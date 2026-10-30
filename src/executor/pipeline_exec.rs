@@ -5097,6 +5097,53 @@ impl Executor {
             }
         }
 
+        // rubash#2255: a NON-builtin stage whose own redirect list
+        // binds a numbered input fd (`3<seed`, `3< <(...)`, `4<&0`)
+        // cannot be served by the inline slot arms below: they run on
+        // this executor against the stage's text payload and hold no
+        // per-element fd table, so the binding — and every `<&N` dup
+        // or /dev/fd/N operand that reads it — is silently dropped
+        // (`cat 3<seed <&3 | wc -c` printed 0). GNU forks the element
+        // and applies its whole ordered list in the child
+        // (redir.c:237 do_redirections), so decline to the external
+        // stage spawner, which applies the list through the shared
+        // path (apply_external_stdin_redirect for fd 0,
+        // apply_external_fd_delivery for the numbered bindings) —
+        // the same decline the fd-0 file gate above makes. Builtin
+        // stages keep the stage-subshell route, whose funnel binds
+        // numbered fds into the clone's table; {var} entries belong
+        // to the dynamic-fd applier, not this gate.
+        {
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| self.routes_as_builtin(&expanded));
+            if !builtin_stage
+                && command.redirects.iter().any(|redirect| {
+                    redirect.fd_var.is_none()
+                        && redirect.fd.is_some_and(|fd| fd >= 3)
+                        && matches!(
+                            redirect.kind,
+                            crate::parser::RedirectKind::Input
+                                | crate::parser::RedirectKind::ReadWrite
+                                | crate::parser::RedirectKind::DuplicateInput
+                                | crate::parser::RedirectKind::CloseInput
+                        )
+                })
+            {
+                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
+        }
+
         // rubash#2124: a builtin element carrying a /dev/tcp|udp input
         // redirect (fd-0 winner or a numbered fd) must run in the
         // stage subshell, where the simple-command funnel's bind
