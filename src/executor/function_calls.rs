@@ -402,6 +402,10 @@ impl Executor {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0);
         let mut fd0_bindings: Vec<FunctionCallStdinBinding> = Vec::new();
+        // rubash#2239: the inherited fd-0 entry displaced below while
+        // this call's staged FUNCTION_STDIN text serves the body;
+        // restored on the exit path next to the fd0_bindings restore.
+        let mut displaced_fd0_entry: Option<Option<crate::executor::fd_table::FdEntry>> = None;
         let (call_stdin, stdin_carved_from_parent) =
             if let Some(definition_redirects) = &definition_redirects {
                 match self.function_call_stdin(definition_redirects)? {
@@ -446,6 +450,23 @@ impl Executor {
             while let Some(binding) = fd0_bindings.pop() {
                 self.restore_function_call_fd0(binding);
             }
+            // rubash#2239: the same supersession must hold against the
+            // INHERITED fd-0 entry. GNU installs the call's heredoc on
+            // fd 0 itself for the body's duration (execute_cmd.c:854
+            // do_redirections, RX_UNDOABLE, undone on return), so no
+            // frame binding survives underneath it. Rubash stages the
+            // body as FUNCTION_STDIN text instead and leaves the entry
+            // in place — and every consumer that consults the fd table
+            // before the mirror (the external spawn wiring's File arm,
+            // the stdin pull's source predicate) then reads the frame's
+            // binding, classically a `</dev/null` on an enclosing
+            // test_eval_-style frame, and the payload is lost. The
+            // null-device exemption in function_call_stdin only holds
+            // for consumers that fall through to the mirror; displace
+            // the entry for the body's duration so they all see the
+            // staged text. (The compound-command twin of this move is
+            // bind_command_fd0_input, rubash#2170.)
+            displaced_fd0_entry = Some(self.fd_table.entries.remove(&0));
         }
         // Set inside the entry block when this call actually pushes
         // BASH_ARGC/BASH_ARGV frames (extdebug only — see below), so the
@@ -855,6 +876,18 @@ impl Executor {
         // undone when the function returns.
         while let Some(binding) = fd0_bindings.pop() {
             self.restore_function_call_fd0(binding);
+        }
+        // rubash#2239: reinstate the fd-0 entry the staged body
+        // displaced on entry (see the displacement above).
+        if let Some(entry) = displaced_fd0_entry.take() {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(0, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&0);
+                }
+            }
         }
         // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
         // saved DEBUG action is restored only when the body did not set a
