@@ -447,8 +447,24 @@ impl Executor {
                     if let Some(alias_fd) = redirect_target_fd(&target) {
                         // An fd-alias PATH spelling (/dev/fd/M):
                         // GNU services it with an open over the
-                        // alias layer (rubash#1963), which yields
-                        // M's current endpoint.
+                        // alias layer (rubash#1963). For a regular
+                        // file that open is FRESH (rubash#2256 wave
+                        // 2): the binding must be a new FileFd on the
+                        // resolver's path, not M's own endpoint —
+                        // binding the shared endpoint made the
+                        // child's reads consume M's offset in the
+                        // parent, and a second identical command
+                        // found M drained. The fresh binding is
+                        // stashed like every other own binding, so
+                        // the spawn stamps this one description at
+                        // N and a same-list `<&N` dup shares it,
+                        // exactly GNU's open-then-dup2 shape.
+                        if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
+                            if let Ok(fresh) = FileFd::open_read(path) {
+                                self.own_input_bindings.insert(fd, fresh.clone());
+                                return Some(fresh);
+                            }
+                        }
                         let endpoint = self.fd_table.read_endpoint(alias_fd)?;
                         return self.endpoint_as_own_input_binding(fd, alias_fd, endpoint, &target);
                     }
@@ -605,11 +621,15 @@ impl Executor {
                             process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                             return Ok(());
                         }
-                        // `< /dev/fd/N` (and `<&N`) on a file-backed fd dup
-                        // the open file into the child's stdin (GNU redir.c
-                        // dup2 semantics through the /dev/fd device layer):
-                        // DuplicateHandle keeps the shared file offset, so a
-                        // partially-read fd feeds the child only the rest.
+                        // `<&N` on a file-backed fd dups the open file
+                        // into the child's stdin (GNU redir.c dup2
+                        // semantics): DuplicateHandle keeps the shared
+                        // file offset, so a partially-read fd feeds the
+                        // child only the rest. (The `< /dev/fd/N` spelling
+                        // is an open, not this arm — it takes the
+                        // open_input_redirect path below, whose alias
+                        // dispatch re-opens regular files fresh,
+                        // rubash#2256.)
                         Some(FdReadEndpoint::File(file_fd)) => {
                             let dup = crate::fd::duplicate_handle(file_fd.handle)?;
                             process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));

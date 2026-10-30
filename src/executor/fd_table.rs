@@ -83,6 +83,24 @@ impl FileFd {
         Ok((file.clone(), file))
     }
 
+    /// rubash#2256: whether an open of this endpoint through its
+    /// `/dev/fd/N` alias spelling is a FRESH open of `path` (a new
+    /// open file description at offset 0) rather than a dup of this
+    /// handle. GNU's alias open is the plain open() of the magic
+    /// link — redir.c's RF_DEVFD dup special case (redir.c:603,
+    /// :629) compiles only without HAVE_DEV_FD, and the oracle
+    /// build defines it — so for a regular file the kernel hands
+    /// back a new description, while pipes, sockets and devices
+    /// cannot be re-opened that way and keep the dup (a pipe open
+    /// attaches to the same stream, which the dup already models).
+    /// The handle must be a disk file AND the stored path must
+    /// itself name a regular file: synthetic spellings backed by a
+    /// disk handle (the /dev/zero pump file) are not their target.
+    pub(crate) fn reopens_fresh(&self) -> bool {
+        crate::fd::is_disk_file(self.handle)
+            && std::fs::metadata(&self.path).is_ok_and(|meta| meta.is_file())
+    }
+
     /// Adopt an already-open std File (a connected socket for
     /// /dev/tcp|/dev/udp redirection, rubash#1026) as a FileFd whose
     /// `path` is the shell-level target name.

@@ -761,6 +761,23 @@ impl Executor {
                         continue;
                     }
                     if let Some(source) = redirect_target_fd(&target) {
+                        // rubash#2256: a spelling target (`> /dev/fd/N`)
+                        // on a regular-file endpoint binds a FRESH open
+                        // of the target; every other endpoint keeps the
+                        // dup. (A bare-fd target cannot reach this arm —
+                        // that is the Duplicate kinds' shape above.)
+                        if let Some(path) = self.fd_alias_reopen_path(source) {
+                            let append = redirect.append
+                                || matches!(
+                                    redirect.kind,
+                                    RedirectKind::Append | RedirectKind::CombinedAppend
+                                );
+                            if let Ok(fresh) = FileFd::open_write(path, append, false) {
+                                self.fd_table
+                                    .open_output(fd, FdWriteEndpoint::File(fresh), false);
+                                continue;
+                            }
+                        }
                         let _ = self.fd_table.dup_output(fd, source);
                         continue;
                     }

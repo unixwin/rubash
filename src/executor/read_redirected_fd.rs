@@ -106,8 +106,20 @@ impl Executor {
         // record from that endpoint through a scratch fd, mirroring
         // the streamed `<(` arm above; the path slurp below would
         // read the process's unrelated real fd N (or fail on it).
+        // rubash#2256 (wave 2): the alias is an open() (GNU redir.c),
+        // so a source the resolver names as a regular file is read
+        // through a FRESH FileFd — offset 0, the source descriptor's
+        // own offset unmoved — instead of a clone of the source's
+        // endpoint, whose shared offset made repeated
+        // `read < /dev/fd/6` calls walk the file instead of
+        // re-reading its first record.
         if let Some(alias_fd) = dev_stdio_redirect_fd(&target) {
-            if let Some(endpoint) = self.fd_table.read_endpoint(alias_fd) {
+            let fresh_endpoint = self
+                .fd_alias_reopen_path(alias_fd)
+                .and_then(|path| FileFd::open_read(path).ok())
+                .map(FdReadEndpoint::File);
+            let endpoint = fresh_endpoint.or_else(|| self.fd_table.read_endpoint(alias_fd));
+            if let Some(endpoint) = endpoint {
                 if let Some(scratch) = self.allocate_dynamic_fd() {
                     self.fd_table.open_input(scratch, endpoint, true);
                     let line = self.fd_table.read_text(

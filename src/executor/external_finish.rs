@@ -54,14 +54,17 @@ impl Executor {
             // current binding (implicit std fds write their default stream)
             // instead of reopening the alias as a literal Windows path
             // (write_dev_stdio_redirect_output, rubash#216).
-            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+            if let Some(result) =
+                self.write_dev_stdio_redirect_output(&target, output, false, redirect.clobber)
+            {
                 return result;
             }
             let file = self.create_redirect_output(&target, redirect.clobber)?;
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
-            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output, true, true)
+            {
                 return result;
             }
             // Classified append open (rubash#1964): the raw mapped
