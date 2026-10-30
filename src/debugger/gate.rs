@@ -65,6 +65,13 @@ impl Default for GateFlag {
 /// atomic load.
 pub static SESSION_ACTIVE: GateFlag = GateFlag::new();
 
+/// Serializes tests that arm the process-wide gate: the gate is
+/// global state in a multi-threaded test binary, so every test
+/// that arms it (the roundtrip below, the WP-3 wiring tests) holds
+/// this lock for the whole armed span.
+#[cfg(test)]
+pub(crate) static GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::{GateFlag, SESSION_ACTIVE};
@@ -101,6 +108,14 @@ mod tests {
     /// construction and state transitions).
     #[test]
     fn session_active_global_roundtrip() {
+        // Acquire the lock the way every GateTestSpan does —
+        // poison-tolerantly. A span holder that panics mid-span
+        // poisons this mutex; the flag itself is restored by the
+        // span's Drop disarm, so this test recovers the guard
+        // instead of exploding on the poison.
+        let _guard = crate::debugger::gate::GATE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert!(!SESSION_ACTIVE.is_armed());
         SESSION_ACTIVE.arm();
         assert!(SESSION_ACTIVE.is_armed());

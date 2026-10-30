@@ -176,6 +176,49 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
+/// Snapshot the PROCESS umask — the save half of the fork boundary's
+/// umask handling (rubash#1907). The builtin applies the mask to the
+/// process (see the set path above), and this engine's subshells are
+/// flat (no fork), so a mask set inside `( )` would stay applied to
+/// the process after the region ends unless the boundary restores it.
+/// GNU gets this for free from fork (execute_cmd.c:1576
+/// execute_in_subshell): the child's mask dies with the child. The
+/// flat boundary therefore records the process mask in the saved
+/// state at `clone_for_child_save` and re-applies it at restore.
+/// Returns None where there is no process umask (Windows), which
+/// makes the restore a no-op there.
+pub(crate) fn snapshot_process_umask() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // umask(0) reveals the current mask; restore it immediately
+        // (the same read-restore dance as current_mask).
+        unsafe {
+            let mask = libc::umask(0);
+            libc::umask(mask);
+            Some(mask as u32)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// The restore half: put the process umask back to the value
+/// `snapshot_process_umask` recorded before the region ran.
+pub(crate) fn apply_process_umask(mask: u32) {
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::umask(mask as libc::mode_t);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mask;
+    }
+}
+
 fn current_mask(env_vars: &HashMap<String, String>) -> u32 {
     if let Some(mask) = env_vars
         .get("__RUBASH_UMASK")

@@ -12,6 +12,7 @@
 #![allow(unreachable_patterns)]
 #![allow(clashing_extern_declarations)]
 
+pub mod api;
 pub mod build_info;
 pub mod builtins;
 pub mod console_readline;
@@ -30,10 +31,22 @@ pub mod parser;
 pub mod posix_errors;
 pub mod proc_vfs;
 pub mod script_driver;
+pub mod special_paths;
 pub mod shell;
 pub(crate) mod stack_growth;
 pub mod token_str;
 pub mod usage;
+pub(crate) mod winuxcmd_fifo;
+
+// The DAP frontend entry points (1.5.0 debugger design section
+// 13; PLAN row 10): the one part of the debugger the binaries and
+// embedding hosts dispatch to. The session core stays crate-
+// private behind this facade until the API finalization gives it
+// a curated public surface.
+pub use debugger::{
+    run_dap_server, run_dap_stdio, run_debug_cli, run_debug_cli_with_stream, DapLaunchPreset,
+    DebugCliPreset,
+};
 
 // Re-export commonly used types
 #[cfg(windows)]

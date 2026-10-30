@@ -27,3 +27,4 @@ scripts/git-hooks/* text eol=lf
 tests/regression/golden/** -text
 tests/regression/snapshots/** -text
 tests/regression/corpus/** -text
+LICENSE text eol=lf

@@ -90,9 +90,23 @@ fn test_combined_output_process_substitution_captures_stdout_and_stderr() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    let output = fs::read_to_string(&output_path).unwrap();
-    assert!(output.contains("out"));
-    assert!(output.contains("err"));
+    // rubash#1871 (pin correction): a `>(...)` consumer is async in
+    // GNU too — nothing guarantees its writes have landed when the
+    // owning command returns, so the pin polls for the content like
+    // the sibling pins in this file (the old immediate read raced
+    // the consumer and lost under load).
+    let mut output = String::new();
+    for _ in 0..40 {
+        if let Ok(contents) = fs::read_to_string(&output_path) {
+            output = contents;
+            if output.contains("out") && output.contains("err") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(output.contains("out"), "output: {output:?}");
+    assert!(output.contains("err"), "output: {output:?}");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(helper_path);
 }
@@ -127,9 +141,20 @@ fn test_combined_append_process_substitution_captures_stdout_and_stderr() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    let output = fs::read_to_string(&output_path).unwrap();
-    assert!(output.contains("out"));
-    assert!(output.contains("err"));
+    // rubash#1871 (pin correction): poll for the async `>(...)`
+    // consumer's writes — see the &> sibling above.
+    let mut output = String::new();
+    for _ in 0..40 {
+        if let Ok(contents) = fs::read_to_string(&output_path) {
+            output = contents;
+            if output.contains("out") && output.contains("err") {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(output.contains("out"), "output: {output:?}");
+    assert!(output.contains("err"), "output: {output:?}");
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(helper_path);
 }
@@ -174,7 +199,19 @@ fn test_function_argument_output_process_substitution_word_runs_on_return() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(&output_path).unwrap(), "payload");
+    // rubash#1871 (pin correction): poll for the async `>(...)`
+    // consumer's writes — see the &> sibling above.
+    let mut output = String::new();
+    for _ in 0..40 {
+        if let Ok(contents) = fs::read_to_string(&output_path) {
+            output = contents;
+            if output == "payload" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "payload");
     let _ = fs::remove_file(output_path);
 }
 
@@ -1641,6 +1678,17 @@ fn test_embedded_assignment_input_process_substitution_keeps_surrounding_text() 
 
 #[test]
 fn test_assignment_output_process_substitution_runs_after_redirect_write() {
+    // rubash#1871 (pin correction, GNU oracle; product fixed in the
+    // same commit): a bare assignment's `>(...)` fd dies WITH the
+    // assignment command (subst.c closes a command's procsub fds at
+    // command end, like the #545 input side), so the later
+    // `printf alpha > "$p"` open fails ENOENT and printf exits 1.
+    // GNU leaves the output file EMPTY: the assignment's own finish
+    // ran `cat > out` with no input before printf ever ran. The old
+    // pin expected the opposite of GNU ("alpha", status 0) — rubash
+    // matched it only because the fd-table entry outlived the
+    // assignment and the flush re-created the dead carrier, silently
+    // swallowing the write.
     let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-assignment-output-process-substitution-output.txt";
     let _ = fs::remove_file(output_path);
@@ -1652,8 +1700,8 @@ fn test_assignment_output_process_substitution_runs_after_redirect_write() {
     let result = executor.execute_ast(&ast);
 
     assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "alpha");
+    assert_eq!(executor.last_exit_code(), 1);
+    assert_eq!(fs::read_to_string(output_path).unwrap(), "");
     let _ = fs::remove_file(output_path);
 }
 
@@ -1756,7 +1804,19 @@ fn test_append_output_process_substitution_feeds_command_stdin() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(fs::read_to_string(output_path).unwrap(), "appended\n");
+    // rubash#1871 (pin correction): poll for the async `>(...)`
+    // consumer's writes — see the &> sibling above.
+    let mut output = String::new();
+    for _ in 0..40 {
+        if let Ok(contents) = fs::read_to_string(output_path) {
+            output = contents;
+            if output == "appended\n" {
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(output, "appended\n");
     let _ = fs::remove_file(output_path);
 }
 
@@ -2858,6 +2918,10 @@ fn test_function_body_can_be_conditional_command() {
 
 #[test]
 fn test_unclosed_arithmetic_subscript_does_not_execute_tail_bracket() {
+    // rubash#1871 (pin correction, GNU oracle): GNU reports
+    // "unexpected EOF while looking for matching `)'" and exits 1 —
+    // an EOF read error, not a grammar syntax error (which would be
+    // 2). The tail `]` never executes. The old pin expected 2.
     let _cwd_guard = CwdGuard::take();
     let tokens = tokenize("((X=([))]");
     let ast = parse(&tokens);
@@ -2865,8 +2929,8 @@ fn test_unclosed_arithmetic_subscript_does_not_execute_tail_bracket() {
 
     let result = executor.execute_ast(&ast);
 
-    assert!(matches!(result, Err(ExecuteError::ExitCode(2))));
-    assert_eq!(executor.last_exit_code(), 2);
+    assert!(matches!(result, Err(ExecuteError::ExitCode(1))));
+    assert_eq!(executor.last_exit_code(), 1);
 }
 
 #[test]
@@ -3446,13 +3510,20 @@ fn test_named_coproc_executes_select_body() {
 
 #[test]
 fn test_named_coproc_executes_time_prefixed_brace_body() {
+    // rubash#1871 (pin rewrite, GNU oracle): the original shape
+    // `coproc MYC time { ...; }' is UNGRAMMATICAL — GNU's coproc
+    // grammar admits only a simple or compound command after the
+    // NAME, and a time-pipeline is neither (script-file oracle:
+    // syntax error, exit 2). The grammatical shape carrying the same
+    // intent (a named coproc with a brace body, time-prefixed) is
+    // `time -p coproc MYC { ...; }'.
     let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-coproc-time-brace-output.txt";
     let status_path = "target/rubash-coproc-time-brace-status.txt";
     let _ = fs::remove_file(output_path);
     let _ = fs::remove_file(status_path);
     let input = format!(
-        "coproc MYC time {{ echo timed > {output_path}; }}; echo pid:${{MYC_PID:+set}} > {status_path}"
+        "time -p coproc MYC {{ echo timed > {output_path}; }}; echo pid:${{MYC_PID:+set}} > {status_path}"
     );
     let tokens = tokenize(&input);
     let ast = parse(&tokens);

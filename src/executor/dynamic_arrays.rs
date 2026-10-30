@@ -278,6 +278,7 @@ impl Executor {
                 | "BASH_SUBSHELL"
                 | "BASH_ARGV0"
                 | "FUNCNAME"
+                | "BASH_SOURCE"
                 | "GROUPS"
                 | "LINENO"
                 | "BASH_COMMAND"
@@ -318,6 +319,23 @@ impl Executor {
             "FUNCNAME" if self.shell_state.function_depth > 0 => {
                 Some(self.funcname_stack().first().cloned().unwrap_or_default())
             }
+            // GNU variables.c:1892: BASH_SOURCE is an INIT_DYNAMIC_VAR
+            // whose get_self reads the live ARRAY object — a scalar read
+            // is element 0 of the same array element reads see. Rubash's
+            // env mirror cell is only refreshed where the stack is pushed
+            // for a `source` frame or a script-name bind, NOT on function
+            // entry/exit, so after any function call the scalar read kept
+            // returning the frame the cell last froze (rubash#1872:
+            // bats' DEBUG trap argument "$BASH_SOURCE" stuck at the
+            // loader's file for the whole run). Read the composed view,
+            // exactly like the element/storage arms below.
+            "BASH_SOURCE" => Some(
+                self.dynamic_stack_array_values("BASH_SOURCE")
+                    .unwrap_or_default()
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default(),
+            ),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
                 self.shell_state
@@ -514,6 +532,40 @@ impl Executor {
                 self.bash_argc_view()
             } else {
                 self.bash_argv_view()
+            };
+            let elements = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("[{index}]={}", sh_double_quote_text(value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!(
+                "declare -a{readonly}{exported} {name}=({elements})"
+            ));
+        }
+        // rubash#1872: BASH_SOURCE/BASH_LINENO are the same class —
+        // dynamic stack arrays (variables.c push_source / execute_
+        // function array_push) whose env mirror cells only refresh at
+        // source-frame push/pop, so a declare after any function call
+        // printed the frozen cell (a returned function's frame on top,
+        // the pushed call line missing). Render from the composed
+        // views element reads use, before the scalar gate below.
+        if matches!(name, "BASH_SOURCE" | "BASH_LINENO") {
+            let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+                "x"
+            } else {
+                ""
+            };
+            let readonly = if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
+                "r"
+            } else {
+                ""
+            };
+            let values = if name == "BASH_SOURCE" {
+                self.dynamic_stack_array_values("BASH_SOURCE")
+                    .unwrap_or_default()
+            } else {
+                self.bash_lineno_view()
             };
             let elements = values
                 .iter()
@@ -855,6 +907,11 @@ impl Executor {
     /// materializing call (rubash#1051, rubash#1110 item 4).
     pub(in crate::executor) fn bash_argv_view(&self) -> Vec<String> {
         let mut view = self.shell_state.bash_argv_stack.clone();
+        // rubash#2058: fork-inherited frames sit beneath this shell's
+        // own, exactly where GNU's fork left the parent's frames.
+        if let Some(inherited) = &self.shell_state.inherited_fork_frames {
+            view.extend(inherited.argv_frames.iter().cloned());
+        }
         if let Some(bottom) = self.bash_arg_bottom_frame() {
             view.extend(bottom.iter().cloned());
         }
@@ -865,6 +922,9 @@ impl Executor {
     /// the bottom frame's count last (see [`Self::bash_argv_view`]).
     pub(in crate::executor) fn bash_argc_view(&self) -> Vec<String> {
         let mut view = self.shell_state.bash_argc_stack.clone();
+        if let Some(inherited) = &self.shell_state.inherited_fork_frames {
+            view.extend(inherited.argc_frames.iter().cloned());
+        }
         if let Some(bottom) = self.bash_arg_bottom_frame() {
             view.push(bottom.len().to_string());
         }
@@ -887,6 +947,19 @@ impl Executor {
         if self.shell_state.function_depth > 0 {
             return None;
         }
+        // rubash#2058: a respawn child born inside the parent's
+        // function context inherits the unmaterialized state too —
+        // variables.c:1656 get_bashargcv initializes only at
+        // variable_context == 0, and the fork preserved the context
+        // even though this child's own depth reads 0.
+        if self
+            .shell_state
+            .inherited_fork_frames
+            .as_ref()
+            .is_some_and(|frames| frames.in_function)
+        {
+            return None;
+        }
         let frame: Vec<String> = self
             .shell_state
             .positional_window()
@@ -902,6 +975,11 @@ impl Executor {
         let mut stack = self.shell_state.bash_lineno_stack.clone();
         if self.has_script_main_frame() && stack.last().map(String::as_str) != Some("0") {
             stack.push("0".to_string());
+        }
+        // rubash#2058: fork-inherited call lines beneath this shell's
+        // own (the inherited view already carries its trailing "0").
+        if let Some(inherited) = &self.shell_state.inherited_fork_frames {
+            stack.extend(inherited.linenos.iter().cloned());
         }
         stack
     }
@@ -939,13 +1017,24 @@ impl Executor {
                 // function the whole array reads as unset. `unset FUNCNAME`
                 // unbinds the cell and function entry never re-creates it
                 // (rubash#541).
-                if self.shell_state.function_depth == 0
+                // rubash#2058: a respawn child born inside the parent's
+                // function context reads as inside those frames too —
+                // the fork preserved them even though this child's own
+                // depth is 0.
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                let inherited_names: &[String] = inherited
+                    .map(|frames| frames.function_names.as_slice())
+                    .unwrap_or(&[]);
+                if (self.shell_state.function_depth == 0 && inherited_names.is_empty())
                     || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
                 {
                     Vec::new()
                 } else {
                     let mut stack = self.shell_state.function_name_stack.clone();
-                    if self.has_script_main_frame()
+                    stack.extend(inherited_names.iter().cloned());
+                    let has_main = self.has_script_main_frame()
+                        || inherited.is_some_and(|frames| frames.has_main_frame);
+                    if has_main
                         && !stack.is_empty()
                         && stack.last().map(String::as_str) != Some("main")
                     {
@@ -970,8 +1059,18 @@ impl Executor {
                 // Without a main frame (`bash -c`, stdin scripts) the
                 // script-name bottom entry installed with $0 is not a
                 // BASH_SOURCE frame (see the storage arm's probe note).
-                if !self.has_script_main_frame() && !stack.is_empty() {
+                // rubash#2058: a respawn child of a script parent holds
+                // only real frames in its raw stack (no $0 entry is
+                // installed on the respawn birth path), so the pop must
+                // not eat one; the inherited view — already rendered
+                // by the parent — goes beneath the child's own frames.
+                let inherited = self.shell_state.inherited_fork_frames.as_ref();
+                let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
+                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
                     stack.pop();
+                }
+                if let Some(inherited) = inherited {
+                    stack.extend(inherited.sources.iter().cloned());
                 }
                 stack
             }

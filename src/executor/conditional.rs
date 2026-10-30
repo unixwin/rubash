@@ -47,12 +47,63 @@ impl Executor {
         &mut self,
         command: &crate::parser::ConditionalCommand,
     ) -> i32 {
-        if let Some(status) =
+        // rubash#1915: publish the procsub spans the parser recorded
+        // for this conditional's operands so the nounset scan points
+        // below mask exactly those spans before judging a word (see
+        // Executor::conditional_procsub_span_targets). Save/restore:
+        // a conditional evaluated inside an operand's command
+        // substitution on this same executor (eval/source frames)
+        // nests inside the outer conditional's table.
+        let span_targets: Vec<(String, Vec<String>)> = command
+            .args
+            .iter()
+            .zip(&command.arg_metadata)
+            .filter_map(|(arg, metadata)| {
+                if metadata.process_substitutions.is_empty() {
+                    None
+                } else {
+                    Some((
+                        arg.clone(),
+                        metadata
+                            .process_substitutions
+                            .iter()
+                            .map(|substitution| substitution.target.clone())
+                            .collect(),
+                    ))
+                }
+            })
+            .collect();
+        let saved_span_targets =
+            std::mem::replace(&mut self.conditional_procsub_span_targets, span_targets);
+        let status = if let Some(status) =
             self.conditional_status_with_metadata(&command.args, &command.arg_metadata)
         {
-            return status;
-        }
-        self.execute_conditional(&command.args)
+            status
+        } else {
+            self.execute_conditional(&command.args)
+        };
+        self.conditional_procsub_span_targets = saved_span_targets;
+        status
+    }
+
+    /// rubash#1915: mask the process-substitution spans the parser
+    /// recorded for THIS conditional word out of the text a `[[ ]]`
+    /// nounset scan is about to judge. The lookup is by the word's
+    /// exact operand text, and the spans come from that word's own
+    /// parse record: a `<(...)`-shaped string inside a quoted sibling
+    /// operand was never recorded for it, so its `$` remains a live
+    /// parent reference and the scan still reports it. Words with no
+    /// recorded span (including derived strings the evaluator builds)
+    /// scan exactly as before.
+    fn mask_conditional_procsub_spans<'a>(&self, word: &'a str) -> std::borrow::Cow<'a, str> {
+        let Some((_, targets)) = self
+            .conditional_procsub_span_targets
+            .iter()
+            .find(|(arg, _)| arg == word)
+        else {
+            return std::borrow::Cow::Borrowed(word);
+        };
+        Self::mask_recorded_span_targets(word, targets.iter().map(String::as_str))
     }
 
     pub(super) fn execute_conditional(&mut self, args: &[String]) -> i32 {
@@ -249,6 +300,82 @@ impl Executor {
     /// the in-band carrier the way remove_quoted_nulls drops CTLNUL at
     /// dequote (subst.c:4795+); no [[ ]] context consumes the field-
     /// splitting semantics it encodes.
+    /// rubash#1932: materialize the recorded process-substitution
+    /// spans of a `[[ ]]` operand into `/dev/fd/N` words, the way GNU
+    /// cond_expand_word -> expand_word realizes every operand
+    /// (subst.c process_substitute runs the body and the word becomes
+    /// the fd path) — not only the whole-operand file-test forms
+    /// `conditional_process_substitution_unary` covers. A span in a
+    /// string operand (`[[ <(cmd) =~ fd ]]`, `[[ -n <(cmd) ]]`, an
+    /// embedded `a<(cmd)`) must run its body and splice the fd word
+    /// before the comparison ever sees the operand. Only spans the
+    /// parser recorded for THIS word materialize (the same table the
+    /// nounset mask consults), so a quoted `"<(cmd)"` operand stays
+    /// literal text. The fd words and output carriers register in the
+    /// same command-scoped stores the unary path uses; the
+    /// conditional wrapper drains both.
+    fn materialize_conditional_procsub_spans(&mut self, word: &str) -> String {
+        if !word.contains("<(") && !word.contains(">(") {
+            return word.to_string();
+        }
+        let Some((_, targets)) = self
+            .conditional_procsub_span_targets
+            .iter()
+            .find(|(arg, _)| arg == word)
+        else {
+            return word.to_string();
+        };
+        let targets: Vec<String> = targets.clone();
+        if targets.is_empty() {
+            return word.to_string();
+        }
+        let substitutions = crate::parser::WordMetadata::new(0, word.to_string(), word.to_string())
+            .process_substitutions;
+        let mut materialized = word.to_string();
+        let mut cursor = 0usize;
+        for substitution in substitutions {
+            if !targets.contains(&substitution.target) {
+                continue;
+            }
+            let search_from = cursor.min(materialized.len());
+            let Some(start) = materialized[search_from..]
+                .find(&substitution.target)
+                .map(|offset| offset + search_from)
+            else {
+                continue;
+            };
+            let end = start + substitution.target.len();
+            let word_form = if substitution.output {
+                let Ok(path) = self.empty_process_substitution_temp() else {
+                    continue;
+                };
+                let form = self.process_substitution_output_fd_word(&path);
+                let line = self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0);
+                self.conditional_output_procsubs
+                    .push((path, substitution.source.clone(), line));
+                form
+            } else if let Some(form) =
+                self.process_substitution_child_fd_word(&substitution.source, None)
+            {
+                form
+            } else if let Some(output) =
+                self.process_substitution_output_bytes(&substitution.source)
+            {
+                self.process_substitution_fd_word(&output)
+            } else {
+                continue;
+            };
+            materialized.replace_range(start..end, &word_form);
+            cursor = start + word_form.len();
+        }
+        materialized
+    }
+
     fn expand_conditional_word(&mut self, word: &str) -> String {
         // rubash#1422: an earlier operand already hit the DISCARD-class
         // error below; GNU abandons the conditional at the first bad
@@ -256,6 +383,12 @@ impl Executor {
         if self.conditional_expansion_error_status.get().is_some() {
             return String::new();
         }
+        // rubash#1932: realize the operand's recorded procsub spans
+        // first — the nounset scan below then judges the fd words (no
+        // span text remains to mask), and the expansion consumes the
+        // same realized text GNU compares.
+        let materialized = self.materialize_conditional_procsub_spans(word);
+        let word = materialized.as_str();
         // GNU cond.c cond_expand_word -> expand_word: a nounset unbound
         // variable (or another FATAL expansion error) in a [[ ]]
         // operand raises FORCE_EOF, exactly as in a simple command's
@@ -264,7 +397,11 @@ impl Executor {
         // returns only i32, so record the fatal for
         // execute_conditional_command_with_redirects to unwind.
         if !self.conditional_expansion_fatal.get() {
-            if let Some((name, message, status)) = self.parameter_expansion_error_in_word(word) {
+            // rubash#1915: the scan judges the parent word, never a
+            // recorded procsub body — mask this word's recorded spans
+            // (the expansion below still consumes the original word).
+            let masked = self.mask_conditional_procsub_spans(word);
+            if let Some((name, message, status)) = self.parameter_expansion_error_in_word(&masked) {
                 if status == 1 {
                     // GNU subst.c: a non-fatal word-expansion error
                     // (substring expression < 0, bad substitution) is
@@ -804,6 +941,18 @@ impl Executor {
         }
         let value = self.expand_conditional_word(operand);
         self.xtrace_conditional_term(op, &value, None);
+        // rubash#1902: an fd-alias operand answers the bound fd's facts
+        // (sh_stataccess stats the current binding, eaccess.c:116), so the
+        // marks must be fresh for THIS evaluation — same contract as the
+        // [ ] path's fused scan. rubash#2131: the `[[ ]]` command's own
+        // redirection list rides along (stashed on the executor by its
+        // wrapper — only fds 1/2 were bound, so fd 0's own redirect is
+        // stated by the sync's overlay, not by an entry).
+        if crate::special_paths::fd_alias_target(&value).is_some() {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![op.to_string(), value];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }
@@ -954,7 +1103,11 @@ impl Executor {
         }
         let mut prefix_comsubs: Vec<String> = Vec::new();
         for word in [left, right] {
-            let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(word);
+            // rubash#1915: same recorded-span masking as the operand
+            // expansion scan — a procsub body's `$` is the child's,
+            // never a parent reference for the `=~` nounset verdict.
+            let masked = self.mask_conditional_procsub_spans(word);
+            let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(&masked);
             prefix_comsubs.extend(bodies);
             if let Some(name) = unbound {
                 for body in &prefix_comsubs {

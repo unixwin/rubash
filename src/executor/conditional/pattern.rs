@@ -15,15 +15,39 @@ pub(in crate::executor) fn case_pattern_matches(pattern: &str, word: &str) -> bo
         let word: Vec<char> = stage_word_match_units(word, byte_locale);
         return case_pattern_matches_at_with_case(&pattern, 0, &word, 0, false);
     }
-    if let Some(verdict) = literal_pattern_equality(pattern, word, false) {
+    case_pattern_matches_prechecked(pattern, word, false)
+}
+
+/// Matcher body below the byte-spelling / byte-locale gates, for callers
+/// that evaluate the gates ONCE for a whole (pattern, value) pair and
+/// then match many char-boundary slices of that value — the `${v#pat}` /
+/// `${v%pat}` removal walks (parameter_decode.rs) and the anchored /
+/// scanning substitution finders (parameter_replace.rs). Both gates are
+/// containment predicates over the two sides (a byte spelling or a
+/// non-ASCII text char on either side), so a gate-clean pair stays clean
+/// for every char-boundary slice of the value: slicing cannot
+/// manufacture a spelling the whole value does not carry, and the
+/// pattern side is invariant across candidates. GNU's match_upattern
+/// (subst.c:5382) likewise runs strmatch directly against the live
+/// string — the C matcher does no per-candidate staging or
+/// re-inspection either. Callers must only use this entry when the full
+/// pair is gate-clean; the verdict for any single candidate is then
+/// exactly what [`case_pattern_matches`] / its nocase twin would return
+/// for that candidate alone.
+pub(in crate::executor) fn case_pattern_matches_prechecked(
+    pattern: &str,
+    word: &str,
+    nocase: bool,
+) -> bool {
+    if let Some(verdict) = literal_pattern_equality(pattern, word, nocase) {
         return verdict;
     }
-    if let Some(verdict) = simple_glob_matches(pattern, word, false) {
+    if let Some(verdict) = simple_glob_matches(pattern, word, nocase) {
         return verdict;
     }
     let pattern: Vec<char> = pattern.chars().collect();
     let word: Vec<char> = word.chars().collect();
-    case_pattern_matches_at_with_case(&pattern, 0, &word, 0, false)
+    case_pattern_matches_at_with_case(&pattern, 0, &word, 0, nocase)
 }
 
 pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str) -> bool {
@@ -35,15 +59,7 @@ pub(in crate::executor) fn case_pattern_matches_nocase(pattern: &str, word: &str
         let word: Vec<char> = stage_word_match_units(word, byte_locale);
         return case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true);
     }
-    if let Some(verdict) = literal_pattern_equality(pattern, word, true) {
-        return verdict;
-    }
-    if let Some(verdict) = simple_glob_matches(pattern, word, true) {
-        return verdict;
-    }
-    let pattern: Vec<char> = pattern.chars().collect();
-    let word: Vec<char> = word.chars().collect();
-    case_pattern_matches_at_with_case(&pattern, 0, &word, 0, true)
+    case_pattern_matches_prechecked(pattern, word, true)
 }
 
 /// Word-hoisted twin of [`case_pattern_matches`]: the `case` subject word is

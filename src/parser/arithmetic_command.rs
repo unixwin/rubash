@@ -298,7 +298,7 @@ fn set_arithmetic_command_words(
     command.words.push("))".to_string());
     let mut arithmetic = arithmetic_command(expression);
     arithmetic.raw_expression = raw_expression.filter(|raw| !raw.is_empty());
-    command.arithmetic_command = Some(arithmetic);
+    command.arithmetic_command = Some(Box::new(arithmetic));
     if !delimiters_balanced {
         command.insert_assignment(
             "__RUBASH_PARSE_ERROR__".to_string(),
@@ -387,7 +387,13 @@ fn delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
     ))
 }
 
-pub(super) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
+/// The arithmetic operator inventory of one expression text: the
+/// longest-match operator scan the `(( ))` command metadata is
+/// built with. The debugger's implicit-evaluation whitelist
+/// (debugger design 7.5, WP-7) classifies `$((...))` bodies with
+/// this same scan, so the checker and the command metadata can
+/// never disagree about what an assignment or update operator is.
+pub(crate) fn arithmetic_operators(expression: &str) -> Vec<ArithmeticOperator> {
     const OPERATORS: &[&str] = &[
         "<<=", ">>=", "**=", "++", "--", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "&&",
         "||", "==", "!=", "<=", ">=", "<<", ">>", "**", "=", "<", ">", "&", "|", "^", "%", "/",
@@ -451,7 +457,7 @@ fn is_arithmetic_identifier_continue(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }
 
-pub(super) fn is_arithmetic_assignment_operator(operator: &str) -> bool {
+pub(crate) fn is_arithmetic_assignment_operator(operator: &str) -> bool {
     matches!(
         operator,
         "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" | "**="

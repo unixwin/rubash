@@ -2,7 +2,7 @@ use std::env;
 use std::io::{self, Write};
 
 use super::diagnostic::diagnostic_prefix;
-use super::marks::{mark_array, mark_assoc, mark_exported, mark_typed, marked_vars, unmark_typed};
+use super::marks::{mark_array, mark_assoc, mark_exported, mark_typed, unmark_typed};
 use super::{
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS,
     INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
@@ -103,7 +103,6 @@ where
     let attr_targets: Vec<(String, bool)> =
         names.iter().map(|name| attr_target_name(name)).collect();
     let attr_names_owned: Vec<String> = if !nameref && !unset_nameref {
-        let namerefs = marked_vars(variables, NAMEREF_VARS);
         attr_targets
             .iter()
             .map(|(name, _)| {
@@ -111,7 +110,7 @@ where
                     return name.clone();
                 }
                 let base = name.strip_suffix('+').unwrap_or(name);
-                if namerefs.contains(base) {
+                if variables.is_marked(NAMEREF_VARS, base) {
                     if let Some((_, target)) = super::declare_nameref_chain(variables, base) {
                         return target;
                     }
@@ -132,8 +131,6 @@ where
     // operand up with find_variable_noref and operates on the nameref
     // itself. Function scope binds a different table, where the
     // variables.c:3061 global-table clause does not fire.
-    let declared_unset = marked_vars(variables, super::DECLARED_UNSET_VARS);
-    let nameref_set = marked_vars(variables, NAMEREF_VARS);
     let names: Vec<&str> = if nameref || in_function {
         attr_names_owned.iter().map(String::as_str).collect()
     } else {
@@ -146,8 +143,8 @@ where
                     .map(|(base, _)| base)
                     .unwrap_or(name)
                     .trim_end_matches('+');
-                !(nameref_set.contains(base)
-                    && !declared_unset.contains(base)
+                !(variables.is_marked(NAMEREF_VARS, base)
+                    && !variables.is_marked(super::DECLARED_UNSET_VARS, base)
                     && variables.get(base).map_or(true, |cell| cell.is_empty()))
             })
             .collect()
@@ -164,8 +161,6 @@ where
         || unset_readonly
         || unset_trace
     {
-        let arrays = marked_vars(variables, ARRAY_VARS);
-        let assocs = marked_vars(variables, ASSOC_VARS);
         for name in names {
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
@@ -183,7 +178,9 @@ where
                 // variable untouched instead of unmarking after the error.
                 continue;
             }
-            if (unset_array && arrays.contains(name)) || (unset_assoc && assocs.contains(name)) {
+            if (unset_array && variables.is_marked(ARRAY_VARS, name))
+                || (unset_assoc && variables.is_marked(ASSOC_VARS, name))
+            {
                 writeln!(
                     stderr,
                     "{}{command_name}: {}: cannot destroy array variables in this way",
@@ -257,7 +254,7 @@ where
             if let Some(current) = variables.get(name) {
                 let is_storage = current.starts_with(STORAGE_WORD_PREFIX)
                     || (current.starts_with('(') && current.ends_with(')'));
-                if !is_storage && !declared_unset.contains(name) {
+                if !is_storage && !variables.is_marked(super::DECLARED_UNSET_VARS, name) {
                     let mut entries = std::collections::BTreeMap::new();
                     entries.insert(0, current.clone());
                     let converted = super::storage::format_indexed_array_storage(entries);
@@ -293,7 +290,7 @@ where
             if let Some(current) = variables.get(name) {
                 let is_storage = current.starts_with(STORAGE_WORD_PREFIX)
                     || (current.starts_with('(') && current.ends_with(')'));
-                if !is_storage && !declared_unset.contains(name) {
+                if !is_storage && !variables.is_marked(super::DECLARED_UNSET_VARS, name) {
                     let converted = super::storage::format_assoc_storage(vec![(
                         "0".to_string(),
                         current.clone(),

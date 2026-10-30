@@ -213,6 +213,9 @@ impl Executor {
         // when they exhaust their input before finding it.
         self.read_eof_no_delimiter = false;
         self.fd_table.read_eof_no_delimiter = false;
+        // niubash#684: same reset discipline for the process-stdin EOF
+        // verdict — it describes THIS acquisition only.
+        self.read_process_stdin_eof = false;
         // read.def check_read_timeout runs at the top of every read-loop
         // iteration — including before the first byte — so a deadline that
         // already expired during setup reports timeout even on buffered
@@ -416,7 +419,7 @@ impl Executor {
                     )
             })
             .is_some_and(|r| matches!(r.kind, crate::parser::RedirectKind::HereString));
-        let fd0_self_dup = cmd.redirect_in.as_ref().is_some_and(|redirect| {
+        let fd0_self_dup = cmd.redirect_in.as_deref().is_some_and(|redirect| {
             redirect.fd_var.is_none()
                 && redirect.fd.unwrap_or(0) == 0
                 && matches!(
@@ -426,7 +429,7 @@ impl Executor {
         });
         if let Some(redirect) = cmd
             .redirect_in
-            .as_ref()
+            .as_deref()
             .filter(|_| !fd0_self_dup && !last_stdin_is_herestring)
         {
             if redirect.fd.unwrap_or(0) != 0 {
@@ -440,6 +443,44 @@ impl Executor {
                 .strip_prefix("<(")
                 .and_then(|target| target.strip_suffix(')'))
             {
+                // rubash#1952: stream first — serve the record from the
+                // spawned body's live pipe through a scratch fd (GNU
+                // subst.c:6362 process_substitute forks the body; the
+                // record reader observes real arrival). The timed
+                // collection below is the spawn-failure fallback.
+                if let Some(fd) = self.allocate_dynamic_fd() {
+                    if let Some(file_fd) =
+                        self.spawn_input_process_substitution_child(source, cmd.line)
+                    {
+                        self.fd_table
+                            .open_input(fd, FdReadEndpoint::File(file_fd), true);
+                        let line = self.fd_table.read_text(
+                            fd,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                            escape_aware,
+                            raw,
+                        );
+                        self.fd_table.entries.remove(&fd);
+                        return Some(match line {
+                            Some(line) => trim_read_input(
+                                line,
+                                delimiter,
+                                char_limit,
+                                exact_char_limit,
+                                escape_aware,
+                                raw,
+                            ),
+                            None => {
+                                if !self.fd_table.read_timed_out {
+                                    self.read_eof_no_delimiter = true;
+                                }
+                                String::new()
+                            }
+                        });
+                    }
+                }
                 if let Some((output, body_timing)) =
                     self.process_substitution_output_bytes_timed(source)
                 {
@@ -570,19 +611,162 @@ impl Executor {
                 );
             }
 
+            // rubash#1917/#1900: synthetic /proc targets are judged by
+            // the registry on their SHELL spelling, before any path
+            // translation. The translated path's metadata never exists
+            // for them on Windows, so the gate below misrouted them
+            // into the device branch and the read failed (or read
+            // empty) — the same ladder-skip family as rubash#1904's
+            // $(<file) face. Content slurps here, exactly as the serve
+            // further down does; a link resolves to its native target
+            // and continues through the ordinary file flow with it
+            // (the session cwd answers for self/cwd, per G-02).
+            if let Some(bytes) = crate::special_paths::synthetic_proc_content(&expanded_target) {
+                let input = crate::executor::substitution_metadata::bytes_to_shell_text(&bytes);
+                if input.is_empty() {
+                    return None;
+                }
+                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
+                    &input,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                return Some(trim_read_input(
+                    input,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                ));
+            }
+            // rubash#2091: a /dev/tcp|udp target is judged by the
+            // registry on its shell spelling too — it has no filesystem
+            // path at all, so the translated-path machinery below
+            // served a silent EOF and the connection GNU's
+            // do_redirections performs (redir.c netopen) never
+            // happened, for `<>` and plain `<` alike. Connect once here
+            // and serve the record off the live socket, bound
+            // transiently as fd 0 like the device branch below; a
+            // failed connect is the redirection's failure, reported in
+            // the serve like the dangling-alias face above
+            // (rubash#721).
+            if crate::special_paths::is_net_redirect_target(&expanded_target) {
+                // rubash#2124: the simple-command funnel's bind may
+                // already have connected this command's winning net
+                // input and bound it on fd 0 — serve the bound
+                // endpoint instead of connecting a second time. The
+                // serve result is authoritative: the endpoint IS this
+                // target's stream, so its EOF is the read's EOF.
+                if self.dispatch_net_bound_fds.contains(&0) {
+                    return self.read_virtual_fd_stdin(
+                        0,
+                        silent,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
+                match self.open_net_redirect(&expanded_target) {
+                    Ok(file) => {
+                        let file = FileFd::from_file(file, expanded_target.clone().into());
+                        let saved = self.fd_table.entries.get(&0).cloned();
+                        self.fd_table
+                            .open_input(0, FdReadEndpoint::File(file), false);
+                        let line = self.read_virtual_fd_stdin(
+                            0,
+                            silent,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                            escape_aware,
+                            raw,
+                        );
+                        match saved {
+                            Some(entry) => {
+                                self.fd_table.entries.insert(0, entry);
+                            }
+                            None => {
+                                self.fd_table.entries.remove(&0);
+                            }
+                        }
+                        return line;
+                    }
+                    Err(error) => {
+                        let mut stderr = Vec::new();
+                        let _ = writeln!(
+                            &mut stderr,
+                            "{}{}",
+                            self.diagnostic_prefix(),
+                            crate::posix_errors::message(&error)
+                        );
+                        let _ = self.write_redirected_command_stderr(cmd, &stderr);
+                        return None;
+                    }
+                }
+            }
+            let link_native = crate::special_paths::synthetic_link_target(
+                &expanded_target,
+                Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+            )
+            .map(|link| link.native);
+
             // niubash#177: same operand resolution as open_input_redirect —
             // a virtual-root input operand may exist only under its `.exe`
             // spelling on disk.
-            let path = self.session_path(crate::executor::path::windows_operand_file_path(
-                shell_path_to_windows(&expanded_target, &self.shell_state.env_vars),
-                &self.shell_state.env_vars,
-            ));
+            let path = match &link_native {
+                Some(native) => std::path::PathBuf::from(native),
+                None => self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&expanded_target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                )),
+            };
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)
                     .read(true)
                     .write(true)
                     .open(&path);
+            }
+            // rubash#1903: a WinuxCmd fifo marker is a regular file on
+            // disk, so the live-handle branch below would bind the
+            // marker file itself and the slurp further down would read
+            // its bytes. Bind the rendezvous read handle transiently
+            // instead — the same record-wise live read, over the pipe.
+            #[cfg(windows)]
+            if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&path) {
+                let Ok(server) = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&path, &|| {
+                    crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                }) else {
+                    return None;
+                };
+                let file = FileFd::from_file(server, path.clone());
+                let saved = self.fd_table.entries.get(&0).cloned();
+                self.fd_table
+                    .open_input(0, FdReadEndpoint::File(file), false);
+                let line = self.read_virtual_fd_stdin(
+                    0,
+                    silent,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                match saved {
+                    Some(entry) => {
+                        self.fd_table.entries.insert(0, entry);
+                    }
+                    None => {
+                        self.fd_table.entries.remove(&0);
+                    }
+                }
+                return line;
             }
             // GNU redir.c opens the target as the command's fd 0; for
             // non-regular inputs (/dev/tty → CON, NUL, a fifo) the read must
@@ -668,9 +852,25 @@ impl Executor {
             // GNU read receives raw bytes from redir.c-opened inputs. Keep
             // invalid UTF-8 inside the RAW_BYTE_MARKER carrier instead of
             // dropping the whole record at this boundary.
+            // rubash#1937: a synthetic-link target resolving to a
+            // directory (/proc/self/cwd) — GNU's read fails EISDIR on
+            // the descriptor itself (read.def:911). Record the read
+            // error so the builtin renders
+            // `read: 0: read error: Is a directory` instead of serving
+            // the mapped literal path's unrelated failure. The facts
+            // are a stub off Windows, where the real directory read
+            // below produces the same failure natively.
+            if crate::proc_vfs::proc_unary_facts(&expanded_target)
+                .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+            {
+                self.fd_table.read_error = Some("Is a directory".to_string());
+                return None;
+            }
             // Q11 /proc P1: synthetic files are served before the filesystem
             // (docs/proc-vfs-plan.md hook B).
-            let input = if let Some(bytes) = crate::proc_vfs::proc_file_content(&expanded_target) {
+            let input = if let Some(bytes) =
+                crate::special_paths::synthetic_proc_content(&expanded_target)
+            {
                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
             } else if let Some((bytes, _, _)) = procsub_taken {
                 // `<(cmd)` carrier path: the word names a draining
@@ -706,7 +906,21 @@ impl Executor {
         // Here-strings are command-local input. Persistent virtual fds must
         // bypass `stdin_string_for_command`, whose legacy remaining-text view
         // does not advance the shared fd cursor.
-        if cmd.here_string.is_some() {
+        // rubash#1966: the body may live in EITHER store — the parser
+        // places an unnumbered `<<<` in cmd.here_string but a numbered
+        // `0<<<` (and `0<<`) in heredoc_redirects with fd == Some(0)
+        // (parser/redirections.rs assign_here_string_redirect_raw).
+        // stdin_string_for_command_mut resolves both stores (its
+        // fd-0-winner logic owns the ordering); this funnel's admission
+        // check looked only at the unnumbered field, so a numbered
+        // here-string was invisible to `read` and the builtin fell
+        // through to the process stdin (EOF / a block) instead.
+        let has_fd0_body = cmd.here_string.is_some()
+            || cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd == Some(0));
+        if has_fd0_body {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
                 self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
                     &line,
@@ -828,6 +1042,18 @@ impl Executor {
             return None;
         }
 
+        // niubash#684: the fd-0 probe above already routed an
+        // InheritedProcessStdin endpoint through the inherited reader
+        // (read_virtual_fd_stdin), and it delivered the descriptor's
+        // EOF verdict. The mirror → inherited chain below would ask the
+        // SAME descriptor a second time — re-blocking and consuming the
+        // next input line as a record — where GNU reads one descriptor
+        // once (read.def:294) and ends the builtin at its EOF
+        // (read.def:767, :949).
+        if self.read_process_stdin_eof {
+            return None;
+        }
+
         self.read_function_stdin(delimiter, char_limit, exact_char_limit, escape_aware, raw)
             .or_else(|| {
                 self.read_inherited_process_stdin(
@@ -871,6 +1097,14 @@ impl Executor {
             raw,
         ) {
             return Some(line);
+        }
+        // niubash#684: the inherited transport already delivered fd 0's
+        // EOF verdict — the raw fallback reader would only re-block on
+        // the same descriptor and swallow the next input line as a
+        // record GNU never assigns (read.def:767/:949 end the builtin
+        // at the first EOF).
+        if self.read_process_stdin_eof {
+            return None;
         }
         match read_stdin_until(
             self.read_deadline,
@@ -1061,10 +1295,11 @@ impl Executor {
     /// Text/ProcessSubstitution read endpoint at N) falls through to the
     /// filesystem open, which stays correct for real files.
     pub(crate) fn sourced_dev_fd_text(&self, filename: &str) -> Option<String> {
-        let fd_text = filename
-            .strip_prefix("/dev/fd/")
-            .or_else(|| filename.strip_prefix("/proc/self/fd/"))?;
-        let fd = fd_text.parse::<u32>().ok()?;
+        // The spelling judgment is the registry's (redundancy audit
+        // R3/D6): the local strip+parse also accepted `/dev/fd/+3`,
+        // which GNU rejects on every face (the literal open fails
+        // ENOENT in procfs).
+        let fd = crate::special_paths::fd_alias_target(filename)?;
         let (data, offset) = self.fd_table.input_snapshot_bytes(fd)?;
         let content = data.get(offset..)?.to_vec();
         Some(bytes_to_shell_text(&content))
@@ -1108,7 +1343,8 @@ impl Executor {
         // rubash#1551: the body is a forked child (subst.c:6362
         // process_substitute) running in place here — bracket the
         // process-global hash-table mirror for its duration.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         subshell.stdout_capture = Some(Vec::new());
         // Direct-stdout builtins inside the substitution consult the
         // thread-local capture, which belongs to an enclosing pipeline
@@ -1174,7 +1410,7 @@ impl Executor {
                 escape_aware,
                 raw,
             ) {
-                if let Some((_, offset)) = self.fd_table.input_snapshot(fd) {
+                if let Some(offset) = self.fd_table.input_offset(fd) {
                     self.shell_state
                         .env_vars
                         .insert(fd_stdin_offset_key(fd), offset.to_string());
@@ -1479,6 +1715,9 @@ impl Executor {
             None
         };
         let manual_echo = onechar.is_some() && !silent;
+        // niubash#684: canonical-console VEOF translation state for the
+        // byte loop below (see read_helpers::stdin_veof_armed).
+        let veof_armed = super::read_helpers::stdin_veof_armed(stdin_handle, onechar.is_some());
         let mut output = String::new();
         let mut decoder = StdinCharDecoder::new();
         let mut units = 0usize;
@@ -1530,6 +1769,20 @@ impl Executor {
                 if buf.is_empty() {
                     eof = true;
                     break;
+                }
+                // niubash#684: canonical-console VEOF — see
+                // read_helpers::stdin_veof_armed. At an empty record the
+                // 0x04 marker IS the EOF (and the verdict recording
+                // below treats it exactly like the zero-length read);
+                // mid-record it flushes the buffered prefix — already
+                // delivered byte-wise — so it is dropped and the record
+                // continues.
+                if veof_armed && buf[0] == 0x04 {
+                    if output.is_empty() {
+                        eof = true;
+                        break;
+                    }
+                    continue;
                 }
                 decoder.queue_byte(buf[0]);
             }
@@ -1596,6 +1849,16 @@ impl Executor {
         // break with eof=1); conflating the two made the empty line fail the
         // builtin and swallow the following record (niubash#275).
         if output.is_empty() && !delimiter_found {
+            // niubash#684: a genuine EOF (the raw read returned empty)
+            // with nothing served is the builtin's verdict, recorded so
+            // the caller's fallback cascade does not re-block on a
+            // second transport — GNU reads ONE descriptor and zread's
+            // EOF ends the builtin (read.def:767, :949). Timeout and
+            // interrupt breaks reach here with `eof` clear and leave
+            // the flag untouched; those verdicts have their own arms.
+            if eof {
+                self.read_process_stdin_eof = true;
+            }
             return None;
         }
         // read.def:949 eof: the handle closed before the delimiter.

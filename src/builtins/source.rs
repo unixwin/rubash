@@ -101,6 +101,10 @@ where
             if matches!(error, SourceParseError::HelpRequested) {
                 crate::builtins::help::print_builtin_help(command_name, &mut *stdout)?;
                 executor.set_exit_code(2);
+                // rubash#2117: CHECK_HELPOPT returns EX_USAGE (258 >
+                // EX_SHERRBASE) — execute_cmd.c:4886-4888 marks
+                // special_builtin_failed for the completion.
+                executor.mark_special_builtin_failed();
                 return Ok(());
             }
             match error {
@@ -133,6 +137,12 @@ where
                 "{command_name}: usage: {command_name} [-p path] filename [arguments]"
             )?;
             executor.set_exit_code(2);
+            // rubash#2117: GNU builtins/source.def returns EX_USAGE
+            // (258 > EX_SHERRBASE) for every face in this arm — the
+            // getopt default (:133-137), a missing -p argument and a
+            // missing filename (:143-147) — which execute_cmd.c:4886-4888
+            // marks special_builtin_failed.
+            executor.mark_special_builtin_failed();
             return Ok(());
         }
     };
@@ -175,7 +185,12 @@ where
         }
     }
 
-    if matches!(filename, "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0") {
+    // The fd-0 spelling judgment is the registry's (issue rubash#1973):
+    // `fd_alias_target == Some(0)` carries exactly the canonical
+    // spellings the literal table matched — GNU rejects the leading-zero
+    // family on every face, so `. /dev/fd/00` falls through to the
+    // filesystem open and fails ENOENT there, like the oracle.
+    if crate::special_paths::fd_alias_target(filename) == Some(0) {
         // GNU source.def opens /dev/stdin, which in a pipeline is the pipe
         // read end inherited as stdin ("echo x | . /dev/stdin" from
         // source6.sub). Read the shell's stdin instead of resolving a

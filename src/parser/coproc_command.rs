@@ -1,3 +1,4 @@
+use super::parse_loop::offending_line_text;
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -30,12 +31,30 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             // and the fds bind as COPROC). A builtin-name allowlist
             // here stole the first word of the simple command as a
             // name (rubash#1153).
-            if !lookahead.value.starts_with('-') && next_is_compound {
+            if !lookahead.value.starts_with('-')
+                && !is_keyword(tokens, i, "!")
+                && next_is_compound
+            {
                 name = Some((lookahead.value.clone(), lookahead.raw.clone()));
                 i += 1; // consume the name
             }
             // Otherwise: no name, the token is part of the simple command
         }
+    }
+
+    // rubash#1652: GNU parse.y:1125-1175 coproc grammar is `COPROC
+    // [WORD] shell_command`, and `!` is a pipeline modifier, not a
+    // shell_command — so `coproc ! ...` is a syntax error, never a
+    // name and never a simple-command word. Without this, the `!`
+    // fell into the simple-command word list and the coproc ran
+    // with the negation silently applied inside the child.
+    // Note the name gate above excludes the `!` keyword too:
+    // `coproc ! { ...; }` must hit this error, not the runtime
+    // "not a valid identifier" path (a QUOTED "!" is a real word
+    // and still takes the name path, matching GNU's identifier
+    // error for `coproc "!" { ...; }`).
+    if is_keyword(tokens, i, "!") {
+        return Some(coproc_bang_error(tokens, start, i));
     }
 
     // Parse the body
@@ -151,8 +170,42 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
     // Simple command: collect remaining tokens as words
     let mut words = Vec::new();
-    let mut word_metadata = Vec::new();
+    // Explicit element type: the rubash#1983 index-1 check below
+    // reads word_metadata[0].raw before the first push, which
+    // leaves the element type ambiguous to inference (E0282).
+    let mut word_metadata: Vec<WordMetadata> = Vec::new();
     while i < tokens.len() {
+        // rubash#1652 (continued): GNU also rejects `!` as the
+        // SECOND word of the coproc's simple command (`coproc a !
+        // ...`, `coproc NAME ! ...`): after COPROC WORD the parser
+        // commits to the named form and demands a shell_command,
+        // so a `!` there is a syntax error — while a `!` after two
+        // or more words is a plain word (`coproc a b ! c` parses).
+        // The body-position check above covers index 0; this
+        // covers index 1. (A quoted "!" is a real word and never
+        // reaches this arm: is_keyword only matches the bare
+        // keyword token.)
+        //
+        // rubash#1983: the index-1 rejection does NOT apply when
+        // the one collected word is an assignment word. GNU's
+        // lexer returns an assignment-shaped first word as
+        // ASSIGNMENT_WORD, and parse.y:5899
+        // reserved_word_acceptable has no ASSIGNMENT_WORD in its
+        // accept set, so the following `!` never becomes BANG at
+        // all — it lexes as a plain WORD and lands as the child
+        // command's NAME (`coproc X=1 ! echo hi` runs a child that
+        // reports `!: command not found`, script rc 0; verified
+        // against GNU bash 5.3.20, incl. the `a[1]=x` / `a+=1`
+        // shapes; a non-name first word like `9a=1` or `a-b=1`
+        // stays a WORD and the `!` still errors). The raw spelling
+        // decides: a quoted name (`"X"=1`) is not an assignment
+        // word in GNU either.
+        if words.len() == 1
+            && !coproc_word_is_assignment(&word_metadata[0].raw)
+            && is_keyword(tokens, i, "!")
+        {
+            return Some(coproc_bang_error(tokens, start, i));
+        }
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
             let raw = if next_i == i + 1 {
                 tokens[i].raw.as_str()
@@ -183,6 +236,36 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         None,
     ));
     Some(finish_coproc_command(command, tokens, i))
+}
+
+/// The parse-error node GNU reports for a `!` where the coproc
+/// grammar admits no pipeline modifier (body position, or second
+/// word of the simple command). The executor reports it as
+/// `syntax error near unexpected token `!'` and aborts with
+/// status 2. The rest of the offending construct (up to the next
+/// command boundary) is swallowed so parsing resumes cleanly at
+/// the next command.
+fn coproc_bang_error(tokens: &[Token], start: usize, bang: usize) -> (CommandNode, usize) {
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "!{}{}",
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            tokens[bang].position,
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        offending_line_text(tokens, bang, None, 0),
+    );
+    let mut end = bang;
+    while end < tokens.len() && tokens[end].kind != TokenKind::Semicolon {
+        end += 1;
+    }
+    finish_coproc_command(command, tokens, end)
 }
 
 fn finish_coproc_command(
@@ -241,6 +324,35 @@ fn coproc_command(
 
 fn synthetic_delimiter_metadata(delimiter: &str) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, delimiter, delimiter))
+}
+
+/// GNU assignment-word shape at the head of a simple command: a name
+/// (`[A-Za-z_][A-Za-z0-9_]*`, optionally with a `[...]` subscript)
+/// followed by `=` or `+=`. This is the shape GNU's lexer returns as
+/// ASSIGNMENT_WORD (parse.y read_token), after which reserved words
+/// stop being recognized (parse.y:5899 reserved_word_acceptable) —
+/// the rubash#1983 exemption for a `!` following the coproc's first
+/// word. (Judgment shape first measured in the #1712 line's
+/// 537e177c; subscript/`+=` arms oracle-verified for #1983.)
+fn coproc_word_is_assignment(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    let mut i = 0;
+    if i >= bytes.len() || !(bytes[i] == b'_' || bytes[i].is_ascii_alphabetic()) {
+        return false;
+    }
+    while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'[' {
+        match word[i..].find(']') {
+            Some(close) => i += close + 1,
+            None => return false,
+        }
+    }
+    if i < bytes.len() && bytes[i] == b'+' {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b'='
 }
 
 fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {

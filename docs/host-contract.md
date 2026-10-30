@@ -4,6 +4,16 @@
 之间的权威合约记录 + 通用化路线图。优先级：**排在 GNU 平价战役之后**，
 但所有裁决必须记录在案（本文）。
 
+**2026-10-30 状态注记（1.5.0 winux 清除，S1–S5）**：§0.2 与 §1 中的
+WINUXSH_\*「遗留兜底别名」已按用户裁定**整桥拆除、不再保留 legacy**——
+两仓均不再读取、写入或导出 WINUXSH_ROOT / WINUXSH_SHELL / WINUXSH，
+shim 与引擎均不再探测 winuxsh.exe。§1 表与解析链以下文为准：引擎根解析
+链 = `__RUBASH_SHELL_ROOT` → `RUBASH_ROOT`（宿主侧另有 NIU_ROOT / NIU_SHELL
+正名）。`WINUXSH_SHELL_PATH_STYLE` 与 `WINUXSH_HIST_IGNORE_*` 为无读者死名，
+一并销账。设备哨兵已改名 `\\.\RUBASH_UNSUPPORTED_DEVICE`（引擎产生，
+归引擎命名空间；§3 原 NIU_ 改名案作废）。§1/§3 的原文保留为决策记录，
+与本注记冲突处以本注记为准。
+
 ## 0. Owner 裁决
 
 1. **License 统一 MIT**。`LICENSE` 文件本体一直是 MIT 全文，Cargo.toml 包字段
@@ -30,6 +40,8 @@
 解析链（已修空值遮蔽 bug，commit 7eb9403d）：按 NIU_SHELL_ROOT →
 WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 NIU_* 唯一。
 嵌入 API 通道 `__RUBASH_SHELL_ROOT` 恒为最优先（清单不可见，命名空间正确）。
+（2026-10-30 更新：WINUXSH_ROOT 已随 1.5.0 winux 清除 S3 拆除，引擎现行
+链为 `__RUBASH_SHELL_ROOT` → `RUBASH_ROOT`；上文链序为拆除前记录。）
 
 ## 2. 宿主↔引擎职责分层（NIU-1 审计确认的现状 + 目标）
 
@@ -58,7 +70,12 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
   引擎可以是旧的）。
 - P2-A WINUXSH_HIST_IGNORE_DUPS/_SPACE 死信道：宿主零读者已实锤 →
   rubash 停写（或宿主映射 reedline history_exclusion_prefix + 去重）。
+  （2026-10-30 销账：两名在两仓均无读者、无写入方，属死名，随 1.5.0
+  winux 清除 S5 文档销账确认终结。）
 - P2-D rubash 读 NIU_* 优先 + WINUXSH_* 兜底 → 宿主 shell.rs 删旧名双写。
+  （2026-10-30 销账：以整桥拆除形态完成——niu S2 删三处读与 WINUXSH_SHELL
+  写、rubash S3 停写停导出并删兜底位，兜底本身不再存在，强于原计划的
+  「优先+兜底」。）
 - P3-A 清理 niu1.exe / usr/bin/__old_0.17.0/ / tmp 残留；
   ⚠️ ~/.niubashrc 含真实 API 密钥——任何文档/打包严禁引用其内容。
 
@@ -68,6 +85,9 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
 - set_shell_root/set_winuxcmd_path 停止**导出**品牌变量（改只设 __RUBASH_*
   隐藏通道；宿主确认不读导出值后执行）。
 - WINUXSH_UNSUPPORTED_DEVICE sentinel 改名 NIU_（T1 机械）。
+  （2026-10-30 销账：已随 1.5.0 winux 清除 S5 执行，实际改名为
+  `\\.\RUBASH_UNSUPPORTED_DEVICE`——哨兵由引擎 path.rs 产生，归引擎
+  命名空间，NIU_ 案作废；仓内外无按旧字面量匹配的消费者。）
 - init.rs 与 cd/paths.rs 的 PWD 风格双实现合并为单一所有权（T2）。
 - Cargo features：windows-host / test-support 门控（NIU-4 Phase 1）。
 - `bash` bin 在非 Windows 上必须是真 shell（现为 winuxsh shim，127）。

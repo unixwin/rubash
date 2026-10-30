@@ -312,6 +312,23 @@ impl<'a> Lexer<'a> {
     /// Track the GNU reader state that affects `{` handling:
     /// reserved-word acceptability (last two tokens) and PST_CASEPAT.
     fn record_token(&mut self, token: &mut Token) {
+        // rubash#1871: the reserved-word verdict for THIS token in the
+        // state in which it was READ — captured before any of this
+        // token's own state updates below (notably the
+        // last_was_time_option rewrite, which describes the NEXT
+        // token's window). The history demotion at the bottom must use
+        // this value: recomputing reserved_word_position() after the
+        // rewrite demoted a keyword read inside the time-option window
+        // (`time -p coproc C { ...; }`: reading `coproc' cleared
+        // last_was_time_option, so the recomputation called its
+        // position non-reserved and recorded (Word, "coproc") — two
+        // tokens later the `{` after the coproc NAME then failed the
+        // token_before_that == coproc arm and never became a group
+        // opener). GNU's CHECK_FOR_RESERVED_WORD (parse.y:3168) judges
+        // the token by last_read_token as it stood when the token was
+        // read, which is exactly this capture (and the value the
+        // reserved_position stamp above derives from).
+        let read_time_reserved_position = self.reserved_word_position();
         // rubash#1721: stamp the reserved-word verdict for word-path
         // keyword tokens from the reader state in which the token was
         // READ (before this token updates it below) — the same state
@@ -579,7 +596,7 @@ impl<'a> Lexer<'a> {
         };
         let history_kind = if token.kind == TokenKind::Keyword
             && is_keyword(&token.value)
-            && (!self.reserved_word_position() || time_after_pipe)
+            && (!read_time_reserved_position || time_after_pipe)
         {
             TokenKind::Word
         } else {

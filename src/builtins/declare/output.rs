@@ -3,21 +3,21 @@ use std::io::{self, Write};
 use super::storage::{format_array_value, format_assoc_value, quote_declare_value};
 
 #[derive(Clone, Copy)]
-pub(super) struct DeclarationAttrs {
-    pub(super) exported: bool,
-    pub(super) readonly: bool,
-    pub(super) array: bool,
-    pub(super) assoc: bool,
-    pub(super) integer: bool,
-    pub(super) uppercase: bool,
-    pub(super) lowercase: bool,
-    pub(super) capcase: bool,
-    pub(super) nameref: bool,
-    pub(super) trace: bool,
+pub(crate) struct DeclarationAttrs {
+    pub(crate) exported: bool,
+    pub(crate) readonly: bool,
+    pub(crate) array: bool,
+    pub(crate) assoc: bool,
+    pub(crate) integer: bool,
+    pub(crate) uppercase: bool,
+    pub(crate) lowercase: bool,
+    pub(crate) capcase: bool,
+    pub(crate) nameref: bool,
+    pub(crate) trace: bool,
 }
 
 impl DeclarationAttrs {
-    pub(super) fn has_scalar_attribute(self) -> bool {
+    pub(crate) fn has_scalar_attribute(self) -> bool {
         self.exported
             || self.readonly
             || self.integer
@@ -29,7 +29,7 @@ impl DeclarationAttrs {
     }
 }
 
-pub(super) fn print_declaration<W>(
+pub(crate) fn print_declaration<W>(
     name: &str,
     value: &str,
     attrs: DeclarationAttrs,
@@ -80,7 +80,7 @@ where
     }
 }
 
-pub(super) fn print_plain_declaration<W>(
+pub(crate) fn print_plain_declaration<W>(
     name: &str,
     value: &str,
     attrs: DeclarationAttrs,
@@ -100,7 +100,7 @@ where
     writeln!(stdout, "{name}={rendered}")
 }
 
-pub(super) fn print_unset_declaration<W>(
+pub(crate) fn print_unset_declaration<W>(
     name: &str,
     attrs: DeclarationAttrs,
     stdout: &mut W,

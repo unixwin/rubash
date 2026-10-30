@@ -113,7 +113,20 @@ pub(crate) enum FdReadEndpoint {
     File(Rc<FileFd>),
     InheritedProcessStdin,
     ProcessSubstitution(Rc<RefCell<TextInput>>),
-    CoprocStdout { pid: u32, fd: Rc<FileFd> },
+    CoprocStdout {
+        pid: u32,
+        fd: Rc<FileFd>,
+    },
+    /// A descriptor bound to a DIRECTORY (rubash#1937): GNU's open of
+    /// a directory succeeds (O_RDONLY) and every read fails EISDIR —
+    /// the read builtin reports `read error: Is a directory`
+    /// (read.def:911). The variant exists for the Windows synthetic
+    /// -link bind of /proc/self/cwd, where no directory handle can be
+    /// opened at all: the bind succeeds with this endpoint and reads
+    /// fabricate the EISDIR failure, so the in-shell readers report
+    /// exactly GNU's shape. Off Windows a real directory FileFd
+    /// serves the same descriptor.
+    Directory,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +148,27 @@ pub(crate) enum FdWriteEndpoint {
         /// Bookkeeping only — excluded from endpoint identity below.
         procsub_pid: Option<u32>,
     },
+    /// rubash#1898: an fd bound to /dev/full. The bind succeeds;
+    /// every write fails ENOSPC, which the write faces render through
+    /// sh_chkwrite (`<name>: write error: No space left on device`,
+    /// builtins/common.c:320-334). No Windows handle has that failure
+    /// profile, so the endpoint is carried symbolically and the
+    /// faces produce the failure — the registry's answer travels
+    /// with the descriptor instead of being re-derived per face.
+    FullDevice,
+    /// rubash#2042: an fd bound to a 0644-class synthetic /proc
+    /// content entry (`/proc/self/status`, `/proc/<pid>/cmdline`).
+    /// The open succeeds (procfs 0644) and every WRITE fails EINVAL —
+    /// procfs content files without a write handler answer
+    /// `write error: Invalid argument` (measured on real procfs,
+    /// bash 5.3.20: `echo hi >&3` after `exec 3<>/proc/self/status`
+    /// fails with rc 1 in the writer's name). No Windows handle
+    /// reproduces a per-write EINVAL, so — exactly like FullDevice —
+    /// the endpoint is carried symbolically and the in-shell write
+    /// faces produce the failure. The read side stays the generated
+    /// snapshot byte channel; the failed write never alters what a
+    /// later read serves (GNU's observable too).
+    ProcContentWrite,
 }
 
 #[derive(Debug, Clone)]
@@ -665,6 +699,13 @@ impl FdTable {
     ) -> Option<Vec<u8>> {
         self.read_error = None;
         let endpoint = self.entries.get(&fd)?.read.clone()?;
+        // rubash#1937: a directory descriptor fails every read with
+        // EISDIR (read.def:911) — record the strerror the read
+        // builtin's error channel renders, and serve no record.
+        if matches!(endpoint, FdReadEndpoint::Directory) {
+            self.read_error = Some("Is a directory".to_string());
+            return None;
+        }
         let file = match &endpoint {
             FdReadEndpoint::File(file) | FdReadEndpoint::CoprocStdout { fd: file, .. } => {
                 Some(file.clone())
@@ -1071,7 +1112,23 @@ impl FdTable {
                 match crate::fd::read_some(file.handle, 8192) {
                     Ok(buf) if buf.is_empty() => break,
                     Ok(buf) => out.extend_from_slice(&buf),
-                    Err(_) => break,
+                    Err(error) => {
+                        // rubash#2101: a hard read error on an
+                        // otherwise empty drain is a fact a caller
+                        // may own — the same first-error discipline
+                        // read_file_bytes keeps for the read builtin
+                        // (rubash#1495). A directory bound to the fd
+                        // reads EISDIR; swallowing it made a draining
+                        // consumer (the emulated cat) report success
+                        // where GNU's reader fails with its own
+                        // diagnostic. read_bytes resets the slot at
+                        // entry, so recording here cannot leak into an
+                        // unrelated later read.
+                        if out.is_empty() && self.read_error.is_none() {
+                            self.read_error = Some(crate::posix_errors::message(&error));
+                        }
+                        break;
+                    }
                 }
             }
             return Some(out);
@@ -1119,6 +1176,26 @@ impl FdTable {
         Some(input.offset)
     }
 
+    /// Current read offset of a materialized (Text /
+    /// ProcessSubstitution) endpoint, without copying its bytes.
+    /// Callers that only mirror the cursor (the `read` builtin's
+    /// per-record offset write-back, scope restore, existence probes)
+    /// must use this rather than [`Self::input_snapshot`]: GNU serves
+    /// each record off the shared descriptor cursor in O(record)
+    /// (read.def zreadc), so consulting the cursor after a record
+    /// must not clone and re-convert the whole stream — doing so made
+    /// every `read` on a procsub endpoint cost O(stream), i.e.
+    /// `while read; done < <(...)` quadratic in the stream size
+    /// (perf-round F6: subst.lad_procsub_read@20000 at 27x GNU).
+    pub(crate) fn input_offset(&self, fd: u32) -> Option<usize> {
+        let endpoint = self.entries.get(&fd)?.read.as_ref()?;
+        let input = match endpoint {
+            FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
+            _ => return None,
+        };
+        Some(input.borrow().offset)
+    }
+
     pub(crate) fn input_snapshot_bytes(&self, fd: u32) -> Option<(Vec<u8>, usize)> {
         let endpoint = self.entries.get(&fd)?.read.as_ref()?;
         let input = match endpoint {
@@ -1127,6 +1204,27 @@ impl FdTable {
         };
         let input = input.borrow();
         Some((input.data.clone(), input.offset))
+    }
+
+    /// rubash#1952: drain a live File read endpoint (a streamed
+    /// procsub's pipe, an exec-bound file) from its current offset to
+    /// EOF through the shared OS handle — the &self counterpart of
+    /// read_all_bytes for expansion-time readers (the comsub
+    /// quick-read ladder) that cannot take &mut. The reads advance
+    /// the shared offset, exactly like a GNU fork child's reads.
+    pub(crate) fn read_file_endpoint_bytes(&self, fd: u32) -> Option<Vec<u8>> {
+        let FdReadEndpoint::File(file) = self.read_endpoint(fd)? else {
+            return None;
+        };
+        let mut out = Vec::new();
+        loop {
+            match crate::fd::read_some(file.handle, 8192) {
+                Ok(buf) if buf.is_empty() => break,
+                Ok(buf) => out.extend_from_slice(&buf),
+                Err(_) => break,
+            }
+        }
+        Some(out)
     }
 
     pub(crate) fn input_snapshot(&self, fd: u32) -> Option<(String, usize)> {
@@ -1211,6 +1309,13 @@ impl FdTable {
                     FdReadEndpoint::CoprocStdout { pid, .. } => {
                         MaterializedRead::CoprocStdout(*pid)
                     }
+                    FdReadEndpoint::Directory => {
+                        // rubash#1937: the snapshot has no directory
+                        // shape; the rebound fd reads as empty
+                        // instead of failing EISDIR (cross-boundary
+                        // residual — the in-shell faces are exact).
+                        MaterializedRead::Bytes(Vec::new())
+                    }
                 });
                 let write = entry.write.as_ref().map(|endpoint| match endpoint {
                     FdWriteEndpoint::Stdout => MaterializedWrite::Stdout,
@@ -1224,6 +1329,36 @@ impl FdTable {
                             path: path.clone(),
                             command: command.clone(),
                         }
+                    }
+                    FdWriteEndpoint::FullDevice => {
+                        // rubash#1898: materializing a /dev/full
+                        // binding for a child stage hands it an
+                        // absorbed sink file — the ENOSPC failure
+                        // profile cannot cross this boundary (the
+                        // in-shell write faces carry it exactly);
+                        // GNU hands the child the real device.
+                        let path = std::env::temp_dir().join(format!(
+                            "rubash-full-sink-{}-{}",
+                            std::process::id(),
+                            fd
+                        ));
+                        let _ = std::fs::File::create(&path);
+                        MaterializedWrite::File(path)
+                    }
+                    FdWriteEndpoint::ProcContentWrite => {
+                        // rubash#2042: same boundary as FullDevice —
+                        // the child gets an absorbed sink file; the
+                        // EINVAL write profile cannot cross into a
+                        // child handle (the in-shell write faces
+                        // carry it exactly); GNU hands the child the
+                        // real procfs entry.
+                        let path = std::env::temp_dir().join(format!(
+                            "rubash-proc-sink-{}-{}",
+                            std::process::id(),
+                            fd
+                        ));
+                        let _ = std::fs::File::create(&path);
+                        MaterializedWrite::File(path)
                     }
                 });
                 (*fd, MaterializedFd { read, write })
@@ -1262,6 +1397,11 @@ impl PartialEq for FdWriteEndpoint {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
+            // rubash#1898: /dev/full endpoints are interchangeable.
+            (Self::FullDevice, Self::FullDevice) => true,
+            // rubash#2042: all 0644-class synthetic /proc write binds
+            // are interchangeable, like the device class above.
+            (Self::ProcContentWrite, Self::ProcContentWrite) => true,
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
             (Self::CoprocStdin { pid: a, .. }, Self::CoprocStdin { pid: b, .. }) => a == b,
             (
@@ -1349,6 +1489,38 @@ mod tests {
                 .as_deref(),
             Some("two")
         );
+    }
+
+    #[test]
+    fn input_offset_tracks_consumption_without_a_snapshot() {
+        // perf-round F6: the per-record offset write-back must consult
+        // the cursor through input_offset; it tracks read consumption
+        // exactly like the snapshot's offset half, and stays None for
+        // fds with no materialized endpoint.
+        let mut table = FdTable::new();
+        assert_eq!(table.input_offset(10), None);
+        table.open_input(
+            10,
+            FdReadEndpoint::process_substitution_bytes(b"one\ntwo\n".to_vec()),
+            true,
+        );
+        assert_eq!(table.input_offset(10), Some(0));
+        assert_eq!(
+            table.read_text(10, '\n', None, false, false, true),
+            Some("one".to_string())
+        );
+        assert_eq!(table.input_offset(10), Some(4));
+        assert_eq!(
+            table.input_offset(10),
+            Some(table.input_snapshot(10).unwrap().1)
+        );
+        assert_eq!(
+            table.read_text(10, '\n', None, false, false, true),
+            Some("two".to_string())
+        );
+        assert_eq!(table.input_offset(10), Some(8));
+        assert_eq!(table.read_text(10, '\n', None, false, false, true), None);
+        assert_eq!(table.input_offset(99), None);
     }
 
     #[test]

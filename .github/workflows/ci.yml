@@ -59,13 +59,68 @@ jobs:
       # debug_assert family this suite pins is armed only in dev-profile
       # builds of the spawned shell, and no other CI lane ran these targets
       # (the #824 panics therefore never met a gate). Hermetic, fast, hard
-      # gate (unlike the continue-on-error cli_tests lane below).
+      # gate (unlike the cli_tests lane, which runs in the separate
+      # visible-but-not-yet-gating cli-tests job below).
       - name: Run marker leak golden tests
         run: cargo nextest run --test marker_leak_golden --test issue824_marker_decode_boundary_regressions --profile ci
 
+      # rubash#2036 S5: the three-way sync corpus for the 34
+      # builtin/WinuxCmd conflict names (tests/difftest/cases-2036).
+      # Expectations are recorded GNU bash 5.3.20 / coreutils 9.4
+      # measurements, so the gate needs no live GNU oracle on the
+      # runner; the test is #[cfg(unix)] and this ubuntu lane is its
+      # execution home (the Windows three-way run is the win-diff
+      # battery, pkg10 H cell).
+      - name: Run 2036 sync corpus tests
+        run: >-
+          cargo nextest run --test issue2036_s5_sync_corpus
+          --test issue2043_sync_a_class_regressions
+          --test issue2046_sync_b_class_regressions --profile ci
+
+  # rubash#2176: cli_tests used to run as a continue-on-error step inside
+  # the rust job above, which made its reds invisible -- the job showed
+  # green no matter how the suite did, and that is how the #2163 `-- -c`
+  # failures stayed hidden on every platform. It now runs as its own job
+  # with no continue-on-error, so a failure shows up as a red named check
+  # on every PR. It is deliberately NOT a required gate yet: the suite is
+  # red on master, so gating today would block every PR for pre-existing
+  # failures. --no-fail-fast makes each run a complete failure census
+  # (nextest stops at the first failure by default); the census is the
+  # input the failure-budget ledger (#2176, tied to the #2163 Windows
+  # full re-run) starts from, and once the census reaches zero this job
+  # can be promoted to a required check.
+  cli-tests:
+    name: Compatibility CLI tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Same external bashdb fixture preparation as the rust job above:
+      # the bashdb_compat slice of cli_tests needs the fixture in place.
+      - name: Prepare external bashdb fixture
+        run: |
+          git clone --depth 1 --branch bash-5.3 https://github.com/Trepan-Debuggers/bashdb.git target/bashdb-source
+          cd target/bashdb-source
+          bash ./autogen.sh
+          ./configure --prefix="$GITHUB_WORKSPACE/target/bashdb-install"
+          make -j2
+          make install
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/setup-bashdb-fixture.sh target/bashdb-install
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Run compatibility CLI tests
-        continue-on-error: true
-        run: cargo nextest run --test cli_tests --profile ci
+        run: cargo nextest run --test cli_tests --profile ci --no-fail-fast
 
   rust-macos:
     name: Rust tests (macOS)
@@ -79,8 +134,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # The bashdb fixture is only required by cli_tests (continue-on-error
-      # above); lib tests run fixture-free. This job gives the #[cfg(unix)]
+      # The bashdb fixture is only required by cli_tests (the separate
+      # cli-tests job); lib tests run fixture-free. This job gives the #[cfg(unix)]
       # engine tests (signal tables, PATH walk, wait decode, fd extras)
       # their first real darwin execution -- cross-target-check only proves
       # they compile FOR darwin.
@@ -124,6 +179,14 @@ jobs:
       # the suite (60-360s), the job timeout is the outer backstop.
       - name: Run regression suite (goldens, snapshots, perf canaries)
         run: cargo test --test regression
+
+      # rubash#1026 hard gate (RC audit item 6, ruled 2026-10-28): the live
+      # /dev/tcp loopback pin (exec 3<> + read -u 3) lives in
+      # tests/issue1025_1026_1068_1103_1359_redirect_fd_regressions.rs,
+      # which no CI job executes — its Windows face was never CI-proven.
+      # Run it as its own step so a red here fails this job on its own.
+      - name: Run issue1026 dev/tcp loopback pin (hard gate)
+        run: cargo test --test issue1025_1026_1068_1103_1359_redirect_fd_regressions issue_1026_dev_tcp_live_endpoint_round_trips -- --exact
 
       # Re-record protocol runner leg (see tests/regression.rs module
       # header): record the suite snapshots with THIS runner's engine and
@@ -230,6 +293,33 @@ jobs:
 
       - name: Check tests on macOS target
         run: cargo check --tests --target aarch64-apple-darwin
+
+  # rubash#2176: check-only Windows lane. No CI job compiled the whole
+  # tests/ tree for Windows -- the windows-latest regression job runs
+  # --lib, --test regression and single pin targets only -- so the six
+  # integration targets #2163 found Windows-broken had been sitting
+  # uncompiled, invisibly, for a long time. This job compiles every test
+  # target for the MSVC target and executes none of them: cheap, and it
+  # puts the whole class of breakage behind a per-PR gate. The target is
+  # named explicitly (rather than relying on the runner's host triple)
+  # so the lane keeps checking exactly this target if the windows image
+  # default ever moves.
+  windows-tests-check:
+    name: Windows tests compile check
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Check tests on Windows MSVC target
+        run: cargo check --tests --target x86_64-pc-windows-msvc
 
   shell-functionality:
     name: Shell functionality tests

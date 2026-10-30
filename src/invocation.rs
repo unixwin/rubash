@@ -20,15 +20,33 @@ pub struct ShellInvocation {
     pub dump_po: bool,
     /// --pretty-print: parse input and print it back in normalized form.
     pub pretty_print: bool,
-    /// --debug: GNU shell.c:255 sets the vestigial `debugging` variable —
-    /// accepted, recorded, no behavioral effect (the native debugger,
-    /// rubash#497, will own this name when it lands).
+    /// --debug: GNU shell.c:255 sets the vestigial `debugging` variable.
+    /// The native debugger owns this name since PLAN row 11
+    /// (rubash#497; debugger design section 2): in the rubash
+    /// binary, the script-operand form dispatches to the
+    /// interactive frontend in main.rs's leading-option scan,
+    /// before this parser runs. The forms that reach this parser
+    /// (-c, -s, interactive) keep the recorded-flag behavior plus
+    /// the extdebug arming main.rs applies for them — the
+    /// debugger implies the gate internally on its own path and
+    /// never flips the user's extdebug observably.
     pub debug: bool,
     /// --debugger: GNU parity (shell.c:257 sets debugging_mode). The flag
     /// itself never touches extdebug — startup runs the bashdb starter file
     /// (main.rs start_debugger) and clears the mode when it is missing
     /// (shell.c:1547-1566).
     pub debugger: bool,
+    /// --dap: the native debugger's protocol frontend (1.5.0
+    /// debugger design section 13; PLAN row 10) — the same debug
+    /// session `--debug` will front, over DAP. This is an engine
+    /// meta flag, not a GNU option: it is recorded here so a
+    /// host can dispatch on it before running anything (the
+    /// adapter owns its executor and the process stdio, so
+    /// `apply` deliberately takes no DAP action). The rubash
+    /// binary dispatches in main.rs's leading-option scan,
+    /// before the GNU parser, so the GNU long-option contract is
+    /// untouched.
+    pub dap: bool,
     pub command: Option<String>,
     pub command_name: Option<String>,
     pub positional_params: Vec<String>,
@@ -143,6 +161,7 @@ impl ShellInvocation {
             pretty_print: false,
             debug: false,
             debugger: false,
+            dap: false,
             command: None,
             command_name: None,
             positional_params: Vec::new(),
@@ -182,7 +201,13 @@ impl ShellInvocation {
                     out.interactive = true;
                     i += 1;
                 }
-                "-D" => {
+                "-D" | "+D" => {
+                    // GNU shell.c:960-964: case 'D' fires for either
+                    // sign — `bash +D` dumps exactly like `-D`
+                    // (oracle-probed on 5.3.20; the rubash binary's own
+                    // loop has had both arms since rubash#1977, this
+                    // shared parser only had the minus form, so a niu
+                    // `+D` was swallowed and the script executed).
                     out.dump_strings = true;
                     i += 1;
                 }
@@ -232,6 +257,10 @@ impl ShellInvocation {
                 }
                 "--debugger" => {
                     out.debugger = true;
+                    i += 1;
+                }
+                "--dap" => {
+                    out.dap = true;
                     i += 1;
                 }
                 "--restricted" => {
@@ -441,7 +470,15 @@ impl ShellInvocation {
             // `__RUBASH_` env filter).
             executor.set_env(crate::script_driver::READ_STDIN_MARKER, "1");
         }
-        executor.set_positional_params(self.positional_params.clone());
+        // rubash#2032: an internal respawn's birth seed carries the
+        // fork-inherited positional window (Executor::new consumed
+        // POSITIONAL_PARAMS_TRANSPORT); the respawn argv is just
+        // `-c source`, so this invocation's empty parameter list must
+        // not clear the seed. An invocation that DOES carry parameters
+        // wins verbatim, as before.
+        if !self.positional_params.is_empty() || executor.positional_params().is_empty() {
+            executor.set_positional_params(self.positional_params.clone());
+        }
         Ok(())
     }
 
@@ -609,6 +646,10 @@ fn parse_post_c_option(
         }
         "--debug" => {
             out.debug = true;
+            Ok(Some(index + 1))
+        }
+        "--dap" => {
+            out.dap = true;
             Ok(Some(index + 1))
         }
         "--debugger" => {
@@ -963,6 +1004,16 @@ mod tests {
         assert!(parsed.restricted);
         assert!(parsed.shell_flags.contains(&("verbose".into(), true)));
         assert_eq!(parsed.rc_file.as_deref(), Some("alt.rc"));
+    }
+
+    #[test]
+    fn parses_plus_d_as_dump_strings() {
+        // GNU shell.c:960-964: case 'D' fires for either sign
+        // (oracle-probed: `bash +D script` dumps, never executes).
+        let parsed = ShellInvocation::parse(&["+D".into(), "script.sh".into()]).unwrap();
+        assert!(parsed.dump_strings);
+        assert!(!parsed.dump_po);
+        assert_eq!(parsed.script.as_deref(), Some("script.sh"));
     }
 
     #[test]

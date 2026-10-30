@@ -356,8 +356,14 @@ impl BreakpointTable {
     }
 
     /// Insert a line entry (5.1) and return its id.
+    ///
+    /// The stored key is the file's canonical identity
+    /// (`super::resolution::file_identity`, PLAN row 11), never
+    /// the caller's spelling: entries set through a symlink, a
+    /// relative path, or a short name are the same entry.
     pub fn insert_line(&mut self, file: impl Into<String>, line: u32) -> BreakpointId {
         let id = self.alloc_id();
+        let file = super::resolution::file_identity(&file.into());
         self.entries.insert(id, Breakpoint::line(id, file, line));
         id
     }
@@ -408,13 +414,14 @@ impl BreakpointTable {
     /// Delete the line entries at one (file, line) — the no-argument
     /// `clear` rule of design 5.5 — and return how many were removed.
     pub fn clear_at(&mut self, file: &str, line: u32) -> usize {
+        let file = super::resolution::file_identity(file);
         let doomed: Vec<BreakpointId> = self
             .entries
             .values()
             .filter(|entry| {
                 matches!(
                     &entry.target,
-                    BreakpointTarget::Line { file: f, line: l } if f == file && *l == line
+                    BreakpointTarget::Line { file: f, line: l } if f == &file && *l == line
                 )
             })
             .map(|entry| entry.id)
@@ -442,16 +449,22 @@ impl BreakpointTable {
     }
 
     /// Enabled seam-fired entries bound to one (file, line).
+    ///
+    /// The query spelling is normalized to the canonical
+    /// identity here, at the same convergence point as
+    /// registration (`insert_line`), so the engine's reported
+    /// spelling and the user's spelling meet on one key.
     pub fn line_entries_at<'a>(
         &'a self,
         file: &'a str,
         line: u32,
     ) -> impl Iterator<Item = &'a Breakpoint> + 'a {
+        let identity = super::resolution::file_identity(file);
         self.entries.values().filter(move |entry| {
             entry.enabled
                 && matches!(
                     &entry.target,
-                    BreakpointTarget::Line { file: f, line: l } if f == file && *l == line
+                    BreakpointTarget::Line { file: f, line: l } if f == &identity && *l == line
                 )
         })
     }
@@ -474,6 +487,19 @@ impl BreakpointTable {
     /// enabled watches and needs the whole set in one pass.
     pub fn watch_entries(&self) -> impl Iterator<Item = &Breakpoint> {
         self.entries.values().filter(|entry| entry.kind.is_watch())
+    }
+
+    /// Whether any entry could stop the debuggee at a seam: an
+    /// enabled line or function entry. Watch entries never stop
+    /// at a seam (their stop-and-diff is serviced at stops the
+    /// other kinds cause), and disabled entries are skipped by
+    /// the consult entirely — neither keeps the consult awake.
+    /// The funnel's inert fast exit (design 4.4) asks this
+    /// before its stop-decision machinery.
+    pub fn has_enabled_seam_entries(&self) -> bool {
+        self.entries.values().any(|entry| {
+            entry.enabled && matches!(entry.kind, BreakpointKind::Line | BreakpointKind::Function)
+        })
     }
 
     /// Enable or disable an entry; false when the id is unknown.
@@ -573,6 +599,31 @@ mod tests {
     };
 
     #[test]
+    fn has_enabled_seam_entries_counts_only_enabled_line_and_function() {
+        let mut table = BreakpointTable::new();
+        assert!(!table.has_enabled_seam_entries(), "empty table");
+        let watch = table.insert_watch("x");
+        assert!(
+            !table.has_enabled_seam_entries(),
+            "watch is not a seam stop"
+        );
+        let line = table.insert_line("a.sh", 10);
+        assert!(table.has_enabled_seam_entries(), "enabled line entry");
+        table.set_enabled(line, false);
+        assert!(
+            !table.has_enabled_seam_entries(),
+            "a disabled line entry is inert"
+        );
+        table.set_enabled(line, true);
+        let _ = table.remove(line);
+        let func = table.insert_function("main");
+        assert!(table.has_enabled_seam_entries(), "enabled function entry");
+        table.set_enabled(func, false);
+        assert!(!table.has_enabled_seam_entries());
+        let _ = watch;
+    }
+
+    #[test]
     fn ids_start_at_one_and_advance_in_creation_order() {
         let mut table = BreakpointTable::new();
         let a = table.insert_line("a.sh", 10);
@@ -606,7 +657,9 @@ mod tests {
         assert_eq!(
             entry.target,
             BreakpointTarget::Line {
-                file: "lib.sh".to_string(),
+                // The stored key is the canonical identity of the
+                // spelling, per row 11's keying convergence.
+                file: crate::debugger::resolution::file_identity("lib.sh"),
                 line: 20
             }
         );

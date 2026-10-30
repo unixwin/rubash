@@ -85,12 +85,30 @@ impl Executor {
         }
         match cmd.words[0].as_str() {
             "/bin/pwd" | "/usr/bin/pwd" => {
+                // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word
+                // is execve'd verbatim — when the shell path layer
+                // translates this spelling to an existing, executable
+                // literal file, that FILE answers (physical-pwd default,
+                // --help/--version) and the builtin redirect stands down;
+                // with no literal file the redirect stays (the Windows
+                // no-/bin default, docs/builtins.md §4.3). Declining routes
+                // to the real exec path, whose own literal probe resolves
+                // the same file.
+                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
+                {
+                    return Ok(false);
+                }
                 let mut pwd_cmd = cmd.clone();
                 pwd_cmd.words[0] = "pwd".to_string();
                 self.exit_code = self.execute_pwd(&pwd_cmd)?;
                 Ok(true)
             }
             "/bin/printf" | "/usr/bin/printf" => {
+                // Issue #2093: same literal-file gate as the pwd arm above.
+                if crate::executor::path::literal_executable_file(name, &self.shell_state.env_vars)
+                {
+                    return Ok(false);
+                }
                 let mut printf_cmd = cmd.clone();
                 printf_cmd.words[0] = "printf".to_string();
                 self.exit_code = self.execute_printf(&printf_cmd)?;
@@ -332,6 +350,7 @@ impl Executor {
         let mut no_more_flags = false;
         let mut parents = false;
         let mut failed = false;
+        let mut operands = 0usize;
         // coreutils diagnostics are the emulated command's own stderr:
         // they go through the command's redirections like any external
         // command's output (rubash#1372: `mkdir ... >f 2>&1` must create
@@ -392,6 +411,7 @@ impl Executor {
             // parent must fail ENOENT without -p, not silently create
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
+            operands += 1;
             let path =
                 self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
             let result = if parents {
@@ -408,6 +428,16 @@ impl Executor {
                 )?;
                 failed = true;
             }
+        }
+        if operands == 0 {
+            // GNU coreutils 9.4 mkdir.c: an invocation whose words are
+            // all options (or a bare `--`) has no operand — it reports
+            // `mkdir: missing operand` and exits 1. The loop above
+            // silently succeeded with rc 0 on that shape (rubash#2043
+            // A1: a fake success on an error input).
+            writeln!(stderr, "mkdir: missing operand")?;
+            writeln!(stderr, "Try 'mkdir --help' for more information.")?;
+            failed = true;
         }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = i32::from(failed);
@@ -448,17 +478,20 @@ impl Executor {
         let mut create_missing = true;
         let mut stamp_accessed = true;
         let mut stamp_modified = true;
-        // (atime, mtime) requested by -t/-d/-r; None = current time.
-        let mut stamp: Option<(SystemTime, SystemTime)> = None;
-        // A -d/-t value this emulation cannot evaluate exactly.
-        let mut unevaluated_date: Option<String> = None;
+        // The stamp is resolved after the option loop from the LAST
+        // -t/-d/-r, in GNU's evaluation order (rubash#1948): -t
+        // converts eagerly (a bad stamp errors on sight, even when a
+        // later option would supersede it), while -d and -r are only
+        // recorded — a superseded -r is never stat'ed and a
+        // superseded -d never parsed, so `touch -r missing -r good
+        // out` succeeds. Of the survivors, the reference file is
+        // evaluated before the date grammar (rubash#1846) and the
+        // date wins the value; -t combined with either is the
+        // separate "more than one source" error.
+        let mut stamp_t: Option<(SystemTime, SystemTime)> = None;
+        let mut date_text: Option<String> = None;
+        let mut ref_file: Option<String> = None;
         let mut info_request = false;
-        // The first -r failure's diagnostic text, held back instead of
-        // printed on sight (rubash#1846): coreutils touch evaluates
-        // the reference file before the date grammar, so when both
-        // fail the reference line is the only one GNU prints, and a
-        // delegated invocation lets the real binary report its own.
-        let mut ref_error: Option<String> = None;
         let mut operands: Vec<String> = Vec::new();
         // coreutils diagnostics are the emulated command's own stderr
         // (rubash#1846): buffered and routed through the command's
@@ -484,51 +517,94 @@ impl Executor {
                 continue;
             }
             if let Some(long) = expanded.strip_prefix("--") {
-                let (name, attached) = match long.split_once('=') {
-                    Some((name, value)) => (name, Some(value.to_string())),
+                let (typed, attached) = match long.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
                     None => (long, None),
                 };
-                match name {
-                    "date" | "reference" => {
-                        let value = attached.or_else(|| {
-                            let value = cmd.words.get(index).cloned();
-                            index += 1;
-                            value
-                        });
-                        match value {
-                            Some(value) => self.touch_apply_stamp_option(
-                                if name == "date" { 'd' } else { 'r' },
-                                &value,
-                                &mut stamp,
-                                &mut unevaluated_date,
-                                &mut ref_error,
-                            ),
-                            None => failed = true,
-                        }
-                    }
-                    "time" => {
-                        let value = attached.or_else(|| {
-                            let value = cmd.words.get(index).cloned();
-                            index += 1;
-                            value
-                        });
-                        match value.as_deref() {
-                            Some("atime" | "access" | "use") => stamp_modified = false,
-                            Some("mtime" | "modify") => stamp_accessed = false,
-                            _ => failed = true,
-                        }
-                    }
-                    "no-create" => create_missing = false,
-                    "version" | "help" => info_request = true,
-                    _ => {
-                        // glibc getopt_long reports the whole word,
-                        // an attached `=value` included.
-                        writeln!(stderr, "touch: unrecognized option '--{}'", long)?;
-                        writeln!(stderr, "Try 'touch --help' for more information.")?;
+                let entry = match resolve_long_option(typed, TOUCH_LONG_OPTIONS) {
+                    LongResolution::Matched(entry) => entry,
+                    // No touch table entry is no_abbrev.
+                    LongResolution::Abbreviated(entry) => entry,
+                    LongResolution::Unknown => {
+                        diag_unrecognized_option(&mut stderr, "touch", expanded);
                         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
                     }
+                    LongResolution::Ambiguous(candidates) => {
+                        diag_ambiguous_option(&mut stderr, "touch", expanded, &candidates);
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                };
+                // rubash#1946: a no-argument option given `=value`.
+                if entry.arg == LongArg::NoArg && attached.is_some() {
+                    diag_option_no_argument_allowed(&mut stderr, "touch", entry.name);
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(true);
+                }
+                match entry.name {
+                    "date" | "reference" | "time" => {
+                        let value = match attached {
+                            Some(value) => Some(value.to_string()),
+                            None => {
+                                let value = cmd.words.get(index).cloned();
+                                index += 1;
+                                value
+                            }
+                        };
+                        // rubash#1947: a missing value is a getopt
+                        // error with its own diagnostic, never a
+                        // silent failure bit with empty stderr.
+                        let Some(value) = value else {
+                            diag_option_requires_argument(&mut stderr, "touch", entry.name);
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        };
+                        match entry.name {
+                            "date" => date_text = Some(value),
+                            "reference" => ref_file = Some(value),
+                            _ => match argmatch(&value, TOUCH_TIME_VALUES) {
+                                ArgMatch::Matched(_, 0) => stamp_modified = false,
+                                ArgMatch::Matched(_, _) => stamp_accessed = false,
+                                ArgMatch::Invalid => {
+                                    diag_invalid_value(
+                                        &mut stderr,
+                                        "touch",
+                                        "time",
+                                        &value,
+                                        false,
+                                        TOUCH_TIME_VALID_LINES,
+                                    );
+                                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                                    self.exit_code = 1;
+                                    return Ok(true);
+                                }
+                                ArgMatch::Ambiguous => {
+                                    diag_invalid_value(
+                                        &mut stderr,
+                                        "touch",
+                                        "time",
+                                        &value,
+                                        true,
+                                        TOUCH_TIME_VALID_LINES,
+                                    );
+                                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                                    self.exit_code = 1;
+                                    return Ok(true);
+                                }
+                            },
+                        }
+                    }
+                    "no-create" => create_missing = false,
+                    // Decline-disposition (touch_declines routed the
+                    // invocation); defensive fallback.
+                    "no-dereference" => return Ok(false),
+                    "version" | "help" => info_request = true,
+                    _ => unreachable!("the resolver only returns table names"),
                 }
                 continue;
             }
@@ -539,6 +615,9 @@ impl Executor {
                 position += flag.len_utf8();
                 match flag {
                     'c' => create_missing = false,
+                    // rubash#1944: -f is GNU's legacy no-op flag,
+                    // silently accepted since the 1990s.
+                    'f' => {}
                     'a' => stamp_modified = false,
                     'm' => stamp_accessed = false,
                     'h' => {}
@@ -553,26 +632,88 @@ impl Executor {
                             index += 1;
                             value
                         };
-                        match value {
-                            Some(value) => self.touch_apply_stamp_option(
-                                flag,
-                                &value,
-                                &mut stamp,
-                                &mut unevaluated_date,
-                                &mut ref_error,
-                            ),
-                            None => failed = true,
+                        // rubash#1947: a missing value is a getopt
+                        // error with its own diagnostic.
+                        let Some(value) = value else {
+                            diag_short_option_requires_argument(&mut stderr, "touch", flag);
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        };
+                        match flag {
+                            // -t converts eagerly (coreutils
+                            // posixtime): a bad stamp errors on
+                            // sight, even when a later -t would
+                            // supersede it (rubash#1948).
+                            't' => match parse_touch_stamp_time(&value) {
+                                Some(time) => stamp_t = Some((time, time)),
+                                None => {
+                                    let _ =
+                                        writeln!(stderr, "touch: invalid date format '{}'", value);
+                                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                                    self.exit_code = 1;
+                                    return Ok(true);
+                                }
+                            },
+                            'd' => date_text = Some(value),
+                            _ => ref_file = Some(value),
                         }
                         break;
                     }
                     bad => {
-                        writeln!(stderr, "touch: invalid option -- '{}'", bad)?;
-                        writeln!(stderr, "Try 'touch --help' for more information.")?;
+                        diag_invalid_short_option(&mut stderr, "touch", bad);
                         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
                     }
                 }
+            }
+        }
+        // -t is the POSIX time source: combined with a surviving -d
+        // or -r it is its own error (measured against coreutils 9.4;
+        // the verdict precedes the -r stat and the -d evaluation).
+        if stamp_t.is_some() && (date_text.is_some() || ref_file.is_some()) {
+            let _ = writeln!(
+                stderr,
+                "touch: cannot specify times from more than one source"
+            );
+            diag_try_line(&mut stderr, "touch");
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            self.exit_code = 1;
+            return Ok(true);
+        }
+        // Deferred evaluation of the surviving -r/-d (rubash#1948),
+        // in GNU's order: the reference file first, then the date
+        // grammar; the date wins the value.
+        let mut ref_stamp: Option<(SystemTime, SystemTime)> = None;
+        let mut ref_error: Option<String> = None;
+        if let Some(reference) = &ref_file {
+            let target =
+                self.session_path(shell_path_to_windows(reference, &self.shell_state.env_vars));
+            match std::fs::metadata(&target) {
+                Ok(metadata) => {
+                    ref_stamp = Some((
+                        metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
+                        metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                    ));
+                }
+                Err(error) => {
+                    ref_error = Some(format!(
+                        "touch: failed to get attributes of '{}': {}",
+                        reference,
+                        crate::posix_errors::message(&error)
+                    ));
+                }
+            }
+        }
+        let mut date_stamp: Option<(SystemTime, SystemTime)> = None;
+        // The surviving -d, when it falls outside the evaluated
+        // grammar (delegation decides its fate below).
+        let mut unevaluated_date: Option<String> = None;
+        if let Some(text) = &date_text {
+            match parse_touch_date_string(text) {
+                Some(time) => date_stamp = Some((time, time)),
+                None => unevaluated_date = Some(text.clone()),
             }
         }
         // Delegation: --version/--help and dates outside the evaluated
@@ -596,6 +737,7 @@ impl Executor {
             self.exit_code = 1;
             return Ok(true);
         }
+        let stamp = date_stamp.or(ref_stamp).or(stamp_t);
         let (stamp_atime, stamp_mtime) = stamp.unwrap_or_else(|| {
             let now = SystemTime::now();
             (now, now)
@@ -613,10 +755,20 @@ impl Executor {
                 }
                 times
             };
-            let stamped = File::options()
-                .write(true)
-                .open(&target)
-                .and_then(|file| file.set_times(make_times()));
+            // GNU touch stamps an EXISTING operand through
+            // utimensat (touch.c do_touch) — it never opens the
+            // operand, so directories (EISDIR on a write open,
+            // rubash#2105: nvm's `touch -t ... "$lock"` aging a lock
+            // directory), fifos (any open blocks), and read-only
+            // files all take the stamp. stamp_existing_operand is
+            // that shape; a missing operand keeps the create flow
+            // below, classified by its NotFound error.
+            let stamped = stamp_existing_operand(
+                &target,
+                stamp_accessed.then_some(stamp_atime),
+                stamp_modified.then_some(stamp_mtime),
+                &make_times,
+            );
             let outcome = match stamped {
                 Ok(()) => Ok(()),
                 // -c on a missing operand: GNU touch skips it silently
@@ -643,47 +795,97 @@ impl Executor {
         self.exit_code = if failed { 1 } else { 0 };
         Ok(true)
     }
+}
 
-    /// One -t/-d/-r option for the emulated touch (rubash#1069): resolve
-    /// it to a concrete (atime, mtime) stamp, record an unevaluated date
-    /// for the delegation/error decision, or flag a missing reference.
-    fn touch_apply_stamp_option(
-        &self,
-        flag: char,
-        value: &str,
-        stamp: &mut Option<(SystemTime, SystemTime)>,
-        unevaluated_date: &mut Option<String>,
-        ref_error: &mut Option<String>,
-    ) {
-        match flag {
-            'r' => {
-                let target =
-                    self.session_path(shell_path_to_windows(value, &self.shell_state.env_vars));
-                match std::fs::metadata(&target) {
-                    Ok(metadata) => {
-                        let atime = metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
-                        let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-                        *stamp = Some((atime, mtime));
+/// Stamp an existing `touch` operand (rubash#2105). Existence is
+/// classified by stat (following symlinks, as GNU's utimensat with
+/// flags 0 does): a missing operand returns the NotFound error the
+/// caller's create / -c flow keys on. On unix the stamp is the
+/// utimensat syscall itself — no open, so directories, fifos, and
+/// read-only files stamp exactly as under GNU. On other platforms
+/// the stamp goes through a handle: write-open first, then the
+/// read-open shape `cp_apply_preserved` falls back to (a directory
+/// takes SetFileTime on a read/backup-semantics handle, the same
+/// outcome WinuxCmd's touch reaches via FILE_WRITE_ATTRIBUTES).
+fn stamp_existing_operand(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+    make_times: &dyn Fn() -> std::fs::FileTimes,
+) -> std::io::Result<()> {
+    // Each platform arm consumes only one stamp representation.
+    #[cfg(unix)]
+    let _ = make_times;
+    #[cfg(not(unix))]
+    let _ = (atime, mtime);
+    std::fs::metadata(target)?;
+    #[cfg(unix)]
+    {
+        touch_utimensat(target, atime, mtime)
+    }
+    #[cfg(not(unix))]
+    {
+        File::options()
+            .write(true)
+            .open(target)
+            .and_then(|file| file.set_times(make_times()))
+            .or_else(|_| File::open(target).and_then(|file| file.set_times(make_times())))
+    }
+}
+
+/// utimensat(AT_FDCWD, path, times, 0) with UTIME_OMIT for the
+/// side `-a`/`-m` did not select. SystemTime values before the
+/// epoch convert to the matching negative timespec.
+#[cfg(unix)]
+fn touch_utimensat(
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    // `libc::time_t` is deprecated on musl/ohos targets and the niubash
+    // cross-target checks compile this crate with `-D warnings`
+    // (rubash#2146). The casts below target the `tv_sec` field's own
+    // type, so allowing the alias locally changes no conversion on any
+    // target; see the twins in printf/zone.rs and
+    // `local_utc_offset_seconds` below.
+    #[allow(deprecated)]
+    fn to_timespec(value: Option<SystemTime>) -> libc::timespec {
+        let Some(value) = value else {
+            return libc::timespec {
+                tv_sec: 0,
+                tv_nsec: libc::UTIME_OMIT as libc::c_long,
+            };
+        };
+        match value.duration_since(SystemTime::UNIX_EPOCH) {
+            Ok(elapsed) => libc::timespec {
+                tv_sec: elapsed.as_secs() as libc::time_t,
+                tv_nsec: elapsed.subsec_nanos() as libc::c_long,
+            },
+            Err(before) => {
+                let elapsed = before.duration();
+                if elapsed.subsec_nanos() == 0 {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t),
+                        tv_nsec: 0,
                     }
-                    Err(error) => {
-                        *ref_error = Some(format!(
-                            "touch: failed to get attributes of '{}': {}",
-                            value,
-                            crate::posix_errors::message(&error)
-                        ));
+                } else {
+                    libc::timespec {
+                        tv_sec: -(elapsed.as_secs() as libc::time_t) - 1,
+                        tv_nsec: 1_000_000_000 - elapsed.subsec_nanos() as libc::c_long,
                     }
                 }
             }
-            't' => match parse_touch_stamp_time(value) {
-                Some(time) => *stamp = Some((time, time)),
-                None => *unevaluated_date = Some(value.to_string()),
-            },
-            'd' => match parse_touch_date_string(value) {
-                Some(time) => *stamp = Some((time, time)),
-                None => *unevaluated_date = Some(value.to_string()),
-            },
-            _ => {}
         }
+    }
+    let times = [to_timespec(atime), to_timespec(mtime)];
+    let c_path = std::ffi::CString::new(target.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }
 
@@ -870,20 +1072,22 @@ impl Executor {
         // -u/--update copies only when the source is newer or the destination
         // is absent, --remove-destination unlinks the destination first, and
         // -t/--target-directory routes every operand into one directory.
-        // -p/--preserve keeps the source's mode and timestamps on the
+        // -p/--preserve keeps the source's attributes on the
         // destination (niubash#533: the flags used to parse as no-ops, so
         // the destination always took the copy time); -a/--archive is
-        // -dR --preserve=all, so it preserves too. Ownership from the
-        // preserve list is parsed but not actionable (an unprivileged GNU
-        // cp skips it silently as well).
+        // -dR --preserve=all, so it preserves too. The preserve list is
+        // validated through argmatch and every attribute is actionable
+        // (rubash#1941): mode/timestamps are stamped, links keeps hard
+        // links linked, xattr/context copy through the unix attribute
+        // store; ownership alone parses and is skipped, matching what
+        // an unprivileged GNU cp can actually honor.
         // Formerly "tolerated but unimplemented" shapes (-f, -l, -s,
         // -d/-P, --parents, --backup, -S/--suffix) are no longer
         // tolerated: cp_declines turns them away above, since the
         // emulation does not implement them; the no-op arms in the
         // parse below remain only as a defensive fallback.
         let mut recursive = false;
-        let mut preserve_mode = false;
-        let mut preserve_times = false;
+        let mut preserve = CpPreserve::default();
         let mut no_clobber = false;
         let mut interactive = false;
         let mut verbose = false;
@@ -920,58 +1124,148 @@ impl Executor {
                 continue;
             }
             if let Some(rest) = expanded.strip_prefix("--") {
-                let (name, value) = match rest.split_once('=') {
-                    Some((name, value)) => (name, Some(value.to_string())),
+                let (typed, attached) = match rest.split_once('=') {
+                    Some((name, value)) => (name, Some(value)),
                     None => (rest, None),
                 };
-                match name {
-                    "recursive" => recursive = true,
-                    "archive" => {
-                        recursive = true;
-                        preserve_mode = true;
-                        preserve_times = true;
-                    }
-                    "no-clobber" => no_clobber = true,
-                    "interactive" => interactive = true,
-                    "verbose" => verbose = true,
-                    "preserve" => cp_apply_preserve_list(
-                        value.as_deref(),
-                        &mut preserve_mode,
-                        &mut preserve_times,
-                        true,
-                    ),
-                    "no-preserve" => cp_apply_preserve_list(
-                        value.as_deref(),
-                        &mut preserve_mode,
-                        &mut preserve_times,
-                        false,
-                    ),
-                    "update" => update_only = true,
-                    "remove-destination" => remove_dest = true,
-                    "force" | "link" | "symbolic-link" | "parents" | "backup"
-                    | "no-dereference" | "suffix" | "context" => {}
-                    "target-directory" | "target-dir" => {
-                        // The -t/--target-directory value is argv too: take
-                        // it as-is (issue #555).
-                        target_dir = value.or_else(|| words.next().map(|next| next.clone()));
-                    }
-                    "help" => {
-                        let _ = writeln!(stderr, "{}", cp_usage_text());
-                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                        self.exit_code = 0;
-                        return Ok(true);
-                    }
-                    other => {
-                        let _ = writeln!(stderr, "cp: unknown option '--{}'", other);
+                let entry = match resolve_long_option(typed, CP_LONG_OPTIONS) {
+                    LongResolution::Matched(entry) => entry,
+                    // No cp table entry is no_abbrev.
+                    LongResolution::Abbreviated(entry) => entry,
+                    LongResolution::Unknown => {
+                        diag_unrecognized_option(&mut stderr, "cp", expanded);
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
                     }
+                    LongResolution::Ambiguous(candidates) => {
+                        diag_ambiguous_option(&mut stderr, "cp", expanded, &candidates);
+                        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                };
+                // rubash#1946: a no-argument option given `=value`
+                // is a getopt error, reported under the canonical
+                // name even when an abbreviation was typed.
+                if entry.arg == LongArg::NoArg && attached.is_some() {
+                    diag_option_no_argument_allowed(&mut stderr, "cp", entry.name);
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(true);
+                }
+                match entry.name {
+                    "recursive" => recursive = true,
+                    "archive" => {
+                        // -a is -dR --preserve=all (the -d leg
+                        // declines; the preserve leg is all five).
+                        recursive = true;
+                        preserve.set_all(true);
+                    }
+                    "no-clobber" => no_clobber = true,
+                    "interactive" => interactive = true,
+                    "verbose" => verbose = true,
+                    // The emulation always follows links, so these
+                    // two are honest no-ops.
+                    "dereference" | "logical" => {}
+                    "preserve" | "no-preserve" => {
+                        // --preserve's list is optional and never
+                        // consumes the next word; --no-preserve's
+                        // list is required (attached or next word).
+                        let list = if entry.arg == LongArg::Required {
+                            match attached.or_else(|| words.next().map(|next| next.as_str())) {
+                                Some(value) => Some(value),
+                                None => {
+                                    diag_option_requires_argument(&mut stderr, "cp", entry.name);
+                                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                    self.exit_code = 1;
+                                    return Ok(true);
+                                }
+                            }
+                        } else {
+                            attached
+                        };
+                        // rubash#1941: the list is validated through
+                        // argmatch — an unknown or ambiguous element
+                        // is the measured diagnostic, never a silent
+                        // drop.
+                        if let Err(bad) =
+                            cp_apply_preserve_list(list, &mut preserve, entry.name == "preserve")
+                        {
+                            diag_invalid_value(
+                                &mut stderr,
+                                "cp",
+                                entry.name,
+                                &bad.text,
+                                bad.ambiguous,
+                                CP_PRESERVE_VALID_LINES,
+                            );
+                            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
+                    }
+                    "update" => match attached {
+                        None => update_only = true,
+                        Some(text) => match argmatch(text, CP_UPDATE_VALUES) {
+                            ArgMatch::Matched("older", _) => update_only = true,
+                            // all/none are decline-disposition
+                            // (cp_declines routed them); defensive.
+                            ArgMatch::Matched(_, _) => return Ok(false),
+                            ArgMatch::Invalid => {
+                                diag_invalid_value(
+                                    &mut stderr,
+                                    "cp",
+                                    "update",
+                                    text,
+                                    false,
+                                    CP_UPDATE_VALID_LINES,
+                                );
+                                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                self.exit_code = 1;
+                                return Ok(true);
+                            }
+                            ArgMatch::Ambiguous => {
+                                diag_invalid_value(
+                                    &mut stderr,
+                                    "cp",
+                                    "update",
+                                    text,
+                                    true,
+                                    CP_UPDATE_VALID_LINES,
+                                );
+                                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                self.exit_code = 1;
+                                return Ok(true);
+                            }
+                        },
+                    },
+                    "remove-destination" => remove_dest = true,
+                    "target-directory" => {
+                        // The -t/--target-directory value is argv too: take
+                        // it as-is (issue #555).
+                        match attached.or_else(|| words.next().map(|next| next.as_str())) {
+                            Some(value) => target_dir = Some(value.to_string()),
+                            None => {
+                                diag_option_requires_argument(&mut stderr, "cp", entry.name);
+                                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                self.exit_code = 1;
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    // Every remaining table entry is
+                    // decline-disposition (cp_long_option_declines):
+                    // cp_declines already routed the invocation, and
+                    // this fallback keeps the handler from answering
+                    // a shape it does not implement.
+                    _ => return Ok(false),
                 }
                 continue;
             }
-            // Short option cluster such as -upv; -t and -S take the next
-            // word as their value.
+            // Short option cluster such as -upv; -t and -S take a
+            // value: the rest of the cluster when attached, else the
+            // next word.
             let chars: Vec<char> = expanded[1..].chars().collect();
             let mut index = 0;
             while index < chars.len() {
@@ -979,29 +1273,49 @@ impl Executor {
                     'r' | 'R' => recursive = true,
                     'a' => {
                         recursive = true;
-                        preserve_mode = true;
-                        preserve_times = true;
+                        preserve.set_all(true);
                     }
                     'n' => no_clobber = true,
                     'i' => interactive = true,
                     'v' => verbose = true,
                     'p' => {
-                        preserve_mode = true;
-                        preserve_times = true;
+                        preserve.mode = true;
+                        preserve.times = true;
                     }
                     'u' => update_only = true,
-                    'f' | 'l' | 's' | 'd' | 'P' | 'Z' => {}
+                    // The emulation always follows links (-L is its
+                    // native behavior, an honest no-op).
+                    'L' => {}
+                    // Decline-disposition letters (cp_declines
+                    // routed the invocation); defensive fallback.
+                    'f' | 'l' | 's' | 'd' | 'P' | 'Z' | 'T' => return Ok(false),
                     't' => {
                         // The -t value is argv too: take it as-is (issue #555).
-                        target_dir = words.next().map(|next| next.clone());
+                        if index + 1 < chars.len() {
+                            target_dir = Some(chars[index + 1..].iter().collect());
+                        } else {
+                            match words.next() {
+                                Some(next) => target_dir = Some(next.clone()),
+                                None => {
+                                    diag_short_option_requires_argument(&mut stderr, "cp", 't');
+                                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                                    self.exit_code = 1;
+                                    return Ok(true);
+                                }
+                            }
+                        }
                         break;
                     }
                     'S' => {
-                        words.next();
+                        // Decline-disposition; skip its value
+                        // defensively (rest of cluster or next word).
+                        if index + 1 == chars.len() {
+                            words.next();
+                        }
                         break;
                     }
                     other => {
-                        let _ = writeln!(stderr, "cp: invalid option -- '{}'", other);
+                        diag_invalid_short_option(&mut stderr, "cp", other);
                         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                         self.exit_code = 1;
                         return Ok(true);
@@ -1089,6 +1403,10 @@ impl Executor {
             return Ok(true);
         }
 
+        // rubash#1941: --preserve=links bookkeeping for this whole
+        // invocation — the first destination each source inode was
+        // copied to, so a repeat lands as a hard link to it.
+        let mut link_map: CpLinkMap = std::collections::HashMap::new();
         let mut status = 0;
         for source_word in &effective[..effective.len() - 1] {
             // /dev/null as a source reads as an empty stream, so the copy
@@ -1313,21 +1631,24 @@ impl Executor {
                 }
 
                 let result = if source.is_dir() {
-                    cp_copy_tree(&source, &target, 0, preserve_mode, preserve_times)
+                    cp_copy_tree(&source, &target, 0, preserve, &mut link_map)
                 } else {
-                    fs::copy(&source, &target).map(|_| ())
+                    cp_copy_file(&source, &target, preserve, &mut link_map)
                 };
                 match result {
                     Ok(_) => {
-                        if preserve_mode || preserve_times {
+                        if preserve.mode || preserve.times {
                             // Tree copies apply preservation per node
                             // inside cp_copy_tree; a plain file copy is
                             // stamped here (niubash#533).
                             if !source.is_dir() {
-                                cp_apply_preserved(&source, &target, preserve_mode, preserve_times);
+                                cp_apply_preserved(&source, &target, preserve.mode, preserve.times);
                             }
                         } else if !source.is_dir() {
                             cp_set_modified_now(&target);
+                        }
+                        if !source.is_dir() {
+                            cp_apply_preserved_attributes(&source, &target, preserve);
                         }
                         if verbose {
                             let _ = writeln!(
@@ -1405,23 +1726,62 @@ impl Executor {
                 continue;
             }
             if let Some(long) = expanded.strip_prefix("--") {
-                let (name, value) = match long.split_once('=') {
+                let (typed, attached) = match long.split_once('=') {
                     Some((name, value)) => (name, Some(value)),
                     None => (long, None),
                 };
-                match name {
+                let entry = match resolve_long_option(typed, RM_LONG_OPTIONS) {
+                    LongResolution::Matched(entry) => entry,
+                    LongResolution::Abbreviated(entry) => {
+                        // `rm: you may not abbreviate the
+                        // --no-preserve-root option` — bare, no Try
+                        // line (coreutils 9.4, measured).
+                        writeln!(
+                            stderr,
+                            "rm: you may not abbreviate the --{} option",
+                            entry.name
+                        )?;
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                    LongResolution::Unknown => {
+                        diag_unrecognized_option(&mut stderr, "rm", expanded);
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                    LongResolution::Ambiguous(candidates) => {
+                        diag_ambiguous_option(&mut stderr, "rm", expanded, &candidates);
+                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                        self.exit_code = 1;
+                        return Ok(true);
+                    }
+                };
+                // rubash#1946: a no-argument option given `=value`
+                // (--preserve-root is Optional-arg, exempt here; its
+                // value carries its own diagnostic below).
+                if entry.arg == LongArg::NoArg && attached.is_some() {
+                    diag_option_no_argument_allowed(&mut stderr, "rm", entry.name);
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    self.exit_code = 1;
+                    return Ok(true);
+                }
+                match entry.name {
                     // The real binary owns these two texts.
                     "help" | "version" => return Ok(false),
                     "force" => force = true,
                     "recursive" => recursive = true,
                     "dir" => remove_empty_dir = true,
                     "verbose" => verbose = true,
-                    "interactive" | "one-file-system" => {}
+                    // Decline-disposition (rm_declines routed the
+                    // invocation); defensive fallback.
+                    "interactive" | "one-file-system" => return Ok(false),
                     // getopt_long declares --preserve-root with an
                     // optional argument whose only accepted value is
                     // `all`; any other attached value is its own
                     // diagnostic with no Try line (coreutils 9.4).
-                    "preserve-root" => match value {
+                    "preserve-root" => match attached {
                         None | Some("all") => preserve_root = true,
                         Some(other_value) => {
                             writeln!(
@@ -1433,28 +1793,8 @@ impl Executor {
                             return Ok(true);
                         }
                     },
-                    "no-preserve-root" => match value {
-                        None => preserve_root = false,
-                        Some(_) => {
-                            writeln!(
-                                stderr,
-                                "rm: option '--no-preserve-root' doesn't allow an argument"
-                            )?;
-                            writeln!(stderr, "Try 'rm --help' for more information.")?;
-                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                            self.exit_code = 1;
-                            return Ok(true);
-                        }
-                    },
-                    _ => {
-                        // glibc getopt_long reports the whole word,
-                        // an attached `=value` included.
-                        writeln!(stderr, "rm: unrecognized option '--{long}'")?;
-                        writeln!(stderr, "Try 'rm --help' for more information.")?;
-                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                        self.exit_code = 1;
-                        return Ok(true);
-                    }
+                    "no-preserve-root" => preserve_root = false,
+                    _ => unreachable!("the resolver only returns table names"),
                 }
                 continue;
             }
@@ -1752,8 +2092,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-                file.write_all(&output)?;
+                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
             }
@@ -1784,7 +2124,17 @@ impl Executor {
             // drains the source, later ones see EOF (GNU cat.c reads
             // stdin once — shared file offset).
             let mut stdin_remaining: Option<Vec<u8>> = None;
+            // rubash#1952: a streamed procsub operand (see the dev-fd
+            // arm below) writes through ONE output sink kept alive
+            // until the finish emit — the finish must append the
+            // accumulated remainder to the same sink instead of
+            // re-creating (truncating) the target via write_cat_output.
+            let operand_count = operands.len();
+            let mut operand_index = 0usize;
+            let mut procsub_sink: Option<File> = None;
+            let mut procsub_streamed = false;
             for word in operands {
+                operand_index += 1;
                 // cmd.words are the already-expanded argv: the simple-command
                 // executor ran each word through expand_command_words once
                 // (execute_cmd.c execute_disk_command -> expand_words), which
@@ -1822,6 +2172,16 @@ impl Executor {
                             stdin_remaining = Some(Vec::new());
                         } else {
                             stdin_remaining = Some(self.cat_stdin_operand_bytes(cmd));
+                            // rubash#2101: the operand drain recorded
+                            // a hard read error — a directory bound to
+                            // fd 0 reads EISDIR, and GNU's cat reports
+                            // it for the `-` operand, sets status 1,
+                            // and continues with the next operand
+                            // (cat.c).
+                            if let Some(message) = self.fd_table.read_error.take() {
+                                writeln!(&mut diagnostics, "cat: -: {message}")?;
+                                status = 1;
+                            }
                         }
                     }
                     if let Some(bytes) = stdin_remaining.take() {
@@ -1834,6 +2194,44 @@ impl Executor {
                 // the fd endpoint's remaining bytes (subst.c shared
                 // offset).
                 if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&target) {
+                    // rubash#1952: an identity cat over a live File
+                    // endpoint (a process substitution's pipe, a FIFO)
+                    // streams chunk-wise as bytes arrive — GNU cat.c's
+                    // byte-copy loop over the dup'd descriptor. The
+                    // buffered serve below drains the endpoint whole,
+                    // which starves on a non-terminating producer.
+                    // Formatting options keep the buffered serve (their
+                    // state spans the whole stream — see
+                    // stream_inherited_cat). The stream is taken only
+                    // for the LAST operand with no diagnostics pending:
+                    // earlier output flushes into the sink in order,
+                    // and nothing buffered can follow the stream, so
+                    // the finish emit stays a pure append.
+                    if options.identity()
+                        && fd >= 3
+                        && operand_index == operand_count
+                        && diagnostics.is_empty()
+                    {
+                        if let Some(file) = self.dev_fd_operand_live_file(cmd, fd) {
+                            if procsub_sink.is_none() && !procsub_streamed {
+                                procsub_sink = self.open_cat_output_sink(cmd)?;
+                            }
+                            if !output.is_empty() {
+                                match procsub_sink.as_mut() {
+                                    Some(sink_file) => {
+                                        crate::fd::write_file_all(sink_file, &filter(&output))?;
+                                    }
+                                    None => {
+                                        self.write_cat_output(cmd, &filter(&output))?;
+                                    }
+                                }
+                                output.clear();
+                            }
+                            self.stream_cat_file_operand(cmd, &file, &mut procsub_sink)?;
+                            procsub_streamed = true;
+                            continue;
+                        }
+                    }
                     match self.dev_fd_operand_bytes_for_command(cmd, fd) {
                         Some(read) if read.stdout_file && !read.bytes.is_empty() => {
                             // GNU cat.c: input resolves to the file fd 1
@@ -1863,8 +2261,34 @@ impl Executor {
                 }
                 // Q11 /proc P1 (docs/proc-vfs-plan.md hook B2): synthetic
                 // files are served before the filesystem.
-                if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+                if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
                     output.extend(bytes);
+                    continue;
+                }
+                // SyntheticLink (rubash#1900): exe/cwd operands read
+                // through the resolved target (session cwd for
+                // self/cwd, per the G-02 anchoring); errors keep the
+                // bare GNU cat diagnostic shape used below.
+                if let Some(link) = crate::special_paths::synthetic_link_target(
+                    &target,
+                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                ) {
+                    match fs::read(&link.native) {
+                        Ok(bytes) => output.extend(bytes),
+                        Err(error) => {
+                            // rubash#2027: the operand renders through GNU
+                            // cat's quotef and the reason keeps the real
+                            // errno mapping (including the Windows
+                            // reserved-name to ENOENT inference).
+                            writeln!(
+                                &mut diagnostics,
+                                "cat: {}: {}",
+                                super::command_substitution::gnu_cat_quoted_operand(&target),
+                                crate::posix_errors::path_strerror(&target, &error)
+                            )?;
+                            status = 1;
+                        }
+                    }
                     continue;
                 }
                 // niubash#177: resolve through the operand form so a
@@ -1881,6 +2305,40 @@ impl Executor {
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
                 ));
+                // rubash#1903: a WinuxCmd fifo marker operand is the
+                // read side of the named-pipe rendezvous, not a file
+                // holding the marker bytes — WinuxCmd's own cat
+                // bridges its operand the same way (file_io), and the
+                // issue's repro (`echo hi > f & cat f`) reads through
+                // whichever cat the ecosystem resolves, so the
+                // emulated reader must meet the writer here. Buffered
+                // like this handler's other operand serves: the read
+                // runs to the writer's EOF, which is the fifo's own
+                // close semantics.
+                #[cfg(windows)]
+                if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(&win) {
+                    let read = crate::winuxcmd_fifo::open_winuxcmd_fifo_read(&win, &|| {
+                        crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
+                    })
+                    .and_then(|mut file| {
+                        use std::io::Read;
+                        let mut bytes = Vec::new();
+                        file.read_to_end(&mut bytes).map(|_| bytes)
+                    });
+                    match read {
+                        Ok(bytes) => output.extend(bytes),
+                        Err(error) => {
+                            writeln!(
+                                &mut diagnostics,
+                                "cat: {}: {}",
+                                target,
+                                crate::posix_errors::message(&error)
+                            )?;
+                            status = 1;
+                        }
+                    }
+                    continue;
+                }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
                 let read = match self.procsub_stream_take(&win) {
@@ -1895,12 +2353,21 @@ impl Executor {
                         // strerror and no shell diagnostic prefix. The
                         // discarded error flattened EACCES/EISDIR to a
                         // blanket ENOENT text behind the script prefix
-                        // (rubash#1309).
+                        // (rubash#1309). rubash#2027: the operand itself
+                        // renders through GNU cat's quotef (coreutils
+                        // `error (0, errno, "%s", quotef (name))`), so
+                        // `cat '<(echo hi)'` reports
+                        // `cat: '<(echo hi)': No such file or directory`,
+                        // and the reason keeps the real-errno mapping —
+                        // on Windows a name bearing the reserved `<`/`>`
+                        // bytes can never exist, so the invalid-name
+                        // rejection reads ENOENT exactly like the Unix
+                        // lookup failure it stands in for.
                         writeln!(
                             &mut diagnostics,
                             "cat: {}: {}",
-                            target,
-                            crate::posix_errors::message(&error)
+                            super::command_substitution::gnu_cat_quoted_operand(&target),
+                            crate::posix_errors::path_strerror(&target, &error)
                         )?;
                         status = 1;
                     }
@@ -1908,7 +2375,18 @@ impl Executor {
             }
             let output = filter(&output);
             if diagnostics.is_empty() {
-                self.write_cat_output(cmd, &output)?;
+                if procsub_streamed {
+                    // rubash#1952: the streamed operand already wrote
+                    // through the sink; append the (normally empty)
+                    // remainder there — write_cat_output would
+                    // re-create and truncate the target.
+                    match procsub_sink.as_mut() {
+                        Some(sink_file) => crate::fd::write_file_all(sink_file, &output)?,
+                        None => self.write_cat_output(cmd, &output)?,
+                    }
+                } else {
+                    self.write_cat_output(cmd, &output)?;
+                }
             } else {
                 // rubash#1371: ONE emit for both streams so the ordered
                 // redirect walk opens each target exactly once — with
@@ -1960,6 +2438,18 @@ impl Executor {
                     None | Some(FdReadEndpoint::InheritedProcessStdin)
                 ) {
                     if let Some(bytes) = self.fd_table.read_all_bytes(0) {
+                        // rubash#2101: the drain recorded a hard read
+                        // error (a directory bound to fd 0 reads
+                        // EISDIR) — GNU's cat reports it for the
+                        // implicit `-` and fails (cat.c), it does not
+                        // exit 0 on the empty read.
+                        if let Some(message) = self.fd_table.read_error.take() {
+                            let mut stderr = Vec::new();
+                            writeln!(&mut stderr, "cat: -: {message}")?;
+                            self.write_buffered_builtin_output(cmd, &filter(&bytes), &stderr)?;
+                            self.exit_code = 1;
+                            return Ok(true);
+                        }
                         self.write_cat_output(cmd, &filter(&bytes))?;
                         self.exit_code = 0;
                         return Ok(true);
@@ -2069,7 +2559,7 @@ impl Executor {
     /// GNU cat.c's byte-copy loop. Identity options only (formatting needs
     /// whole-stream state).
     fn stream_cat_stdin_operand(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        use std::io::{Read, Write};
+        use std::io::Read;
         // The output target is opened ONCE for the whole copy: `write_cat_output`
         // recreates (truncates) it per call, so a per-8 KiB-chunk caller kept
         // only the last chunk (niubash#198).
@@ -2082,8 +2572,32 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
+            }
+        }
+        Ok(())
+    }
+    /// rubash#1952: stream a live fd-table File endpoint (a process
+    /// substitution's pipe read end) to the cat output as bytes
+    /// arrive, the way GNU cat.c copies the dup'd descriptor — the
+    /// buffered operand serve drains the endpoint whole and starves
+    /// on a non-terminating producer. The output target is opened
+    /// ONCE for the whole copy (see stream_cat_stdin_operand).
+    fn stream_cat_file_operand(
+        &mut self,
+        cmd: &CommandNode,
+        file: &FileFd,
+        sink: &mut Option<File>,
+    ) -> Result<(), ExecuteError> {
+        loop {
+            let chunk = crate::fd::read_some(file.handle, 8192).map_err(ExecuteError::IoError)?;
+            if chunk.is_empty() {
+                break;
+            }
+            match sink.as_mut() {
+                Some(sink_file) => crate::fd::write_file_all(sink_file, &chunk)?,
+                None => self.write_cat_output(cmd, &chunk)?,
             }
         }
         Ok(())
@@ -2116,7 +2630,7 @@ impl Executor {
                 break;
             }
             match sink.as_mut() {
-                Some(file) => file.write_all(&buffer[..count])?,
+                Some(file) => crate::fd::write_file_all(file, &buffer[..count])?,
                 None => self.write_cat_output(cmd, &buffer[..count])?,
             }
         }
@@ -2125,6 +2639,17 @@ impl Executor {
     }
 
     fn external_sed(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
+        // rubash#1903 residual census (S6, 2026-10-29): this arm can
+        // never read a file operand — sed_script_args declines any
+        // invocation carrying one — so there is no emulated-reader
+        // face that could mistake a WinuxCmd fifo marker for a plain
+        // file; operand shapes fall through to the spawned sed,
+        // whose own side bridges the rendezvous. The pipeline sed
+        // arm shares the same admission, and the only grep arm
+        // (pipeline_exec::inline_grep_args) declines file operands
+        // identically. cat, the one emulated reader that does take
+        // operands, is bridged above (path_is_winuxcmd_fifo).
+        //
         // cmd.words are the already-expanded argv (the simple-command
         // executor expanded each word once, execute_cmd.c
         // execute_disk_command -> expand_words). Re-running expand_word here
@@ -2157,14 +2682,21 @@ impl Executor {
         // platform has a real fifo object, so the emulation must not
         // answer at all — decline and let the resolved PATH binary
         // create the fifo (dispatch reaches this handler only when the
-        // name resolved, rubash#1545). The unconditional
-        // `Operation not supported` refusal below is the Windows-only
-        // answer: Windows has no POSIX fifo object, and creating a
-        // regular file instead would silently change semantics (a
-        // fifo's blocking open/read behavior would become an instant
-        // regular-file EOF). GNU coreutils mkfifo reports per-operand
-        // failures and exits 1 — match that honestly:
-        // `mkfifo: cannot create fifo 'NAME': Operation not supported`.
+        // name resolved, rubash#1545).
+        //
+        // rubash#1903 supersedes the Windows half of the #1725
+        // refusal. That refusal's rationale was that creating a
+        // regular file instead of a fifo "would silently change
+        // semantics (a fifo's blocking open/read behavior would
+        // become an instant regular-file EOF)". The premise is gone:
+        // the shell now recognizes the WinuxCmd fifo marker and
+        // bridges redirect opens of it to the named-pipe rendezvous
+        // (crate::winuxcmd_fifo), so creating the marker in WinuxCmd's
+        // on-disk format completes the semantics instead of faking
+        // them — `mkfifo f; echo hi > f & cat f` works end to end,
+        // and WinuxCmd tools bridge the same marker from their side.
+        // GNU coreutils mkfifo reports per-operand failures and
+        // exits 1 — the creation loop below keeps that shape.
         #[cfg(not(windows))]
         {
             let _ = cmd;
@@ -2172,37 +2704,150 @@ impl Executor {
         }
         #[cfg(windows)]
         {
-            // -m MODE consumes a value; other options are accepted and
-            // ignored. argv as-is — no second expand_word pass (issue
+            // -m/--mode consumes a value; -Z/--context is accepted
+            // and ignored (no SELinux context exists on Windows).
+            // argv as-is — no second expand_word pass (issue
             // #555, see external_mkdir). Diagnostics are the emulated
             // command's own stderr and go through the command's
             // redirections (rubash#1372/#1725), never straight to the
             // terminal via the shell's default stderr.
-            let mut mode_value_pending = false;
+            //
+            // rubash#1945: the usage-error shapes are GNU's, not the
+            // per-operand refusal — a missing -m value and a missing
+            // operand are getopt/operand diagnostics with the Try
+            // line, and an invocation with no operand at all must
+            // not exit 0 in silence.
+            let mut mode_pending: Option<bool> = None; // Some(true): --mode form
+            let mut mode: Option<String> = None;
             let mut no_more_flags = false;
             let mut failed = false;
+            let mut operands: Vec<&str> = Vec::new();
             let mut stderr: Vec<u8> = Vec::new();
-            for word in &cmd.words[1..] {
+            'words: for word in &cmd.words[1..] {
                 let expanded = word.as_str();
-                if mode_value_pending {
-                    mode_value_pending = false;
+                if mode_pending.is_some() {
+                    mode = Some(expanded.to_string());
+                    mode_pending = None;
                     continue;
                 }
                 if !no_more_flags && expanded == "--" {
                     no_more_flags = true;
                     continue;
                 }
-                if !no_more_flags && expanded.starts_with('-') && expanded != "-" {
-                    if expanded == "-m" {
-                        mode_value_pending = true;
+                if !no_more_flags && expanded.starts_with("--") {
+                    let (typed, attached) = match expanded[2..].split_once('=') {
+                        Some((name, value)) => (name, Some(value)),
+                        None => (&expanded[2..], None),
+                    };
+                    match resolve_long_option(typed, MKFIFO_LONG_OPTIONS) {
+                        LongResolution::Matched(entry) => {
+                            if entry.arg == LongArg::NoArg && attached.is_some() {
+                                diag_option_no_argument_allowed(&mut stderr, "mkfifo", entry.name);
+                                failed = true;
+                                break 'words;
+                            }
+                            if entry.name == "mode" {
+                                match attached {
+                                    Some(value) => mode = Some(value.to_string()),
+                                    None => mode_pending = Some(true),
+                                }
+                            }
+                        }
+                        LongResolution::Unknown => {
+                            diag_unrecognized_option(&mut stderr, "mkfifo", expanded);
+                            failed = true;
+                            break 'words;
+                        }
+                        LongResolution::Ambiguous(candidates) => {
+                            diag_ambiguous_option(&mut stderr, "mkfifo", expanded, &candidates);
+                            failed = true;
+                            break 'words;
+                        }
+                        // No mkfifo table entry is no_abbrev.
+                        LongResolution::Abbreviated(_) => {}
                     }
                     continue;
                 }
-                writeln!(
-                    stderr,
-                    "mkfifo: cannot create fifo '{expanded}': Operation not supported"
-                )?;
-                failed = true;
+                if !no_more_flags && expanded.starts_with('-') && expanded != "-" {
+                    let cluster: Vec<char> = expanded[1..].chars().collect();
+                    let mut position = 0;
+                    while position < cluster.len() {
+                        match cluster[position] {
+                            // -m takes the rest of the cluster as
+                            // its value, or the next word when it
+                            // ends the cluster.
+                            'm' => {
+                                if position + 1 == cluster.len() {
+                                    mode_pending = Some(false);
+                                } else {
+                                    mode = Some(cluster[position + 1..].iter().collect());
+                                }
+                                break;
+                            }
+                            'Z' => {}
+                            bad => {
+                                diag_invalid_short_option(&mut stderr, "mkfifo", bad);
+                                failed = true;
+                                break 'words;
+                            }
+                        }
+                        position += 1;
+                    }
+                    continue;
+                }
+                operands.push(expanded);
+            }
+            if !failed {
+                if let Some(long_form) = mode_pending {
+                    if long_form {
+                        diag_option_requires_argument(&mut stderr, "mkfifo", "mode");
+                    } else {
+                        diag_short_option_requires_argument(&mut stderr, "mkfifo", 'm');
+                    }
+                    failed = true;
+                } else if operands.is_empty() {
+                    let _ = writeln!(stderr, "mkfifo: missing operand");
+                    diag_try_line(&mut stderr, "mkfifo");
+                    failed = true;
+                } else if let Some(mode) = &mode {
+                    if mode.is_empty() || !mode.chars().all(|ch| ('0'..='7').contains(&ch)) {
+                        let _ = writeln!(stderr, "mkfifo: invalid mode '{mode}'");
+                        failed = true;
+                    }
+                }
+            }
+            if !failed {
+                // WinuxCmd's readonly rule (mkfifo.cpp): an octal
+                // mode without any write bit — no digit from 02367
+                // anywhere — maps to the DOS readonly attribute.
+                let readonly = mode.as_deref().is_some_and(|mode| {
+                    !mode.is_empty()
+                        && mode.chars().all(|ch| ('0'..='7').contains(&ch))
+                        && !mode.contains(['0', '2', '3', '6', '7'])
+                });
+                for expanded in &operands {
+                    let path = self
+                        .session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
+                    // GNU coreutils reports per-operand failures and
+                    // continues with the rest, exiting 1.
+                    if std::fs::metadata(&path).is_ok() {
+                        let _ = writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': File exists"
+                        );
+                        failed = true;
+                        continue;
+                    }
+                    if let Err(error) = crate::winuxcmd_fifo::create_winuxcmd_fifo(&path, readonly)
+                    {
+                        let _ = writeln!(
+                            stderr,
+                            "mkfifo: cannot create fifo '{expanded}': {}",
+                            crate::posix_errors::message(&error)
+                        );
+                        failed = true;
+                    }
+                }
             }
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = if failed { 1 } else { 0 };
@@ -2210,6 +2855,238 @@ impl Executor {
         }
     }
 }
+
+/// gnulib getopt_long resolution shared by the emulated coreutils
+/// applets in this file (cp/touch/rm/mkfifo): a typed long option
+/// resolves by exact match or by unambiguous prefix against the
+/// command's table, and option VALUES resolve the same way through
+/// argmatch. The diagnostic forms are the coreutils 9.4 shapes
+/// measured against the local oracle (rubash#1941/#1942/#1946/#1947):
+/// an unknown option is reported with the whole typed word (an
+/// attached `=value` included), an ambiguous prefix lists every
+/// candidate in table order (again with the whole typed word), a
+/// no-argument option given `=value` and a value-list failure are
+/// reported under the canonical name, and every form carries the
+/// `Try '<cmd> --help'` line except rm's preserve-root pair, which
+/// coreutils prints bare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LongArg {
+    /// No argument; an attached `=value` is an error.
+    NoArg,
+    /// An argument is required: attached, or the next word.
+    Required,
+    /// An argument may be attached with `=` but the next word is
+    /// never consumed.
+    Optional,
+}
+
+#[derive(Clone, Copy)]
+struct LongOption {
+    name: &'static str,
+    arg: LongArg,
+    /// rm's --no-preserve-root: coreutils accepts the option only
+    /// spelled in full (`rm: you may not abbreviate the
+    /// --no-preserve-root option`, no Try line).
+    no_abbrev: bool,
+}
+
+const fn long_option(name: &'static str, arg: LongArg) -> LongOption {
+    LongOption {
+        name,
+        arg,
+        no_abbrev: false,
+    }
+}
+
+const fn long_option_no_abbrev(name: &'static str, arg: LongArg) -> LongOption {
+    LongOption {
+        name,
+        arg,
+        no_abbrev: true,
+    }
+}
+
+enum LongResolution<'a> {
+    Matched(&'a LongOption),
+    Unknown,
+    Ambiguous(Vec<&'a str>),
+    /// The typed text abbreviates a no_abbrev option.
+    Abbreviated(&'a LongOption),
+}
+
+/// Resolve the name part of one `--name[=value]` word against TABLE
+/// the way gnulib getopt_long does: an exact match wins outright;
+/// otherwise the typed text must be a prefix of exactly one entry.
+fn resolve_long_option<'a>(typed: &str, table: &'a [LongOption]) -> LongResolution<'a> {
+    if typed.is_empty() {
+        return LongResolution::Unknown;
+    }
+    if let Some(entry) = table.iter().find(|entry| entry.name == typed) {
+        return LongResolution::Matched(entry);
+    }
+    let matches: Vec<&LongOption> = table
+        .iter()
+        .filter(|entry| entry.name.starts_with(typed))
+        .collect();
+    match matches.as_slice() {
+        [] => LongResolution::Unknown,
+        [only] => {
+            if only.no_abbrev {
+                LongResolution::Abbreviated(only)
+            } else {
+                LongResolution::Matched(only)
+            }
+        }
+        many => LongResolution::Ambiguous(many.iter().map(|entry| entry.name).collect()),
+    }
+}
+
+/// coreutils argmatch for an option VALUE (cp --preserve lists,
+/// touch --time, cp --update): the value resolves by exact match or
+/// unambiguous prefix; entries sharing a group collapse into one
+/// value (touch's --time synonyms atime/access/use are one value, so
+/// `ac` is unambiguous). The empty value matches every entry and is
+/// therefore ambiguous whenever the list names two values — the
+/// "ambiguous argument ''" wording, never "invalid".
+enum ArgMatch<'a> {
+    Matched(&'a str, u8),
+    Invalid,
+    Ambiguous,
+}
+
+fn argmatch<'a>(value: &str, valid: &[(&'a str, u8)]) -> ArgMatch<'a> {
+    if let Some((name, group)) = valid.iter().find(|(name, _)| *name == value) {
+        return ArgMatch::Matched(name, *group);
+    }
+    let mut matched: Option<(&str, u8)> = None;
+    for (name, group) in valid {
+        if !name.starts_with(value) {
+            continue;
+        }
+        match matched {
+            None => matched = Some((name, *group)),
+            Some((_, seen_group)) if seen_group == *group => {}
+            Some(_) => return ArgMatch::Ambiguous,
+        }
+    }
+    match matched {
+        Some((name, group)) => ArgMatch::Matched(name, group),
+        None => ArgMatch::Invalid,
+    }
+}
+
+fn diag_try_line(stderr: &mut Vec<u8>, prog: &str) {
+    let _ = writeln!(stderr, "Try '{prog} --help' for more information.");
+}
+
+/// `<prog>: unrecognized option '--<whole typed word>'` + Try line.
+/// The whole word is reported, an attached `=value` included
+/// (glibc getopt_long; measured for cp/rm/touch alike).
+fn diag_unrecognized_option(stderr: &mut Vec<u8>, prog: &str, whole_word: &str) {
+    let _ = writeln!(stderr, "{prog}: unrecognized option '{whole_word}'");
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: option '--<whole typed word>' is ambiguous; possibilities:
+/// '--a' '--b'` + Try line, candidates in table order.
+fn diag_ambiguous_option(stderr: &mut Vec<u8>, prog: &str, whole_word: &str, candidates: &[&str]) {
+    let listed: Vec<String> = candidates
+        .iter()
+        .map(|name| format!("'--{name}'"))
+        .collect();
+    let _ = writeln!(
+        stderr,
+        "{prog}: option '{whole_word}' is ambiguous; possibilities: {}",
+        listed.join(" ")
+    );
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: option '--<canonical>' doesn't allow an argument` + Try
+/// line (rubash#1946: the canonical name is reported even when the
+/// user typed an abbreviation).
+fn diag_option_no_argument_allowed(stderr: &mut Vec<u8>, prog: &str, canonical: &str) {
+    let _ = writeln!(
+        stderr,
+        "{prog}: option '--{canonical}' doesn't allow an argument"
+    );
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: option '--<canonical>' requires an argument` + Try line.
+fn diag_option_requires_argument(stderr: &mut Vec<u8>, prog: &str, canonical: &str) {
+    let _ = writeln!(
+        stderr,
+        "{prog}: option '--{canonical}' requires an argument"
+    );
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: option requires an argument -- '<ch>'` + Try line (the
+/// short-option missing-value form).
+fn diag_short_option_requires_argument(stderr: &mut Vec<u8>, prog: &str, flag: char) {
+    let _ = writeln!(stderr, "{prog}: option requires an argument -- '{flag}'");
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: invalid option -- '<ch>'` + Try line.
+fn diag_invalid_short_option(stderr: &mut Vec<u8>, prog: &str, flag: char) {
+    let _ = writeln!(stderr, "{prog}: invalid option -- '{flag}'");
+    diag_try_line(stderr, prog);
+}
+
+/// `<prog>: invalid argument '<value>' for '--<canonical>'` (or the
+/// "ambiguous argument" wording) + the `Valid arguments are:` block
+/// (one `  - '<line>'` per line) + Try line — the argmatch failure
+/// form shared by cp --preserve/--update and touch --time.
+fn diag_invalid_value(
+    stderr: &mut Vec<u8>,
+    prog: &str,
+    canonical: &str,
+    value: &str,
+    ambiguous: bool,
+    valid_lines: &[&str],
+) {
+    if ambiguous {
+        let _ = writeln!(
+            stderr,
+            "{prog}: ambiguous argument '{value}' for '--{canonical}'"
+        );
+    } else {
+        let _ = writeln!(
+            stderr,
+            "{prog}: invalid argument '{value}' for '--{canonical}'"
+        );
+    }
+    let _ = writeln!(stderr, "Valid arguments are:");
+    for line in valid_lines {
+        let _ = writeln!(stderr, "  - '{line}'");
+    }
+    diag_try_line(stderr, prog);
+}
+
+/// mkfifo's long-option table (coreutils mkfifo.c).
+const MKFIFO_LONG_OPTIONS: &[LongOption] = &[
+    long_option("context", LongArg::Optional),
+    long_option("help", LongArg::NoArg),
+    long_option("mode", LongArg::Required),
+    long_option("version", LongArg::NoArg),
+];
+
+/// rm's long-option table (coreutils rm.c). --no-preserve-root is
+/// no_abbrev: coreutils accepts it only spelled in full.
+const RM_LONG_OPTIONS: &[LongOption] = &[
+    long_option("dir", LongArg::NoArg),
+    long_option("force", LongArg::NoArg),
+    long_option("help", LongArg::NoArg),
+    long_option("interactive", LongArg::Optional),
+    long_option("one-file-system", LongArg::NoArg),
+    long_option_no_abbrev("no-preserve-root", LongArg::NoArg),
+    long_option("preserve-root", LongArg::Optional),
+    long_option("recursive", LongArg::NoArg),
+    long_option("verbose", LongArg::NoArg),
+    long_option("version", LongArg::NoArg),
+];
 
 /// rubash#1636: whether an rm invocation carries an option shape
 /// the emulation accepts but does not implement — the interactive
@@ -2229,9 +3106,11 @@ fn rm_declines(words: &[String]) -> bool {
             continue;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            let name = long.split('=').next().unwrap_or(long);
-            if matches!(name, "interactive" | "one-file-system") {
-                return true;
+            let typed = long.split('=').next().unwrap_or(long);
+            if let LongResolution::Matched(entry) = resolve_long_option(typed, RM_LONG_OPTIONS) {
+                if matches!(entry.name, "interactive" | "one-file-system") {
+                    return true;
+                }
             }
             continue;
         }
@@ -2270,6 +3149,33 @@ fn mkdir_declines(words: &[String]) -> bool {
     false
 }
 
+/// touch's long-option table (coreutils touch.c). --file is NOT in
+/// it: coreutils 9.4 answers `unrecognized option '--file'`.
+const TOUCH_LONG_OPTIONS: &[LongOption] = &[
+    long_option("date", LongArg::Required),
+    long_option("help", LongArg::NoArg),
+    long_option("no-create", LongArg::NoArg),
+    long_option("no-dereference", LongArg::NoArg),
+    long_option("reference", LongArg::Required),
+    long_option("time", LongArg::Required),
+    long_option("version", LongArg::NoArg),
+];
+
+/// touch --time values with their argmatch groups: the three atime
+/// synonyms are one value, the two mtime synonyms another, so a
+/// prefix naming only synonyms of one value is unambiguous.
+const TOUCH_TIME_VALUES: &[(&str, u8)] = &[
+    ("atime", 0),
+    ("access", 0),
+    ("use", 0),
+    ("mtime", 1),
+    ("modify", 1),
+];
+
+/// The --time `Valid arguments are:` lines, in the shape
+/// diag_invalid_value prints them (`  - '<line>'` per line).
+const TOUCH_TIME_VALID_LINES: &[&str] = &["atime', 'access', 'use", "mtime', 'modify"];
+
 /// rubash#1636: whether a touch invocation declines — it carries
 /// -h/--no-dereference (parsed as a no-op; the stamp would land on
 /// the symlink target instead of the link), or it has no operands at
@@ -2293,18 +3199,20 @@ fn touch_declines(words: &[String]) -> bool {
             continue;
         }
         if let Some(long) = arg.strip_prefix("--") {
-            let (name, attached) = match long.split_once('=') {
+            let (typed, attached) = match long.split_once('=') {
                 Some((name, value)) => (name, Some(value)),
                 None => (long, None),
             };
-            match name {
-                "no-dereference" => return true,
-                "date" | "reference" | "time" => {
-                    if attached.is_none() {
-                        index += 1;
+            if let LongResolution::Matched(entry) = resolve_long_option(typed, TOUCH_LONG_OPTIONS) {
+                match entry.name {
+                    "no-dereference" => return true,
+                    "date" | "reference" | "time" => {
+                        if attached.is_none() {
+                            index += 1;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
             continue;
         }
@@ -2327,6 +3235,138 @@ fn touch_declines(words: &[String]) -> bool {
         }
     }
     operands == 0
+}
+
+/// cp's long-option table in coreutils cp.c declaration order —
+/// the order is observable: an ambiguous prefix lists its candidates
+/// in table order (measured: `--re` → '--recursive'
+/// '--remove-destination' '--reflink'; `--c` → '--copy-contents'
+/// '--context').
+const CP_LONG_OPTIONS: &[LongOption] = &[
+    long_option("archive", LongArg::NoArg),
+    long_option("attributes-only", LongArg::NoArg),
+    long_option("backup", LongArg::Optional),
+    long_option("copy-contents", LongArg::NoArg),
+    long_option("context", LongArg::Optional),
+    long_option("dereference", LongArg::NoArg),
+    long_option("force", LongArg::NoArg),
+    long_option("help", LongArg::NoArg),
+    long_option("interactive", LongArg::NoArg),
+    long_option("link", LongArg::NoArg),
+    long_option("logical", LongArg::NoArg),
+    long_option("no-clobber", LongArg::NoArg),
+    long_option("no-dereference", LongArg::NoArg),
+    long_option("no-preserve", LongArg::Required),
+    long_option("no-target-directory", LongArg::NoArg),
+    long_option("one-file-system", LongArg::NoArg),
+    long_option("parents", LongArg::NoArg),
+    long_option("physical", LongArg::NoArg),
+    long_option("preserve", LongArg::Optional),
+    long_option("recursive", LongArg::NoArg),
+    long_option("remove-destination", LongArg::NoArg),
+    long_option("reflink", LongArg::Optional),
+    long_option("sparse", LongArg::Required),
+    long_option("strip-trailing-slashes", LongArg::NoArg),
+    long_option("suffix", LongArg::Required),
+    long_option("symbolic-link", LongArg::NoArg),
+    long_option("target-directory", LongArg::Required),
+    long_option("update", LongArg::Optional),
+    long_option("verbose", LongArg::NoArg),
+    long_option("version", LongArg::NoArg),
+];
+
+/// The cp long options whose semantics this emulation does not
+/// implement: resolving to one declines the invocation to the real
+/// binary (the cp_declines narrowing, rubash#1636). --dereference
+/// and --logical are NOT here: the emulation always follows links,
+/// so both are honest no-ops.
+fn cp_long_option_declines(name: &str) -> bool {
+    matches!(
+        name,
+        "attributes-only"
+            | "backup"
+            | "copy-contents"
+            | "context"
+            | "force"
+            | "help"
+            | "link"
+            | "no-dereference"
+            | "no-target-directory"
+            | "one-file-system"
+            | "parents"
+            | "physical"
+            | "reflink"
+            | "sparse"
+            | "strip-trailing-slashes"
+            | "suffix"
+            | "symbolic-link"
+            | "version"
+    )
+}
+
+/// The --preserve/--no-preserve attribute names (coreutils cp.c
+/// argmatch table), in the order the `Valid arguments are:` block
+/// prints them.
+const CP_PRESERVE_VALUES: &[(&str, u8)] = &[
+    ("mode", 0),
+    ("timestamps", 1),
+    ("ownership", 2),
+    ("links", 3),
+    ("context", 4),
+    ("xattr", 5),
+    ("all", 6),
+];
+
+const CP_PRESERVE_VALID_LINES: &[&str] = &[
+    "mode",
+    "timestamps",
+    "ownership",
+    "links",
+    "context",
+    "xattr",
+    "all",
+];
+
+/// The --update values (coreutils cp.c argmatch table).
+const CP_UPDATE_VALUES: &[(&str, u8)] = &[("all", 0), ("none", 1), ("older", 2)];
+
+const CP_UPDATE_VALID_LINES: &[&str] = &["all", "none", "older"];
+
+/// The attributes a cp invocation preserves (rubash#1941): mode and
+/// timestamps are stamped by cp_apply_preserved; links reroutes a
+/// repeated source inode to a hard link (cp_link_destination); xattr
+/// and context copy through the platform attribute store on unix.
+/// Ownership parses and is skipped, matching what an unprivileged
+/// GNU cp can actually honor.
+#[derive(Clone, Copy, Default)]
+struct CpPreserve {
+    mode: bool,
+    times: bool,
+    links: bool,
+    xattr: bool,
+    context: bool,
+}
+
+impl CpPreserve {
+    fn any(&self) -> bool {
+        self.mode || self.times || self.links || self.xattr || self.context
+    }
+
+    fn set_all(&mut self, value: bool) {
+        self.mode = value;
+        self.times = value;
+        self.links = value;
+        self.xattr = value;
+        self.context = value;
+    }
+}
+
+/// One bad --preserve/--no-preserve element: the offending text and
+/// whether argmatch found it ambiguous (an empty element, or a
+/// prefix of two attributes) rather than invalid.
+struct CpBadAttribute {
+    text: String,
+    ambiguous: bool,
 }
 
 /// rubash#1636: whether a cp invocation uses an option shape the
@@ -2355,19 +3395,37 @@ fn cp_declines(words: &[String]) -> bool {
             continue;
         }
         if let Some(rest) = arg.strip_prefix("--") {
-            let (name, value) = match rest.split_once('=') {
+            let (typed, value) = match rest.split_once('=') {
                 Some((name, value)) => (name, Some(value)),
                 None => (rest, None),
             };
-            match name {
-                "link" | "symbolic-link" | "parents" | "backup" | "context" | "force" | "help"
-                | "version" | "no-dereference" | "suffix" => return true,
+            let entry = match resolve_long_option(typed, CP_LONG_OPTIONS) {
+                LongResolution::Matched(entry) => entry,
+                // Unknown and ambiguous words are the handler's to
+                // diagnose (GNU diagnoses them too); a decline is
+                // only for shapes GNU accepts but the emulation does
+                // not implement.
+                _ => continue,
+            };
+            if cp_long_option_declines(entry.name) {
+                return true;
+            }
+            match entry.name {
                 "update" => {
-                    if !matches!(value, None | Some("older")) {
-                        return true;
+                    // Only the implemented `older` semantics stay
+                    // (a bare --update is `older` on the oracle);
+                    // all/none decline, and an unresolvable value
+                    // declines so the real binary prints the argmatch
+                    // diagnostic.
+                    match value {
+                        None => {}
+                        Some(text) => match argmatch(text, CP_UPDATE_VALUES) {
+                            ArgMatch::Matched("older", _) => {}
+                            _ => return true,
+                        },
                     }
                 }
-                "target-directory" | "target-dir" => {
+                "target-directory" => {
                     if value.is_none() {
                         index += 1;
                     }
@@ -2376,31 +3434,28 @@ fn cp_declines(words: &[String]) -> bool {
             }
             continue;
         }
-        for ch in arg[1..].chars() {
-            match ch {
-                'l' | 's' | 'd' | 'P' | 'Z' | 'f' | 'S' => return true,
+        let chars: Vec<char> = arg[1..].chars().collect();
+        let mut position = 0;
+        while position < chars.len() {
+            match chars[position] {
+                'l' | 's' | 'd' | 'P' | 'Z' | 'f' | 'S' | 'T' => return true,
                 't' => {
-                    // The handler takes the next word as -t's value.
-                    index += 1;
+                    // -t takes the rest of the cluster as its value,
+                    // or the next word when it ends the cluster.
+                    if position + 1 == chars.len() {
+                        index += 1;
+                    }
                     break;
                 }
                 _ => {}
             }
+            position += 1;
         }
     }
     false
 }
 
 /// cp's help text, scoped to the forms this implementation honours.
-fn cp_usage_text() -> &'static str {
-    "Usage: cp [OPTION]... SOURCE DEST\n\n\
-     Copy SOURCE to DEST, or multiple SOURCES to DIRECTORY.\n\n\
-     Supported: -a -d -f -i -l -n -P -p -R -r -s -u -v --archive --backup\
-       --force --help --interactive --link --no-clobber --no-dereference\
-       --parents --preserve[=ATTR_LIST] --remove-destination --recursive\
-       --suffix=SUFFIX --symbolic-link --target-directory=DIR\
-       --target-dir=DIR --update\n"
-}
 
 /// Whether an rm operand's target IS the root directory, for the
 /// preserve-root failsafe (rubash#1847). A bare symlink operand
@@ -2568,6 +3623,61 @@ fn cp_source_not_newer(source: &std::path::Path, target: &std::path::Path) -> bo
     }
 }
 
+/// Per-invocation --preserve=links bookkeeping: source inode
+/// identity → the first destination it was copied to.
+type CpLinkMap = std::collections::HashMap<(u64, u64), std::path::PathBuf>;
+
+/// The identity two names of one file share: (device, inode) on
+/// unix, (volume serial, file index) on Windows. None where the
+/// platform exposes neither (links preservation then degrades to
+/// plain copies).
+#[cfg(unix)]
+fn cp_inode_key(source: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(source)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn cp_inode_key(source: &std::path::Path) -> Option<(u64, u64)> {
+    // std's MetadataExt::file_index is unstable (windows_by_handle);
+    // the executor's handle-based identity helper is the stable
+    // route and the same pair `[ a -ef b ]` compares.
+    crate::executor::path::file_identity(source).map(|(serial, index)| (u64::from(serial), index))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn cp_inode_key(_source: &std::path::Path) -> Option<(u64, u64)> {
+    None
+}
+
+/// Copy one regular file, honoring --preserve=links: a source inode
+/// already copied in this invocation links the new destination to
+/// the first copy instead of duplicating the bytes (the two
+/// destinations then share an inode, mode and times included —
+/// exactly GNU's result).
+fn cp_copy_file(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    preserve: CpPreserve,
+    link_map: &mut CpLinkMap,
+) -> io::Result<()> {
+    if preserve.links {
+        if let Some(key) = cp_inode_key(source) {
+            if let Some(first) = link_map.get(&key) {
+                return fs::hard_link(first, target);
+            }
+            let copied = fs::copy(source, target).map(|_| ());
+            if copied.is_ok() {
+                link_map.insert(key, target.to_path_buf());
+            }
+            return copied;
+        }
+    }
+    fs::copy(source, target).map(|_| ())
+}
+
 /// cp -r: directories are created and walked in sorted entry order so the
 /// result is deterministic. Symlinks are followed, which is cp's default
 /// (without -d); the depth cap turns a link cycle into an error instead of
@@ -2576,8 +3686,8 @@ fn cp_copy_tree(
     source: &std::path::Path,
     target: &std::path::Path,
     depth: usize,
-    preserve_mode: bool,
-    preserve_times: bool,
+    preserve: CpPreserve,
+    link_map: &mut CpLinkMap,
 ) -> io::Result<()> {
     if depth > 40 {
         return Err(io::Error::new(
@@ -2591,8 +3701,8 @@ fn cp_copy_tree(
             &fs::canonicalize(source)?,
             target,
             depth + 1,
-            preserve_mode,
-            preserve_times,
+            preserve,
+            link_map,
         );
     }
     if metadata.is_dir() {
@@ -2604,44 +3714,217 @@ fn cp_copy_tree(
                 entry.path().as_path(),
                 &target.join(entry.file_name()),
                 depth + 1,
-                preserve_mode,
-                preserve_times,
+                preserve,
+                link_map,
             )?;
         }
         // GNU sets a copied directory's preserved attributes only after
         // its contents land, so child writes cannot clobber them.
-        if preserve_mode || preserve_times {
-            cp_apply_preserved(source, target, preserve_mode, preserve_times);
+        if preserve.mode || preserve.times {
+            cp_apply_preserved(source, target, preserve.mode, preserve.times);
         }
+        cp_apply_preserved_attributes(source, target, preserve);
         return Ok(());
     }
-    fs::copy(source, target)?;
-    if preserve_mode || preserve_times {
-        cp_apply_preserved(source, target, preserve_mode, preserve_times);
+    cp_copy_file(source, target, preserve, link_map)?;
+    if preserve.mode || preserve.times {
+        cp_apply_preserved(source, target, preserve.mode, preserve.times);
     }
+    cp_apply_preserved_attributes(source, target, preserve);
     Ok(())
 }
 
 /// One `--preserve`/`--no-preserve` attribute list (coreutils cp.c:
-/// the bare option means the default list mode,ownership,timestamps;
-/// `all` names every attribute). Only mode and timestamps are actionable
-/// in this emulation; ownership/links/context/xattr parse and are
-/// skipped, matching what an unprivileged GNU cp can actually honor.
-fn cp_apply_preserve_list(list: Option<&str>, mode: &mut bool, times: &mut bool, value: bool) {
+/// the bare --preserve means the default list
+/// mode,ownership,timestamps; `all` names every attribute). Each
+/// element resolves through argmatch — an element naming no
+/// attribute, or an ambiguous prefix (the empty element above all),
+/// is an error the caller reports with the measured diagnostic
+/// (rubash#1941); nothing is silently dropped. Elements are NOT
+/// trimmed (GNU's argmatch sees the space: `--preserve='mode,
+/// timestamps'` fails on ' timestamps').
+fn cp_apply_preserve_list(
+    list: Option<&str>,
+    preserve: &mut CpPreserve,
+    value: bool,
+) -> Result<(), CpBadAttribute> {
     let Some(list) = list else {
-        *mode = value;
-        *times = value;
-        return;
+        preserve.mode = value;
+        preserve.times = value;
+        return Ok(());
     };
     for attr in list.split(',') {
-        match attr.trim() {
-            "mode" => *mode = value,
-            "timestamps" => *times = value,
-            "all" => {
-                *mode = value;
-                *times = value;
+        match argmatch(attr, CP_PRESERVE_VALUES) {
+            ArgMatch::Matched(name, _) => match name {
+                "mode" => preserve.mode = value,
+                "timestamps" => preserve.times = value,
+                "links" => preserve.links = value,
+                "context" => preserve.context = value,
+                "xattr" => preserve.xattr = value,
+                // Ownership parses; an unprivileged GNU cp cannot
+                // honor it either and skips it silently.
+                "ownership" => {}
+                "all" => preserve.set_all(value),
+                _ => unreachable!("argmatch only returns table names"),
+            },
+            ArgMatch::Invalid => {
+                return Err(CpBadAttribute {
+                    text: attr.to_string(),
+                    ambiguous: false,
+                });
             }
-            _ => {}
+            ArgMatch::Ambiguous => {
+                return Err(CpBadAttribute {
+                    text: attr.to_string(),
+                    ambiguous: true,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The xattr/context half of --preserve (rubash#1941): on unix the
+/// attributes copy through the platform xattr store; Windows has no
+/// xattr namespace and no SELinux context, so the flags are accepted
+/// no-ops there (there is no GNU cp for Windows to diverge from).
+fn cp_apply_preserved_attributes(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    preserve: CpPreserve,
+) {
+    #[cfg(unix)]
+    {
+        if preserve.xattr {
+            cp_copy_xattrs(source, target, false);
+        }
+        if preserve.context {
+            cp_copy_xattrs(source, target, true);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (source, target, preserve);
+    }
+}
+
+/// The xattr syscalls take extra position/options arguments on
+/// macOS; these shims fold them to zero so the copy walk below is
+/// shared across unix flavors.
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_list(path: *const libc::c_char, buf: *mut libc::c_char, size: usize) -> isize {
+    unsafe { libc::listxattr(path, buf, size, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_list(path: *const libc::c_char, buf: *mut libc::c_char, size: usize) -> isize {
+    unsafe { libc::listxattr(path, buf, size) }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_get(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    value: *mut libc::c_void,
+    size: usize,
+) -> isize {
+    unsafe { libc::getxattr(path, name, value, size, 0, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_get(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    value: *mut libc::c_void,
+    size: usize,
+) -> isize {
+    unsafe { libc::getxattr(path, name, value, size) }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_set(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    value: *const libc::c_void,
+    size: usize,
+) -> libc::c_int {
+    unsafe { libc::setxattr(path, name, value, size, 0, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_set(
+    path: *const libc::c_char,
+    name: *const libc::c_char,
+    value: *const libc::c_void,
+    size: usize,
+) -> libc::c_int {
+    unsafe { libc::setxattr(path, name, value, size, 0) }
+}
+
+/// Best-effort xattr copy (the same stance cp_apply_preserved takes
+/// for mode/times: preservation failures do not fail the copy). With
+/// CONTEXT_ONLY, only the SELinux context attribute moves — that is
+/// what --preserve=context amounts to (lgetfilecon/lsetfilecon);
+/// otherwise every listed attribute moves, security.selinux
+/// included, as gnulib's xattr_copy does.
+#[cfg(unix)]
+fn cp_copy_xattrs(source: &std::path::Path, target: &std::path::Path, context_only: bool) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(source_c) = CString::new(source.as_os_str().as_bytes()) else {
+        return;
+    };
+    let Ok(target_c) = CString::new(target.as_os_str().as_bytes()) else {
+        return;
+    };
+    let size = unsafe { xattr_list(source_c.as_ptr(), std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return;
+    }
+    let mut names = vec![0u8; size as usize];
+    let size = unsafe {
+        xattr_list(
+            source_c.as_ptr(),
+            names.as_mut_ptr() as *mut libc::c_char,
+            names.len(),
+        )
+    };
+    if size <= 0 {
+        return;
+    }
+    names.truncate(size as usize);
+    for name in names.split(|byte| *byte == 0) {
+        if name.is_empty() || (context_only && name != b"security.selinux") {
+            continue;
+        }
+        let Ok(name_c) = CString::new(name) else {
+            continue;
+        };
+        let value_size =
+            unsafe { xattr_get(source_c.as_ptr(), name_c.as_ptr(), std::ptr::null_mut(), 0) };
+        if value_size < 0 {
+            continue;
+        }
+        let mut value = vec![0u8; value_size as usize];
+        let got = unsafe {
+            xattr_get(
+                source_c.as_ptr(),
+                name_c.as_ptr(),
+                value.as_mut_ptr() as *mut libc::c_void,
+                value.len(),
+            )
+        };
+        if got < 0 {
+            continue;
+        }
+        value.truncate(got as usize);
+        unsafe {
+            xattr_set(
+                target_c.as_ptr(),
+                name_c.as_ptr(),
+                value.as_ptr() as *const libc::c_void,
+                value.len(),
+            );
         }
     }
 }
@@ -2993,11 +4276,11 @@ fn cat_v_content(line: &[u8], options: &CatOptions) -> Vec<u8> {
 
 fn cat_redirect_targets(cmd: &CommandNode) -> Vec<&String> {
     [
-        cmd.redirect_in.as_ref(),
-        cmd.redirect_out.as_ref(),
-        cmd.append.as_ref(),
-        cmd.redirect_err.as_ref(),
-        cmd.redirect_err_append.as_ref(),
+        cmd.redirect_in.as_deref(),
+        cmd.redirect_out.as_deref(),
+        cmd.append.as_deref(),
+        cmd.redirect_err.as_deref(),
+        cmd.redirect_err_append.as_deref(),
     ]
     .into_iter()
     .flatten()
@@ -3088,16 +4371,25 @@ impl Executor {
             // the file's current mode via chmod(2)); windows keeps the
             // emulated store, which is the only mode source there.
             #[cfg(unix)]
-            let base = {
+            let (base, is_dir) = {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::metadata(&host)
-                    .map(|metadata| metadata.permissions().mode())
-                    .unwrap_or(0o644)
+                    .map(|metadata| (metadata.permissions().mode(), metadata.is_dir()))
+                    .unwrap_or((0o644, false))
             };
             #[cfg(not(unix))]
             let base = crate::builtins::test::emulated_file_mode(file, &self.shell_state.env_vars)
                 .unwrap_or_else(|| self.default_emulated_mode(&windows));
-            match apply_chmod_mode(base, mode, current_umask(&self.shell_state.env_vars)) {
+            #[cfg(not(unix))]
+            let is_dir = std::fs::metadata(&host)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false);
+            match apply_chmod_mode(
+                base,
+                mode,
+                current_umask(&self.shell_state.env_vars),
+                is_dir,
+            ) {
                 Some(new_mode) => {
                     #[cfg(unix)]
                     {
@@ -3322,7 +4614,7 @@ fn chmod_mode_declines(mode: &str) -> bool {
 }
 
 /// Apply one chmod MODE operand (octal or symbolic clauses) to BASE.
-fn apply_chmod_mode(base: u32, mode: &str, umask: u32) -> Option<u32> {
+fn apply_chmod_mode(base: u32, mode: &str, umask: u32, is_dir: bool) -> Option<u32> {
     let trimmed = mode.trim();
     if !trimmed.is_empty() && trimmed.chars().all(|ch| ch.is_ascii_digit()) && trimmed.len() <= 4 {
         return u32::from_str_radix(trimmed, 8)
@@ -3360,8 +4652,13 @@ fn apply_chmod_mode(base: u32, mode: &str, umask: u32) -> Option<u32> {
                 'w' => perms |= 0o222,
                 'x' => perms |= 0o111,
                 'X' => {
-                    // Directory, or some execute bit already set.
-                    if (current & 0o111) != 0 {
+                    // coreutils modechange.c mode_adjust: X grants
+                    // execute only for a directory, or when the
+                    // file's ORIGINAL mode (BASE, before this
+                    // invocation's clauses) already has some execute
+                    // bit — never for modes an earlier clause of the
+                    // same string just created (rubash#1943).
+                    if is_dir || (base & 0o111) != 0 {
                         perms |= 0o111;
                     }
                 }

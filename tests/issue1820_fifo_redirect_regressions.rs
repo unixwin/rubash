@@ -57,11 +57,61 @@ fn mkfifo(path: &std::path::Path) {
     assert!(status.success(), "mkfifo {path:?}");
 }
 
+/// Drain one pipe on a thread, forwarding chunks as they arrive so
+/// the harness never depends on every write end closing
+/// (rubash#1868): a killed shell can leave an orphaned background
+/// child holding the pipe open, and a blocking `read_to_end` after
+/// the kill then stalls the whole suite forever.
+fn drain_pipe<R: Read + Send + 'static>(mut pipe: R) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if sender.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// Collect whatever a drain thread produced, giving up after
+/// `grace` — the bytes are diagnostics for a run whose verdict is
+/// already decided, so a stuck writer must not stall the harness.
+fn collect_drained(receiver: std::sync::mpsc::Receiver<Vec<u8>>, grace: Duration) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let deadline = Instant::now() + grace;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(chunk) => bytes.extend_from_slice(&chunk),
+            Err(_) => break,
+        }
+    }
+    bytes
+}
+
 /// Run `case.sh` (written into a scratch dir that also holds the
 /// prebuilt fifo `f`) under rubash with a cleared environment, with a
 /// watchdog deadline. Returns (stdout, stderr, success); a hung run
 /// is killed and reported as failure.
+///
+/// rubash#1868 anti-hang contract: the shell runs in its OWN process
+/// group and the watchdog kills the whole group, so an orphaned
+/// wrapper cannot survive the kill; the pipes drain on threads from
+/// the start (a full pipe can never gate the shell) and collection
+/// after a kill is grace-bounded, so this helper returns in bounded
+/// time no matter what the run leaves behind.
 fn run_script_watchdog(script: &str, timeout: Duration) -> (String, String, bool) {
+    use std::os::unix::process::CommandExt;
     let dir = scratch_tempdir();
     mkfifo(&dir.0.join("f"));
     let script_path = dir.0.join("case.sh");
@@ -76,14 +126,26 @@ fn run_script_watchdog(script: &str, timeout: Duration) -> (String, String, bool
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .expect("spawn rubash");
+    let pgid = child.id();
+    let stdout_rx = drain_pipe(child.stdout.take().expect("stdout pipe"));
+    let stderr_rx = drain_pipe(child.stderr.take().expect("stderr pipe"));
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait().expect("try_wait") {
             Some(status) => break Some(status),
             None => {
                 if Instant::now() >= deadline {
+                    // Kill the whole group, not just the shell: a
+                    // background wrapper that outlives its shell keeps
+                    // the inherited pipes (and possibly the FIFO
+                    // rendezvous) hostage.
+                    let _ = Command::new("/bin/kill")
+                        .arg("-KILL")
+                        .arg(format!("-{pgid}"))
+                        .status();
                     let _ = child.kill();
                     break None;
                 }
@@ -91,15 +153,17 @@ fn run_script_watchdog(script: &str, timeout: Duration) -> (String, String, bool
             }
         }
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_end(&mut stdout);
-    }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_end(&mut stderr);
-    }
     let _ = child.wait();
+    // After a clean exit every writer is gone and the drains end at
+    // once; after a kill, bound the wait so a writer outside the
+    // group still cannot stall the suite (rubash#1868).
+    let grace = if status.is_some() {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(5)
+    };
+    let stdout = collect_drained(stdout_rx, grace);
+    let stderr = collect_drained(stderr_rx, grace);
     (
         String::from_utf8_lossy(&stdout).into_owned(),
         String::from_utf8_lossy(&stderr).into_owned(),

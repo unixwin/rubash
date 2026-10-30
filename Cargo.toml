@@ -25,9 +25,23 @@ exclude = [
     "tests/**",
 ]
 
+# The `bash` face shim is a Windows-only compatibility artifact: it exists so
+# `bash.exe` / `sh.exe` can forward to the installed host shell when a real
+# `exec` is unavailable (see src/bin/bash.rs). On Unix the same face is a
+# hardlink/symlink to the host binary (niubash `shell_links`), so building the
+# shim there only produces a stray 468KB binary that can silently forward to
+# `$SHELL` — rubash itself never ships it (release artifacts package `rubash`
+# only). Gate it behind `windows-shim`; Windows packaging enables the feature.
 [[bin]]
 name = "bash"
 path = "src/bin/bash.rs"
+required-features = ["windows-shim"]
+
+[features]
+# Windows-only `bash`/`sh` face shim (src/bin/bash.rs). Unix builds never
+# produce it; Windows packaging opts in with `--features windows-shim`.
+default = []
+windows-shim = []
 
 [dependencies]
 regex = "1"

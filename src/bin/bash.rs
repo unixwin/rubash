@@ -1,12 +1,10 @@
 //! Thin Windows-compatible bash entry point for Niubash installations.
 //!
-//! AI invoker entry — forwards to the host shell (niu/winuxsh).
+//! AI invoker entry — forwards to the host shell (niu).
 //!
 //! The shim intentionally forwards the command line and standard handles
 //! without interpreting shell syntax. It lets Unix scripts resolve
-//! `/usr/bin/bash` to the installed Niubash executable. The pre-rename
-//! `winuxsh.exe` / `WINUXSH_SHELL` names stay in the fallback chain so
-//! layouts built by older installers keep launching.
+//! `/usr/bin/bash` to the installed Niubash executable.
 
 use std::env;
 use std::io::{self, Write};
@@ -197,18 +195,16 @@ fn interactive_launch_wanted() -> bool {
 }
 
 fn locate_shell() -> Option<PathBuf> {
-    for variable in ["NIU_SHELL", "WINUXSH_SHELL"] {
-        if let Some(path) = env::var_os(variable).map(PathBuf::from) {
-            if is_executable_file(&path) && !same_as_current_exe(&path) {
-                return Some(path);
-            }
+    if let Some(path) = env::var_os("NIU_SHELL").map(PathBuf::from) {
+        if is_executable_file(&path) && !same_as_current_exe(&path) {
+            return Some(path);
         }
     }
 
     if let Ok(current) = env::current_exe() {
         let mut directory = current.parent().map(Path::to_path_buf);
         while let Some(path) = directory {
-            for name in ["niu.exe", "winuxsh.exe"] {
+            for name in ["niu.exe"] {
                 let candidate = path.join(name);
                 if is_executable_file(&candidate) && !same_as_current_exe(&candidate) {
                     return Some(candidate);
@@ -218,17 +214,13 @@ fn locate_shell() -> Option<PathBuf> {
         }
     }
 
-    for variable in ["WINUXSH", "SHELL"] {
-        if let Some(path) = env::var_os(variable).map(PathBuf::from) {
-            if is_executable_file(&path) && !same_as_current_exe(&path) {
-                return Some(path);
-            }
+    if let Some(path) = env::var_os("SHELL").map(PathBuf::from) {
+        if is_executable_file(&path) && !same_as_current_exe(&path) {
+            return Some(path);
         }
     }
 
     find_on_path("niu.exe")
-        .or_else(|| find_on_path("winuxsh.exe"))
-        .or_else(|| find_on_path("winuxsh"))
 }
 
 /// The invocation name worth forwarding to the host shell, if any. Returns

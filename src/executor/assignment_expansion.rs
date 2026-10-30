@@ -547,12 +547,10 @@ impl Executor {
         // chain finish — the remaining quoted tildes stay marker-guarded.
         if value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE) {
             if let Some(raw) = raw {
-                if let Some(rewritten) =
-                    tilde_expand::expand_unquoted_tildes_in_raw_assignment_rhs(
-                        raw,
-                        &self.shell_state.env_vars,
-                    )
-                {
+                if let Some(rewritten) = tilde_expand::expand_unquoted_tildes_in_raw_assignment_rhs(
+                    raw,
+                    &self.shell_state.env_vars,
+                ) {
                     let full = format!("{name}={rewritten}");
                     let (rederived, _) =
                         crate::lexer::word_value_from_raw(&full, self.posix_mode_enabled(), false);

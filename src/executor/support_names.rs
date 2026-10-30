@@ -360,6 +360,19 @@ pub(in crate::executor) fn is_reserved_word(word: &str) -> bool {
     )
 }
 
+/// The POSIX special-builtin set, execution side. GNU's table is
+/// name-based: `special_builtins[]` (builtins/mkbuiltins.c:148-154)
+/// lists 16 names — `source` included, as the synonym spelling of
+/// `.` — and the SPECIAL flag is applied by name wherever the name
+/// appears (mkbuiltins.c:819-820). This predicate is the executor's
+/// one classification point for the set (function shadowing,
+/// definition rejection, tempenv fatality, assignment persistence);
+/// it must stay equal to the registry's `SPECIAL_BUILTINS`
+/// (command_registry.rs), which the registry consistency tests pin.
+/// rubash#2036 KD-2: `source` was missing here until S3 — the
+/// introspection faces already reported it as special (S2), and
+/// variable_state carried a `|| command == "source"` workaround for
+/// the gap (removed with this alignment).
 pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
     matches!(
         name,
@@ -374,6 +387,7 @@ pub(in crate::executor) fn is_posix_special_builtin(name: &str) -> bool {
             | "return"
             | "set"
             | "shift"
+            | "source"
             | "times"
             | "trap"
             | "unset"
@@ -577,8 +591,8 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
         // shields its body from the outer redirect entirely: GNU opens the
         // inner redirect before the body runs, so `{ { echo a; } >n1; } >n2`
         // sends `a` to n1 and never lets n2 reach the body (niubash#118).
-        let has_own_output_redirect = command.redirect_out.as_ref().is_some_and(|r| own_fd1(r))
-            || command.append.as_ref().is_some_and(|r| own_fd1(r))
+        let has_own_output_redirect = command.redirect_out.as_deref().is_some_and(|r| own_fd1(r))
+            || command.append.as_deref().is_some_and(|r| own_fd1(r))
             || command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -591,14 +605,14 @@ pub(in crate::executor) fn apply_stdout_append_redirect(
                 ) && existing.fd.unwrap_or(1) == 1
                     && !is_injected_group_redirect(existing)
             });
-        let no_own_stdout_field = !command.redirect_out.as_ref().is_some_and(|r| own_fd1(r))
-            && !command.append.as_ref().is_some_and(|r| own_fd1(r));
+        let no_own_stdout_field = !command.redirect_out.as_deref().is_some_and(|r| own_fd1(r))
+            && !command.append.as_deref().is_some_and(|r| own_fd1(r));
         if own_output_is_fd_alias {
             command
                 .redirects
                 .insert(0, injected_group_redirect(&redirect));
         } else if no_own_stdout_field {
-            command.append = Some(injected_group_redirect(redirect));
+            command.append = Some(Box::new(injected_group_redirect(redirect)));
             if command.redirects.iter().any(|existing| {
                 matches!(
                     existing.kind,
@@ -711,7 +725,7 @@ pub(in crate::executor) fn apply_stderr_append_redirect(
         let inherits_stderr =
             command.redirect_err.is_none() && command.redirect_err_append.is_none();
         if inherits_stderr {
-            command.redirect_err_append = Some(injected_group_redirect(&redirect));
+            command.redirect_err_append = Some(Box::new(injected_group_redirect(&redirect)));
             // An INJECTED group stdout append is not the command's own
             // stdout redirect: GNU applies every compound redirect before
             // the body runs (redir.c do_redirections at compound entry), so

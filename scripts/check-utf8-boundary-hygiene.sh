@@ -86,6 +86,14 @@ src/lexer/word.rs::as_bytes\(\)\[name_start - 1\] as char
 src/parser/ast_print.rs::bytes\[index\] as char
 src/parser/token_actions.rs::Some\(c as char\)
 src/executor/parameter_replace.rs::&value\[cursor
+# script_driver.rs (#1961 alias arm + speculative feeder): `cursor`/`nl`
+# are BYTE offsets, not char counters — `nl` comes from `find('\n')`, so it
+# indexes a 0x0A byte, and `cursor` is only ever 0 or `nl + 1`. 0x0A is
+# never a UTF-8 continuation byte (0x80..=0xBF), so both slice bounds are
+# always char boundaries; the final-piece slice ends at `len()`.
+src/script_driver.rs::push_line\(&expanded_tail\[cursor\.\.nl\]
+src/script_driver.rs::push_line\(&spec_text\[cursor\.\.nl\]
+src/script_driver.rs::push_line\(&spec_text\[cursor\.\.\]
 EOF
 )
 

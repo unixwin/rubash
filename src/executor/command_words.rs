@@ -228,8 +228,8 @@ impl Executor {
         // A word wrapped in quotes (e.g. `"$(cmd) extra"`) keeps its spaces
         // together: quote removal happens after field splitting in Bash, so
         // quoted words must not be split even when they expand to whitespace.
-        // Quote state comes from the raw word only: word_quotes (the
-        // lexer quote segments) also records quotes nested inside a braced
+        // Quote state comes from the raw word only: a lexer
+        // quote-segment scan would also record quotes nested inside a braced
         // parameter expansion (e.g. ${1-"$@"}), but those are word syntax
         // of the expansion, not outer quoting, so they must not suppress
         // field splitting of the unquoted word's result. raw_word_is_quoted
@@ -407,6 +407,30 @@ impl Executor {
                 return self.glob_for_list_fields(fields);
             }
             return Ok(values);
+        }
+        // rubash#1993: a whole-word unquoted `$*`/`${*}` in a for list
+        // expands exactly like a command word (subst.c:13219 sends both
+        // through expand_word_internal): with a set-empty IFS, Posix
+        // interp 888 dispatches $* to the dollar_at word list — one
+        // word per positional parameter, empty parameters contributing
+        // no word. The command-word path (command_prepare) has this
+        // arm; the for path fell through to the scalar expander, which
+        // joined the parameters with the empty separator into ONE word
+        // (`IFS=; for x in $*` iterated once over the concatenation).
+        if (word == "$*" || word == "${*}")
+            && !super::command_prepare::raw_word_is_quoted(raw)
+            && self
+                .shell_state
+                .env_vars
+                .get("IFS")
+                .is_some_and(|ifs| ifs.is_empty())
+        {
+            return Ok(self
+                .shell_state
+                .positional_window_cloned()
+                .into_iter()
+                .filter(|value| !value.is_empty())
+                .collect());
         }
         // A fully double-quoted for-list word (STORAGE_WORD_PREFIX marker)
         // runs the same quoted braced-alternate fan-outs the command-argv

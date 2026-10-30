@@ -41,6 +41,12 @@ impl Executor {
             )?;
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = 2;
+            // rubash#2117: GNU builtins/source.def:143-147 returns
+            // EX_USAGE (258 > EX_SHERRBASE) for the missing-filename
+            // face, which execute_cmd.c:4886-4888 marks
+            // special_builtin_failed — a non-interactive POSIX shell
+            // exits (execute_cmd.c:1004-1017).
+            self.special_builtin_failed.set(true);
             return Ok(());
         };
 
@@ -162,7 +168,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -192,7 +198,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_write_redirect(r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -218,7 +224,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -262,7 +268,7 @@ impl Executor {
         {
             if let Some(redirect) = command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r))
             {
                 let target = self.expand_redirect_target(redirect);
@@ -304,28 +310,28 @@ fn brace_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<BraceStdioArm> 
         (
             command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_splice_redirect(command, r)),
             BraceStdioArm::Out,
         ),
         (
             command
                 .append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stdout_write_redirect(r)),
             BraceStdioArm::Append,
         ),
         (
             command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r)),
             BraceStdioArm::Err,
         ),
         (
             command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| is_stderr_splice_redirect(command, r)),
             BraceStdioArm::ErrAppend,
         ),

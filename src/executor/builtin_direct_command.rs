@@ -70,6 +70,15 @@ impl Executor {
             return Ok(());
         }
 
+        // rubash#2126: `builtin NAME` is itself a dispatch of NAME
+        // (builtin.def calls the builtin's function directly), so the
+        // tracker note follows the re-dispatched name — `builtin eval`
+        // arms it exactly like a plain `eval` dispatch (GNU-verified),
+        // anything else disarms. The catch-all arm below is the
+        // not-a-shell-builtin error: no dispatch happened there, so it
+        // restores the pre-note value.
+        let tracker_before_builtin_redispatch = self.shell_state.last_dispatch_was_eval_or_source;
+        self.note_simple_command_dispatch(name);
         match name {
             ":" => {
                 let redirect_failed =
@@ -339,6 +348,9 @@ impl Executor {
             }
             "shift" => self.execute_shift_command(&builtin_cmd),
             _ => {
+                // rubash#2126: no dispatch — undo the note above.
+                self.shell_state.last_dispatch_was_eval_or_source =
+                    tracker_before_builtin_redispatch;
                 self.write_builtin_not_found(cmd, name)?;
                 self.exit_code = 1;
                 Ok(())

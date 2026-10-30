@@ -77,11 +77,11 @@ fn replace_parameter_pattern_inner(
     // single-slash form anchors at the beginning (`#`) or end (`%`).
     if !global {
         if let Some(prefix_pattern) = pattern.strip_prefix('#') {
-            return replace_parameter_prefix(value, prefix_pattern, &amp, extglob);
+            return replace_parameter_prefix(value, prefix_pattern, &amp, nocase, extglob);
         }
 
         if let Some(suffix_pattern) = pattern.strip_prefix('%') {
-            return replace_parameter_suffix(value, suffix_pattern, &amp, extglob);
+            return replace_parameter_suffix(value, suffix_pattern, &amp, nocase, extglob);
         }
     }
 
@@ -202,6 +202,38 @@ fn parameter_pattern_match(pattern: &str, word: &str, nocase: bool, extglob: boo
     }
 }
 
+/// Prechecked twin of [`parameter_pattern_match`] for the finders below:
+/// the caller has evaluated both byte gates once for the whole
+/// (pattern, value) pair and they do not fire, and every candidate is a
+/// char-boundary slice of that same value, so the per-candidate gate
+/// re-evaluation inside the case matchers could only repeat the same
+/// negative verdict at O(candidate length) per boundary — on a
+/// multi-thousand-char value with an anchored pattern (`${v/#seg/…}`,
+/// `${v/%gz/…}`) that re-scan was the dominant cost of the expansion.
+fn parameter_pattern_match_prechecked(
+    pattern: &str,
+    word: &str,
+    nocase: bool,
+    extglob: bool,
+) -> bool {
+    if extglob && pattern_uses_extglob_syntax(pattern) {
+        if nocase {
+            return super::conditional::extglob_case_pattern_matches_nocase(pattern, word);
+        }
+        return super::conditional::extglob_case_pattern_matches(pattern, word);
+    }
+    super::conditional::pattern::case_pattern_matches_prechecked(pattern, word, nocase)
+}
+
+/// One-time gate verdict for a (pattern, value) pair whose char-boundary
+/// slices are about to be matched one by one: both byte gates are
+/// containment predicates, so a gate-clean pair stays clean for every
+/// slice (see case_pattern_matches_prechecked).
+fn pattern_pair_gates_clean(pattern: &str, value: &str) -> bool {
+    !super::conditional::pattern::sides_need_byte_char_matching(pattern, value)
+        && !super::conditional::pattern::sides_need_byte_locale_units(pattern, value)
+}
+
 fn normalize_parameter_pattern_backslashes(pattern: &str) -> String {
     // The three passes rewrite the internal backslash markers only; a
     // pattern carrying none of them is already normalized, so skip the
@@ -224,9 +256,10 @@ pub(in crate::executor) fn replace_parameter_prefix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    nocase: bool,
     extglob: bool,
 ) -> String {
-    let Some(end) = find_parameter_prefix_match(value, pattern, extglob) else {
+    let Some(end) = find_parameter_prefix_match(value, pattern, nocase, extglob) else {
         return value.to_string();
     };
     format!("{}{}", amp(&value[..end]), &value[end..])
@@ -236,9 +269,10 @@ pub(in crate::executor) fn replace_parameter_suffix(
     value: &str,
     pattern: &str,
     amp: &dyn Fn(&str) -> String,
+    nocase: bool,
     extglob: bool,
 ) -> String {
-    let Some(start) = find_parameter_suffix_match(value, pattern, extglob) else {
+    let Some(start) = find_parameter_suffix_match(value, pattern, nocase, extglob) else {
         return value.to_string();
     };
     format!("{}{}", &value[..start], amp(&value[start..]))
@@ -263,34 +297,84 @@ pub(super) fn pattern_contains_glob(pattern: &str) -> bool {
 pub(in crate::executor) fn find_parameter_prefix_match(
     value: &str,
     pattern: &str,
+    nocase: bool,
     extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
         return Some(0);
     }
 
-    value
+    let prechecked = pattern_pair_gates_clean(pattern, value);
+    let candidate_matches = |word: &str| {
+        if prechecked {
+            parameter_pattern_match_prechecked(pattern, word, nocase, extglob)
+        } else {
+            parameter_pattern_match(pattern, word, nocase, extglob)
+        }
+    };
+    // A star-free pattern matches at most pattern_match_length_bound
+    // chars (the invariant find_parameter_pattern_match documents), so
+    // candidate ends past that char distance cannot match and are not
+    // tested; extglob groups change the match width, so the prune is
+    // disabled for extglob patterns, exactly as in the scanning finder.
+    let bound = if extglob && pattern_uses_extglob_syntax(pattern) {
+        None
+    } else {
+        pattern_match_length_bound(pattern)
+    };
+    let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
+        .collect();
+    indices
+        .iter()
+        .enumerate()
         .rev()
-        .find(|end| parameter_pattern_match(pattern, &value[..*end], false, extglob))
+        .filter(|(pos, _)| bound.map_or(true, |bound| *pos <= bound))
+        .find(|(_, end)| candidate_matches(&value[..**end]))
+        .map(|(_, end)| *end)
 }
 
 pub(in crate::executor) fn find_parameter_suffix_match(
     value: &str,
     pattern: &str,
+    nocase: bool,
     extglob: bool,
 ) -> Option<usize> {
     if pattern.is_empty() {
         return Some(value.len());
     }
 
-    value
+    let prechecked = pattern_pair_gates_clean(pattern, value);
+    let candidate_matches = |word: &str| {
+        if prechecked {
+            parameter_pattern_match_prechecked(pattern, word, nocase, extglob)
+        } else {
+            parameter_pattern_match(pattern, word, nocase, extglob)
+        }
+    };
+    // Bound prune, twin of find_parameter_prefix_match: a star-free
+    // pattern matches at most pattern_match_length_bound chars, so
+    // candidate starts whose suffix is longer than the bound cannot
+    // match; disabled for extglob patterns.
+    let bound = if extglob && pattern_uses_extglob_syntax(pattern) {
+        None
+    } else {
+        pattern_match_length_bound(pattern)
+    };
+    let indices: Vec<usize> = value
         .char_indices()
         .map(|(index, _)| index)
         .chain(std::iter::once(value.len()))
-        .find(|start| parameter_pattern_match(pattern, &value[*start..], false, extglob))
+        .collect();
+    let total = indices.len() - 1;
+    indices
+        .iter()
+        .enumerate()
+        .filter(|(pos, _)| bound.map_or(true, |bound| total - *pos <= bound))
+        .find(|(_, start)| candidate_matches(&value[**start..]))
+        .map(|(_, start)| *start)
 }
 
 pub(in crate::executor) fn find_parameter_pattern_match(
@@ -302,6 +386,19 @@ pub(in crate::executor) fn find_parameter_pattern_match(
     extglob: bool,
 ) -> Option<(usize, usize)> {
     let start_index = indices.iter().position(|index| *index >= cursor)?;
+
+    // The byte gates are evaluated once for the whole (pattern, value)
+    // pair; every candidate below is a char-boundary slice of the value,
+    // so the verdict cannot change per candidate (see
+    // case_pattern_matches_prechecked).
+    let prechecked = pattern_pair_gates_clean(pattern, value);
+    let candidate_matches = |word: &str| {
+        if prechecked {
+            parameter_pattern_match_prechecked(pattern, word, nocase, extglob)
+        } else {
+            parameter_pattern_match(pattern, word, nocase, extglob)
+        }
+    };
 
     // GNU strmatch scans per position with the pattern itself, so a
     // bracket-class pattern over a long value stays linear. The descending
@@ -363,7 +460,7 @@ pub(in crate::executor) fn find_parameter_pattern_match(
             if ends_at_value_end && *end != value.len() {
                 continue;
             }
-            if parameter_pattern_match(pattern, &value[*start..*end], nocase, extglob) {
+            if candidate_matches(&value[*start..*end]) {
                 best = Some(*end);
             }
         }
@@ -805,6 +902,8 @@ fn ansic_quote_bytes(bytes: &[u8]) -> String {
 }
 
 fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = char>) {
+    // R8: one locale read per walk, not per character.
+    let utf8 = crate::locale::is_utf8();
     for ch in chars {
         match ch {
             crate::executor::markers::QUOTED_WORD_PREFIX => output.push_str("\\E"),
@@ -817,7 +916,7 @@ fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = cha
             '\t' => output.push_str("\\t"),
             '\\' => output.push_str("\\\\"),
             '\'' => output.push_str("\\'"),
-            c if is_ansic_printable(c) => output.push(c),
+            c if is_ansic_printable(c, utf8) => output.push(c),
             c => {
                 let mut buffer = [0u8; 4];
                 for byte in c.encode_utf8(&mut buffer).as_bytes() {
@@ -832,10 +931,12 @@ fn push_ansic_escaped_chars(output: &mut String, chars: impl Iterator<Item = cha
 /// the string contains any character that is not printable in the locale
 /// (ISPRINT for ASCII bytes, iswprint for the rest).
 fn ansic_should_quote_value(value: &str) -> bool {
-    value.chars().any(|ch| !is_ansic_printable(ch))
+    // R8: one locale read per walk, not per character.
+    let utf8 = crate::locale::is_utf8();
+    value.chars().any(|ch| !is_ansic_printable(ch, utf8))
 }
 
-fn is_ansic_printable(ch: char) -> bool {
+fn is_ansic_printable(ch: char, utf8: bool) -> bool {
     if ch.is_ascii() {
         (0x20..=0x7e).contains(&(ch as u8))
     } else {
@@ -845,7 +946,7 @@ fn is_ansic_printable(ch: char) -> bool {
         // (strtrans.c:266-282) is the UTF-8-locale branch, and under
         // LC_ALL=C every byte >= 0x80 is escaped octal instead
         // (rubash#1464).
-        crate::locale::is_utf8() && !ch.is_control()
+        utf8 && !ch.is_control()
     }
 }
 
@@ -854,6 +955,8 @@ fn is_ansic_printable(ch: char) -> bool {
 /// copied verbatim, and every other byte rendered as a 3-digit octal escape.
 fn ansic_quote_value(value: &str) -> String {
     let mut output = String::from("$'");
+    // R8: one locale read per walk, not per character.
+    let utf8 = crate::locale::is_utf8();
     for ch in value.chars() {
         match ch {
             crate::executor::markers::QUOTED_WORD_PREFIX => output.push_str("\\E"),
@@ -866,7 +969,7 @@ fn ansic_quote_value(value: &str) -> String {
             '\t' => output.push_str("\\t"),
             '\\' => output.push_str("\\\\"),
             '\'' => output.push_str("\\'"),
-            c if is_ansic_printable(c) => output.push(c),
+            c if is_ansic_printable(c, utf8) => output.push(c),
             c => {
                 // GNU walks unsigned bytes; each non-printable byte becomes
                 // \NNN, so encode the UTF-8 byte sequence byte-for-byte.

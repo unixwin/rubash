@@ -7,86 +7,38 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
+use std::sync::{Mutex, OnceLock};
 
-use crate::executor::path::{is_executable_file, shell_directory_entries, shell_path_entries};
+use crate::executor::path::{
+    command_lookup_fingerprint, is_executable_file, shell_directory_entries, shell_path_entries,
+};
 
 use crate::builtins::alias::Alias;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
+
+/// The builtin name list for the `builtin` compgen action and the
+/// completion candidate faces: a projection of the single command
+/// registry (rubash#2036 S2; this file's hand-maintained SHELL_BUILTINS
+/// copy drifted from the executor table by exactly `env` — KD-1).
+/// Registry order is the order the copies all agreed on.
+pub(crate) fn shell_builtin_names() -> Vec<&'static str> {
+    crate::executor::command_registry::introspection_builtin_names()
+}
+
+/// The keyword name list for the `keyword` compgen action and the
+/// command-completion candidates: likewise a registry projection
+/// (the hand SHELL_KEYWORDS copy is gone).
+pub(crate) fn shell_keyword_names() -> Vec<&'static str> {
+    crate::executor::command_registry::introspection_keyword_names()
+}
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
 
-const SHELL_BUILTINS: &[&str] = &[
-    ".",
-    ":",
-    "[",
-    "alias",
-    "bg",
-    "bind",
-    "break",
-    "builtin",
-    "caller",
-    "cd",
-    "command",
-    "compgen",
-    "complete",
-    "compopt",
-    "continue",
-    "declare",
-    "dirs",
-    "disown",
-    "echo",
-    "enable",
-    "eval",
-    "exec",
-    "exit",
-    "export",
-    "false",
-    "fc",
-    "fg",
-    "getopts",
-    "hash",
-    "help",
-    "history",
-    "jobs",
-    "kill",
-    "let",
-    "local",
-    "logout",
-    "mapfile",
-    "popd",
-    "printf",
-    "pushd",
-    "pwd",
-    "read",
-    "readarray",
-    "readonly",
-    "return",
-    "set",
-    "shift",
-    "shopt",
-    "source",
-    "suspend",
-    "test",
-    "times",
-    "trap",
-    "true",
-    "type",
-    "typeset",
-    "ulimit",
-    "umask",
-    "unalias",
-    "unset",
-    "wait",
-];
-const SHELL_KEYWORDS: &[&str] = &[
-    "if", "then", "else", "elif", "fi", "case", "esac", "for", "select", "while", "until", "do",
-    "done", "in", "function", "time", "{", "}", "!", "[[", "]]", "coproc",
-];
 const READLINE_BINDINGS: &[&str] = &[
     "abort",
     "accept-line",
@@ -321,85 +273,6 @@ const COMPOPTS: &[(&str, u64)] = &[
 // %, (( ... )), [[ ... ]], for ((, { ... }) and "variables"; excludes the bare
 // reserved words do/done/elif/else/esac/fi/in/then). Setopt is the flags.c
 // set -o table; shopt is the 5.3.0 shopt_vars table.
-const HELP_TOPIC_COMPLETIONS: &[&str] = &[
-    "!",
-    "%",
-    "(( ... ))",
-    ".",
-    ":",
-    "[",
-    "[[ ... ]]",
-    "alias",
-    "bg",
-    "bind",
-    "break",
-    "builtin",
-    "caller",
-    "case",
-    "cd",
-    "command",
-    "compgen",
-    "complete",
-    "compopt",
-    "continue",
-    "coproc",
-    "declare",
-    "dirs",
-    "disown",
-    "echo",
-    "enable",
-    "eval",
-    "exec",
-    "exit",
-    "export",
-    "false",
-    "fc",
-    "fg",
-    "for",
-    "for ((",
-    "function",
-    "getopts",
-    "hash",
-    "help",
-    "history",
-    "if",
-    "jobs",
-    "kill",
-    "let",
-    "local",
-    "logout",
-    "mapfile",
-    "popd",
-    "printf",
-    "pushd",
-    "pwd",
-    "read",
-    "readarray",
-    "readonly",
-    "return",
-    "select",
-    "set",
-    "shift",
-    "shopt",
-    "source",
-    "suspend",
-    "test",
-    "time",
-    "times",
-    "trap",
-    "true",
-    "type",
-    "typeset",
-    "ulimit",
-    "umask",
-    "unalias",
-    "unset",
-    "until",
-    "variables",
-    "wait",
-    "while",
-    "{ ... }",
-];
 
 const SETOPT_COMPLETIONS: &[&str] = &[
     "allexport",
@@ -842,7 +715,7 @@ pub(crate) fn apply_completion_actions(
                 pipestatus.live_array,
             )),
             "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
-            "builtin" => candidates.extend(SHELL_BUILTINS.iter().map(|s| s.to_string())),
+            "builtin" => candidates.extend(shell_builtin_names().iter().map(|s| s.to_string())),
             "command" => candidates.extend(command_completion_candidates(
                 env_vars,
                 aliases,
@@ -867,12 +740,16 @@ pub(crate) fn apply_completion_actions(
             "export" => {
                 candidates.extend(exported_variable_completion_candidates(env_vars, underlay))
             }
-            "helptopic" => candidates.extend(HELP_TOPIC_COMPLETIONS.iter().map(|s| s.to_string())),
+            "helptopic" => candidates.extend(
+                crate::builtins::help::help_topic_names()
+                    .iter()
+                    .map(|s| s.to_string()),
+            ),
             "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
             "function" => candidates.extend(function_completion_candidates(function_names)),
             "group" => candidates.extend(group_completion_candidates(env_vars)),
             "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
-            "keyword" => candidates.extend(SHELL_KEYWORDS.iter().map(|s| s.to_string())),
+            "keyword" => candidates.extend(shell_keyword_names().iter().map(|s| s.to_string())),
             "service" => candidates.extend(service_completion_candidates(word)),
             "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
@@ -1347,7 +1224,7 @@ fn path_completion_base(word: &str) -> (&str, &str) {
 
 fn enabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
     let disabled = disabled_builtin_completion_candidates(env_vars);
-    SHELL_BUILTINS
+    shell_builtin_names()
         .iter()
         .copied()
         .filter(|name| !disabled.iter().any(|disabled_name| disabled_name == name))
@@ -1780,17 +1657,53 @@ fn command_completion_candidates(
     // (rubash#1795).
     let mut candidates = Vec::new();
     candidates.extend(aliases.keys().cloned());
-    candidates.extend(SHELL_KEYWORDS.iter().map(|name| (*name).to_string()));
+    candidates.extend(shell_keyword_names().iter().map(|name| (*name).to_string()));
     candidates.extend(function_names.iter().cloned());
-    candidates.extend(SHELL_BUILTINS.iter().map(|name| (*name).to_string()));
+    candidates.extend(shell_builtin_names().iter().map(|name| (*name).to_string()));
     candidates.extend(path_command_completion_candidates(env_vars));
     candidates
+}
+
+/// rubash#1994: the PATH completion walk, memoized under the
+/// command-lookup fingerprint (the same key the executor's command
+/// lookup cache uses: PATH, PWD, PATHEXT and every env key the path
+/// translation consults). A `compgen -c` / compspec evaluation used to
+/// re-walk every PATH directory and stat every entry on EVERY call —
+/// on a fat PATH (~2900 executables) that was ~95ms per call in-shell
+/// (Linux same-machine), so 200 evaluations paid the walk 200 times.
+/// The cached list is the RAW walk (duplicates across directories
+/// preserved, rubash#1089); callers merge/sort/dedup as before.
+/// Accepted staleness, identical to the niubash host-side cache this
+/// mirrors: filesystem-only changes under an unchanged fingerprint
+/// are observed when a fingerprint input changes (a PATH bind, a cd),
+/// not before.
+struct PathCandidatesCache {
+    fingerprint: String,
+    candidates: Vec<String>,
+}
+
+static PATH_CANDIDATES_CACHE: OnceLock<Mutex<PathCandidatesCache>> = OnceLock::new();
+
+fn path_candidates_cache() -> &'static Mutex<PathCandidatesCache> {
+    PATH_CANDIDATES_CACHE.get_or_init(|| {
+        Mutex::new(PathCandidatesCache {
+            fingerprint: String::new(),
+            candidates: Vec::new(),
+        })
+    })
 }
 
 fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
     let Some(path_value) = env_vars.get("PATH") else {
         return Vec::new();
     };
+
+    let fingerprint = command_lookup_fingerprint(env_vars);
+    if let Ok(cache) = path_candidates_cache().lock() {
+        if cache.fingerprint == fingerprint {
+            return cache.candidates.clone();
+        }
+    }
 
     let mut candidates = Vec::new();
     for dir in shell_path_entries(path_value) {
@@ -1808,6 +1721,10 @@ fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec
                 candidates.push(entry.name);
             }
         }
+    }
+    if let Ok(mut cache) = path_candidates_cache().lock() {
+        cache.fingerprint = fingerprint;
+        cache.candidates = candidates.clone();
     }
     candidates
 }

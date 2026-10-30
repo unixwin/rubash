@@ -55,10 +55,6 @@ fn run_c(script: &str) -> (i32, Vec<String>) {
     (output.status.code().unwrap_or(-1), stdout)
 }
 
-fn e_lines(lines: &[String]) -> usize {
-    lines.iter().filter(|l| l.as_str() == "E").count()
-}
-
 /// The issue's exact repro: three constructs, three E lines.
 #[test]
 fn issue_repro_fires_three_not_five() {

@@ -16,12 +16,10 @@
 //!   declare -n ref=var; var=orig; ref+=x env -> var=origx (no ref= line)
 //!   unset u; u+=5 env -> u=5
 //!
-//! One row is deliberately weaker than GNU: the top-level compound-append
-//! value (a=1; a+=(9) -> 1(9)) is owned by the temporary-assignment table
-//! binding, whose append composition lands with the carrier cluster
-//! (PR #1767, #1620 root cause 1). This file pins only the host loop's
-//! own duty on that row — no marker leak — and the row must be upgraded
-//! to the exact `1(9)` value once #1767 merges (see REPORT).
+//! The top-level compound-append row (a=1; a+=(9) -> 1(9)) was deliberately
+//! weaker than GNU while its value rode the carrier cluster's table fix
+//! (PR #1767, #1620 root cause 1); #1767 has merged, so the row now pins
+//! the exact `1(9)` value as well as no marker leak.
 
 use rubash::executor::{Executor, HostExternalCommandOutput};
 use rubash::lexer::tokenize;
@@ -52,6 +50,11 @@ fn run_host_captures(script: &str) -> Vec<HashMap<String, String>> {
     let ast = parse(&tokens);
     let result = executor.execute_ast(&ast);
     assert!(result.is_ok(), "script failed: {script:?} -> {result:?}");
+    // The executor owns the handler closure, which owns the second Arc
+    // clone of the sink; try_unwrap can only succeed once the executor
+    // (and with it the closure) is dropped. Without this drop every test
+    // in this file panics in try_unwrap before any assertion runs.
+    drop(executor);
     Arc::try_unwrap(captured)
         .ok()
         .unwrap()
@@ -103,11 +106,12 @@ fn issue1766_top_compound_plain_strips_marker() {
 }
 
 #[test]
-fn issue1766_top_compound_append_leaks_no_marker() {
-    // Value correctness (GNU: 1(9)) rides the carrier cluster's table fix
-    // (PR #1767); this row pins the host loop's own duty: no marker bytes
-    // reach the host, whatever the table currently holds.
+fn issue1766_top_compound_append_composes_window_value() {
+    // Formerly a weak row (no-marker-leak only) while the value rode the
+    // carrier cluster's table fix (PR #1767); #1767 has merged, so this row
+    // now pins the exact GNU value 1(9) as well as no marker leak.
     let env = only("a=1; a+=(9) hostprobe");
+    assert_eq!(env.get("a").map(String::as_str), Some("1(9)"));
     assert_no_marker(&env);
 }
 

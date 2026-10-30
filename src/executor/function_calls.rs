@@ -191,6 +191,10 @@ impl Executor {
             redirects.heredoc_body = cmd.heredoc_body.clone();
             redirects.here_string = cmd.here_string.clone();
             redirects.here_string_carrier = cmd.here_string_carrier.clone();
+            // rubash#1867: the numbered heredoc/herestring bodies live
+            // in the parallel store — without them the call-time bind
+            // sees the redirect nodes but no bodies to stage.
+            redirects.heredoc_redirects = cmd.heredoc_redirects.clone();
             // GNU execute_cmd.c:5205 binds the definition's BODY command
             // (function_cell), whose `redirects' list carries the numbered
             // entries (`} 5</dev/null'); execute_command re-applies them
@@ -664,10 +668,19 @@ impl Executor {
             .or(definition_line);
         // GNU execute_cmd.c:5387-5391: the entry fire's DebugDecision — a
         // non-zero trap status under debugging_mode skips the body entirely
-        // (no RETURN trap either, probe m2: `FN=0` with the body's echo
-        // absent); the function call's status is EXECUTION_SUCCESS.
+        // and the RETURN trap does not run for the skipped frame
+        // (execute_cmd.c:5391-5407 keeps both the body execution and
+        // run_return_trap inside the not-skipped branch; P-1, adjudicated
+        // against the GNU 5.3.20 oracle — probes p1a/p1a2: body absent,
+        // RETURN trap silent). The skipped call's status is the trap's
+        // status — `result = run_debug_trap()` flows through (p1a: 1,
+        // p1a2: 127) — NOT EXECUTION_SUCCESS; that rule belongs to the
+        // simple-command seam (execute_cmd.c:4510).
+        // WP-3: an attached session also admits this seam (function
+        // breakpoints, design 5.2); with no DEBUG action installed the
+        // funnel only consults the session.
         let mut debug_entry_return: Option<i32> = None;
-        let debug_entry_skip = if function_traced {
+        let debug_entry_skip_status = if function_traced || self.debugger_session_here() {
             if let Some(line) = body_open_line {
                 self.set_current_line_value(line);
             }
@@ -687,8 +700,8 @@ impl Executor {
                 .unwrap_or_else(|| {
                     crate::executor::command_text::bash_command_source_text(call_cmd)
                 });
-            match self.run_debug_trap(&command_text) {
-                Ok(skip) => skip.is_some(),
+            match self.run_debug_trap(crate::debugger::SeamKind::FunctionEntry, &command_text) {
+                Ok(skip) => skip,
                 // rubash#1162: a `return` inside the DEBUG action at the
                 // entry fire (funcnest is already incremented, so the
                 // action runs in this function's frame) returns from THIS
@@ -698,12 +711,12 @@ impl Executor {
                 // aborted the whole script at the top-level driver.
                 Err(ExecuteError::Return(status)) => {
                     debug_entry_return = Some(status);
-                    false
+                    None
                 }
                 Err(error) => return Err(error),
             }
         } else {
-            false
+            None
         };
         // GNU execute_function (execute_cmd.c:5269+) applies the call's
         // redirections to real descriptors for the body's duration
@@ -779,6 +792,15 @@ impl Executor {
                 })
                 .cloned()
                 .collect();
+            // rubash#1867: keep the numbered heredoc/herestring bodies
+            // that pair with the selected redirect nodes (same fd > 2
+            // cut) so with_numbered_fd_bindings can stage them.
+            selected.heredoc_redirects = definition
+                .heredoc_redirects
+                .iter()
+                .filter(|redirect| redirect.fd.is_some_and(|fd| fd > 2))
+                .cloned()
+                .collect();
             selected
         });
         // A body flagged UNSTREAMED_FUNCTION_BODIES still holds
@@ -800,19 +822,28 @@ impl Executor {
         // run_unwind_frame does in GNU.
         let result = if let Some(status) = debug_entry_return {
             Err(ExecuteError::Return(status))
-        } else if debug_entry_skip {
+        } else if debug_entry_skip_status.is_some() {
             Ok(())
         } else {
             self.with_compound_output_redirects(call_cmd, |executor| {
-                let body_run = |executor: &mut Executor| {
-                    executor.with_ambient_line(body_open_line, |executor| {
-                        executor.execute_ast_inner(&body_ast.commands)
-                    })
-                };
-                match &definition_body_redirects {
-                    Some(definition) => executor.with_numbered_fd_bindings(definition, body_run),
-                    None => body_run(executor),
-                }
+                // rubash#1867: the call's numbered input redirects and
+                // heredoc/herestring entries bind around the body,
+                // outside the definition's own bindings (GNU applies
+                // the call's do_redirections first, the definition's
+                // stored redirects inside execute_function).
+                executor.with_call_numbered_input_redirects(call_cmd, |executor| {
+                    let body_run = |executor: &mut Executor| {
+                        executor.with_ambient_line(body_open_line, |executor| {
+                            executor.execute_ast_inner(&body_ast.commands)
+                        })
+                    };
+                    match &definition_body_redirects {
+                        Some(definition) => {
+                            executor.with_numbered_fd_bindings(definition, body_run)
+                        }
+                        None => body_run(executor),
+                    }
+                })
             })
         };
         if body_unstreamed {
@@ -871,9 +902,51 @@ impl Executor {
             Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
         ) {
             None
+        } else if debug_entry_skip_status.is_some() {
+            // P-1 (adjudicated at the entry fire above): GNU does not
+            // run the RETURN trap for an entry-skipped frame —
+            // execute_cmd.c:5391-5407 keeps run_return_trap inside the
+            // not-skipped branch.
+            None
         } else {
             self.run_function_return_trap()?
         };
+        // DE-04 (design 5.4): every frame that returns — by completion,
+        // by entry skip, or by an entry force-return — is reported to
+        // the session at this site, with the status the caller will
+        // observe. Exit unwinds are not returns: the session learns of
+        // them through DE-09 instead.
+        if !matches!(
+            result,
+            Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
+        ) {
+            let (route, frame_status) = if let Some(status) = debug_entry_skip_status {
+                (crate::debugger::ReturnRoute::EntrySkipped, status)
+            } else if let Some(status) = debug_entry_return {
+                (
+                    crate::debugger::ReturnRoute::EntryForceReturn,
+                    trap_return_status.unwrap_or(status),
+                )
+            } else {
+                let status = match &result {
+                    Ok(()) => trap_return_status.unwrap_or(self.exit_code),
+                    Err(ExecuteError::Return(status)) => trap_return_status.unwrap_or(*status),
+                    _ => self.exit_code,
+                };
+                (crate::debugger::ReturnRoute::Completed, status)
+            };
+            let caller_location = call_cmd.line.map(|line| {
+                let file = self
+                    .shell_state
+                    .bash_source_stack
+                    .get(1)
+                    .or_else(|| self.shell_state.bash_source_stack.first())
+                    .cloned()
+                    .unwrap_or_default();
+                crate::debugger::SourceLocation::new(file, line as u32)
+            });
+            self.debugger_note_frame_returned(name, route, frame_status, caller_location)?;
+        }
         // GNU execute_cmd.c run_unwind_frame ("function_calling") AFTER the
         // run_return_trap fires: uw_maybe_set_return_trap restores the saved
         // action only when the body left the trap untrapped
@@ -982,7 +1055,11 @@ impl Executor {
                 Ok(())
             }
             Ok(()) => {
-                if let Some(status) = trap_return_status {
+                if let Some(status) = debug_entry_skip_status {
+                    // P-1: a skipped frame returns the trap's status
+                    // (the funnel's Some(status)); see the entry fire.
+                    self.exit_code = status;
+                } else if let Some(status) = trap_return_status {
                     self.exit_code = status;
                 }
                 Ok(())
@@ -1044,6 +1121,26 @@ impl Executor {
         let mut last_stderr_leg: Option<Redirect> = None;
         for redirect in &call_cmd.redirects {
             if redirect.fd_var.is_some() {
+                continue;
+            }
+            // rubash#2031: a leg INJECTED by an enclosing compound's splice
+            // (GROUP_REDIRECT_INJECTED_MARK) is not part of this call's own
+            // redirect list in GNU terms — execute_cmd.c:5606 applies the
+            // call's written list once, and an ancestor compound's binding
+            // reaches the body through the descriptors themselves. Here that
+            // binding is already realized on the fd table by the ancestor's
+            // scope, and this call's own with_compound_output_redirects wrap
+            // keeps it in force (skipping the re-bind via
+            // injected_redirect_fd_is_bound) or lets the call's genuine legs
+            // displace it. Re-splicing the injected leg into the body copies
+            // it WITHOUT that context onto leaves that run after a nearer
+            // scope rebinds the fd — e.g. the call's own `>&2` dup onto a
+            // command-substitution capture (an Stdout endpoint, not the
+            // File endpoint injected_redirect_fd_is_bound recognizes) — and
+            // the leaf then re-opens the ancestor's target over the dup
+            // binding, silently swallowing the output
+            // (`$( ( a x >&2 ) 2>&1 >/dev/null )` lost the message).
+            if crate::executor::support_names::is_injected_group_redirect(redirect) {
                 continue;
             }
             if !suppress_stdout && is_stdout_write_redirect(redirect) {
@@ -1294,6 +1391,23 @@ impl Executor {
                 }
             }
             return Ok((None, false, None));
+        }
+        // rubash#2124: a /dev/tcp|udp call target is not a filesystem
+        // object — the metadata classification below fell through to
+        // the non-regular arm and FileFd::open_read reported it
+        // ENOENT. GNU redir.c do_redirections connects it (redir_open
+        // -> netopen) and binds it on fd 0 for the body's duration.
+        // open_net_redirect's error already carries the path-shaped
+        // message (the connect pre-line was emitted by the connect).
+        if crate::special_paths::is_net_redirect_target(&target) {
+            let file = self.open_net_redirect(&target)?;
+            let saved = self.fd_table.entries.get(&0).cloned();
+            self.fd_table.open_input(
+                0,
+                FdReadEndpoint::File(FileFd::from_file(file, target.clone().into())),
+                false,
+            );
+            return Ok((None, false, Some(FunctionCallStdinBinding { entry: saved })));
         }
         let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
         if !std::fs::metadata(&path)

@@ -818,6 +818,8 @@ pub(crate) fn ansic_shouldquote(value: &str) -> bool {
     // raw-byte markers (U+E000 series) must decode first or a stored
     // non-printing byte reads as a printable PUA wide char.
     let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
+    // R8: one locale read per walk, not per decoded character.
+    let utf8 = crate::locale::is_utf8();
     let mut index = 0;
     while index < bytes.len() {
         let byte = bytes[index];
@@ -833,7 +835,7 @@ pub(crate) fn ansic_shouldquote(value: &str) -> bool {
             // strtrans.c:351-354; under a non-UTF-8 locale (LC_ALL=C)
             // every high-bit byte is non-printing and forces quoting
             // (rubash#1464).
-            Some(ch) if crate::locale::is_utf8() && is_printable_wide(ch) => index += ch.len_utf8(),
+            Some(ch) if utf8 && is_printable_wide(ch) => index += ch.len_utf8(),
             _ => return true,
         }
     }
@@ -850,6 +852,8 @@ pub(crate) fn ansic_quote(value: &str) -> String {
     // execution_misc.rs) so stored non-printing bytes render as octal.
     let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(value);
     let mut out = String::with_capacity(4 * bytes.len() + 4);
+    // R8: one locale read per walk, not per decoded character.
+    let utf8 = crate::locale::is_utf8();
     out.push_str("$'");
     let mut index = 0;
     while index < bytes.len() {
@@ -904,7 +908,7 @@ pub(crate) fn ansic_quote(value: &str) -> String {
                 // branch (strtrans.c:266-282); under a non-UTF-8 locale
                 // each high-bit byte falls to the octal arm below, one
                 // byte at a time (rubash#1464).
-                Some(ch) if crate::locale::is_utf8() && is_printable_wide(ch) => {
+                Some(ch) if utf8 && is_printable_wide(ch) => {
                     out.push(ch);
                     index += ch.len_utf8();
                 }

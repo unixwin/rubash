@@ -78,6 +78,37 @@ impl Executor {
             self.last_builtin_write_failed.set(false);
             return Ok(());
         }
+        // rubash#1968: GNU runs do_redirections BEFORE the builtin
+        // body (execute_cmd.c:5606 execute_builtin_or_function), so a
+        // failed input open suppresses the builtin entirely — no
+        // output, status 1, the redirection_error diagnostic. This
+        // buffered route is where echo/printf-class builtins flush,
+        // and it never validated input redirects: the ordered walk
+        // below only routes fds 1/2, so `echo hi < /dev/fd/63` and
+        // `echo hi <> /dev/fd/63` printed with status 0. The plain
+        // filesystem face is already settled before execution (the
+        // reject gate's Input probe and the setup walk), so this
+        // pass owns exactly the registry classes those passes skip:
+        // net targets (probed through the classified ladder — the
+        // probe's netopen is the command's one open), fd aliases
+        // (judged against the fd table, no drain), and synthetic
+        // /proc targets (served by their ladder). A failure routes
+        // its diagnostic through the command's fd-2 binding, drops
+        // both buffers, and folds status 1 into the builtin's return
+        // through the write-failure flag.
+        if let Some(error) = self.buffered_builtin_input_redirect_error(cmd) {
+            let mut line = Vec::new();
+            let _ = writeln!(
+                &mut line,
+                "{}{}",
+                self.diagnostic_prefix(),
+                crate::posix_errors::message(&error)
+            );
+            let _ = self.write_redirect_diagnostic_routed(cmd, &line);
+            self.exit_code = 1;
+            self.last_builtin_write_failed.set(true);
+            return Ok(());
+        }
         // Exact-once consumer boundary for U+E000 raw-byte markers carried
         // in word data (ANSI-C \xHH / octal bytes >= 0x80, raw-byte
         // substitution payloads). Builtins write to the real byte sinks
@@ -94,6 +125,60 @@ impl Executor {
         }
         self.write_buffered_stdout_block(cmd, &stdout)?;
         self.write_buffered_stderr_block(cmd, &stderr)
+    }
+
+    /// The first failing input-side redirect of a buffered builtin,
+    /// restricted to the special-path registry classes the earlier
+    /// passes skip (rubash#1968; see the call site). The returned
+    /// error already carries the `<target>: <strerror>` path_error
+    /// shape. Plain filesystem, null-device and fd-alias targets
+    /// return None — the reject gate and the setup walk settled
+    /// those before the builtin ran (the gate settles dangling
+    /// aliases since the #1963 gate fix), and re-probing them here
+    /// could only repeat their verdict. Net and synthetic targets
+    /// are the residue: the gate's Input/ReadWrite probes exempt
+    /// every registry class, and nothing else on the buffered route
+    /// ever attempts them — a refused /dev/tcp connect or an
+    /// unservable synthetic name would otherwise let the builtin
+    /// execute silently, where GNU suppresses it with status 1.
+    fn buffered_builtin_input_redirect_error(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<std::io::Error> {
+        use crate::parser::RedirectKind;
+        for redirect in &cmd.redirects {
+            if redirect.fd_var.is_some()
+                || crate::executor::support_names::is_injected_group_redirect(redirect)
+            {
+                continue;
+            }
+            if !matches!(redirect.kind, RedirectKind::Input | RedirectKind::ReadWrite) {
+                continue;
+            }
+            let target = self.expand_redirect_target(redirect);
+            if is_closed_redirect_target(&target) || target.starts_with("<(") {
+                continue;
+            }
+            let write = redirect.kind == RedirectKind::ReadWrite;
+            let result = match crate::special_paths::classify_special_path(&target) {
+                crate::special_paths::SpecialPathClass::NetRedirect
+                | crate::special_paths::SpecialPathClass::SyntheticProc
+                | crate::special_paths::SpecialPathClass::SyntheticLink => {
+                    if write {
+                        self.probe_input_redirect_readwrite(&target)
+                            .map(|_| ())
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))
+                    } else {
+                        self.probe_input_redirect(&target).map(|_| ())
+                    }
+                }
+                _ => continue,
+            };
+            if let Err(error) = result {
+                return Some(error);
+            }
+        }
+        None
     }
 
     fn write_buffered_stdout_block(
@@ -206,31 +291,41 @@ impl Executor {
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-        // GNU execute_cmd.c:4886-4888: a special builtin whose status exceeds
-        // EX_SHERRBASE has it converted (EX_USAGE 258 -> EX_BADUSAGE 2) and
-        // sets special_builtin_failed, so a POSIX non-interactive shell exits
-        // on `trap USR1` (the usage failure the posix reset-by-name rule
-        // raises). Mirrors the execute_set/unset wrappers. The direct/late
-        // dispatch arms for `trap` do not consult the flag, so this wrapper
-        // applies the execute_cmd.c:1004-1017 gate itself.
+        // GNU execute_cmd.c:4886-4888: a special builtin whose status
+        // exceeds EX_SHERRBASE has it converted (EX_USAGE 258 ->
+        // EX_BADUSAGE 2, EX_UTILERROR 263 -> EXECUTION_FAILURE 1) and
+        // marks special_builtin_failed; the :1004-1017 check then exits
+        // a non-interactive POSIX shell in an untested context. trap's
+        // layer returns the RAW code only from the POSIX reset-by-name
+        // face (builtins/trap.rs EX_USAGE_INTERNAL, `trap USR1`); its
+        // other usage faces (invalid option, -p with -P, -P without a
+        // signal, a single non-signal argument) return the converted
+        // EX_USAGE (2) — and within trap's status vocabulary 2 is only
+        // ever a usage face (bad signal specs are EXECUTION_FAILURE),
+        // so both conventions mark the failure here.
+        //
+        // rubash#2117: the exit itself is adjudicated by the ONE gate
+        // in execute_materialized_command. This wrapper previously
+        // converted inline (an immediate ExitCode when posix +
+        // non-interactive), which pre-empted the gate's tested-context
+        // (execute_cmd.c:1004's ignore_return/invert), `command'-builtin
+        // suppression (execute_cmd.c:4657-4666) and ERR-trap
+        // adjudication: `trap USR1 || x`, `command trap USR1` and a
+        // benign ERR trap all exited where GNU continues. Every
+        // dispatch arm for `trap` (late slot, direct `builtin' route,
+        // `command' re-dispatch) completes inside an enclosing simple
+        // command whose gate — or, for `command', the re-dispatch's
+        // flag clear — owns the verdict, so marking is sufficient.
         if status > 256 {
             self.special_builtin_failed.set(true);
             let converted = match status {
                 258..=259 => 2, // EX_USAGE, EX_BADSYNTAX -> EX_BADUSAGE
                 _ => 1,         // EX_UTILERROR etc. -> EXECUTION_FAILURE
             };
-            if self.posix_mode_enabled()
-                && self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    != Some("1")
-            {
-                self.exit_code = converted;
-                return Err(ExecuteError::ExitCode(converted));
-            }
             return Ok(converted);
+        }
+        if status == crate::builtins::trap::EX_USAGE {
+            self.special_builtin_failed.set(true);
         }
         Ok(status)
     }

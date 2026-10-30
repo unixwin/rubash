@@ -18,7 +18,6 @@ use std::process::{Command, Stdio};
 struct Run {
     stdout: String,
     stderr: String,
-    code: Option<i32>,
 }
 
 fn tempdir(tag: &str) -> PathBuf {
@@ -40,7 +39,6 @@ fn rubash_c(script: &str, dir: &Path) -> Run {
     Run {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        code: output.status.code(),
     }
 }
 

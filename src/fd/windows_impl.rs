@@ -206,8 +206,12 @@ impl FdTable {
         // materialize through an anonymous pipe so downstream reads (and any
         // inherited-handle child) see ordinary byte-stream semantics. The
         // write side is closed immediately: a pipe reports EOF once drained,
-        // which is exactly the procfs "static snapshot file" behavior.
-        if let Some(content) = crate::proc_vfs::proc_file_content(path) {
+        // which is exactly the procfs "static snapshot file" behavior. The
+        // class judgment and bytes come from the special-path registry
+        // (vfs audit §4.5 slice S1/S2), the same entry open_file_read
+        // below asks; only the input shape differs (POSIX spelling here,
+        // an already-translated Path there).
+        if let Some(content) = crate::special_paths::synthetic_proc_content(path) {
             return self.install_read_bytes(slot, &content);
         }
         let wide = to_wide(path);
@@ -447,10 +451,23 @@ const CREATE_NEW: DWORD = 1;
 const OPEN_ALWAYS: DWORD = 4;
 const FILE_END: DWORD = 2;
 
+// FILE_FLAG_BACKUP_SEMANTICS (defined with the other file-flag
+// constants above) is what lets CreateFileW open a DIRECTORY
+// handle (backup/restore semantics).
+
 fn create_file(
     path: &std::path::Path,
     access: DWORD,
     disposition: DWORD,
+) -> std::io::Result<HANDLE> {
+    create_file_with_flags(path, access, disposition, 0)
+}
+
+fn create_file_with_flags(
+    path: &std::path::Path,
+    access: DWORD,
+    disposition: DWORD,
+    flags: DWORD,
 ) -> std::io::Result<HANDLE> {
     let wide: Vec<u16> = path
         .as_os_str()
@@ -464,7 +481,7 @@ fn create_file(
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             disposition,
-            0,
+            flags,
             0,
         )
     };
@@ -478,12 +495,38 @@ fn create_file(
 pub fn open_file_read(path: &std::path::Path) -> std::io::Result<HANDLE> {
     // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): every redirect-read path
     // funnels through here (FileFd::open_read), so the synthetic /proc files
-    // materialize as a drained pipe handle at this single choke point.
+    // materialize as a drained pipe handle at this single choke point. The
+    // class judgment and bytes come from the special-path registry (vfs
+    // audit §4.5 slice S1/S2) — the same entry FdTable::open_read asks;
+    // the Path-to-POSIX-text conversion below is only this entry's input
+    // adaptation, since callers here hold an already-translated Path.
     let posix_text = path.to_string_lossy().replace('\\', "/");
-    if let Some(content) = crate::proc_vfs::proc_file_content(&posix_text) {
+    if let Some(content) = crate::special_paths::synthetic_proc_content(&posix_text) {
         return install_bytes_read_pipe(&content);
     }
-    create_file(path, GENERIC_READ, OPEN_EXISTING)
+    match create_file(path, GENERIC_READ, OPEN_EXISTING) {
+        Ok(handle) => Ok(handle),
+        Err(error) => {
+            // rubash#2101: a directory is a legal input in GNU —
+            // redir.c redir_open opens it and the child receives the
+            // descriptor; only a READING child fails, with its own
+            // diagnostic. CreateFileW refuses directories without
+            // FILE_FLAG_BACKUP_SEMANTICS, so the plain open killed
+            // the command at redirect time with Permission denied.
+            // Retry directories with the flag; every other failure
+            // keeps the original error.
+            if std::fs::metadata(path).is_ok_and(|meta| meta.is_dir()) {
+                create_file_with_flags(
+                    path,
+                    GENERIC_READ,
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS,
+                )
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
 /// Create an anonymous pipe pre-filled with `content`, write end closed:
@@ -644,6 +687,66 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_PIPE
 }
 
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetNamedPipeInfo(
+        h: HANDLE,
+        flags: *mut DWORD,
+        in_size: *mut DWORD,
+        out_size: *mut DWORD,
+        instances: *mut DWORD,
+    ) -> BOOL;
+}
+
+/// The handle is a winsock SOCKET: netopen adoption stores the connected
+/// `/dev/tcp|udp` endpoint as the fd's raw handle (rubash#1026), and a
+/// SOCKET reports FILE_TYPE_PIPE too. Discriminator: GetNamedPipeInfo
+/// succeeds only on a named pipe and fails on a socket (the same split
+/// libuv's uv_guess_handle uses to separate UV_NAMED_PIPE from UV_TCP),
+/// so FILE_TYPE_PIPE + GetNamedPipeInfo failure = socket.
+///
+/// This matters because the byte primitives below must not serve a socket
+/// through ReadFile/WriteFile: rubash#1976 — `exec 3<>/dev/tcp/host/port`
+/// opened the connection, then every fd-3 read AND write failed with
+/// `Invalid argument` (ERROR_INVALID_PARAMETER): std's sockets are created
+/// WSA_FLAG_OVERLAPPED, and a synchronous ReadFile/WriteFile with a NULL
+/// OVERLAPPED on an overlapped handle is rejected outright. GNU has one
+/// connected socket descriptor serving both directions of any netopen face
+/// (redir.c:660 redir_open calls netopen for RF_DEVTCP/RF_DEVUDP whatever
+/// the `<`/`>`/`<>` spelling; lib/sh/netopen.c:282 netopen → socket +
+/// connect at :178 _netopen4, then plain read(2)/write(2) on that one fd),
+/// so the socket API (recv/send) is the correct primitive for BOTH
+/// directions here.
+pub fn is_socket_handle(h: HANDLE) -> bool {
+    if !is_pipe_handle(h) {
+        return false;
+    }
+    let mut junk: DWORD = 0;
+    (unsafe { GetNamedPipeInfo(h, &mut junk, &mut junk, &mut junk, &mut junk) }) == 0
+}
+
+/// Run one byte-I/O operation on a socket HANDLE through std's socket API.
+/// `TcpStream::from_raw_socket` is only a recv/send carrier for the raw
+/// handle — the fd table owns the close (close_handle), so the stream is
+/// `ManuallyDrop` and never closesocket'd. recv/send work on an overlapped
+/// socket regardless of the overlap flag (that is how every std::net
+/// endpoint does its I/O), which is exactly what ReadFile/WriteFile cannot
+/// do (rubash#1976). A connected UDP endpoint sends the same way; its
+/// datagram record buffering (winsock recv discards a datagram larger than
+/// the buffer — WSAEMSGSIZE — where POSIX read truncates and GNU serves
+/// records from a chunked zreadc buffer) is a read-builtin concern, not a
+/// primitive one.
+fn socket_io<T>(
+    h: HANDLE,
+    io: impl FnOnce(&mut std::net::TcpStream) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    use std::os::windows::io::FromRawSocket;
+    let mut stream = std::mem::ManuallyDrop::new(unsafe {
+        std::net::TcpStream::from_raw_socket(h as std::os::windows::io::RawSocket)
+    });
+    io(&mut stream)
+}
+
 /// The filesystem path an open disk-file handle refers to, or None for
 /// pipes/consoles/devices. GNU's `open("/proc/self/fd/N", O_RDONLY)` on a
 /// regular-file descriptor performs a FRESH open at offset 0, so callers
@@ -673,6 +776,19 @@ pub fn disk_file_path(h: HANDLE) -> Option<std::path::PathBuf> {
 pub fn is_console_handle(h: HANDLE) -> bool {
     let mut mode: DWORD = 0;
     (unsafe { GetConsoleMode(h, &mut mode) }) != 0
+}
+
+/// True when the console input handle is in line-input (cooked) mode.
+/// A cooked Windows console has no VEOF of its own: conhost assembles a
+/// line and hands its bytes — Ctrl-D included — to ReadFile as data,
+/// where a Unix canonical line discipline would have turned the same
+/// keystroke into an EOF/flush. The read transports consult this to
+/// translate a received 0x04 byte back into those semantics
+/// (niubash#684). ENABLE_LINE_INPUT is defined with the one-char guard
+/// constants below.
+pub fn console_line_input_mode(h: HANDLE) -> bool {
+    let mut mode: DWORD = 0;
+    (unsafe { GetConsoleMode(h, &mut mode) }) != 0 && (mode & ENABLE_LINE_INPUT) != 0
 }
 
 /// FILE_TYPE_CHAR check for `test -c` (GNU test.c filetest → S_ISCHR):
@@ -900,6 +1016,13 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
             }
         }
         FILE_TYPE_PIPE => {
+            // rubash#1976: PeekNamedPipe is a named-pipe API — on a
+            // netopen socket it just fails, which degraded every bounded
+            // read to an immediate "Ready" followed by a blocking recv.
+            // select() is the winsock equivalent of the pipe peek loop.
+            if is_socket_handle(h) {
+                return wait_socket_readable(h, timeout);
+            }
             let deadline = std::time::Instant::now() + timeout;
             loop {
                 let mut avail: DWORD = 0;
@@ -931,8 +1054,74 @@ pub fn wait_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
     }
 }
 
+/// Bounded readability wait on a socket handle (rubash#1976): winsock
+/// select() on the one descriptor, the direct analogue of the named-pipe
+/// PeekNamedPipe loop above. `read -t N -u 3` on `/dev/tcp` then times out
+/// while the socket is quiet instead of burning the deadline and blocking
+/// forever. SOCKET_ERROR (winsock uninitialized, closed handle) degrades
+/// to Ready — the same fallback shape as the pipe branch's failed peek.
+fn wait_socket_readable(h: HANDLE, timeout: std::time::Duration) -> ReadWait {
+    #[repr(C)]
+    struct WsaFdSet {
+        fd_count: u32,
+        fd_array: [usize; WSA_FD_SET_SIZE],
+    }
+    #[repr(C)]
+    struct WsaTimeval {
+        tv_sec: i32,
+        tv_usec: i32,
+    }
+    const WSA_FD_SET_SIZE: usize = 64;
+    const SOCKET_ERROR: i32 = -1;
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn select(
+            nfds: i32,
+            readfds: *mut WsaFdSet,
+            writefds: *mut WsaFdSet,
+            exceptfds: *mut WsaFdSet,
+            timeout: *const WsaTimeval,
+        ) -> i32;
+    }
+    // nfds is ignored on Windows; the set carries the descriptor.
+    let mut readfds = WsaFdSet {
+        fd_count: 1,
+        fd_array: [h as usize; WSA_FD_SET_SIZE],
+    };
+    let tv = WsaTimeval {
+        tv_sec: timeout.as_secs().min(i32::MAX as u64) as i32,
+        tv_usec: timeout.subsec_micros() as i32,
+    };
+    match unsafe {
+        select(
+            0,
+            &mut readfds,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &tv,
+        )
+    } {
+        0 => ReadWait::Timeout,
+        n if n > 0 => ReadWait::Ready,
+        _ => ReadWait::Ready,
+    }
+}
+
 /// Read up to `n` bytes; ERROR_BROKEN_PIPE (drained anonymous pipe) is EOF.
 pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
+    // rubash#1976: a netopen endpoint is a socket handle — recv, not
+    // ReadFile (see is_socket_handle). recv returning 0 is the orderly
+    // peer shutdown = EOF GNU's read(2) sees on the netopen descriptor;
+    // the ERROR_BROKEN_PIPE mapping below stays pipe-only.
+    if is_socket_handle(h) {
+        return socket_io(h, |stream| {
+            use std::io::Read as _;
+            let mut buf = vec![0u8; n.max(1)];
+            let got = stream.read(&mut buf)?;
+            buf.truncate(got);
+            Ok(buf)
+        });
+    }
     let mut buf = vec![0u8; n.max(1)];
     let mut got: DWORD = 0;
     let ok = unsafe {
@@ -955,7 +1144,30 @@ pub fn read_some(h: HANDLE, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Write all bytes to an opened redirect-target `File` through the
+/// raw-handle primitive (rubash#2102). A netopen target's File wraps a
+/// SOCKET handle: std's `File::write_all` reaches WriteFile, which
+/// rejects a socket with ERROR_INVALID_PARAMETER — every write failed
+/// `Invalid argument`, live peer or dead, and a dead peer never
+/// surfaced its real error. The primitive routes sockets through send
+/// (see is_socket_handle / rubash#1976), so a closed peer reports its
+/// genuine failure (the WSAECONNRESET/EPIPE family) through
+/// sh_chkwrite. The File keeps owning the handle; this only borrows it.
+pub fn write_file_all(file: &std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    write_all(file.as_raw_handle() as HANDLE, bytes)
+}
+
 pub fn write_all(h: HANDLE, bytes: &[u8]) -> std::io::Result<()> {
+    // rubash#1976: send, not WriteFile, on a netopen endpoint (see
+    // is_socket_handle); write_all loops send until the buffer is out,
+    // the same contract as the WriteFile loop below.
+    if is_socket_handle(h) {
+        return socket_io(h, |stream| {
+            use std::io::Write as _;
+            stream.write_all(bytes)
+        });
+    }
     let mut off = 0usize;
     while off < bytes.len() {
         let mut n: DWORD = 0;

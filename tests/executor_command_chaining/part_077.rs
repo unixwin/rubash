@@ -414,11 +414,18 @@ fn test_time_null_command_resets_status() {
 
 #[test]
 fn test_command_builtin_can_invoke_time_keyword_bridge() {
+    // rubash#1871 (pin correction, GNU oracle): `command' does NOT
+    // re-admit the reserved word `time' — after `command' the next
+    // word is an ordinary command name, so `time' is looked up in
+    // PATH and (with a hermetic PATH) not found: 127 for both, and
+    // GNU prints `time: command not found'. The old pin expected a
+    // "time keyword bridge" (false:1 / true:0) that GNU never had.
     let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-command-time-output.txt";
     let _ = fs::remove_file(output_path);
     let input = format!(
-        "command time -p false; echo false:$? > {output_path}; \
+        "PATH=/rubash-nonexistent; \
+         command time -p false; echo false:$? > {output_path}; \
          command time -p true; echo true:$? >> {output_path}"
     );
     let tokens = tokenize(&input);
@@ -431,7 +438,7 @@ fn test_command_builtin_can_invoke_time_keyword_bridge() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "false:1\ntrue:0\n"
+        "false:127\ntrue:127\n"
     );
     let _ = fs::remove_file(output_path);
 }
@@ -1126,6 +1133,12 @@ fn test_alias_introduced_time_executes_arithmetic_command() {
 
 #[test]
 fn test_alias_introduced_time_executes_coproc_command() {
+    // rubash#1871: run through the real CLI like the sibling alias
+    // pins (wt33/wt37) — an alias defined and used in one input
+    // cannot be modeled by a single in-process tokenize+execute_ast
+    // pass. The behavior pinned is the #1871 lexer fix: after the
+    // alias expands to `time', the `coproc' read inside the -p window
+    // keeps its reserved position, so the brace body groups.
     let _cwd_guard = CwdGuard::take();
     let status_path = "target/rubash-alias-time-coproc-status.txt";
     let _ = fs::remove_file(status_path);
@@ -1133,14 +1146,8 @@ fn test_alias_introduced_time_executes_coproc_command() {
         "shopt -s expand_aliases\nalias t=time\n\
          t -p coproc ATIMEDC {{ :; }}; echo pid:${{ATIMEDC_PID:+set}} > {status_path}"
     );
-    let tokens = tokenize(&input);
-    let ast = parse(&tokens);
-    let mut executor = Executor::new();
-
-    let result = executor.execute_ast(&ast);
-
-    assert!(result.is_ok());
-    assert_eq!(executor.last_exit_code(), 0);
+    let (_cli_out, cli_err, cli_code) = run_cli_script(&input);
+    assert_eq!(cli_code, Some(0), "stderr: {cli_err}");
     assert_eq!(fs::read_to_string(status_path).unwrap(), "pid:set\n");
     let _ = fs::remove_file(status_path);
 }

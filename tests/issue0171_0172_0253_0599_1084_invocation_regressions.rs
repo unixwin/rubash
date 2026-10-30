@@ -13,6 +13,7 @@
 //! All expectations were measured against GNU bash 5.3.20. Tests only.
 
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -74,6 +75,10 @@ impl Scratch {
 
     /// Invoke the built binary through a symlink called `name`, with
     /// argv[0] set to exactly `name` (as a PATH lookup would produce).
+    /// The probe is unix exec mechanics (symlink + explicit argv[0]
+    /// override via `CommandExt::arg0`); std exposes no argv[0] override
+    /// on Windows, where argv[0] follows the program path.
+    #[cfg(unix)]
     fn run_as_name(&self, name: &str, args: &[&str]) -> (String, String, i32) {
         let bindir = self.dir.join("bin");
         fs::create_dir_all(&bindir).unwrap();
@@ -123,6 +128,7 @@ fn issue253_exported_function_materializes_once_in_env() {
     assert_eq!(out, "1\n");
 }
 
+#[cfg(unix)]
 #[test]
 fn issue599_invoked_as_bash_reports_bash_dollar_zero() {
     let s = Scratch::new("i599");

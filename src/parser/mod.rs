@@ -2,7 +2,7 @@
 //!
 //! Transforms tokens into an AST.
 
-mod arithmetic_command;
+pub(crate) mod arithmetic_command;
 mod arithmetic_for;
 mod array_element_assignment;
 pub mod assignment;

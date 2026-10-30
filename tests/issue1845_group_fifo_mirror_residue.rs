@@ -37,7 +37,7 @@ fn run(script: &str, stdin_data: &str, pipe_stdin: bool) -> (String, String, Opt
         std::fs::write(&path, stdin_data).expect("write stdin scratch");
         let file = std::fs::File::open(&path).expect("open stdin scratch");
         cmd.stdin(Stdio::from(file));
-        let mut child = cmd.spawn().expect("spawn rubash");
+        let child = cmd.spawn().expect("spawn rubash");
         let out = child.wait_with_output().expect("wait rubash");
         let _ = std::fs::remove_file(&path);
         return (

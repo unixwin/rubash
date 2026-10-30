@@ -1,5 +1,23 @@
 use super::*;
 
+/// add_or_supercede for an ordered env pair list (variables.c
+/// maybe_make_export_env): replace the value in place when the
+/// name is already present (compared case-insensitively on
+/// Windows, like its environment block), else append.
+pub(in crate::executor) fn env_pair_supercede(
+    pairs: &mut Vec<(String, String)>,
+    name: String,
+    value: String,
+) {
+    if let Some(slot) = pairs.iter_mut().find(|(existing, _)| {
+        existing == &name || (cfg!(windows) && existing.eq_ignore_ascii_case(&name))
+    }) {
+        slot.1 = value;
+        return;
+    }
+    pairs.push((name, value));
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_readonly(
         &mut self,
@@ -11,6 +29,14 @@ impl Executor {
             let status =
                 self.execute_readonly_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            // rubash#2117: the -f face's invalid option returns
+            // EX_USAGE (GNU setattr.def via declare.def's function
+            // face), which execute_cmd.c:4886-4888 marks
+            // special_builtin_failed; this path's status vocabulary
+            // has 2 only for that face.
+            if status == crate::builtins::setattr::EX_USAGE {
+                self.special_builtin_failed.set(true);
+            }
             return Ok(status);
         }
 
@@ -116,6 +142,13 @@ impl Executor {
         } else {
             status
         };
+        // rubash#2117: same EX_USAGE mark as execute_export — GNU
+        // setattr.def's invalid-option return (execute_cmd.c:4886-4888);
+        // readonly's status vocabulary has the converted 2 only for
+        // this face.
+        if status == crate::builtins::setattr::EX_USAGE {
+            self.special_builtin_failed.set(true);
+        }
         // GNU execute_cmd.c:1004-1017 with the sh_invalidid/err_readonly
         // assignment class: in POSIX mode a non-interactive shell exits when
         // the special builtin readonly fails on an assignment (`readonly
@@ -260,7 +293,8 @@ impl Executor {
         Ok(())
     }
 
-    pub(in crate::executor) fn apply_exported_functions_to_child(&self, process: &mut Command) {
+    pub(in crate::executor) fn exported_function_env_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = Vec::new();
         for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS) {
             let Some(body) = self.shell_state.functions.get(&name) else {
                 continue;
@@ -271,15 +305,31 @@ impl Executor {
                 .get(&name)
                 .map(|info| info.def_redirects.as_slice())
                 .unwrap_or(&[]);
-            process.env(
+            pairs.push((
                 exported_function_env_name(&name),
                 exported_function_env_value(&body.commands, def_redirects),
-            );
+            ));
+        }
+        pairs
+    }
+
+    pub(in crate::executor) fn apply_exported_functions_to_child(&self, process: &mut Command) {
+        for (name, value) in self.exported_function_env_pairs() {
+            process.env(name, value);
         }
     }
 
-    pub(in crate::executor) fn apply_child_environment(&self, process: &mut Command) {
-        process.env_clear();
+    /// The child-environment composition as ordered pairs — the data
+    /// form of [`Executor::apply_child_environment`], sharing this
+    /// one body: the route seam (external_route) hands a routed call
+    /// the environment as pairs, and the spawn path applies the same
+    /// pairs to its `Command`. Composition uses add_or_supercede
+    /// semantics (variables.c maybe_make_export_env): a name already
+    /// present is replaced in place, so the sequence of pairs this
+    /// returns carries exactly the names and values the `Command`
+    /// form sets, in the same order.
+    pub(in crate::executor) fn compose_child_environment(&self) -> Vec<(String, String)> {
+        let mut pairs: Vec<(String, String)> = Vec::new();
         // G-03: project the process-env mirror into the child env FIRST,
         // so the session overlays below override it name-by-name. The
         // mirror set (local_helpers::shell_assignment_needs_process_env:
@@ -287,17 +337,18 @@ impl Executor {
         // protocol name) is written through to the process env on
         // assignment precisely so child processes can read it back —
         // every other spawn surface honors that transport (the
-        // respawn/comsub env_map bases start from std::env::vars()).
-        // This builder env_clear()s, so without the projection the
-        // mirror was a write-only sink for plain external commands: a
-        // session's own mirrored writes never reached its children
-        // (the multi-session harness caught a mirrored __RUBASH_* probe
-        // invisible to the assigning session's /usr/bin/env). TMPDIR
+        // respawn/comsub env_map bases start from the ingested process
+        // environment — env_helpers::process_env_pairs).
+        // This builder env_clear()s (the Command form), so without the
+        // projection the mirror was a write-only sink for plain external
+        // commands: a session's own mirrored writes never reached its
+        // children (the multi-session harness caught a mirrored __RUBASH_*
+        // probe invisible to the assigning session's /usr/bin/env). TMPDIR
         // stays out (set_process_env never mirrors it); __RUBASH_TRAP*
         // keys stay out except the merged ignore set, which the
         // transport_inherited_ignores arm below re-adds in child form —
         // the same strip the respawn env_map applies.
-        for (name, value) in std::env::vars() {
+        for (name, value) in crate::executor::env_helpers::process_env_pairs() {
             if name == "TMPDIR"
                 || !crate::executor::local_helpers::shell_assignment_needs_process_env(&name)
                 || (name.starts_with("__RUBASH_TRAP")
@@ -306,7 +357,8 @@ impl Executor {
             {
                 continue;
             }
-            process.env(&name, self.child_env_value(&name, &value));
+            let value = self.child_env_value(&name, &value);
+            env_pair_supercede(&mut pairs, name, value);
         }
         for name in marked_env_names(&self.shell_state.env_vars, EXPORTED_VARS) {
             // GNU variables.c make_env_array_from_var_list: array and
@@ -317,7 +369,8 @@ impl Executor {
             }
             if let Some(value) = self.shell_state.env_vars.get(&name) {
                 if is_valid_process_env(&name, value) {
-                    process.env(&name, self.child_env_value(&name, value));
+                    let value = self.child_env_value(&name, value);
+                    env_pair_supercede(&mut pairs, name, value);
                 }
             }
         }
@@ -329,7 +382,8 @@ impl Executor {
                 continue;
             }
             if is_valid_process_env(&name, &value) {
-                process.env(&name, self.child_env_value(&name, &value));
+                let value = self.child_env_value(&name, &value);
+                env_pair_supercede(&mut pairs, name, value);
             }
         }
         // SIG_IGN dispositions cross the process boundary in GNU (fork);
@@ -339,10 +393,28 @@ impl Executor {
         let inherited_ignores =
             crate::builtins::trap::transport_inherited_ignores(&self.shell_state.env_vars);
         if !inherited_ignores.is_empty() {
-            process.env(crate::builtins::trap::TRAP_ORIG_IGNORES, inherited_ignores);
+            env_pair_supercede(
+                &mut pairs,
+                crate::builtins::trap::TRAP_ORIG_IGNORES.to_string(),
+                inherited_ignores,
+            );
         }
-        apply_required_windows_child_environment(process, &self.shell_state.env_vars);
-        self.apply_exported_functions_to_child(process);
+        for (name, value) in crate::executor::path::required_windows_child_environment_pairs(
+            &self.shell_state.env_vars,
+        ) {
+            env_pair_supercede(&mut pairs, name, value);
+        }
+        for (name, value) in self.exported_function_env_pairs() {
+            env_pair_supercede(&mut pairs, name, value);
+        }
+        pairs
+    }
+
+    pub(in crate::executor) fn apply_child_environment(&self, process: &mut Command) {
+        process.env_clear();
+        for (name, value) in self.compose_child_environment() {
+            process.env(name, value);
+        }
     }
 
     pub(in crate::executor) fn child_env_value(&self, name: &str, value: &str) -> String {

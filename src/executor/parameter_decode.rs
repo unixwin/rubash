@@ -173,6 +173,14 @@ pub(in crate::executor) fn remove_matching_prefix(
     // order the collected Vec produced. Boundaries that would split a
     // marker pair are not candidates (marker_pair_split_points).
     let split_points = marker_pair_split_points(value);
+    let prechecked = removal_pair_gates_clean(pattern, value);
+    let candidate_matches = |word: &str| {
+        if prechecked {
+            removal_pattern_matches_prechecked(pattern, word, extglob)
+        } else {
+            removal_pattern_matches(pattern, word, extglob)
+        }
+    };
     let mut indices = value
         .char_indices()
         .map(|(index, _)| index)
@@ -180,11 +188,11 @@ pub(in crate::executor) fn remove_matching_prefix(
         .filter(|index| !split_points.contains(index));
     let matched = match length {
         MatchLength::Shortest => indices
-            .find(|&end| removal_pattern_matches(pattern, &value[..end], extglob))
+            .find(|&end| candidate_matches(&value[..end]))
             .map(|end| value[end..].to_string()),
         MatchLength::Longest => indices
             .rev()
-            .find(|&end| removal_pattern_matches(pattern, &value[..end], extglob))
+            .find(|&end| candidate_matches(&value[..end]))
             .map(|end| value[end..].to_string()),
     };
     matched.unwrap_or_else(|| value.to_string())
@@ -225,6 +233,14 @@ pub(in crate::executor) fn remove_matching_suffix(
     // with the same marker-pair split exclusion (rubash#1261: the `%`
     // form stranded the U+E000 sentinel half).
     let split_points = marker_pair_split_points(value);
+    let prechecked = removal_pair_gates_clean(pattern, value);
+    let candidate_matches = |word: &str| {
+        if prechecked {
+            removal_pattern_matches_prechecked(pattern, word, extglob)
+        } else {
+            removal_pattern_matches(pattern, word, extglob)
+        }
+    };
     let mut indices = value
         .char_indices()
         .map(|(index, _)| index)
@@ -233,10 +249,10 @@ pub(in crate::executor) fn remove_matching_suffix(
     let matched = match length {
         MatchLength::Shortest => indices
             .rev()
-            .find(|&start| removal_pattern_matches(pattern, &value[start..], extglob))
+            .find(|&start| candidate_matches(&value[start..]))
             .map(|start| value[..start].to_string()),
         MatchLength::Longest => indices
-            .find(|&start| removal_pattern_matches(pattern, &value[start..], extglob))
+            .find(|&start| candidate_matches(&value[start..]))
             .map(|start| value[..start].to_string()),
     };
     matched.unwrap_or_else(|| value.to_string())
@@ -354,6 +370,35 @@ fn removal_pattern_matches(pattern: &str, word: &str, extglob: bool) -> bool {
     } else {
         case_pattern_matches(pattern, word)
     }
+}
+
+/// Prechecked twin of [`removal_pattern_matches`] for the removal walks:
+/// the caller has evaluated both byte gates once for the whole
+/// (pattern, value) pair and they do not fire, and every candidate the
+/// walk tests is a char-boundary slice of that same value (the walk
+/// itself excludes marker-pair split points), so the per-candidate gate
+/// re-evaluation inside case_pattern_matches could only repeat the same
+/// negative verdict at O(candidate length) per boundary. On a
+/// multi-thousand-char value with the match at the far end of the scan
+/// (`${v%%.*}`) that re-scan was the dominant cost of the expansion.
+fn removal_pattern_matches_prechecked(pattern: &str, word: &str, extglob: bool) -> bool {
+    if extglob && pattern_uses_extglob_syntax(pattern) {
+        super::conditional::extglob_case_pattern_matches(pattern, word)
+    } else {
+        super::conditional::pattern::case_pattern_matches_prechecked(pattern, word, false)
+    }
+}
+
+/// One-time gate verdict for a (pattern, value) pair in the char-boundary
+/// removal walks: both byte gates are containment predicates, so a
+/// gate-clean pair stays clean for every char-boundary slice of the
+/// value (see case_pattern_matches_prechecked). The byte-locale gate is
+/// already known negative on entry to the walks (it routes to the
+/// raw-byte walks above); it is re-checked here so the helper stays
+/// correct if the routing above it ever changes.
+fn removal_pair_gates_clean(pattern: &str, value: &str) -> bool {
+    !super::conditional::pattern::sides_need_byte_char_matching(pattern, value)
+        && !super::conditional::pattern::sides_need_byte_locale_units(pattern, value)
 }
 
 pub(in crate::executor) fn strip_surrounding_quotes(s: &str) -> String {

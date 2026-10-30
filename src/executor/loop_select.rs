@@ -167,7 +167,9 @@ impl Executor {
             // on the final iteration leaves the for command's status at the
             // trap's status (probe k1: `FOR=1`).
             if self.debug_trap_in_scope() {
-                if let Some(skip_status) = self.run_debug_trap(&for_text)? {
+                if let Some(skip_status) =
+                    self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text)?
+                {
                     self.exit_code = skip_status;
                     ran_body = true;
                     continue;
@@ -348,9 +350,11 @@ impl Executor {
         // `for` keyword's line is the ambient line_number in force while
         // the body executes — inner while/if/group diagnostics report it.
         let for_line = cmd.line;
-        let result = self.with_command_input_redirects(cmd, |executor| {
-            executor.with_ambient_line(for_line, |executor| {
-                executor.execute_for_command(&for_command)
+        let result = self.with_loop_fd_heredocs(cmd, |executor| {
+            executor.with_command_input_redirects(cmd, |executor| {
+                executor.with_ambient_line(for_line, |executor| {
+                    executor.execute_for_command(&for_command)
+                })
             })
         });
         let status = self.exit_code;
@@ -363,19 +367,30 @@ impl Executor {
     }
 
     pub(in crate::executor) fn loop_redirect_input(&mut self, cmd: &CommandNode) -> Option<String> {
-        let redirect = cmd.redirect_in.as_ref()?;
+        let redirect = cmd.redirect_in.as_deref()?;
         if redirect.fd.unwrap_or(0) != 0 {
             return None;
         }
         if is_closed_redirect_target(&self.expand_redirect_target(redirect)) {
             return None;
         }
-        if let Some(source) = redirect
-            .target
-            .strip_prefix("<(")
-            .and_then(|target| target.strip_suffix(')'))
+        // rubash#2024: recorded-span admission — only a span the parser saw
+        // unquoted is a real substitution; a QUOTED `"<(echo hi)"` loop
+        // input target is a literal filename (GNU parse.y records the span
+        // only for an unquoted `<(`; redir.c:916 redir_open then fails it
+        // ENOENT and the compound is abandoned by the literal-target error
+        // channel, compound_stdin_open_failure, before this staging runs).
+        if redirect.target.starts_with("<(")
+            && redirect.target.ends_with(')')
+            && super::external_setup::redirect_target_span_is_recorded(redirect)
         {
-            return self.process_substitution_output(source);
+            if let Some(source) = redirect
+                .target
+                .strip_prefix("<(")
+                .and_then(|target| target.strip_suffix(')'))
+            {
+                return self.process_substitution_output(source);
+            }
         }
 
         let target = self.expand_redirect_target(redirect);
@@ -412,8 +427,21 @@ impl Executor {
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): loop stdin redirect
         // reads synthetic /proc files before the filesystem.
-        if let Some(bytes) = crate::proc_vfs::proc_file_content(&target) {
+        if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
             return Some(bytes_to_shell_text(&bytes));
+        }
+        // rubash#1903: a WinuxCmd fifo marker slurped through the plain
+        // read below would yield the 7 marker bytes and never create
+        // the rendezvous the writer is waiting for. The staging
+        // slurp's one open of a marker is the read side of the
+        // named-pipe rendezvous (same rule as the text channel in
+        // stdin_string_for_command).
+        #[cfg(windows)]
+        if let Some(result) =
+            crate::winuxcmd_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
+        {
+            let buf = result.ok()?;
+            return Some(bytes_to_shell_text(&buf));
         }
         fs::read_to_string(path).ok()
     }

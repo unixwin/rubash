@@ -74,10 +74,10 @@ impl Executor {
             // debugging_mode returns EXECUTION_SUCCESS — the select command
             // never expands its word list nor runs.
             if self
-                .run_debug_trap(&format!(
-                    "select {} in {}",
-                    select_command.variable, words_text
-                ))?
+                .run_debug_trap(
+                    crate::debugger::SeamKind::SelectHead,
+                    &format!("select {} in {}", select_command.variable, words_text),
+                )?
                 .is_some()
             {
                 self.exit_code = 0;
@@ -157,9 +157,11 @@ impl Executor {
         // GNU execute_cmd.c:3513 `line_number = select_command->line`: the
         // `select` keyword's line is the ambient while the body runs.
         let select_line = cmd.line;
-        let result = self.with_command_input_redirects(cmd, |executor| {
-            executor.with_ambient_line(select_line, |executor| {
-                executor.execute_select_loop(&select_command, &values)
+        let result = self.with_loop_fd_heredocs(cmd, |executor| {
+            executor.with_command_input_redirects(cmd, |executor| {
+                executor.with_ambient_line(select_line, |executor| {
+                    executor.execute_select_loop(&select_command, &values)
+                })
             })
         });
         let status = self.exit_code;

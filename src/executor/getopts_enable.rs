@@ -64,10 +64,17 @@ impl Executor {
         // `getopts :ab: opt-var "$@"` consumes -a, reports the identifier
         // error, and the loop stops with the option consumed).
         let variable = cmd.words[word_index + 1].clone();
-        let args: Vec<String> = if cmd.words.len() > word_index + 2 {
-            cmd.words[word_index + 2..].to_vec()
+        // Borrow the argument window instead of cloning it: every read
+        // below completes before the binding calls (the current word is
+        // consumed into `option_chars`, the separate-argument value is
+        // cloned at its read point, and `args.len()` is a by-value
+        // read), so no call observes a window the binds could move.
+        // Cloning made every getopts call O($#) — a scan over thousands
+        // of positionals paid a full Vec<String> clone per option.
+        let args: &[String] = if cmd.words.len() > word_index + 2 {
+            &cmd.words[word_index + 2..]
         } else {
-            self.shell_state.positional_window_cloned()
+            self.shell_state.positional_window()
         };
 
         let silent = optstring.starts_with(':');

@@ -200,6 +200,20 @@ pub(in crate::executor) fn is_con_device_path(path: &std::path::Path) -> bool {
 pub(in crate::executor) fn open_redirect_append(
     path: &std::path::Path,
 ) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    if crate::winuxcmd_fifo::path_is_winuxcmd_fifo(path) {
+        // rubash#1903: an append open of a fifo marker is the write
+        // side of the rendezvous (O_APPEND is meaningless on a pipe,
+        // exactly the device rule below). This is also the flush-side
+        // single pairing open the #1868 walk relies on: the ordered
+        // walk probe-validates the target, and this open is the one
+        // real open GNU performs. The interrupt predicate is the
+        // reduced SIGINT peek — this helper holds no Executor.
+        return crate::winuxcmd_fifo::open_winuxcmd_fifo_write(
+            path,
+            &crate::winuxcmd_fifo::fifo_sigint_pending,
+        );
+    }
     if is_dos_device_path(path) {
         return std::fs::OpenOptions::new().write(true).open(path);
     }
@@ -258,6 +272,34 @@ pub(in crate::executor) fn is_raw_err_and_out_redirect(redirect: &crate::parser:
 
 pub(in crate::executor) fn redirect_target_fd(target: &str) -> Option<u32> {
     redirect_target_fd_and_move(target).and_then(|(fd, move_fd)| (!move_fd).then_some(fd))
+}
+
+/// True when the expanded target is a DUP spelling (`&N` / `&N-`):
+/// the only shape GNU services with a dup2 (redir.c
+/// r_duplicating_input / r_duplicating_output). An fd-alias PATH
+/// spelling (/dev/fd/N, /dev/stdin, /proc/self/fd/N) resolves to the
+/// same fd number through redirect_target_fd_and_move, but GNU
+/// services it with an OPEN over the alias layer (redir_open) — the
+/// two shapes must not share a service face (rubash#1963: an alias
+/// under a file-open kind failed with the dup face's
+/// `N: Bad file descriptor` instead of the open's ENOENT).
+pub(in crate::executor) fn redirect_target_is_dup_spelling(target: &str) -> bool {
+    target
+        .trim_start_matches([
+            crate::executor::markers::QUOTED_WORD_PREFIX,
+            STORAGE_WORD_PREFIX,
+        ])
+        .starts_with('&')
+}
+
+/// The dup source fd of a target, but only when the target is a dup
+/// spelling; alias path spellings return None so file-open faces
+/// fall through to their classified opens (rubash#1963).
+pub(in crate::executor) fn dup_spelling_source_fd(target: &str) -> Option<u32> {
+    if !redirect_target_is_dup_spelling(target) {
+        return None;
+    }
+    redirect_target_fd_and_move(target).map(|(fd, _)| fd)
 }
 
 pub(in crate::executor) fn redirect_target_fd_and_move(target: &str) -> Option<(u32, bool)> {
@@ -325,27 +367,11 @@ pub(in crate::executor) fn command_is_shell_control_structure(cmd: &CommandNode)
         || cmd.function_command.is_some()
 }
 
-/// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
-/// `/dev/fd/N`, and `/proc/self/fd/N` through the OS's fd-alias device
-/// files, which the kernel resolves to a dup of fd N — behaviorally the
-/// same as `>&N`/`<&N`. Windows has no such filesystem, so the names are
-/// recognized here and flow through the same fd-dup machinery (niubash#118:
-/// `>> /dev/stdout` used to land on the CONOUT$ device path and fail with
-/// Permission denied).
-pub(in crate::executor) fn dev_stdio_redirect_fd(target: &str) -> Option<u32> {
-    match target {
-        "/dev/stdin" => return Some(0),
-        "/dev/stdout" => return Some(1),
-        "/dev/stderr" => return Some(2),
-        _ => {}
-    }
-    let fd = target
-        .strip_prefix("/dev/fd/")
-        .or_else(|| target.strip_prefix("/proc/self/fd/"))?;
-    (!fd.is_empty() && fd.chars().all(|ch| ch.is_ascii_digit()))
-        .then(|| fd.parse::<u32>().ok())
-        .flatten()
-}
+/// The fd-alias judgment now lives in the special-path registry
+/// (vfs audit §4.5 slice S1); this re-export keeps the executor's
+/// existing call sites pointed at the one definition. See
+/// [`crate::special_paths::fd_alias_target`] for the GNU rationale.
+pub(in crate::executor) use crate::special_paths::fd_alias_target as dev_stdio_redirect_fd;
 
 /// GNU redir.c:298 redirection_expand → subst.c expand_words_no_vars: a
 /// redirect word whose expansion is EMPTY still counts as one field when

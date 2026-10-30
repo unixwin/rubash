@@ -1,7 +1,4 @@
-use super::{
-    extglob_patterns_in_word_with_raw, pathname_patterns_in_word, word_quotes_in_raw,
-    ArrayElementAssignment, CommandNode,
-};
+use super::{word_quotes_in_raw, ArrayElementAssignment, CommandNode};
 
 pub(super) fn record_array_element_assignment_for_word(
     command: &mut CommandNode,
@@ -146,17 +143,6 @@ pub(super) fn array_element_assignment_from_word(
         operator_metadata: Box::new(super::build_word_metadata(0, operator, operator)),
         append,
         word_index: None,
-        // wt44/parse4: the parameter / arithmetic / brace / tilde element
-        // records have zero readers (see WordMetadata::new) and stay empty.
-        subscript_brace_expansions: Vec::new(),
-        subscript_parameter_expansions: Vec::new(),
-        subscript_arithmetic_expansions: Vec::new(),
-        brace_expansions: Vec::new(),
-        parameter_expansions: Vec::new(),
-        arithmetic_expansions: Vec::new(),
-        extglob_patterns: extglob_patterns_in_word_with_raw(value, raw_value),
-        pathname_patterns: pathname_patterns_in_word(value, raw_value),
-        tilde_expansions: Vec::new(),
         word_quotes: word_quotes_in_raw(raw_value),
     })
 }

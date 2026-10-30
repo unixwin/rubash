@@ -338,12 +338,13 @@ fn run_script_grouped_at_line_offset(
         // reads its input token by token (parse.y:3557 read_token) and
         // never re-tokenizes text it has already consumed; the parked
         // GroupScanFeeder advances the token-level completeness state per
-        // appended line instead. The alias-live arm keeps the exact fresh
-        // whole-pending scan (expansion may rewrite any part of the text).
-        // The returned feeder tokens are unused here: this driver's exec
-        // text re-joins the group's line texts (and history expansion may
-        // rewrite them), so run_history_group's parse keeps its own scan.
-        let Some((pending, start_line, group, mut feeder_tokens)) =
+        // appended line instead. The alias-live arm feeds the same
+        // machines the streaming expansion's committed output
+        // (rubash#1961). The returned feeder tokens are unused here: this
+        // driver's exec text re-joins the group's line texts (and history
+        // expansion may rewrite them), so run_history_group's parse keeps
+        // its own scan.
+        let Some((pending, start_line, group, mut feeder_tokens, _gather_info)) =
             read_next_source_group(executor, &raw_lines, &mut index)
         else {
             break;
@@ -373,6 +374,17 @@ fn run_script_grouped_at_line_offset(
                     trimmed.is_empty() || trimmed.starts_with('#')
                 }),
         );
+        // WP-8 (debugger design 5.1): name this group for syntax
+        // registration (consumed by run_source_impl at its entry).
+        // The identity is the source stack's top — the same string
+        // this file's stops carry. A command string has no file to
+        // name (its stack seed is $0, not a file), so it sets
+        // nothing and its units never register.
+        executor.debug_syntax_unit_file = if executor.command_string_mode() {
+            None
+        } else {
+            executor.shell_state.bash_source_stack.first().cloned()
+        };
         let status = run_history_group(
             executor,
             &session,
@@ -396,6 +408,30 @@ fn run_script_grouped_at_line_offset(
             && stdin_script_errexit_enabled(executor)
             && !executor.last_command_inverted();
         if parse_error || exit_jump || errexit_stop {
+            // DE-06 (design 9.3; PLAN row 12): a parse error is
+            // ending this run — a selected `parse-error` filter
+            // reports the site and parks the session here, after
+            // the diagnostic and the group's valid prefix, before
+            // the exit path runs. The site's line is the failed
+            // group's first line (the diagnostic itself names the
+            // exact line). A stop-loop unwind from the park (the
+            // user ended the session there) replaces the pending
+            // classification with its own exit.
+            if parse_error {
+                let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                    crate::debugger::SourceLocation::new(
+                        file.clone(),
+                        start_line.saturating_add(line_offset) as u32,
+                    )
+                });
+                if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                    crate::debugger::ExceptionKind::ParseError,
+                    executor.last_exit_code(),
+                    location,
+                ) {
+                    return (code, true);
+                }
+            }
             // The parse-abort classification (a reader discard, not an
             // exit-shell jump) must not read as `exit`; the errexit break
             // propagates even then (GNU ERREXIT, see above).
@@ -405,7 +441,147 @@ fn run_script_grouped_at_line_offset(
             );
         }
     }
+    // WP-8 (debugger design 5.1): the reader reached the end of
+    // this input — the same completion note the source builtin
+    // gives, under the same identity rule as the per-group
+    // registration above. The early returns in the loop (parse
+    // aborts, exit jumps) skip it on purpose.
+    if !executor.command_string_mode() {
+        if let Some(file) = executor.shell_state.bash_source_stack.first().cloned() {
+            executor.debugger_note_syntax_complete(&file);
+        }
+    }
     (executor.last_exit_code(), false)
+}
+
+/// Verdicts the gather reached about the group it just pulled, beyond
+/// the feeder-token channel (rubash#1961).
+pub(crate) struct GroupGatherInfo {
+    /// Alias-live arm only: the expanded group text the gather's
+    /// incremental machines certified complete, present only when the
+    /// group broke complete on the machines' own verdict (never on a
+    /// parked-candidate batch fallback). The source executor applies
+    /// the #1940 Fix A certified skip when its own batch expansion of
+    /// the group is byte-identical to this text.
+    pub certified_expanded: Option<String>,
+    /// The gather loop ran out of input without a complete break: the
+    /// accumulated text is known-incomplete from the collector's own
+    /// incremental state (its machines' last verdict, or a heredoc /
+    /// paren gate that never opened), so a caller's whole-text
+    /// completeness re-derivation over the group can only restate
+    /// this verdict (rubash#1961 R5).
+    pub known_incomplete: bool,
+}
+
+/// Speculative verdict state for one unit-park episode in the
+/// alias-live arm of the gather (rubash#1961). While the streaming
+/// expander is parked on a `$(`/`${` unit, the completeness verdict
+/// over the batch expansion of everything fed is owed at every
+/// candidate line until the unit closes. Recomputing it from
+/// scratch per candidate re-feeds the whole uncommitted tail into
+/// fresh machines — Θ(tail) per candidate, Θ(tail × lines) over a
+/// long-lived unit. The shadow instead holds CLONES of the gather's
+/// own machines, advanced incrementally over the speculative
+/// expansion (a cloned expander's finish()): while the expansion
+/// grows append-only — the normal case, where no alias inside the
+/// truncated body rewrote an earlier splice decision — each
+/// refresh advances the shadow by the new appendix only, and
+/// candidates inside the refresh window reuse the standing
+/// verdict. When
+/// the expansion rewrites its own prefix (an alias splice inside
+/// the body flipped a decision as more text arrived), the caller
+/// rebuilds the shadow from the real machines, which do not move
+/// during an episode: a parked expander commits nothing new, so
+/// the snapshot stays exact.
+struct ParkShadow {
+    scan: crate::lexer::GroupScanFeeder,
+    scans: GroupTextScans,
+    /// The real machines' text lengths when the snapshot was taken;
+    /// a mismatch means the real state moved and the shadow is
+    /// stale (the caller rebuilds).
+    base_pending_len: usize,
+    base_fed_len: usize,
+    /// Byte total the shadow feeder has been given, on the same
+    /// arithmetic the gather's real feeding uses.
+    fed_len: usize,
+    /// Speculative text not yet split into feeder lines: the
+    /// committed tail at snapshot time plus every appendix since,
+    /// minus the completed lines already fed.
+    line_buf: String,
+    /// The speculative expansion (finish() remainder) consumed so
+    /// far; the next remainder must extend it, else rebuild.
+    spec: String,
+    /// The battery mirror text: committed expansion plus the
+    /// speculative expansion consumed so far.
+    mirror: String,
+    /// Raw group-text length at which the speculative verdict is
+    /// next refreshed. Between refreshes the shadow's verdict
+    /// stands: a refresh that answered "complete" breaks the group
+    /// on the spot, so a live shadow's standing verdict is always
+    /// "needs more", and the candidates in between skip the
+    /// finish() re-derivation entirely. The window is small (1KB
+    /// of raw text): an alias invocation that closes the unit is
+    /// judged at the refresh right after its text is fully fed —
+    /// and the episode's first candidate always refreshes, so an
+    /// invocation sitting on the unit's own opening line is judged
+    /// immediately.
+    next_refresh_at: usize,
+}
+
+impl ParkShadow {
+    fn snapshot(
+        scan: &crate::lexer::GroupScanFeeder,
+        scans: &GroupTextScans,
+        expanded_pending: &str,
+        expanded_tail: &str,
+        expanded_fed_len: usize,
+    ) -> Self {
+        Self {
+            scan: scan.clone(),
+            scans: scans.clone(),
+            base_pending_len: expanded_pending.len(),
+            base_fed_len: expanded_fed_len,
+            fed_len: expanded_fed_len,
+            line_buf: expanded_tail.to_string(),
+            spec: String::new(),
+            mirror: expanded_pending.to_string(),
+            next_refresh_at: 0,
+        }
+    }
+
+    /// Whether this shadow still matches the caller's frozen real
+    /// state and the speculative expansion still extends the text
+    /// it has consumed.
+    fn matches(&self, expanded_pending: &str, expanded_fed_len: usize, spec_delta: &str) -> bool {
+        self.base_pending_len == expanded_pending.len()
+            && self.base_fed_len == expanded_fed_len
+            && spec_delta.starts_with(&self.spec)
+    }
+
+    /// Advance the shadow machines over the appendix the new
+    /// speculative expansion added since the last candidate.
+    fn advance(&mut self, spec_delta: &str) {
+        let appendix = &spec_delta[self.spec.len()..];
+        self.mirror.push_str(appendix);
+        self.scans.push_raw_line(appendix);
+        self.line_buf.push_str(appendix);
+        let mut cursor = 0usize;
+        while let Some(rel) = self.line_buf[cursor..].find('\n') {
+            let nl = cursor + rel;
+            self.fed_len += nl + 1 - cursor;
+            self.scan
+                .push_line(&self.line_buf[cursor..nl], self.fed_len);
+            cursor = nl + 1;
+        }
+        self.line_buf.drain(..cursor);
+        self.spec = spec_delta.to_string();
+    }
+
+    /// The gather's usual verdict fusion, over the shadow machines.
+    fn needs_more(&mut self, group_has_body: bool) -> bool {
+        let skip_quote_comsub = !group_has_body && self.scan.gates_prove_quotes_comsub_closed();
+        self.scan.token_level_needs_more() || self.scans.needs_more(&self.mirror, skip_quote_comsub)
+    }
 }
 
 /// builtins/evalfile.c source_file -> evalstring.c parse_and_execute: a
@@ -416,18 +592,33 @@ fn run_script_grouped_at_line_offset(
 /// procsub paren depth, and the alias-expanded pending text all decide the
 /// boundary. Returns the group's raw text, its 1-based starting line, the
 /// per-physical-line `(text, is_heredoc_body)` pairs the history driver
-/// records per group, and — in the non-alias arm — the feeder's committed
-/// tokens for the group text (see the perf10 note below).
+/// records per group, the feeder's committed tokens for the group text
+/// (see the perf10 note below), and the gather's own verdicts.
 ///
 /// rubash#281 companion: while the alias table cannot influence the text
 /// (expansion disabled or table empty — the expanded pending IS the raw
 /// pending), the token-level half of the completeness test runs on a
 /// parked `GroupScanFeeder` that advances per appended line instead of
 /// re-tokenizing the whole accumulated group (the O(group^2) amplifier
-/// behind `. ./benchmarks/corpus/nvm.sh --no-use` at 200 s+). With a live
-/// alias table the exact fresh scan is kept: expansion may rewrite any
-/// part of the pending text, so the feeder's append-only checkpoint has no
-/// valid prefix to resume from.
+/// behind `. ./benchmarks/corpus/nvm.sh --no-use` at 200 s+).
+///
+/// rubash#1961: the alias-live arm used to keep the exact fresh scan —
+/// every candidate line re-ran `expand_group_aliases` over the whole
+/// accumulated group AND `stdin_source_needs_more_posix` over its
+/// expansion (a full re-lex), the same O(group^2) disease #1940 removed
+/// from the certified arm (one preset alias + `expand_aliases` made
+/// `source nvm.sh` hang past 120 s while the plain arm took ~1 s). The
+/// arm now feeds a parked `AliasStreamScanner` (lexer/alias_stream.rs):
+/// the expander itself runs incrementally and releases only committed
+/// output — text later input cannot rewrite — and the SAME feeder +
+/// text-scan machines judge that output, so the per-candidate cost is
+/// O(line), not O(group). While the streaming expander is parked
+/// inside a unit, the batch verdict over the truncated text can still
+/// decide differently (an alias value inside a truncated comsub body
+/// closing the unit); those candidates are judged SPECULATIVELY —
+/// a finished clone of the expander yields exactly the batch
+/// expansion of everything fed, and clones of the same machines
+/// (the ParkShadow below) judge it incrementally as it grows.
 ///
 /// perf10 token reuse: `tokenize_with_heredocs` IS a fresh
 /// `GroupScanFeeder` plus one `push_line` per physical line plus
@@ -443,10 +634,17 @@ fn run_script_grouped_at_line_offset(
 /// therefore returned for the caller to reuse instead of re-lexing, under
 /// exactly the conditions that make it byte-identical to the fresh
 /// re-lex:
-///   - the non-alias arm only (`expand_group_aliases` is the identity
-///     there, so the caller's exec text == pending; with live aliases the
-///     caller keeps its fresh re-lex of the possibly rewritten text —
-///     parse.y:3249 alias_expand_token fires per token while READING);
+///   - the group text the feeder lexed is the caller's exec text: in
+///     the non-alias arm by identity (`expand_group_aliases` is the
+///     identity there, so exec text == pending); in the alias-live arm
+///     by the GroupGatherInfo certification — the group broke complete
+///     on the incremental machines' verdict over the streaming
+///     expansion (parse.y:3249 alias_expand_token fires per token while
+///     READING, which is exactly the stream the feeder consumed), and
+///     the caller applies the tokens only when its own batch expansion
+///     is byte-identical to the certified text. Alias-arm groups that
+///     broke on a parked candidate's speculative verdict return no
+///     tokens, as before;
 ///   - the loop broke at a COMPLETE group (an EOF-exhausted incomplete
 ///     group takes run_source_with_line_offset's unclosed-diagnostics
 ///     re-lex);
@@ -464,7 +662,13 @@ pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
     index: &mut usize,
-) -> Option<(String, usize, Vec<(String, bool)>, Option<Vec<Token>>)> {
+) -> Option<(
+    String,
+    usize,
+    Vec<(String, bool)>,
+    Option<Vec<Token>>,
+    GroupGatherInfo,
+)> {
     if *index >= raw_lines.len() {
         return None;
     }
@@ -478,20 +682,53 @@ pub(crate) fn read_next_source_group(
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let aliases_live =
         executor.alias_expansion_enabled() && !executor.shell_state.aliases.is_empty();
-    let mut scan = if aliases_live {
-        None
-    } else {
-        Some(crate::lexer::GroupScanFeeder::new(posix))
+    // rubash#1961: the feeder now runs in BOTH arms. The alias-live arm
+    // feeds it the streaming expansion's committed output (below), the
+    // non-alias arm the raw lines as before.
+    let mut scan = Some(crate::lexer::GroupScanFeeder::new(posix));
+    // The alias-live arm's streaming expander, with the same lookup
+    // expand_group_aliases builds (the table cannot change mid-gather:
+    // nothing executes between the gather's lines).
+    let alias_lookup = move |word: &str| {
+        executor.shell_state.aliases.get(word).map(|alias| {
+            (
+                alias
+                    .value
+                    .replace(crate::executor::markers::DATA_DOLLAR, "$"),
+                alias.expand_next,
+            )
+        })
     };
+    let mut alias_scan = if aliases_live {
+        Some(crate::lexer::AliasStreamScanner::new(
+            &alias_lookup as &crate::lexer::AliasLookup<'_>,
+            posix,
+        ))
+    } else {
+        None
+    };
+    // Alias-live arm feed state: the committed expansion text (the
+    // machines' mirror twin), the not-yet-line-split tail of it, and
+    // the byte total the feeder has been given so far.
+    let mut expanded_pending = String::new();
+    let mut expanded_tail = String::new();
+    let mut expanded_fed_len = 0usize;
+    // Speculative-verdict shadow for a unit-park episode (below).
+    let mut park_shadow: Option<ParkShadow> = None;
     let mut broke_complete = false;
+    // Set when the group broke complete on the incremental machines'
+    // verdict in the alias-live arm (the certification condition).
+    let mut alias_machines_break = false;
     // perf9 (#292B third wave): the parked text-scan battery over the exact
     // `pending` mirror. `pending` is append-only inside this loop (only
     // push_str(raw) ever touches it), so the checkpoints never invalidate:
     // each candidate line advances every still-undecided machine over its
     // own tail instead of re-scanning the whole group (GNU parse.y:3557
     // read_token streams token by token and never re-reads consumed text).
-    // The alias-live arm below keeps the exact fresh whole-pending scan:
-    // alias expansion may rewrite any part of the text.
+    // rubash#1961: in the alias-live arm the battery's mirror is the
+    // committed expansion text instead — the same append-only discipline
+    // holds because the streaming expander only ever appends committed
+    // output (it never revises text it already released).
     let mut text_scans = GroupTextScans::new(posix);
     // perf21 battery fusion: heredoc-body lines live in the pending mirror
     // but not in the feeder's logical-line mirror, so a group that saw any
@@ -558,12 +795,204 @@ pub(crate) fn read_next_source_group(
         }
         group.push((text.to_string(), is_body));
         pending.push_str(raw);
-        text_scans.push_raw_line(raw);
-        if let Some(scan) = scan.as_mut() {
-            scan.push_line(text, pending.len());
+        if aliases_live {
+            // rubash#1961: advance the streaming expander by this raw
+            // line and feed whatever output it commits to the same
+            // machines the non-alias arm feeds raw lines to. The
+            // battery mirror and the feeder both take the EXPANDED
+            // text here; `pending` above stays the raw group text.
+            // Committed output is append-only, so the battery's
+            // checkpoints stay valid, exactly as in the raw arm.
+            let scanner = alias_scan.as_mut().expect("alias arm scanner");
+            scanner.push_line(raw);
+            let delta = scanner.take_committed();
+            if !delta.is_empty() {
+                expanded_pending.push_str(&delta);
+                text_scans.push_raw_line(&delta);
+                expanded_tail.push_str(&delta);
+                // Feed each completed line to the feeder. A byte
+                // cursor walks the tail buffer (draining per line
+                // would re-copy the remainder every time — quadratic
+                // on the long spans a parked unit releases at once);
+                // the consumed prefix is drained once, below.
+                let mut cursor = 0usize;
+                while let Some(rel) = expanded_tail[cursor..].find('\n') {
+                    let nl = cursor + rel;
+                    expanded_fed_len += nl + 1 - cursor;
+                    scan.as_mut()
+                        .expect("feeder")
+                        .push_line(&expanded_tail[cursor..nl], expanded_fed_len);
+                    cursor = nl + 1;
+                }
+                expanded_tail.drain(..cursor);
+            }
+            if !scanner.parked() && !expanded_tail.is_empty() {
+                // Unparked committed output ends at a line boundary
+                // (AliasStreamScanner's contract), so a tail here is
+                // the input's final line without its '\n': hand it to
+                // the feeder as the last piece, exactly like the raw
+                // arm's final push_line.
+                expanded_fed_len += expanded_tail.len();
+                let piece = std::mem::take(&mut expanded_tail);
+                scan.as_mut()
+                    .expect("feeder")
+                    .push_line(&piece, expanded_fed_len);
+            }
+        } else {
+            text_scans.push_raw_line(raw);
+            if let Some(scan) = scan.as_mut() {
+                scan.push_line(text, pending.len());
+            }
         }
         if pending_heredocs.is_empty() && (!saw_heredoc || paren_depth <= 0) {
-            if let Some(scan) = scan.as_ref() {
+            // rubash#1961 parked-candidate verdicts. While the
+            // streaming expander is parked, the machines have not
+            // seen the parked unit's expansion yet. Two cases:
+            //  - Trivial parks (see AliasStreamScanner::
+            //    park_needs_batch): the park leaves an unterminated
+            //    unit IN the batch expansion itself (an open quote,
+            //    backtick, word, compound assignment or `((` in the
+            //    produced text, an operator or `$` at the end of
+            //    input), where the batch needs-more verdict is
+            //    positive by construction — the group simply stays
+            //    open, with no scan at all.
+            //  - Unit parks (a `$(`/`${` extent the stream cannot
+            //    yet decide, or a poisoned phase): the batch
+            //    expansion of the truncated body CAN close the unit
+            //    early (an alias value contributing the closer), so
+            //    the verdict must judge the full expansion of
+            //    everything fed. It is computed SPECULATIVELY:
+            //    clone the expander and finish the clone (by the
+            //    scanner's contract that is exactly the batch
+            //    expansion of all fed input), then judge that text
+            //    with the gather's own machines — on non-final
+            //    lines via the ParkShadow, whose clones of the
+            //    machines advance incrementally over the
+            //    speculative expansion as it grows; on the final
+            //    line via one-shot clones (finish() semantics are
+            //    end-of-input there by definition, so tail routing
+            //    matches the pre-#1961 batch check, which judged
+            //    the same final expansion). Same machines, same
+            //    text, same fusion as the unparked path — at
+            //    clone + appendix cost instead of a whole-group
+            //    re-expand and re-tokenize (the pre-#1961 per-
+            //    candidate batch check, whose full re-lex of a
+            //    large group costs seconds). A speculative break
+            //    earns no certification: the real feeder never
+            //    lexed the tail.
+            let scanner_parked = alias_scan.as_ref().is_some_and(|scanner| scanner.parked());
+            if scanner_parked
+                && *index < raw_lines.len()
+                && !alias_scan.as_ref().expect("scanner").park_needs_batch()
+            {
+                // Trivial park: batch verdict is "needs more" by
+                // construction — the group simply stays open.
+                park_shadow = None;
+                continue;
+            }
+            if scanner_parked && *index < raw_lines.len() {
+                // Unit park, not the final line: the speculative
+                // verdict, computed over the ParkShadow's
+                // incrementally advanced clones of the machines.
+                // Inside the shadow's refresh window the standing
+                // "needs more" verdict is reused as-is.
+                if let Some(shadow) = &park_shadow {
+                    if shadow.base_pending_len == expanded_pending.len()
+                        && shadow.base_fed_len == expanded_fed_len
+                        && pending.len() < shadow.next_refresh_at
+                    {
+                        continue;
+                    }
+                }
+                let mut spec_scanner = alias_scan.as_ref().expect("scanner").clone();
+                let spec_delta = spec_scanner.finish();
+                if park_shadow
+                    .as_ref()
+                    .is_none_or(|sh| !sh.matches(&expanded_pending, expanded_fed_len, &spec_delta))
+                {
+                    park_shadow = Some(ParkShadow::snapshot(
+                        scan.as_ref().expect("feeder"),
+                        &text_scans,
+                        &expanded_pending,
+                        &expanded_tail,
+                        expanded_fed_len,
+                    ));
+                }
+                let shadow = park_shadow.as_mut().expect("shadow");
+                shadow.advance(&spec_delta);
+                let needs_more = shadow.needs_more(group_has_body);
+                shadow.next_refresh_at = pending.len() + 1024;
+                if !needs_more {
+                    broke_complete = true;
+                    break;
+                }
+                continue;
+            }
+            if scanner_parked {
+                // Final line of the input with the expander still
+                // parked: if a ParkShadow is live and the final
+                // speculative expansion still extends it, finish the
+                // verdict on the shadow (feeding its buffered
+                // partial piece as the final line) instead of
+                // re-feeding the whole tail into fresh clones.
+                let mut spec_scanner = alias_scan.as_ref().expect("scanner").clone();
+                let spec_delta = spec_scanner.finish();
+                if let Some(mut shadow) = park_shadow.take() {
+                    if shadow.base_pending_len == expanded_pending.len()
+                        && shadow.base_fed_len == expanded_fed_len
+                        && spec_delta.starts_with(&shadow.spec)
+                    {
+                        shadow.advance(&spec_delta);
+                        if !shadow.line_buf.is_empty() {
+                            let piece = std::mem::take(&mut shadow.line_buf);
+                            shadow.fed_len += piece.len();
+                            shadow.scan.push_line(&piece, shadow.fed_len);
+                        }
+                        if !shadow.needs_more(group_has_body) {
+                            broke_complete = true;
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                let mut spec_scan = scan.as_ref().expect("feeder").clone();
+                let mut spec_scans = text_scans.clone();
+                // The speculative feeder input is everything the
+                // real feeder has not consumed yet: the committed
+                // tail still waiting for its line boundary, plus
+                // the speculative expansion of the parked unit.
+                let mut spec_text = expanded_tail.clone();
+                spec_text.push_str(&spec_delta);
+                let mut spec_mirror = expanded_pending.clone();
+                spec_mirror.push_str(&spec_delta);
+                spec_scans.push_raw_line(&spec_delta);
+                let mut spec_fed_len = expanded_fed_len;
+                let mut cursor = 0usize;
+                while let Some(rel) = spec_text[cursor..].find('\n') {
+                    let nl = cursor + rel;
+                    spec_fed_len += nl + 1 - cursor;
+                    spec_scan.push_line(&spec_text[cursor..nl], spec_fed_len);
+                    cursor = nl + 1;
+                }
+                if cursor < spec_text.len() {
+                    // Final piece without '\n': finish() gave the
+                    // tail end-of-input semantics, so for the
+                    // speculative feeder it is a complete final
+                    // line, exactly like the input's own last line.
+                    spec_fed_len += spec_text.len() - cursor;
+                    spec_scan.push_line(&spec_text[cursor..], spec_fed_len);
+                }
+                let skip_quote_comsub =
+                    !group_has_body && spec_scan.gates_prove_quotes_comsub_closed();
+                let needs_more = spec_scan.token_level_needs_more()
+                    || spec_scans.needs_more(&spec_mirror, skip_quote_comsub);
+                if !needs_more {
+                    broke_complete = true;
+                    break;
+                }
+                continue;
+            }
+            {
                 // Token-level answer FIRST: it is O(1) here (maintained
                 // incrementally by the feeder), while the text-level scans
                 // walk the whole accumulated group. While any `{`/`if`/
@@ -588,32 +1017,57 @@ pub(crate) fn read_next_source_group(
                 // text, the battery's duplicate quotes/comsub machines can
                 // take the answer instead of re-advancing (see
                 // GroupScanFeeder::gates_prove_quotes_comsub_closed).
+                let scan = scan.as_ref().expect("feeder");
                 let skip_quote_comsub = !group_has_body && scan.gates_prove_quotes_comsub_closed();
+                // rubash#1961: the battery's mirror is the raw pending
+                // in the non-alias arm and the committed expansion in
+                // the alias-live arm — in both arms the exact text the
+                // feeder just lexed.
+                let mirror: &str = if aliases_live {
+                    &expanded_pending
+                } else {
+                    &pending
+                };
                 let needs_more = scan.token_level_needs_more()
-                    || text_scans.needs_more(&pending, skip_quote_comsub);
+                    || text_scans.needs_more(mirror, skip_quote_comsub);
                 if !needs_more {
                     broke_complete = true;
+                    alias_machines_break = aliases_live;
                     break;
                 }
-                continue;
-            }
-            let expanded_pending = expand_group_aliases(executor, &pending);
-            if !stdin_source_needs_more_posix(&expanded_pending, posix) {
-                broke_complete = true;
-                break;
+                park_shadow = None;
             }
         }
     }
+    let mut info = GroupGatherInfo {
+        certified_expanded: None,
+        known_incomplete: !broke_complete,
+    };
     let feeder_tokens = match scan {
-        Some(mut scan) if broke_complete && !scan.extglob_toggled() => Some(scan.finish()),
+        Some(mut scan)
+            if broke_complete
+                && !scan.extglob_toggled()
+                && (!aliases_live || alias_machines_break) =>
+        {
+            if aliases_live {
+                // The machines' break certifies the committed
+                // expansion: unparked committed output IS the batch
+                // expansion of `pending` (AliasStreamScanner's
+                // contract), so hand it back for the caller's
+                // byte-compare (GroupGatherInfo::certified_expanded).
+                info.certified_expanded = Some(expanded_pending);
+            }
+            Some(scan.finish())
+        }
         _ => None,
     };
-    Some((pending, start_line, group, feeder_tokens))
+    Some((pending, start_line, group, feeder_tokens, info))
 }
 
 /// One parked text-scan checkpoint over the group's `pending` mirror:
 /// the char offset the scan resumes from, and the machine state there.
 /// `None` (in the owning struct) means the next call full-scans from 0.
+#[derive(Clone)]
 struct ScanCheckpoint<S> {
     resume: usize,
     snapshot: S,
@@ -822,6 +1276,7 @@ fn function_body_opener_signature(signature: &str) -> bool {
 /// unclosed_input_close_char_posix, the function-body checks) stay
 /// authoritative for every other call site, and the per-prefix equivalence
 /// is enforced by the incremental tests there.
+#[derive(Clone)]
 struct GroupTextScans {
     /// Exact char mirror of the accumulated `pending` group text.
     chars: Vec<char>,
@@ -1096,6 +1551,21 @@ fn run_history_group(
         == Some("1");
     let history_on = history_on && !seval_nohist;
     let histexpand_on = histexpand_on && !seval_nohist;
+    // rubash#2072: respawn transport text (a respawned `&`/coproc/procsub
+    // child's serialized `-c` operand) is not a readline line either: the
+    // child is GNU's forked subshell (execute_cmd.c:1576
+    // execute_in_subshell) executing already-parsed commands, and
+    // bashhist.c pre_process_line runs only on lines the interactive
+    // reader reads. The inherited history/histexpand option state stays
+    // VISIBLE in the child (verbatim fork inheritance — `set -o` reads
+    // it), but it must never be APPLIED to the transport text: with an
+    // interactive parent the child otherwise history-expanded its own
+    // function definitions (`!x: event not found` streams and blanked
+    // lines corrupting the parse — the `nvm ls` noise).
+    let respawn_transport =
+        crate::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed);
+    let history_on = history_on && !respawn_transport;
+    let histexpand_on = histexpand_on && !respawn_transport;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
     let cmdhist = shopt_state_enabled(executor, "cmdhist", true);
     let lithist = shopt_state_enabled(executor, "lithist", false);
@@ -2363,6 +2833,27 @@ fn unquoted_delimiter_depth(source: &str, open: char) -> usize {
     depth
 }
 
+/// Tier B host hook (PLAN row 11, M-3): note a console Ctrl+C
+/// the host's own handler received, so the engine's in-process
+/// waits see the interrupt. This is the driver-layer face hosts
+/// consume; it delegates to the kill builtin's mailbox plumbing
+/// (`builtins::kill::note_console_ctrl_c`), which is internal
+/// from this row on. On Unix it is a no-op by design: the
+/// kernel backend already receives the process's SIGINT.
+pub fn inject_console_ctrl_c() {
+    crate::builtins::kill::note_console_ctrl_c();
+}
+
+/// Tier B host hook (PLAN row 11, M-3): consume the background
+/// wrapper handshake from a host launcher's argv before the
+/// host's own option parsing sees it — the driver-layer face of
+/// `builtins::kill::consume_background_wrapper_handshake`, which
+/// is internal plumbing from this row on. Rubash's own binary
+/// calls the same internal entry; hosts call this one.
+pub fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
+    crate::builtins::kill::consume_background_wrapper_handshake(args);
+}
+
 pub fn run_source(executor: &mut Executor, input: &str, interactive: bool) -> i32 {
     run_source_with_line_offset(executor, input, interactive, 0, None, None)
 }
@@ -2848,6 +3339,13 @@ fn run_source_impl(
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
 ) -> i32 {
+    // WP-8 (debugger design 5.1): take the file identity the
+    // calling group driver set for this unit, if any (see
+    // `Executor::debug_syntax_unit_file`). Taking at entry means a
+    // nested unit — a sourced file inside this one, an eval string —
+    // never inherits the identity: its own driver sets it for its
+    // own units, or it stays unset and the unit registers nothing.
+    let syntax_unit_file = executor.debug_syntax_unit_file.take();
     // rubash#1485: a prefix run hands diagnostic ownership to its caller
     // (run_source_prefix_diagnostic_owned); every report inside the
     // unclosed-diagnostics route below goes through this gate so the
@@ -3298,6 +3796,15 @@ fn run_source_impl(
     // -c string) restores the enclosing frame state untouched after
     // its run; its own walks never see the frame raised, because the
     // pending flag was already taken by the outer unit.
+    // WP-8 (debugger design 5.1): a file-backed unit registers its
+    // syntax view with the attached session before it executes,
+    // so the unit's breakpoints are resolvable from its first seam
+    // on. Unset identity (eval strings, -c text, interactive
+    // units): nothing registers.
+    if let Some(file) = &syntax_unit_file {
+        executor.debugger_register_syntax(file, &ast);
+    }
+
     let saved_final_frame = executor.exec_replace_final_frame.get();
     let final_unit = executor.command_string_final_pending.take() && executor.command_string_mode();
     executor.exec_replace_final_frame.set(final_unit);
@@ -3330,8 +3837,16 @@ fn run_source_impl(
         // SigintUnwind is the same DISCARD shape with a fixed verdict
         // (rubash#1639): GNU threw to the top-level reader on the
         // foreground job's SIGINT death — no diagnostic, the reader
-        // continues, and $? is the 130 the wait recorded.
-        Err(ExecuteError::SigintUnwind) => 130,
+        // continues, and $? is the 130 the wait recorded. A mid-wait
+        // mailbox drain (observe_signals_while_blocked, niubash#698)
+        // may have attached its discard mark to the same interrupt
+        // before the wait converted it to this spelling; consume the
+        // unit's bookkeeping here so the mark cannot outlive its unit
+        // and misclassify a later unit's genuine exit.
+        Err(ExecuteError::SigintUnwind) => {
+            let _ = executor.take_signal_discard_pending();
+            130
+        }
         // A `return` that unwinds to this unit's top ends the unit with
         // its status as an ordinary value (builtins/evalfile.c
         // source_file returns it; no jump_to_top_level). It can only
@@ -3485,6 +4000,16 @@ fn bind_lines_columns(executor: &mut Executor, lines: i32, columns: i32) {
     });
 }
 
+/// The Session API's terminal-size notification
+/// (`api::Session::notify_terminal_size`): the host reports the
+/// size as (columns, rows) — the order a terminal reports it —
+/// and the session translates to this (lines, columns) bind
+/// order. The values land through the same LINES/COLUMNS
+/// binding the winsize machinery uses.
+pub fn bind_terminal_size(executor: &mut Executor, lines: i32, columns: i32) {
+    bind_lines_columns(executor, lines, columns);
+}
+
 /// jobs.c:2618 get_tty_state -> jobs.c:2647-2648 `if (check_window_size)
 /// get_new_window_size(0, NULL, NULL)` -> winsize.c:98-100: with checkwinsize
 /// on (default, config-top.h:148 CHECKWINSIZE_DEFAULT 1), an interactive
@@ -3578,10 +4103,46 @@ pub fn bind_interactive_screen_size(executor: &mut Executor) {
 /// file (truncating it to HISTFILESIZE lines), then read HISTFILE into the
 /// list when it exists.
 pub fn initialize_interactive_history(executor: &mut Executor) {
-    executor.set_shell_option("history", true);
+    // GNU shell.c:1835-1837 init_interactive (shell.c:1866-1867
+    // init_interactive_script for the `-i script` arm this site also
+    // serves): `if (enable_history_list == -1) enable_history_list = 1;`
+    // — the interactive default arms history only when nothing has set
+    // the option yet. This used to force the option ON unconditionally,
+    // which re-armed recording after a startup file had opted out with
+    // `set +o history`: the session recorded and its lines were saved to
+    // $HISTFILE at exit anyway (niubash#660). GNU's post-startup load
+    // site (shell.c:806-811) never touches the option.
+    if executor.get_env("__RUBASH_SETOPT_history").is_none() {
+        executor.set_shell_option("history", true);
+    }
     // shell.c init_interactive: interactive shells also default histexpand
     // (set -H) on, so !!/!str expand on each accepted line.
     executor.set_shell_option("histexpand", true);
+    // The HISTFILE default is NOT this site's business. GNU defaults
+    // HISTFILE once, at shell_initialize (shell.c:580) — variables.c:654-661
+    // `if (remember_on_history) { name = bash_default_histfile();
+    // set_if_not("HISTFILE", name); }` — BEFORE the startup files run
+    // (shell.c:722), and the load site reads whatever HISTFILE then holds
+    // (bashhist.c:336 get_string_value at load time). Re-defaulting here —
+    // AFTER the startup files — resurrected the default after an rcfile
+    // `unset HISTFILE`, so an unset-redirected session still loaded and
+    // saved the default file (niubash#661); an rcfile reassignment was
+    // honored only by luck of set_if_not. rubash main.rs
+    // apply_interactive_history_defaults now owns the default, pre-startup.
+    let Some(session) = executor.get_session_history() else {
+        return;
+    };
+    // GNU shell.c:810-811: the whole load — the HISTSIZE/HISTFILESIZE
+    // defaults inside load_history (bashhist.c:323-328), the
+    // sv_histsize("HISTFILESIZE") file truncation and the read itself —
+    // runs only when the startup files have not already put lines into
+    // the list (`history -s` in an rcfile must not be doubled by the
+    // file load): `if (shell_initialized == 0 && history_lines_this_session
+    // == 0) load_history();`.
+    let lines_this_session = session.borrow().lines_this_session;
+    if lines_this_session != 0 {
+        return;
+    }
     if executor.get_env("HISTSIZE").is_none() {
         executor.set_env("HISTSIZE", "500");
     }
@@ -3590,21 +4151,6 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
             executor.set_env("HISTFILESIZE", &histsize);
         }
     }
-    // GNU variables.c/bind_variable defaults: HISTFILE falls back to
-    // ~/.bash_history when unset (bashhist.c reads and appends that
-    // file). Without the default, an unset HISTFILE silently disabled
-    // both the startup load below and the exit save in finish_shell,
-    // losing the whole interactive history (rubash#1216).
-    if executor.get_env("HISTFILE").is_none() {
-        if let Some(home) = executor.get_env("HOME") {
-            if !home.is_empty() {
-                executor.set_env("HISTFILE", &format!("{home}/.bash_history"));
-            }
-        }
-    }
-    let Some(session) = executor.get_session_history() else {
-        return;
-    };
     let Some(histfile) = executor.get_env("HISTFILE").map(String::from) else {
         return;
     };
@@ -3683,6 +4229,29 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     // kernel default.
     #[cfg(unix)]
     crate::builtins::kill::reconcile_kernel_trap_dispositions(&executor.shell_state.env_vars);
+    // rubash#1991: job control must exist for every interactive
+    // session, whoever drives it. GNU establishes it inside
+    // initialize_shell_basics for interactive shells (jobs.c:4869
+    // keeps the `m` flag there even without -m); rubash's binary
+    // startup does the equivalent in apply_startup_job_control, but
+    // that step lives in main.rs, so a library host driving THIS
+    // entry (invocation.rs: a library host (niu) drives the stdin
+    // reader) ran interactive sessions with monitor permanently off
+    // and fg/bg refused with "no job control" on a real terminal.
+    // Mirror the binary's rule at the library entry: an interactive
+    // session defaults monitor on; an explicit startup transport
+    // value (__RUBASH_SETOPT_monitor, from -m/+m or -o/+o monitor)
+    // is respected untouched. Applied once per process: a host may
+    // re-enter this reader per line, and a user's later
+    // `set +o monitor` must survive those re-entries.
+    static JOB_CONTROL_DEFAULT_APPLIED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !JOB_CONTROL_DEFAULT_APPLIED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        && executor.get_env("__RUBASH_SETOPT_monitor").is_none()
+    {
+        executor.set_shell_option("monitor", true);
+    }
     // parse.y:1710: the SAME reader serves tty and non-tty stdin; the two
     // cases differ only in who echoes the accepted line (readline echoes
     // itself on a tty — the Windows cooked console echoes each typed key —
@@ -4746,6 +5315,23 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         // run, whose driver returns the group status directly.
         executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
+        // DE-06 (design 9.3; PLAN row 12): a parse error is
+        // ending this stdin run — a selected `parse-error`
+        // filter reports the site and parks the session before
+        // the exit path runs; a stop-loop unwind from the park
+        // replaces the run's status with its own.
+        if parse_error {
+            let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                crate::debugger::SourceLocation::new(file.clone(), pending_start_line as u32)
+            });
+            if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                crate::debugger::ExceptionKind::ParseError,
+                status,
+                location,
+            ) {
+                executor.set_last_exit_code(code);
+            }
+        }
         pending.clear();
         if parse_error
             || executor.take_exit_jump_pending()
@@ -4775,6 +5361,21 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         // Same group-status commit as the loop body above (rubash#508).
         executor.set_last_exit_code(status);
         let parse_error = executor.take_parse_error();
+        // DE-06 (design 9.3; PLAN row 12): the final group's
+        // parse error — same site treatment as the loop arm
+        // above.
+        if parse_error {
+            let location = executor.shell_state.bash_source_stack.first().map(|file| {
+                crate::debugger::SourceLocation::new(file.clone(), pending_start_line as u32)
+            });
+            if let Err(ExecuteError::ExitCode(code)) = executor.debugger_note_exception_site(
+                crate::debugger::ExceptionKind::ParseError,
+                status,
+                location,
+            ) {
+                executor.set_last_exit_code(code);
+            }
+        }
         if parse_error
             || executor.take_exit_jump_pending()
             || (status != 0
@@ -4864,6 +5465,14 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             }
         }
     }
+    // rubash#1853: end-of-stream job notifications. The boundary
+    // flush in execute_ast only fires when a further top-level
+    // command is walked, so a signal death in the stream's last
+    // command would otherwise leave the shell silently (GNU prints
+    // it from the wait itself — jobs.c:3385 notify_and_cleanup in
+    // wait_for; jobs.c:4723 maybe_print_job_notifications). This
+    // runs before the EXIT trap below, matching GNU's order.
+    let _ = executor.flush_job_notifications_at_stream_end();
     let code = match executor.run_exit_trap_with_status(status) {
         Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
@@ -4876,6 +5485,11 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             1
         }
     };
+    // DE-09 (design WP-1 G-13): the driver finish side reports the
+    // final status to the session — never the EXIT funnel itself.
+    // Idempotent with the exit builtin's dispatch-side report: the
+    // first finish point to speak wins.
+    executor.debugger_note_exit(code);
     // After the EXIT trap (whose writes still belong to the streams):
     // shell exit closes every descriptor, so each still-open persistent
     // output process substitution sees EOF and finishes — run the
@@ -4958,6 +5572,18 @@ pub fn pre_process_interactive_line(executor: &mut Executor, line: &str) -> Inte
         },
         posix,
     };
+
+    // niubash#646: the dispatch of an accepted line is the engine's
+    // observation of the host's save-at-accept add — the moment GNU
+    // stamps the entry (bashhist.c maybe_add_history → really_add_history
+    // → add_history → readline/history.c hist_inittime). Reconciling the
+    // stamp ledger HERE (before the no-expansion early return below —
+    // most lines take it) is what makes an accepted line's stamp its
+    // add time rather than the time of the first later `history` call.
+    // A recording veto (`interactive_history_veto_recording`, set
+    // +o history) drops the entry afterwards and the ledger tail goes
+    // with it.
+    executor.sync_provider_stamp_ledger();
 
     // bashhist.c:541-550 history_expansion_p: the expansion char or the
     // quick-substitution char anywhere in the line.
@@ -5482,7 +6108,7 @@ mod perf10_token_reuse_tests {
         let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut index = 0usize;
         let mut reused = 0usize;
-        while let Some((pending, _start_line, _group, feeder_tokens)) =
+        while let Some((pending, _start_line, _group, feeder_tokens, _info)) =
             read_next_source_group(&executor, &raw_lines, &mut index)
         {
             // run_source_groups' own first gate: a trim-empty group is
@@ -5597,6 +6223,88 @@ mod perf10_token_reuse_tests {
         );
     }
 
+    /// rubash#1961 alias-arm certification differential: with a live
+    /// alias table the gather feeds the streaming expansion to the same
+    /// feeder the raw arm uses. Whenever it hands back tokens, they
+    /// must be byte-identical (after the caller's trailing-separator
+    /// pop) to a fresh re-lex of the batch expansion of the group, and
+    /// the certified text must BE that batch expansion. Groups that
+    /// break on a parked candidate's batch fallback carry no tokens
+    /// and no certification; EOF-tail groups must report
+    /// known_incomplete and carry neither.
+    fn assert_alias_reuse_matches_fresh(text: &str) -> usize {
+        crate::lexer::set_parse_extended_glob(false);
+        let mut executor = Executor::new();
+        executor.set_env("__RUBASH_SHOPT_STATE", "expand_aliases");
+        executor.shell_state.aliases.insert(
+            "ll".to_string(),
+            crate::builtins::alias::Alias::new("ls -l"),
+        );
+        executor
+            .shell_state
+            .aliases
+            .insert("ec".to_string(), crate::builtins::alias::Alias::new("echo"));
+        let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let mut index = 0usize;
+        let mut reused = 0usize;
+        while let Some((pending, _start_line, _group, feeder_tokens, info)) =
+            read_next_source_group(&executor, &raw_lines, &mut index)
+        {
+            if info.known_incomplete {
+                assert!(
+                    feeder_tokens.is_none(),
+                    "EOF-tail group must not carry tokens: {pending:?}"
+                );
+                assert!(
+                    info.certified_expanded.is_none(),
+                    "EOF-tail group must not certify: {pending:?}"
+                );
+                continue;
+            }
+            let exec_text = expand_group_aliases(&executor, &pending);
+            if exec_text.trim().is_empty() {
+                continue;
+            }
+            let Some(mut tokens) = feeder_tokens else {
+                continue;
+            };
+            assert_eq!(
+                info.certified_expanded.as_deref(),
+                Some(exec_text.as_str()),
+                "certified text must be the batch expansion for group {pending:?}"
+            );
+            if tokens
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Semicolon)
+            {
+                tokens.pop();
+            }
+            let fresh = tokenize_with_initial_posix(&exec_text, false);
+            assert_eq!(
+                format!("{tokens:?}"),
+                format!("{fresh:?}"),
+                "alias-arm reused vs fresh token streams differ for group starting {:?}",
+                &pending[..pending.len().min(160)]
+            );
+            reused += 1;
+        }
+        reused
+    }
+
+    #[test]
+    fn alias_arm_reuse_matches_fresh_expansion() {
+        assert!(assert_alias_reuse_matches_fresh("ll /tmp\nec hi\n") >= 1);
+        assert!(
+            assert_alias_reuse_matches_fresh("nvm_install() {\n  ll a\n  ec b\n}\nec done\n") >= 1
+        );
+        assert_alias_reuse_matches_fresh("cat <<EOF\nll in body stays raw\nEOF\nll after\n");
+        assert_alias_reuse_matches_fresh("ec 'one\ntwo'\nll x\n");
+        assert_alias_reuse_matches_fresh("x=$(ec inner)\nll after\n");
+        // EOF tail: an unclosed brace group reports known_incomplete
+        // and reuses nothing.
+        assert_eq!(assert_alias_reuse_matches_fresh("{\n  ll a\n"), 0);
+    }
+
     #[test]
     fn reuse_matches_fresh_posix_flip_lines_inside_group() {
         // `set -o posix` mid-file flips the feeder's internal parse mode per
@@ -5617,7 +6325,7 @@ mod perf10_token_reuse_tests {
         let raw_lines: Vec<&str> = text.split_inclusive('\n').collect();
         let mut index = 0usize;
         let mut refused_seen = false;
-        while let Some((_pending, _start, _group, feeder_tokens)) =
+        while let Some((_pending, _start, _group, feeder_tokens, _info)) =
             read_next_source_group(&executor, &raw_lines, &mut index)
         {
             if feeder_tokens.is_none() {

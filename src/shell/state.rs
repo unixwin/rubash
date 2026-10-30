@@ -28,6 +28,46 @@ use crate::shell::Variable;
 use super::var_table::{VarAttrs, VarTable};
 use super::variables::VariableStore;
 
+/// rubash#2058: call-stack state a fork-shaped respawn inherits from
+/// its parent (docs/design/respawn-transport-census.md). GNU's fork
+/// children (subst.c:6362 process_substitute, execute_cmd.c:1576
+/// execute_in_subshell, coproc make_child) copy the parent's
+/// FUNCNAME / BASH_SOURCE / BASH_LINENO / BASH_ARGV / BASH_ARGC stacks
+/// verbatim (variables.c); a respawned `rubash -c` child re-imports
+/// only its process environment, so the four spawn sites stamp the
+/// parent's effective views and `Executor::new` installs them here.
+/// The dynamic views compose the child's own frames above these.
+///
+/// The three stack views are captured as the parent's EFFECTIVE views
+/// (post main-frame rendering), so composition is plain concatenation.
+/// The BASH_ARGV bottom frame is NOT here: when materialized it seeds
+/// `bash_arg_bottom` at birth like any installed frame; the
+/// unmaterialized state is represented by `argv_bottom` staying out of
+/// that cell plus `in_function` gating read-time synthesis
+/// (variables.c:1656 get_bashargcv initializes only at
+/// variable_context == 0).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InheritedForkFrames {
+    /// Effective FUNCNAME view at spawn (may end in "main").
+    pub(crate) function_names: Vec<String>,
+    /// Effective BASH_SOURCE view at spawn.
+    pub(crate) sources: Vec<String>,
+    /// Effective BASH_LINENO view at spawn (may end in "0").
+    pub(crate) linenos: Vec<String>,
+    /// BASH_ARGV frames above the bottom frame, innermost first.
+    pub(crate) argv_frames: Vec<String>,
+    /// BASH_ARGC frame counts, matching `argv_frames`.
+    pub(crate) argc_frames: Vec<String>,
+    /// The parent executed with variable_context > 0 at spawn time:
+    /// an unmaterialized BASH_ARGV stays unmaterialized in the child.
+    pub(crate) in_function: bool,
+    /// The parent ran a script file (shell.c open_shell_script's main
+    /// frame existed): the child's FUNCNAME view gains "main" beneath
+    /// its own frames, and its BASH_SOURCE raw stack holds only real
+    /// frames (no $0 bottom entry is installed on the respawn path).
+    pub(crate) has_main_frame: bool,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -115,6 +155,11 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#2058: the fork-inherited call-stack frames a respawned
+    /// child was born with (see InheritedForkFrames). None for ordinary
+    /// shells; the dynamic views read the child's own frames above
+    /// these, exactly like GNU's fork copying the parent's stacks.
+    pub(crate) inherited_fork_frames: Option<InheritedForkFrames>,
     /// variables.c variable_context — local scope stacks.
     pub(crate) local_var_scopes: Vec<HashMap<String, Option<String>>>,
     pub(crate) local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -158,6 +203,21 @@ pub struct ShellState {
     pub(crate) function_depth: usize,
     /// variables.c dollar_vars_changed bookkeeping for `set` scope.
     pub(crate) dollar_vars_changed_by_set: bool,
+    /// builtins/common.c:70 `this_shell_builtin` reduced to the one bit
+    /// the #2126 conversion reads: whether the most recent simple-
+    /// command dispatch in the current flow was `eval`, `source` or
+    /// `.`. GNU assigns the global on every simple-command dispatch
+    /// (execute_cmd.c:4813; NULL for function and disk-command
+    /// dispatches) and never restores it when a command or frame
+    /// completes, so a later evalstring parse error is adjudicated
+    /// against the dispatch that most recently ran — the eval/source
+    /// that opened the string arms it, any other dispatch disarms it.
+    /// Forked contexts run in clones of this state (the comsub
+    /// executor clones ShellState wholesale; flat-subshell regions
+    /// save/restore it), which reproduces GNU's per-process isolation;
+    /// pipeline stages additionally snapshot/restore this bit around
+    /// the stage (execute_pipeline_stage).
+    pub(crate) last_dispatch_was_eval_or_source: bool,
     /// lib/sh/random.c RANDOM/SRANDOM generator state.
     pub(crate) random_state: RandomGen,
     /// execute_cmd.c subshell_level.
@@ -309,6 +369,17 @@ pub struct ShellState {
     /// lifetime. A clone starts empty: a fork child may only drain
     /// carriers it wrote itself, never the parent's pending ones.
     pub(crate) procsub_adhoc_carriers: RefCell<Vec<PathBuf>>,
+    /// rubash#1907: the PROCESS umask recorded at the fork-save point
+    /// (`clone_for_child_save`). The `umask` builtin applies the mask
+    /// to the process (builtins/umask.rs), and a flat `( )` region has
+    /// no fork to discard the child's mask the way GNU's
+    /// execute_in_subshell (execute_cmd.c:1576) does — so the save
+    /// point snapshots the process mask into the saved state and
+    /// `restore_flat_subshell` re-applies it when the region ends.
+    /// Only the SAVED snapshot's copy is ever read; the live state's
+    /// own copy is inert. None where there is no process umask
+    /// (Windows) or when the state was never a fork snapshot.
+    pub(crate) fork_saved_process_umask: Option<u32>,
 }
 
 /// The shape of the PIPESTATUS variable cell (variables.c:6291
@@ -447,6 +518,14 @@ pub(crate) struct InteriorSnapshot {
     debug_trap_command: Option<String>,
     xtrace_fd: i32,
     xtrace_fd_source: String,
+    /// rubash#1907: the PROCESS umask at the command-substitution
+    /// boundary. The body runs in this same process, so a `umask`
+    /// inside `$( )` re-masks the process itself; GNU's substitution
+    /// child (subst.c:7143 command_substitute) discards it at exit.
+    /// Snapshotted/restored with the interior state so the leak
+    /// cannot reach the parent (the `( )` boundary's twin fix rides
+    /// `fork_saved_process_umask` on the full-state snapshot).
+    process_umask: Option<u32>,
 }
 
 impl InteriorSnapshot {
@@ -502,6 +581,7 @@ impl ShellState {
             debug_trap_command: self.debug_trap_command.borrow().clone(),
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
+            process_umask: crate::builtins::umask::snapshot_process_umask(),
         }
     }
 
@@ -517,6 +597,11 @@ impl ShellState {
     pub(crate) fn clone_for_child_save(&mut self) -> Self {
         let mut saved = self.clone();
         std::mem::swap(&mut saved.session_history, &mut self.session_history);
+        // rubash#1907: the fork boundary is also where the PROCESS
+        // umask is snapshotted — the child region runs against this
+        // same process, so only a snapshot taken NOW lets the restore
+        // put the parent's mask back (see the field docs).
+        saved.fork_saved_process_umask = crate::builtins::umask::snapshot_process_umask();
         saved
     }
 
@@ -550,6 +635,12 @@ impl ShellState {
         *self.debug_trap_command.borrow_mut() = snapshot.debug_trap_command.clone();
         self.xtrace_fd.set(snapshot.xtrace_fd);
         *self.xtrace_fd_source.borrow_mut() = snapshot.xtrace_fd_source.clone();
+        // rubash#1907: the substitution body ran against this same
+        // PROCESS — re-apply the boundary's process umask (see the
+        // InteriorSnapshot field docs).
+        if let Some(mask) = snapshot.process_umask {
+            crate::builtins::umask::apply_process_umask(mask);
+        }
     }
 }
 
@@ -575,6 +666,7 @@ impl Clone for ShellState {
             bash_arg_bottom: self.bash_arg_bottom.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
+            inherited_fork_frames: self.inherited_fork_frames.clone(),
             local_var_scopes: self.local_var_scopes.clone(),
             local_attr_scopes: self.local_attr_scopes.clone(),
             local_typed_scopes: self.local_typed_scopes.clone(),
@@ -586,6 +678,7 @@ impl Clone for ShellState {
             command_number: self.command_number,
             function_depth: self.function_depth,
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
+            last_dispatch_was_eval_or_source: self.last_dispatch_was_eval_or_source,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
             subshell_source_text: self.subshell_source_text.clone(),
@@ -624,6 +717,7 @@ impl Clone for ShellState {
             // rubash#1691: see the field docs — a clone drains only
             // its own ad-hoc carriers.
             procsub_adhoc_carriers: RefCell::new(Vec::new()),
+            fork_saved_process_umask: self.fork_saved_process_umask,
         }
     }
 }

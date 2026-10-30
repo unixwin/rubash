@@ -346,8 +346,12 @@ fn glob_filename_expand(
             if filename.is_empty() {
                 // glob.c:1287-1289: scan even on a NULL filename, so `b*/`
                 // yields only directories, with the `/` re-added by
-                // glob_dir_to_array.
-                if anchored_physical(&dname, env_vars, cwd).is_dir() {
+                // glob_dir_to_array. rubash#1917 A3: a synthetic /proc
+                // directory (a live pid dir) is a directory for this
+                // check even though nothing physical backs it.
+                if anchored_physical(&dname, env_vars, cwd).is_dir()
+                    || crate::special_paths::synthetic_proc_dir_entries(&dname).is_some()
+                {
                     out.push(format!("{dname}/"));
                 }
             } else {
@@ -418,10 +422,15 @@ fn glob_vector_expand(
     // G-02: every physical access anchors at the session cwd; `dir` keeps
     // its logical form for result construction only.
     let dir_physical = anchored_physical(dir, env_vars, cwd);
+    // rubash#1917 A3: a synthetic /proc directory has no physical
+    // backing; its entries come from the registry's one enumeration
+    // source. Asked once here, the answer serves all three branches
+    // below (directory probe, stat fast path, scan).
+    let proc_entries = crate::special_paths::synthetic_proc_dir_entries(dir);
     // glob.c:669-691: an empty pattern just requires DIR to be a directory
     // and yields one empty name (glob_dir_to_array re-attaches the slash).
     if pattern.is_empty() {
-        return if dir_physical.is_dir() {
+        return if dir_physical.is_dir() || proc_entries.is_some() {
             vec![String::new()]
         } else {
             Vec::new()
@@ -434,15 +443,29 @@ fn glob_vector_expand(
         let npat = dequote_pathname(pattern);
         // glob.c:703-712: the stat path joins DIR and the dequoted tail
         // (the physical join is the anchored equivalent).
-        return if dir_physical.join(&npat).exists() {
-            vec![npat]
-        } else {
-            Vec::new()
-        };
+        if dir_physical.join(&npat).exists() {
+            return vec![npat];
+        }
+        // rubash#1917 A3: inside a synthetic /proc directory the joined
+        // name may itself be synthetic (a content file, a link entry,
+        // or a live pid directory) with nothing physical to stat.
+        if proc_entries.is_some() {
+            let joined = join_dir_to_name(dir, &npat);
+            if crate::special_paths::synthetic_proc_content(&joined).is_some()
+                || crate::special_paths::is_synthetic_link_path(&joined)
+                || crate::special_paths::synthetic_proc_dir_entries(&joined).is_some()
+            {
+                return vec![npat];
+            }
+        }
+        return Vec::new();
     }
-    let entries = match shell_directory_entries_in(&dir_physical) {
-        Ok(entries) => entries,
-        Err(_) => return Vec::new(),
+    let entry_names: Vec<String> = match &proc_entries {
+        Some(names) => names.clone(),
+        None => match shell_directory_entries_in(&dir_physical) {
+            Ok(entries) => entries.into_iter().map(|entry| entry.name).collect(),
+            Err(_) => return Vec::new(),
+        },
     };
     // rubash#1533: in a byte locale glob matching is byte-wise (glob.c
     // matches the compiled pattern against raw dirent bytes), so stage
@@ -461,7 +484,7 @@ fn glob_vector_expand(
         names.push(".".to_string());
         names.push("..".to_string());
     }
-    names.extend(entries.into_iter().map(|entry| entry.name));
+    names.extend(entry_names);
     // GNU glob.c:641 glob_vector matches every dirent against the same
     // compiled byte-domain pattern; decode each candidate into one reused
     // scratch buffer instead of a fresh Vec<char> per file (no per-file

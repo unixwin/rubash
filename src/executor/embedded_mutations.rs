@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::DATA_DOLLAR;
+use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
 // The quoted-null carrier (GNU subst.c CTLNUL): an empty quoted span
@@ -101,6 +101,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
         )
     }
 
@@ -110,7 +111,12 @@ impl Executor {
         context: SubstitutionQuoteContext,
     ) -> String {
         let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
-        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false, false)
+        // Protection on, restore here (rubash#2210): this entry's callers
+        // consume the walker's output as final text, so the walker's own
+        // trailing unescape pass must see expansion results protected —
+        // the same invariant the assignment-RHS entry documents, with the
+        // restore done at this layer instead of by the caller.
+        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false, true, true)
     }
 
     // Compound array assignment RHS (`a=( ... )`): GNU defers expansion to
@@ -133,6 +139,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
         )
     }
@@ -157,6 +164,7 @@ impl Executor {
             SubstitutionQuoteContext::Unquoted,
             false,
             true,
+            false,
             false,
             false,
         )
@@ -219,6 +227,7 @@ impl Executor {
                 segment,
                 SubstitutionQuoteContext::Unquoted,
                 true,
+                false,
                 false,
                 false,
                 false,
@@ -362,7 +371,18 @@ impl Executor {
                 crate::executor::execution_misc::decode_stdin_body_enq(text)
             }
             Some(crate::parser::StdinBody::NeedsExpansion(word)) => {
-                self.expand_here_string_mut(word)
+                // rubash#1867: preexpand_command_stdin wraps a numbered
+                // here-string's STORAGE_WORD_PREFIX body verbatim into a
+                // NeedsExpansion carrier (stdin_body_needs_expansion
+                // exempts the storage form). The prefix is a parser
+                // transport encoding, never data: a carrier still
+                // carrying it takes the storage ladder (ANSI-C decode
+                // or word expansion), exactly like the un-carried body.
+                if let Some(word) = word.strip_prefix(STORAGE_WORD_PREFIX) {
+                    self.expand_stored_here_string_word(word)
+                } else {
+                    self.expand_here_string_mut(word)
+                }
             }
             None => String::new(),
         }
@@ -376,6 +396,7 @@ impl Executor {
         alternate: bool,
         preserve_quotes: bool,
         protect_rhs_data: bool,
+        restore_rhs_data: bool,
     ) -> String {
         self.apply_parameter_assignment_expansions_in_word(word);
         let saved_parameter_state =
@@ -409,6 +430,25 @@ impl Executor {
                 let unescaped = crate::executor::markers::cow_replace(&unescaped, "\\'", "'");
                 unescaped.into_owned()
             }
+        } else {
+            expanded
+        };
+        // rubash#2210: when the walk ran with expansion-result protection
+        // and THIS function ran the final unescape pass above, the pass has
+        // already skipped the protected backslashes (they rode as the
+        // marker, not as `\`), so restore them to real backslashes here.
+        // GNU subst.c:4773 quote_string CTLESC-protects every character of
+        // a parameter-expansion result merged into a word (subst.c:11862
+        // add_quoted_string), and subst.c:4807 dequote_string only strips
+        // CTLESC bytes — assembled expansion data is never re-scanned as
+        // escape syntax. The assignment-RHS entry keeps restore=false:
+        // its caller's own later unescape pass needs the marker alive, and
+        // that caller restores it (rubash#218).
+        let expanded = if restore_rhs_data {
+            crate::executor::markers::restore_bare_sentinels(
+                &expanded,
+                &[(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\")],
+            )
         } else {
             expanded
         };
@@ -744,6 +784,20 @@ impl Executor {
 
             if ch == '\\' {
                 if let Some(&next) = chars.peek() {
+                    // rubash#2210: inside a double-quoted span a backslash
+                    // is special only before the CBSDQUOTE set ($ ` " \
+                    // newline, syntax.h:58); before any other character
+                    // BOTH bytes are literal data (subst.c:11671-11674's
+                    // dquote counterpart — the character is added quoted,
+                    // backslash included). The arms below resolve the
+                    // escapable set inline; every other pair must reach
+                    // the output with its backslash protected, or the
+                    // trailing unescape pass in mut_inner would eat it as
+                    // if it were unquoted escape syntax. Emit the
+                    // DATA_BACKSLASH carrier; mut_inner's tail chain
+                    // restores it after that pass.
+                    let in_dquote_span = !heredoc
+                        && (in_double || matches!(context, SubstitutionQuoteContext::DoubleQuoted));
                     match next {
                         '`' => {
                             chars.next();
@@ -754,10 +808,19 @@ impl Executor {
                         // consumed, leaving one literal \.  This must
                         // happen before the `\$` check below so that
                         // `\\$var` yields `\<expanded>` rather than
-                        // `\$var` (rhs-exp.tests t5/t6).
+                        // `\$var` (rhs-exp.tests t5/t6). Inside a dquote
+                        // span the surviving backslash is itself literal
+                        // data: carry it protected (see above), or a
+                        // following metacharacter would pair with it in
+                        // the trailing pass (`"a\\(b"` -> `a\(b`, not
+                        // `a(b`).
                         '\\' => {
                             chars.next();
-                            output.push('\\');
+                            if in_dquote_span {
+                                output.push(crate::executor::markers::DATA_BACKSLASH);
+                            } else {
+                                output.push('\\');
+                            }
                             continue;
                         }
                         // A backslash inside a parameter body protects the
@@ -798,6 +861,18 @@ impl Executor {
                         '\'' if !matches!(context, SubstitutionQuoteContext::HereDocument) => {
                             chars.next();
                             output.push(crate::lexer::ANSI_C_QUOTE_MARKER);
+                            continue;
+                        }
+                        // rubash#2210: inside a dquote span, a backslash
+                        // before a character outside the escapable set is
+                        // literal data (CBSDQUOTE) — emit it protected so
+                        // the trailing unescape pass keeps both bytes
+                        // (`"a\(b"` stays `a\(b`). The newline pair is the
+                        // line continuation and keeps the fall-through.
+                        _ if in_dquote_span && !matches!(next, '\n' | '\r') => {
+                            chars.next();
+                            output.push(crate::executor::markers::DATA_BACKSLASH);
+                            output.push(next);
                             continue;
                         }
                         // Here-document bodies expand with Q_HERE_DOCUMENT,
@@ -1872,7 +1947,8 @@ impl Executor {
         // opens here too; routes that fall through to
         // expand_command_substitution_with_context nest a second,
         // inner bracket harmlessly.
-        let _hashed_fork = crate::executor::path::hashed_cache_fork_guard();
+        let _hashed_fork =
+            crate::executor::path::hashed_cache_fork_guard(&self.shell_state.env_vars);
         // GNU command_substitute (subst.c:7143) runs the body in a subshell:
         // arithmetic subscript writes queued inside never reach the parent
         // environment. Scope the deferred-write queue to this substitution.

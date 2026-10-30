@@ -15,9 +15,10 @@
 
 use std::io::Read;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use super::fd_table::{FdReadEndpoint, FdWriteEndpoint};
+use super::fd_table::{FdReadEndpoint, FdWriteEndpoint, FileFd};
 use super::Executor;
 use super::{is_closed_redirect_target, redirect_target_fd};
 use crate::parser::{CommandNode, Redirect, RedirectKind};
@@ -150,15 +151,26 @@ pub(in crate::executor) fn dev_operand_targets_fd(arg: &str, fd: u32) -> bool {
     matches!(split_dev_operand(arg), Some((_, value)) if dev_operand_fd(value) == Some(fd))
 }
 
-fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
-    if dev_operand_fd(arg).is_some() {
+/// The operand word-shape discipline shared by the operand passes
+/// (the dev-fd pass here, the synthetic-/proc pass in proc_operands):
+/// a word carries an operand when it IS the operand spelling, or when
+/// it carries it after `=` under an option-looking key. `value_ok`
+/// judges whether a (whole or post-`=`) word is the pass's operand
+/// spelling.
+pub(in crate::executor) fn split_keyed_operand<'a>(
+    arg: &'a str,
+    value_ok: impl Fn(&str) -> bool,
+) -> Option<(&'a str, &'a str)> {
+    if value_ok(arg) {
         return Some(("", arg));
     }
     // `dd of=/dev/stdout`, `tar --file=/dev/stdin` and similar carry the
     // operand after `=`. Option-looking keys (`--x`, lowercase dd-style
     // keys) rewrite; `FOO=/dev/stdin` environment assignments stay literal.
     let (key, value) = arg.split_once('=')?;
-    dev_operand_fd(value)?;
+    if !value_ok(value) {
+        return None;
+    }
     if key.starts_with('-')
         || key
             .chars()
@@ -171,25 +183,26 @@ fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
     }
 }
 
+fn split_dev_operand(arg: &str) -> Option<(&str, &str)> {
+    split_keyed_operand(arg, |value| dev_operand_fd(value).is_some())
+}
+
 /// The descriptor a `/dev/std*` / `/dev/fd/N` / `/proc/self/fd/N` operand
 /// names. `pub(in crate::executor)` so in-process file builtins (emulated
 /// `cat`, `sed`, ...) can resolve the same names against the fd table —
 /// they have no child descriptor table, so the endpoint itself is read.
+///
+/// The spelling judgment itself is the registry's
+/// (`special_paths::fd_alias_target`): this face used to re-parse the
+/// tail with `str::parse`, which also accepted `/dev/fd/+3` — a spelling
+/// GNU rejects on every face (the open fails ENOENT) — so the two
+/// answers drifted apart (redundancy audit R3/D1). The registry also
+/// owns the own-pid spelling (rubash#1974: `/proc/<pid>/fd/N` with the
+/// shell's own pid is the same alias, exactly as procfs serves it);
+/// this face previously carried the only private copy of that rewrite.
+/// Foreign pids stay plain filesystem paths.
 pub(in crate::executor) fn dev_operand_fd(value: &str) -> Option<u32> {
-    if let Some(rest) = value.strip_prefix("/dev/") {
-        return match rest {
-            "stdin" => Some(0),
-            "stdout" => Some(1),
-            "stderr" => Some(2),
-            _ => rest.strip_prefix("fd/")?.parse().ok(),
-        };
-    }
-    let rest = value.strip_prefix("/proc/")?;
-    let rest = rest.strip_prefix("self/").or_else(|| {
-        let (pid, tail) = rest.split_once('/')?;
-        (pid.parse::<u32>().ok()? == std::process::id()).then_some(tail)
-    })?;
-    rest.strip_prefix("fd/")?.parse().ok()
+    crate::special_paths::fd_alias_target(value)
 }
 
 /// The resolved content of a `/dev/fd/N`-family operand together with the
@@ -211,12 +224,12 @@ fn command_redirect_for_fd<'c>(cmd: &'c CommandNode, fd: u32) -> Option<&'c Redi
         .rev()
         .find(|redirect| redirect.fd_var.is_none() && redirect_binds_fd(redirect, fd))
         .or(match fd {
-            0 => cmd.redirect_in.as_ref(),
-            1 => cmd.redirect_out.as_ref().or(cmd.append.as_ref()),
+            0 => cmd.redirect_in.as_deref(),
+            1 => cmd.redirect_out.as_deref().or(cmd.append.as_deref()),
             2 => cmd
                 .redirect_err
-                .as_ref()
-                .or(cmd.redirect_err_append.as_ref()),
+                .as_deref()
+                .or(cmd.redirect_err_append.as_deref()),
             _ => None,
         })
 }
@@ -286,6 +299,89 @@ fn drain_reader_to_temp(
     dev_operand_temp(&bytes, m)
 }
 
+/// rubash#1959: the Windows rendezvous for a procsub read end delivered
+/// as an argv word to an external child (`head -1 <(body)`, `$(cat
+/// <(body))`, and the pipeline word form alike — every spawn site funnels
+/// through `dev_fd_table_operand`). The anonymous pipe's read end has no
+/// openable path and the child cannot inherit numbered handles into argv
+/// names, so the face used to drain the producer to EOF into a temp file
+/// before spawn — the consumer started only after the producer exited.
+/// GNU's contract (subst.c:6362 process_substitute) is a live pipe under
+/// the operand name: the child reads while the producer still runs.
+///
+/// The endpoint is the #1903 WinuxCmd FIFO marker rendezvous (the same
+/// design piece the issue names): the argv word carries a path to an
+/// on-disk `!<fifo>` marker whose reader opens bridge to a deterministic
+/// named pipe. The external child's own runtime (WinuxCmd
+/// file_io.cppm open_binary_file → open_fifo_read_handle) creates the
+/// INBOUND server for the marker and blocks in ConnectNamedPipe; the
+/// pump thread below is the WRITER client (`open_winuxcmd_fifo_write`,
+/// GNU's blocking O_WRONLY fifo open), copying the procsub read end
+/// into the pipe byte-wise. A consumer that is not marker-aware reads
+/// the 7 marker bytes — the same degradation every WinuxCmd fifo shows
+/// a non-protocol consumer.
+///
+/// Ownership and lifetime: the pump owns a DuplicateHandle reference of
+/// the read end, so fd-table cleanup after the child exits (consume's
+/// seek-to-end, the command-scoped close of the procsub fd, FileFd drop)
+/// cannot race its reads. Closing the writer client is the child's EOF;
+/// a consumer gone early (GNU's SIGPIPE shape, `head -1`) fails the
+/// pump's writes and tears the pump down, which breaks the producer's
+/// pipe the same way. If no marker-aware reader ever opens the path, the
+/// pump parks in the write open and the producer parks on its full pipe
+/// — the same running-producer shape GNU leaves behind for an
+/// unconsumed substitution; nothing in the parent blocks on either. The
+/// marker file itself is removed with the materialization record (after
+/// the child exits, like every operand temp).
+#[cfg(windows)]
+fn procsub_fifo_marker_operand(file: &FileFd, m: &mut DevOperandMaterialization) -> Option<String> {
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "rubash-procsub-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    if crate::winuxcmd_fifo::create_winuxcmd_fifo(&path, false).is_err() {
+        return None;
+    }
+    let source = match crate::fd::duplicate_handle(file.handle) {
+        Ok(source) => source,
+        Err(_) => {
+            let _ = std::fs::remove_file(&path);
+            return None;
+        }
+    };
+    let pump_path = path.clone();
+    std::thread::spawn(move || {
+        // Blocks until the child's reader creates the endpoint (and on
+        // ERROR_PIPE_BUSY waits its slice) — no parent-side thread is
+        // involved in that wait, so a consumer that never arrives costs
+        // only this parked thread, never a shell stall.
+        match crate::winuxcmd_fifo::open_winuxcmd_fifo_write(&pump_path, &|| false) {
+            Ok(sink) => {
+                use std::os::windows::io::IntoRawHandle;
+                let sink = sink.into_raw_handle() as crate::fd::HANDLE;
+                loop {
+                    match crate::fd::read_some(source, 65536) {
+                        Ok(chunk) if chunk.is_empty() => break,
+                        Ok(chunk) => {
+                            if crate::fd::write_all(sink, &chunk).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                crate::fd::close_handle(sink);
+            }
+            Err(_) => {}
+        }
+        crate::fd::close_handle(source);
+    });
+    m.temps.push(path.clone());
+    Some(path.to_string_lossy().into_owned())
+}
+
 impl Executor {
     /// Rewrite `/dev/std*`-family operand words in `args` to concrete paths.
     /// `stdin`/`stdout` describe how the caller wires the child's fd 0/1
@@ -322,6 +418,30 @@ impl Executor {
                 let Some(entry) = self.fd_table.entries.get(&fd).filter(|e| !e.closed) else {
                     continue;
                 };
+                // rubash#1952: a File read endpoint (a streamed
+                // procsub's pipe, an exec-bound file) is a real
+                // descriptor in THIS process only — the child does
+                // not inherit it by default, so pin a dup at the
+                // operand's number like the buffered arms below.
+                // The descriptor is shared, not consumed: the child
+                // reads advance the same offset, as under GNU.
+                // rubash#2171: pin a DUPLICATE of the handle, never
+                // the endpoint's own — the record owns what it
+                // attaches and its Drop closes every recorded handle
+                // once the child exits, so recording the parent's
+                // live handle closed the parent's FileFd with the
+                // record (a mere `ls -l /proc/self/fd/0` inspection
+                // left the parent's fd dead; later reads failed
+                // EBADF where GNU keeps the descriptor — EISDIR for
+                // a directory binding). A dup shares the open file
+                // description, offset included, so the child's view
+                // is unchanged.
+                if let Some(FdReadEndpoint::File(file)) = &entry.read {
+                    if let Ok(dup) = crate::fd::duplicate_handle(file.handle) {
+                        m.unix_fd_attach.push((fd, dup));
+                    }
+                    continue;
+                }
                 let buffered = match &entry.read {
                     Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_)) => self
                         .fd_table
@@ -440,8 +560,43 @@ impl Executor {
                     dev_operand_temp(&bytes, m)
                 }
                 FdReadEndpoint::File(file) => {
-                    m.consume_fds.push(fd);
-                    Some(file.path.to_string_lossy().into_owned())
+                    // A pipe-backed endpoint (a process substitution's
+                    // read end, rubash#1952) carries only a display
+                    // name, not a filesystem path. Real file endpoints
+                    // keep handing over their path.
+                    if file.path.to_string_lossy().starts_with("<(") {
+                        // rubash#1959: deliver the live stream through
+                        // the #1903 fifo-marker rendezvous — the child
+                        // opens the marker path and its own runtime
+                        // bridges to the live pipe, instead of the
+                        // parent draining the producer to a temp file
+                        // before spawn (GNU subst.c:6362
+                        // process_substitute hands the child the pipe
+                        // read end itself). Fall back to the drain
+                        // when the rendezvous cannot be set up.
+                        #[cfg(windows)]
+                        {
+                            if let Some(path) = procsub_fifo_marker_operand(file, m) {
+                                // No consume record: the pump thread owns
+                                // the stream now, and the word fd is
+                                // command-scoped (removed at this very
+                                // command's end). A finish-time seek would
+                                // be dead semantics AND would serialize
+                                // against the pump's parked ReadFile on
+                                // the same pipe object — synchronous
+                                // handles allow one operation at a time,
+                                // so the shell would block until the
+                                // producer's next write (observed: the
+                                // whole producer lifetime).
+                                return Some(path);
+                            }
+                        }
+                        m.consume_fds.push(fd);
+                        drain_handle_to_temp(file.handle, m)
+                    } else {
+                        m.consume_fds.push(fd);
+                        Some(file.path.to_string_lossy().into_owned())
+                    }
                 }
                 FdReadEndpoint::InheritedProcessStdin => {
                     drain_handle_to_temp(crate::fd::process_std_handle(0), m)
@@ -449,6 +604,12 @@ impl Executor {
                 FdReadEndpoint::CoprocStdout { fd: file, .. } => {
                     drain_handle_to_temp(file.handle, m)
                 }
+                // rubash#1937: a directory endpoint cannot be
+                // materialized into an openable operand — decline
+                // and let the caller keep the /dev/fd/N spelling
+                // (on Unix the child opens the real directory and
+                // its reads fail EISDIR natively).
+                FdReadEndpoint::Directory => None,
             };
         }
         match entry.write.as_ref()? {
@@ -480,6 +641,18 @@ impl Executor {
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 Some(path.to_string_lossy().into_owned())
             }
+            // rubash#1898: an operand naming a /dev/full binding —
+            // the child gets a throwaway temp whose contents are
+            // never flushed anywhere (absorbed, like the device's
+            // contract minus the ENOSPC the child would see from
+            // the real device; the in-shell faces carry that shape).
+            FdWriteEndpoint::FullDevice => dev_operand_temp(&[], m),
+            // rubash#2042: an operand naming a 0644-class synthetic
+            // /proc binding — same absorbed-temp treatment; the
+            // EINVAL write profile the child would see from the real
+            // procfs entry cannot cross the boundary (the in-shell
+            // faces carry that shape).
+            FdWriteEndpoint::ProcContentWrite => dev_operand_temp(&[], m),
         }
     }
 
@@ -686,6 +859,28 @@ impl Executor {
     /// child a dup of the descriptor, so the in-process equivalent is the
     /// fd endpoint's remaining bytes, consuming the shared offset).
     /// `None` for an unbound or write-only-pipe fd — callers report ENOENT.
+    /// rubash#1952: the live File endpoint a `/dev/fd/N` operand
+    /// names, when the command does not rebind that descriptor
+    /// itself — a streaming consumer (the in-process cat) copies it
+    /// chunk-wise as bytes arrive instead of draining it whole (GNU
+    /// cat.c reads the dup'd descriptor in a byte-copy loop).
+    /// Buffered endpoints and command-rebound descriptors keep the
+    /// byte serve (dev_fd_operand_bytes_for_command), which stays
+    /// authoritative for them.
+    pub(in crate::executor) fn dev_fd_operand_live_file(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+    ) -> Option<Rc<FileFd>> {
+        if command_redirect_for_fd(cmd, fd).is_some() {
+            return None;
+        }
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::File(file)) => Some(file),
+            _ => None,
+        }
+    }
+
     pub(in crate::executor) fn dev_fd_operand_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
         let entry = self.fd_table.entries.get(&fd)?.clone();
         if entry.closed {
@@ -734,9 +929,14 @@ impl Executor {
                     None => Some(Vec::new()),
                 }
             }
-            FdWriteEndpoint::CoprocStdin { .. } | FdWriteEndpoint::ProcessSubstitution { .. } => {
-                None
-            }
+            FdWriteEndpoint::CoprocStdin { .. }
+            | FdWriteEndpoint::ProcessSubstitution { .. }
+            // rubash#1898: a /dev/full write endpoint holds no
+            // readable bytes.
+            | FdWriteEndpoint::FullDevice
+            // rubash#2042: neither does a 0644-class synthetic /proc
+            // write binding (the entry's bytes ride the read side).
+            | FdWriteEndpoint::ProcContentWrite => None,
         }
     }
 
@@ -760,5 +960,40 @@ impl Executor {
             }
         }
         captured
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dev_operand_fd;
+
+    /// Redundancy audit R3/D1: the spelling judgment is the registry's;
+    /// this face's own `str::parse` tail-parse used to accept the `+N`
+    /// spellings GNU rejects on every face (the literal open fails
+    /// ENOENT in procfs; redir.c's no-dev-fd fallback likewise requires
+    /// all_digits).
+    #[test]
+    fn r3_dev_operand_fd_spelling_verdicts() {
+        assert_eq!(dev_operand_fd("/dev/stdin"), Some(0));
+        assert_eq!(dev_operand_fd("/dev/stdout"), Some(1));
+        assert_eq!(dev_operand_fd("/dev/stderr"), Some(2));
+        assert_eq!(dev_operand_fd("/dev/fd/63"), Some(63));
+        assert_eq!(dev_operand_fd("/proc/self/fd/2"), Some(2));
+        assert_eq!(dev_operand_fd("/dev/fd/+3"), None);
+        assert_eq!(dev_operand_fd("/proc/self/fd/+3"), None);
+        assert_eq!(dev_operand_fd("/dev/null"), None);
+        assert_eq!(dev_operand_fd("/etc/passwd"), None);
+    }
+
+    /// The one layer that stays local: the shell's own numeric-pid
+    /// spelling rewrites to `self` (GNU resolves /proc/$$/fd/N through
+    /// procfs); foreign pids are plain filesystem paths.
+    #[test]
+    fn r3_dev_operand_fd_self_pid_layer() {
+        let own = format!("/proc/{}/fd/3", std::process::id());
+        assert_eq!(dev_operand_fd(&own), Some(3));
+        let own_plus = format!("/proc/{}/fd/+3", std::process::id());
+        assert_eq!(dev_operand_fd(&own_plus), None);
+        assert_eq!(dev_operand_fd("/proc/4294967294/fd/3"), None);
     }
 }

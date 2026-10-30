@@ -640,6 +640,13 @@ impl Executor {
                     self.shell_state.arithmetic_nonfatal_error.set(true);
                     return String::new();
                 }
+                // rubash#2004: the typed cell settles hit and miss; the
+                // storage leg below runs only when it cannot.
+                if let Some(settled) = self.assoc_element_value_settled(array_name, &key) {
+                    return settled
+                        .map(|value| parameter_char_length(&value).to_string())
+                        .unwrap_or_else(|| "0".to_string());
+                }
                 return self
                     .parameter_array_storage(array_name)
                     .and_then(|value| assoc_value_at(&value, &key))
@@ -761,6 +768,13 @@ impl Executor {
             if let Some((array_name, key)) = parse_array_subscript(&cell) {
                 if self.is_assoc_parameter_array(array_name) {
                     let key = self.assoc_subscript_key(key);
+                    // rubash#2004: settled cell lookup first, as in the
+                    // direct length leg above.
+                    if let Some(settled) = self.assoc_element_value_settled(array_name, &key) {
+                        return settled
+                            .map(|value| parameter_char_length(&value).to_string())
+                            .unwrap_or_else(|| "0".to_string());
+                    }
                     return self
                         .parameter_array_storage(array_name)
                         .and_then(|value| assoc_value_at(&value, &key))

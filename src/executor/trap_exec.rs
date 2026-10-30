@@ -149,6 +149,28 @@ impl Executor {
         }
     }
 
+    /// `exec N<directory` reached through a synthetic link
+    /// (rubash#1937): GNU's O_RDONLY open of a directory succeeds —
+    /// only the READ fails (EISDIR). Windows cannot open a directory
+    /// handle at all, so the bind installs the Directory endpoint and
+    /// the read side fabricates the failure (see
+    /// FdReadEndpoint::Directory). Bookkeeping mirrors
+    /// set_fd_input_file.
+    pub(in crate::executor) fn set_fd_input_directory(&mut self, fd: u32, dynamic: bool) {
+        self.fd_table
+            .open_input(fd, FdReadEndpoint::Directory, dynamic);
+        self.shell_state.env_vars.remove(&fd_closed_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_key(fd));
+        self.shell_state.env_vars.remove(&fd_stdin_offset_key(fd));
+        if dynamic {
+            self.shell_state
+                .env_vars
+                .insert(fd_dynamic_input_key(fd), "1".to_string());
+        } else {
+            self.shell_state.env_vars.remove(&fd_dynamic_input_key(fd));
+        }
+    }
+
     /// `[N]<>file` — one O_RDWR handle feeding both directions of the slot
     /// (GNU redir.c r_input_output opens a single descriptor).
     pub(in crate::executor) fn set_fd_readwrite_file(
@@ -159,7 +181,7 @@ impl Executor {
     ) -> std::io::Result<()> {
         // rubash#1026: `N<>/dev/tcp/host/port` binds the connected
         // socket (one descriptor, both directions — redir.c netopen).
-        if self.is_net_redirect_target(target) {
+        if crate::special_paths::is_net_redirect_target(target) {
             // Raw error: every caller of this function applies
             // posix_errors::path_error itself.
             let file = self.open_net_redirect_raw(target)?;
@@ -176,7 +198,119 @@ impl Executor {
                 .insert(fd_output_key(fd), target.to_string());
             return Ok(());
         }
-        let path = shell_path_to_windows(target, &self.shell_state.env_vars);
+        // rubash#1898: the zero/full devices bind directly — reads
+        // come from the pump-fed zero source; /dev/zero writes go to
+        // the null sink; /dev/full writes bind the FullDevice
+        // endpoint, whose faces fail ENOSPC through sh_chkwrite
+        // exactly like the direct redirect faces.
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_full_device(target)
+        {
+            let full = crate::special_paths::is_full_device(target);
+            let read_file = Self::zero_device_file(&target)?;
+            let read_fd = FileFd::from_file(read_file, target.into());
+            self.set_fd_input_file(fd, read_fd, dynamic);
+            if full {
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::FullDevice, dynamic);
+            } else {
+                let write_file = self.create_redirect_output("/dev/null", true)?;
+                let write_fd = FileFd::from_file(write_file, target.into());
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(write_fd), dynamic);
+            }
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // rubash#1935: synthetic /proc content — the entry's write
+        // class decides the open, the same answer the probe ladder
+        // gives: the 0444 class fails the open EACCES (redir.c
+        // r_input_output on the real entry); the 0644 class binds —
+        // reads serve the generated snapshot through the byte
+        // channel, writes fail EINVAL through the symbolic
+        // ProcContentWrite endpoint (rubash#2042: GNU's procfs 0644
+        // open succeeds and its writes fail EINVAL; the absorbed
+        // sink made them silently succeed).
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(target) {
+            if !allowed {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Permission denied",
+                ));
+            }
+            let bytes = crate::special_paths::synthetic_proc_content(target).unwrap_or_default();
+            self.set_fd_input_bytes(fd, bytes, dynamic);
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::ProcContentWrite, dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // rubash#1963: `<> /dev/fd/N` opens the alias through the
+        // kernel on GNU — a closed alias fails the open ENOENT, an
+        // open one binds a dup of the descriptor in both directions.
+        if let Some(alias_fd) = crate::special_paths::fd_alias_target(target) {
+            if !super::redirection::dup_source_fd_open(
+                &self.fd_table,
+                alias_fd,
+                &std::collections::HashMap::new(),
+            ) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "No such file or directory",
+                ));
+            }
+            let _ = self.fd_table.dup_input(fd, alias_fd);
+            let _ = self.fd_table.dup_output(fd, alias_fd);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // SyntheticLink (rubash#1900): the open goes to the resolved
+        // native target, as the input arms bind it — the pair split
+        // serves `<>`; a directory target fails the pair open, like
+        // GNU's O_RDWR open of a directory fails.
+        if let Some(link) = crate::special_paths::synthetic_link_target(
+            target,
+            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+        ) {
+            let (read_file, write_file) =
+                FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
+            self.set_fd_input_file(fd, read_file, dynamic);
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state
+                .env_vars
+                .insert(fd_output_key(fd), target.to_string());
+            return Ok(());
+        }
+        // G-02 session-cwd anchor (rubash#1887): GNU redir.c:725
+        // redir_open opens in the shell process, whose only cwd is the
+        // shell's cwd; in this port's split model every session open
+        // anchors at ShellState.cwd via session_path (see its doc), or
+        // a relative operand resolves against the process cwd and the
+        // bind misses files the shell itself just created after `cd`.
+        let path = self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars));
         // open_readwrite_pair splits `<>CON` into its CONIN$/CONOUT$
         // halves (niubash#519: CON rejects a read+write handle).
         let (read_file, write_file) = FileFd::open_readwrite_pair(path)?;
@@ -205,7 +339,7 @@ impl Executor {
     ) -> std::io::Result<()> {
         // rubash#1026: `N>/dev/tcp/host/port` binds the connected
         // socket, not a filesystem path (redir.c netopen).
-        if self.is_net_redirect_target(&target) {
+        if crate::special_paths::is_net_redirect_target(&target) {
             let file = self.open_net_redirect(&target)?;
             let file_fd = FileFd::from_file(file, target.clone().into());
             self.fd_table
@@ -217,7 +351,52 @@ impl Executor {
             self.shell_state.env_vars.insert(fd_output_key(fd), target);
             return Ok(());
         }
-        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+        // rubash#1898: device write binds — /dev/zero discards
+        // through the null sink; /dev/full binds the FullDevice
+        // endpoint (its writes fail ENOSPC through sh_chkwrite).
+        if crate::special_paths::is_zero_device(&target)
+            || crate::special_paths::is_full_device(&target)
+        {
+            if crate::special_paths::is_full_device(&target) {
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::FullDevice, dynamic);
+            } else {
+                let file = self.create_redirect_output("/dev/null", true)?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(file_fd), dynamic);
+            }
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            return Ok(());
+        }
+        // rubash#1935 + rubash#2042: synthetic /proc content — the
+        // 0444 class fails the open EACCES; the 0644 class binds the
+        // symbolic ProcContentWrite endpoint (GNU's procfs open
+        // succeeds and its writes fail EINVAL; the fall-through below
+        // would create a phantom enclave file at the literal path and
+        // its writes would silently succeed).
+        if let Some(allowed) = crate::special_paths::synthetic_proc_write_allowed(&target) {
+            if !allowed {
+                return Err(crate::posix_errors::path_error(
+                    &target,
+                    io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied"),
+                ));
+            }
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::ProcContentWrite, dynamic);
+            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+            self.shell_state
+                .env_vars
+                .remove(&fd_output_process_substitution_key(fd));
+            self.shell_state.env_vars.insert(fd_output_key(fd), target);
+            return Ok(());
+        }
+        // G-02 session-cwd anchor (rubash#1887): see set_fd_readwrite_file.
+        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
         let file = FileFd::open_write(path, append, false)
             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
         self.fd_table
@@ -272,6 +451,17 @@ impl Executor {
             crate::builtins::eval::EvalAction::Complete(status) => {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 self.exit_code = status;
+                // rubash#2117: eval's option faces (an invalid option,
+                // --help) return EX_USAGE (builtins/eval.def:
+                // CASE_HELPOPT / the invalidopt return) — a special
+                // builtin's usage error marks special_builtin_failed
+                // (execute_cmd.c:4886-4888). The Complete arm's status
+                // vocabulary is only success or this face; statuses of
+                // the executed string ride the Execute arm and never
+                // mark it (an inner command's plain 2 is not > EX_SHERRBASE).
+                if status == crate::builtins::eval::EX_USAGE {
+                    self.special_builtin_failed.set(true);
+                }
                 Ok(())
             }
             crate::builtins::eval::EvalAction::Execute(source) => {
@@ -772,7 +962,20 @@ impl Executor {
                     && (has_parse_error || parse_error_raised_during_eval) =>
             {
                 self.exit_code = code;
-                Ok(())
+                // rubash#2126: GNU builtins/evalstring.c:589-596 — a
+                // syntax error (EX_BADSYNTAX) out of parse_and_execute
+                // in a posixly_correct non-interactive shell whose most
+                // recent dispatch is eval/source itself is NOT contained
+                // by the eval boundary: jump_to_top_level (ERREXIT) with
+                // EX_BADUSAGE. The containment arms own every other
+                // shape (non-POSIX mode, `command eval` via the depth
+                // gate inside evalstring_syntax_error_exits, a string
+                // whose own commands already dispatched something else).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // Same containment when an inner boundary already absorbed the
             // error and execute_ast came back Ok with the flag set: GNU's
@@ -780,7 +983,14 @@ impl Executor {
             // EX_BADUSAGE, never the caller's reader.
             Ok(()) if parse_error_raised_during_eval && !parser_error_errexited => {
                 self.exit_code = 2;
-                Ok(())
+                // rubash#2126: same evalstring.c:589-596 conversion for
+                // the surface where the driver swallowed the abort into
+                // an Ok result (parse unit voided after a good prefix).
+                if self.evalstring_syntax_error_exits() {
+                    Err(ExecuteError::ExitCode(2))
+                } else {
+                    Ok(())
+                }
             }
             // GNU evalstring.c:372 installs a local top_level catch for the
             // string being evaluated ("prevents errors in substitution from
@@ -997,10 +1207,46 @@ impl Executor {
     /// value only.
     pub(crate) fn run_debug_trap(
         &mut self,
+        seam: crate::debugger::SeamKind,
         command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
+        }
+        // niubash#681 (design 4.2/9.1): the consult below decides
+        // about THIS seam, so its location facts are snapshotted at
+        // funnel arrival — before the user's trap action runs. The
+        // action executes in full ahead of the consult (the design's
+        // order), and an action that calls a function leaves the
+        // ambient line stamp at that function's definition line on
+        // exit (execute_function's deliberate restamp for the RETURN
+        // trap, function_calls.rs). A consult that re-read the
+        // ambient stamp after the action would adjudicate this
+        // seam's breakpoints against the trap function's definition
+        // line: line breakpoints silently never match, or replay at
+        // the stale line wearing this seam's command text. GNU
+        // establishes the seam's line in the caller before
+        // run_debug_trap (execute_cmd.c) and runs the action inside
+        // a saved/restored parser state (trap.c _run_trap_internal),
+        // so the post-action line state is the seam's by
+        // construction; the snapshot is the same guarantee here.
+        // Taken only while a session is armed (the gate load the
+        // funnel already pays), so the debugger-off path is
+        // unchanged.
+        let seam_facts = if crate::debugger::SESSION_ACTIVE.is_armed() {
+            Some(self.debugger_location())
+        } else {
+            None
+        };
+        // WP-3 (design 4.4; WP-1 gap G-02; 150-c REPORT section 5
+        // note 1): the session gate is consulted BEFORE the
+        // trap-action lookup below, so an attached session is asked
+        // on every funnel arrival — including the no-action early
+        // return — while a disarmed gate costs one atomic load and
+        // the funnel behaves exactly as before. The first arrival
+        // serves the entry stop (note 4).
+        if crate::debugger::SESSION_ACTIVE.is_armed() {
+            self.debugger_serve_entry_stop()?;
         }
         self.debug_trap_running = true;
         // rubash#375: borrowing, allocation-free consult (GNU trap.c:1154
@@ -1009,6 +1255,22 @@ impl Executor {
         let Some(action) =
             crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
         else {
+            // G-03 (WP-1): the no-action path is still a seam
+            // arrival — the consult is asked here too (150-c
+            // REPORT section 5, note 1).
+            if crate::debugger::SESSION_ACTIVE.is_armed() {
+                // The re-entrancy flag stays up for the consult
+                // itself (its condition evaluations rely on it),
+                // but it comes down before any error propagates:
+                // a forced return (design 6.1) unwinds out of the
+                // consult with the run still alive in the caller,
+                // and a stuck flag would silence every later seam
+                // of this executor.
+                let consult_result = self.debugger_consult(seam, command_text, seam_facts);
+                self.debug_trap_running = false;
+                consult_result?;
+                return Ok(None);
+            }
             self.debug_trap_running = false;
             return Ok(None);
         };
@@ -1078,7 +1340,16 @@ impl Executor {
         let extdebug =
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug");
         let skip_command = extdebug && trap_status != 0;
-        Ok(skip_command.then_some(trap_status))
+        if skip_command {
+            // Design 4.2's order: the extdebug veto (step 4) is
+            // decided before the consult (step 5) — a vetoed unit
+            // neither executes nor parks at a stop.
+            return Ok(Some(trap_status));
+        }
+        if crate::debugger::SESSION_ACTIVE.is_armed() {
+            self.debugger_consult(seam, command_text, seam_facts)?;
+        }
+        Ok(None)
     }
 
     /// Runs the RETURN trap action when a function (or sourced script)
@@ -1306,7 +1577,11 @@ impl Executor {
         // their only judge (trapped -> run, ignored -> drop,
         // untrapped -> the 128+sig death).
         let signals = crate::builtins::kill::take_pending_signals(std::process::id())?;
-        let mut queue: Vec<(i32, bool)> = Vec::with_capacity(signals.len() + 4);
+        // #682: with_capacity(4) heap-allocated at every command boundary
+        // even when no delivery is pending (the common case); Vec::new()
+        // defers the allocation to the first push — identical growth
+        // semantics, one malloc/free per command removed from the floor.
+        let mut queue: Vec<(i32, bool)> = Vec::new();
         #[cfg(unix)]
         queue.extend(
             crate::builtins::kill::take_ancestor_signals()
@@ -1503,6 +1778,15 @@ impl Executor {
             }
         }
 
+        // WP-3 (design 4.4; WP-1 gaps G-05/G-10; 150-c REPORT
+        // section 5, note 5): the asynchronous stop is serviced
+        // here — after any signal trap for it has been dispatched
+        // above — at the boundary poll. While a trap action runs,
+        // servicing waits: the poll's later arrivals (after the
+        // action completes) synchronize on the same point.
+        if !self.debug_trap_running && !self.return_trap_running && !self.error_trap_running {
+            self.debugger_service_async_stop()?;
+        }
         Ok(())
     }
 
@@ -1562,6 +1846,37 @@ impl Executor {
                     // Record $? before the unwind so an interactive host that
                     // only maps ExitCode(code) still reports 130 after Ctrl+C.
                     self.exit_code = 128 + signal;
+                    // niubash#698: the same classification the other two
+                    // mailbox drains make for this exact event — the
+                    // boundary dispatch's untrapped branch above
+                    // (run_pending_signal_traps) and the `wait` builtin's
+                    // drain (job_builtins wait_pending_signal_status,
+                    // rubash#1825): in an interactive session an untrapped
+                    // delivery is a DISCARD-class unwind (GNU jobs.c:3315
+                    // ADDINTERRUPT throws the interrupted wait to the
+                    // top-level reader; the session survives with
+                    // $?=128+sig), not a jump_to_top_level exit. This
+                    // mid-wait drain is the ONLY consumer on the paths
+                    // where no kernel delivery adjudicates first — the
+                    // Windows foreground/pipeline waits (#2020) and the
+                    // non-unix builtin sleep — so without the mark the
+                    // source driver read the bare ExitCode as an exit
+                    // jump and an interactive niu died at rc=130 on the
+                    // first untrapped Ctrl+C of a foreground command.
+                    // The test reads the executor's session flag (the
+                    // host-declared interactive state every sibling
+                    // classification reads), never the process env.
+                    // Non-interactive sessions set nothing and keep the
+                    // exit classification byte-identically.
+                    if self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_INTERACTIVE")
+                        .map(String::as_str)
+                        == Some("1")
+                    {
+                        self.signal_discard_pending = true;
+                    }
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
             }
@@ -1649,6 +1964,13 @@ impl Executor {
                     if crate::builtins::kill::last_delivery_kernel_caused(libc::SIGINT) {
                         return Ok(Some(libc::SIGINT));
                     }
+                    // The delivery is forgotten (see above), so the
+                    // discard classification observe attached to its
+                    // unwind is forgotten with it: the mark classifies
+                    // the unwind it was set for, and a swallowed
+                    // unwind must not leave it behind to misclassify a
+                    // later genuine exit in the same unit (niubash#698).
+                    self.take_signal_discard_pending();
                 }
                 other => other?,
             }
@@ -1740,6 +2062,13 @@ impl Executor {
             || (command.and_or().is_some() && !bypass_and_or_gate)
             || self.suppress_errexit != 0
             || self.error_trap_running
+            // rubash#2117: the dispatch-level special_builtin_failed
+            // gate already fired this command's ERR trap (and the
+            // trap's own commands rescued the POSIX exit by clearing
+            // the flag, execute_cmd.c:4480) — GNU fires it once, in
+            // execute_command_internal; a second fire here would
+            // double the action's side effects.
+            || self.err_trap_fired_at_dispatch.get()
             || self.host_internal_depth.get() > 0
             // rubash#439: a word/assignment expansion error (GNU subst.c
             // expand_wdesc_error -> exp_jump_to_top_level(DISCARD)) abandons
@@ -1780,6 +2109,15 @@ impl Executor {
         if action.is_empty() {
             return Ok(());
         }
+        // DE-06 (design 9.3; PLAN row 12): every gate passed and
+        // the action is about to run — a selected `err-trap`
+        // filter reports the site and parks the session here,
+        // before the action executes.
+        self.debugger_note_exception_site(
+            crate::debugger::ExceptionKind::ErrTrap,
+            self.exit_code,
+            None,
+        )?;
         self.error_trap_running = true;
         let saved_exit = self.exit_code;
         // GNU trap.c:367 _run_trap_internal saves last_command_exit_value in
@@ -2068,7 +2406,11 @@ impl Executor {
         ast: &mut Ast,
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.redirect_out.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
             // GNU do_redirections opens the expanded word once, relative to
             // the cwd in force when the compound command starts; the
             // diagnostic reports that word (redir.c report_error on
@@ -2122,7 +2464,7 @@ impl Executor {
         ast: &mut Ast,
         _prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1) {
+        if let Some(redirect) = cmd.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1) {
             let expanded = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before anchoring.
             if self.redirect_failglob_aborted() {
@@ -2155,7 +2497,11 @@ impl Executor {
         ast: &mut Ast,
         prepare_targets: bool,
     ) -> Result<(), ExecuteError> {
-        if let Some(redirect) = cmd.redirect_err.as_ref().filter(|r| r.fd.unwrap_or(2) == 2) {
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
             let expanded = self.expand_redirect_target(redirect);
             // subst.c:12663-12668 failglob: abort before the target is
             // created/anchored (see the redirect_out arm above).
@@ -2212,7 +2558,7 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         if let Some(redirect) = cmd
             .redirect_err_append
-            .as_ref()
+            .as_deref()
             .filter(|r| r.fd.unwrap_or(2) == 2)
         {
             let expanded = self.expand_redirect_target(redirect);
@@ -2314,6 +2660,22 @@ impl Executor {
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
         if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+            // rubash#2125: a `{var}` apply failure is a do_redirections
+            // failure (redir_varassign), reached BEFORE exec_builtin's
+            // search/execve — so in POSIX mode it takes the
+            // execute_cmd.c:4865-4875 EX_REDIRFAIL jump like every
+            // other special-builtin redirect failure, and outside
+            // POSIX mode the command simply completes at status 1.
+            // It must NOT flow into finish_exec_replacement as a bare
+            // status: that path is exec.def's failed_exec, which
+            // covers only the search/execve failure and would exit a
+            // non-POSIX shell (and wrongly defer to `execfail` in
+            // POSIX mode). The mark tells execute_exec_command to
+            // complete at status 1 without the replacement finish.
+            if self.posix_special_redirect_failure_exits(cmd) {
+                return Err(ExecuteError::ExitCode(1));
+            }
+            self.exec_do_redirections_failed.set(true);
             return Ok(1);
         }
 
@@ -2334,6 +2696,16 @@ impl Executor {
             writeln!(&mut stderr, "{message}")?;
             self.write_redirected_command_stderr(cmd, &stderr)?;
             self.exit_code = 1;
+            return Ok(1);
+        }
+        // rubash#2030: the same dup preflight the compound wrappers run —
+        // an `exec` whose `<&N` source is unbound fails EBADF (`N: Bad
+        // file descriptor`, redir.c:1179 dup2 + redir.c:149-158
+        // redirection_error), the command is not exec'd, and the shell
+        // continues at status 1 (GNU exec.def exec_builtin: a failed
+        // do_redirections returns before the execve).
+        if let Some((index, name)) = self.compound_dup_bad_fd(cmd) {
+            self.abandon_compound_for_dup_bad_fd::<()>(cmd, index, &name)?;
             return Ok(1);
         }
         // `<&N` dups and numbered input redirects are real descriptor
@@ -2446,7 +2818,7 @@ impl Executor {
     /// arm's spawn-and-wait simulation.
     #[cfg(unix)]
     fn try_exec_image_replacement_with_stdio(
-        &self,
+        &mut self,
         cmd: &CommandNode,
         stdout: Option<Stdio>,
         stderr: Option<Stdio>,
@@ -2463,6 +2835,12 @@ impl Executor {
             Some(stdio) => stdio,
             None => self.exec_inherited_stdio(2).ok()?,
         };
+        // rubash#2179: a successful replacement ends this process
+        // lifetime; complete any outstanding output-procsub feeds
+        // first. (A decline inside replace_process_image leaves the
+        // shell running with the payloads already delivered — the
+        // state GNU is in at this point by construction.)
+        self.drain_procsub_feeds();
         let status = crate::builtins::exec::replace_process_image(
             &cmd.words[1..],
             &self.shell_state.env_vars,
@@ -2495,7 +2873,8 @@ impl Executor {
                 let child_stdout = Stdio::from(file.try_clone()?);
                 let child_stderr = Stdio::from(file.try_clone()?);
                 let mut child_diag = file.try_clone()?;
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::Path(
@@ -2527,7 +2906,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2565,7 +2945,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
@@ -2601,7 +2982,8 @@ impl Executor {
                 } else {
                     dup.strip_suffix('-').unwrap_or(dup)
                 };
-                let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                    cmd,
                     &cmd.words[1..],
                     crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                     crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2656,7 +3038,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2714,7 +3097,8 @@ impl Executor {
             ) {
                 return result;
             }
-            let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+                cmd,
                 &cmd.words[1..],
                 crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2774,6 +3158,10 @@ impl Executor {
             // descriptor, keep the simulation rather than replacing
             // with the wrong (inherited) descriptors.
             if let Some(stdio) = stdio {
+                // rubash#2179: complete outstanding output-procsub
+                // feeds before a replacement ends this process
+                // lifetime (see try_exec_image_replacement_with_stdio).
+                self.drain_procsub_feeds();
                 if let Some(status) = crate::builtins::exec::replace_process_image(
                     &cmd.words[1..],
                     &self.shell_state.env_vars,
@@ -2798,7 +3186,8 @@ impl Executor {
         let fd1_lands_in_capture = self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
             && (self.stdout_capture.is_some()
                 || crate::executor::shell_options::stdout_capture_active());
-        let (exec_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+            cmd,
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
@@ -2903,6 +3292,10 @@ impl Executor {
                 }
             }
             Some(FdReadEndpoint::InheritedProcessStdin) => Ok(Stdio::inherit()),
+            // rubash#1937: a directory endpoint has no handle to
+            // hand the image; the null device is the closest
+            // spawnable state (cross-boundary residual).
+            Some(FdReadEndpoint::Directory) => Ok(Stdio::null()),
             // fd 0 closed (`exec 0<&-`): the closest spawnable state to
             // GNU's inherited-but-unreadable descriptor.
             None if self.fd_table.has_entry(0) => Ok(Stdio::null()),
@@ -2952,26 +3345,25 @@ impl Executor {
     }
 
     /// rubash#1021 helper: spawn a `<(source)` body as a child shell
-    /// writing to a pipe and bind the read end on `fd`, the way GNU
-    /// process_substitute forks instead of collecting output first.
-    /// The child gets the coproc spawn's environment treatment (shell
-    /// vars plus the full function table as BASH_FUNC entries), is
-    /// registered for reaping, and becomes `$!`. Returns false when the
-    /// spawn could not be set up; the caller then falls back to
+    /// writing to a pipe, the way GNU process_substitute forks instead
+    /// of collecting output first (subst.c:6362). The child gets the
+    /// coproc spawn's environment treatment (shell vars plus the full
+    /// function table as BASH_FUNC entries), is registered for
+    /// reaping, and becomes `$!`. Returns the pipe's read end, or None
+    /// when the spawn could not be set up; callers then fall back to
     /// synchronous collection.
-    fn bind_input_process_substitution_child(
+    pub(in crate::executor) fn spawn_input_process_substitution_child(
         &mut self,
-        fd: u32,
         source: &str,
         line: Option<usize>,
-    ) -> bool {
+    ) -> Option<Rc<FileFd>> {
         use std::process::{Command, Stdio};
         let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
             .map(std::path::PathBuf::from)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
         let Ok((reader, writer)) = std::io::pipe() else {
-            return false;
+            return None;
         };
         let mut child = Command::new(&exe);
         child.arg("-c").arg(source);
@@ -3010,6 +3402,33 @@ impl Executor {
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
         child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        // rubash#2136: the provenance stamp the child's init validates
+        // against its actual parent (init.rs).
+        child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+        // subst.c:6362 process_substitute: the producer is a forked
+        // child one subshell level deeper than its parent, like the
+        // consumer form (external_setup.rs) — this builder never
+        // stamped the depth, so the child's $BASH_SUBSHELL read 0
+        // where GNU reads parent + 1.
+        child.env(
+            "__RUBASH_SUBSHELL_DEPTH",
+            (self.shell_state.subshell_depth.get() + 1).to_string(),
+        );
+        // rubash#2032: process_substitute's producer is a forked child
+        // (subst.c:6362), so it inherits the parent's positional
+        // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
+        // the body saw $# = 0 and `"$@"` collapsed to one empty word —
+        // the bats zero-test-execution regression.
+        child.env(
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
+            self.positional_params_transport_value(),
+        );
+        // rubash#2058: the fork-context stamp (call-stack views,
+        // PIPESTATUS cell, ARGV bottom state) — same fork, same
+        // transport set (see fork_context_transport_entries).
+        for (key, value) in self.fork_context_transport_entries() {
+            child.env(key, value);
+        }
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             child.env("__RUBASH_SCRIPT_NAME", script_name);
         }
@@ -3026,16 +3445,35 @@ impl Executor {
                 let pid = child_proc.id();
                 self.background_children
                     .insert(pid, crate::fd::SpawnedChild::from(child_proc));
+                // rubash#1952: mark the pid as a streamed procsub
+                // producer so the boundary reap can spend its one
+                // bounded grace wait on it (job_builtins.rs).
+                self.procsub_stream_children.insert(pid, false);
                 // GNU process_substitute records the child in $!
                 // (subst.c assigns last_made_pid).
                 self.shell_state.last_background_pid = Some(pid);
                 let file = crate::fd::handle_to_file(crate::fd::into_handle(reader));
-                let file_fd = FileFd::from_file(file, format!("<({source})").into());
-                self.set_fd_input_file(fd, file_fd, fd != 0);
-                true
+                Some(FileFd::from_file(file, format!("<({source})").into()))
             }
-            Err(_) => false,
+            Err(_) => None,
         }
+    }
+
+    /// rubash#1021: bind the read end of a spawned `<(source)` body on
+    /// `fd` (see spawn_input_process_substitution_child). Returns false
+    /// when the spawn could not be set up; the caller then falls back
+    /// to synchronous collection.
+    pub(in crate::executor) fn bind_input_process_substitution_child(
+        &mut self,
+        fd: u32,
+        source: &str,
+        line: Option<usize>,
+    ) -> bool {
+        let Some(file_fd) = self.spawn_input_process_substitution_child(source, line) else {
+            return false;
+        };
+        self.set_fd_input_file(fd, file_fd, fd != 0);
+        true
     }
 
     /// The no-operand exec forms (redirects only, or operands that expand
@@ -3168,6 +3606,18 @@ impl Executor {
                         )?;
                         self.write_default_stderr(&stderr)?;
                         self.exit_code = 1;
+                        // rubash#2125: this inline arm is bare `exec`'s
+                        // own do_redirections — a redir_varassign failure
+                        // here is EX_REDIRFAIL (execute_cmd.c:5613), and
+                        // `exec` is a special builtin, so a posixly_correct
+                        // non-interactive shell takes the
+                        // execute_cmd.c:4865-4875 jump at status 1 instead
+                        // of completing the command. The diagnostic above
+                        // is the redirection_error report GNU emits
+                        // before the jump (redir.c:135).
+                        if self.posix_special_redirect_failure_exits(cmd) {
+                            return Err(ExecuteError::ExitCode(1));
+                        }
                         return Ok(Some(1));
                     }
                     Err(error) => return Err(error),
@@ -3234,7 +3684,12 @@ impl Executor {
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
                     }
-                    if self.open_persistent_output_process_substitution(fd, &target)? {
+                    // rubash#2090: a quoted ">(...)" target is a literal
+                    // filename (subst.c:11365-11372), not a span — only a
+                    // parser-recorded span may bind a substitution here.
+                    if super::external_setup::redirect_target_span_is_recorded(redirect)
+                        && self.open_persistent_output_process_substitution(fd, &target)?
+                    {
                         continue;
                     }
                     let append = matches!(
@@ -3341,6 +3796,17 @@ impl Executor {
                     if let Some(source) = target
                         .strip_prefix("<(")
                         .and_then(|target| target.strip_suffix(')'))
+                        // rubash#2090: value-text shape alone does not
+                        // admit the span — GNU expand_word_internal
+                        // (subst.c:11365-11372) refuses a `<(` whose `<`
+                        // was quoted (Q_DOUBLE_QUOTES), so only a
+                        // parser-recorded (unquoted) span is live; a
+                        // quoted target falls through to the literal
+                        // open below. Same recorded-span admission as
+                        // every other materialization arm (rubash#1931).
+                        .filter(|_| {
+                            super::external_setup::redirect_target_span_is_recorded(redirect)
+                        })
                     {
                         // rubash#1021: GNU process_substitute (subst.c)
                         // forks the body and binds the pipe read end
@@ -3363,10 +3829,13 @@ impl Executor {
                         }
                     }
 
-                    if matches!(
-                        target.as_str(),
-                        "/dev/stdin" | "/proc/self/fd/0" | "/dev/fd/0"
-                    ) {
+                    // The fd-0 spelling judgment is the registry's (issue
+                    // rubash#1973): `fd_alias_target == Some(0)` carries
+                    // exactly the canonical spellings the literal table
+                    // matched — GNU rejects the leading-zero family on
+                    // every face, so `exec 0</dev/fd/00` falls through to
+                    // the filesystem open and fails ENOENT there.
+                    if crate::special_paths::fd_alias_target(&target) == Some(0) {
                         self.fd_table.open_input(
                             fd,
                             FdReadEndpoint::InheritedProcessStdin,
@@ -3384,15 +3853,72 @@ impl Executor {
                     if redirect.operator.ends_with("<>") {
                         self.set_fd_readwrite_file(fd, &target, fd != 0)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
-                    } else if self.is_net_redirect_target(&target) {
+                    } else if crate::special_paths::is_net_redirect_target(&target) {
                         // rubash#1026: `N</dev/tcp/host/port` also
                         // connects (redir.c netopen serves both
                         // directions); the socket binds as the read end.
                         let file = self.open_net_redirect(&target)?;
                         let file_fd = FileFd::from_file(file, target.clone().into());
                         self.set_fd_input_file(fd, file_fd, fd != 0);
+                    } else if crate::special_paths::is_zero_device(&target)
+                        || crate::special_paths::is_full_device(&target)
+                    {
+                        // rubash#1898: the zero/full devices read as
+                        // an unbounded zero stream — bind the
+                        // pump-fed source handle (a real handle, so
+                        // the descriptor behaves like the device).
+                        let file = Self::zero_device_file(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        let file_fd = FileFd::from_file(file, target.clone().into());
+                        self.set_fd_input_file(fd, file_fd, fd != 0);
+                    } else if let Some(bytes) =
+                        crate::special_paths::synthetic_proc_content(&target)
+                    {
+                        // Registry first (rubash#1917 exec-fd face): a
+                        // synthetic /proc file has no filesystem file
+                        // behind the mapped path on Windows, so the
+                        // plain open below reported it ENOENT and the
+                        // descriptor never bound. Serve the generated
+                        // snapshot bytes through the fd byte channel —
+                        // procfs static-snapshot semantics, the same
+                        // shape the process-substitution fallback above
+                        // binds.
+                        self.set_fd_input_bytes(fd, bytes, fd != 0);
+                    } else if let Some(link) = crate::special_paths::synthetic_link_target(
+                        &target,
+                        Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
+                    ) {
+                        // SyntheticLink (rubash#1900): the open goes
+                        // to the resolved native target (the session
+                        // cwd answers for self/cwd), exactly as the
+                        // open ladder binds it.
+                        // rubash#1937: a DIRECTORY target (self/cwd)
+                        // has no openable handle on Windows, but
+                        // GNU's bind succeeds — only reads fail
+                        // (EISDIR). Bind the directory endpoint
+                        // instead of failing the whole redirect at
+                        // open. (Off Windows proc_unary_facts is a
+                        // stub and the real open below serves.)
+                        if crate::proc_vfs::proc_unary_facts(&target)
+                            .is_some_and(|facts| facts.is_link && facts.link_target_is_dir)
+                        {
+                            self.set_fd_input_directory(fd, fd != 0);
+                        } else {
+                            let file = FileFd::open_read(std::path::PathBuf::from(&link.native))
+                                .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                            self.set_fd_input_file(fd, file, fd != 0);
+                        }
                     } else {
-                        let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                        // G-02 session-cwd anchor (rubash#1887): see
+                        // set_fd_readwrite_file — without it `exec
+                        // 10<infile` after `cd` opens against the
+                        // process cwd and reports ENOENT for a file in
+                        // the shell's own cwd (redir8.sub's shape, once
+                        // the session and process cwds diverge).
+                        let path = self.session_path(shell_path_to_windows(
+                            &target,
+                            &self.shell_state.env_vars,
+                        ));
                         let file = FileFd::open_read(path)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                         self.set_fd_input_file(fd, file, fd != 0);
@@ -3667,6 +4193,33 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(fd_output_process_substitution_key(target_fd), command);
+            }
+            Some(FdWriteEndpoint::FullDevice) => {
+                // rubash#1898: the ledger records the device
+                // spelling itself, so a respawned child re-derives
+                // the class from the registry.
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(target_fd), "/dev/full".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::ProcContentWrite) => {
+                // rubash#2042: the ledger records a canonical 0644
+                // spelling, so a respawned child re-derives the same
+                // write class from the registry (the endpoint itself
+                // carries no spelling — the class, not the pid, is
+                // what travels; same device-spelling precedent as the
+                // /dev/full arm above).
+                self.shell_state.env_vars.remove(&fd_closed_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(target_fd), "/proc/self/status".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
             }
             None => {
                 self.shell_state.env_vars.remove(&fd_output_key(target_fd));
@@ -4082,6 +4635,32 @@ impl Executor {
         }
     }
 
+    /// rubash#1646: close the descriptors recorded for `varredir_close`
+    /// by the command that just completed, newest first (GNU closes a
+    /// command's redirections in undo order). Watermark discipline: only
+    /// records at or above `watermark` belong to the finishing command —
+    /// records an enclosing command left pending stay for its own end.
+    /// An entry an external command's undo already closed during
+    /// dispatch is skipped, so a recycled descriptor number is never
+    /// closed by mistake. Errors are swallowed like the shell-exit sweep
+    /// (close_all_persistent_output_process_substitutions): a `>(...)`
+    /// body's own status never fails the owning command.
+    pub(in crate::executor) fn drain_deferred_varredir_closes(&mut self, watermark: usize) {
+        while self.deferred_varredir_closes.len() > watermark {
+            let Some(fd) = self.deferred_varredir_closes.pop() else {
+                break;
+            };
+            let still_open = self
+                .fd_table
+                .entries
+                .get(&fd)
+                .is_some_and(|entry| !entry.closed);
+            if still_open {
+                let _ = self.close_persistent_fd(fd);
+            }
+        }
+    }
+
     fn close_persistent_fd(&mut self, fd: u32) -> Result<(), ExecuteError> {
         self.close_persistent_output_fd(fd)?;
         self.close_persistent_input_fd(fd);
@@ -4320,17 +4899,11 @@ impl Executor {
         }
         let close_after_command = auto_close
             && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
-        let body = if redirect.body_carrier.is_some() {
-            if redirect.here_string {
-                self.expand_here_string_mut_from_carrier(&redirect.body_carrier)
-            } else {
-                self.expand_heredoc_body_mut_from_carrier(&redirect.body_carrier)
-            }
-        } else if let Some(body) = &redirect.body {
-            self.expand_heredoc_body_mut(body)
-        } else {
-            String::new()
-        };
+        // The canonical ladder (expand_heredoc_redirect_text): a
+        // `{var}<<<word` dynamic fd holds the same bytes GNU's
+        // here_document_to_fd produces — storage prefix decoded and
+        // the here-string newline present (rubash#1867).
+        let body = self.expand_heredoc_redirect_text(redirect);
         let Some(fd) = self.allocate_dynamic_fd() else {
             // GNU exhausts {var} heredocs through the same REDIR_VARASSIGN
             // fcntl F_DUPFD path (probe: ulimit -Sn 6 then exec {v}<<E
@@ -4353,7 +4926,11 @@ impl Executor {
             )));
         }
         if close_after_command {
-            self.close_persistent_fd(fd)?;
+            // rubash#1646: defer to the owning command's completion like
+            // the redirection form (see execute_dynamic_fd_var_redirect);
+            // closing at application time EBADF'd the command's own
+            // `<&$var` reads.
+            self.deferred_varredir_closes.push(fd);
         }
         Ok(true)
     }
@@ -4445,7 +5022,12 @@ impl Executor {
 
         let close_after_success = |executor: &mut Self, fd: u32| -> Result<(), ExecuteError> {
             if close_after_command {
-                executor.close_persistent_fd(fd)?;
+                // rubash#1646: record only — execute_command closes the
+                // descriptor when the owning command completes (GNU
+                // undo_redirections timing). Closing here, mid-application,
+                // rejected the command's own `>&$var` writes with EBADF
+                // and dropped a `>(...)` consumer's stream wholesale.
+                executor.deferred_varredir_closes.push(fd);
             }
             Ok(())
         };
@@ -4536,20 +5118,47 @@ impl Executor {
                 if let Some(source) = target
                     .strip_prefix("<(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#2090: only a parser-recorded (unquoted) span
+                    // is a live process substitution — GNU
+                    // expand_word_internal (subst.c:11365-11372) refuses
+                    // a quoted `<(`; the quoted form is a literal filename
+                    // whose open the plain path below owns.
+                    .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
                 {
-                    if let Some(input) = self.process_substitution_output(source) {
-                        let Some(fd) = self.allocate_dynamic_fd() else {
-                            return Err(ExecuteError::IoError(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                self.fd_dup_error_payload(&target),
-                            )));
-                        };
-                        self.fd_table.open_input(
-                            fd,
-                            FdReadEndpoint::process_substitution(&input),
-                            true,
-                        );
-                        self.set_fd_input_text(fd, input, true);
+                    // rubash#1952: stream first, exactly like the plain
+                    // exec arm — GNU process_substitute (subst.c:6362)
+                    // forks the body and binds the pipe read end
+                    // immediately; collecting the output first starves
+                    // the consumer until the producer exits, forever
+                    // for a non-terminating producer. The collected form
+                    // below remains the fallback when the spawn could
+                    // not be set up. (No constructing-command line is
+                    // plumbed into this entry, so the child's diagnostic
+                    // frame starts from the body's own text.)
+                    let mut bound_fd = None;
+                    if let Some(fd) = self.allocate_dynamic_fd() {
+                        if self.bind_input_process_substitution_child(fd, source, None) {
+                            bound_fd = Some(fd);
+                        }
+                    }
+                    if bound_fd.is_none() {
+                        if let Some(input) = self.process_substitution_output(source) {
+                            let Some(fd) = self.allocate_dynamic_fd() else {
+                                return Err(ExecuteError::IoError(std::io::Error::new(
+                                    std::io::ErrorKind::Other,
+                                    self.fd_dup_error_payload(&target),
+                                )));
+                            };
+                            self.fd_table.open_input(
+                                fd,
+                                FdReadEndpoint::process_substitution(&input),
+                                true,
+                            );
+                            self.set_fd_input_text(fd, input, true);
+                            bound_fd = Some(fd);
+                        }
+                    }
+                    if let Some(fd) = bound_fd {
                         if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                             // `<(...)` has no openable path; ledger-only
                             // companion is best-effort.
@@ -4600,7 +5209,10 @@ impl Executor {
                     }
                 }
 
-                let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
+                // G-02 session-cwd anchor (rubash#1887): see
+                // set_fd_readwrite_file.
+                let path =
+                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
                 let (read_file, write_file) =
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         FileFd::open_readwrite_pair(path)
@@ -4648,6 +5260,10 @@ impl Executor {
                 if let Some(source) = target
                     .strip_prefix(">(")
                     .and_then(|target| target.strip_suffix(')'))
+                    // rubash#2090: recorded-span admission, as in the
+                    // Input arm above — a quoted ">(...)" target is a
+                    // literal filename (subst.c:11365-11372).
+                    .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
                 {
                     if self.open_persistent_output_process_substitution(fd, &target)? {
                         if !self.set_dynamic_fd_variable(name, fd) {
@@ -4737,6 +5353,17 @@ impl Executor {
                     fd_stdin_key(target_fd),
                     format!("{FD_COPROC_STDIN_TARGET_PREFIX}{pid}"),
                 );
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_stdin_offset_key(target_fd));
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_dynamic_input_key(target_fd));
+            }
+            Some(FdReadEndpoint::Directory) => {
+                // rubash#1937: the directory endpoint cannot cross
+                // a respawn — clear the ledger like an unbound fd.
+                self.shell_state.env_vars.remove(&fd_stdin_key(target_fd));
                 self.shell_state
                     .env_vars
                     .remove(&fd_stdin_offset_key(target_fd));
@@ -5022,6 +5649,21 @@ impl Executor {
             }
             Ok(None) => match self.execute_exec(cmd) {
                 Ok(status) => {
+                    // rubash#2117: GNU exec.def's option-parse failure
+                    // returns EX_USAGE (258 > EX_SHERRBASE), which
+                    // execute_cmd.c:4886-4888 marks
+                    // special_builtin_failed. The builtin layer returns
+                    // the converted EX_BADUSAGE for that face, and a
+                    // command operand's own exit 2 is indistinguishable
+                    // by value — the layer's own parse is the
+                    // discriminator (builtins/exec.rs
+                    // status_is_option_parse_failure).
+                    if crate::builtins::exec::status_is_option_parse_failure(
+                        &cmd.words[1..],
+                        status,
+                    ) {
+                        self.special_builtin_failed.set(true);
+                    }
                     self.exit_code = status;
                     Ok(status)
                 }
@@ -5030,7 +5672,19 @@ impl Executor {
             Err(error) => Err(error),
         };
         let result = match status_result {
-            Ok(status) => self.finish_exec_replacement(cmd, status),
+            Ok(status) => {
+                // rubash#2125: the status came from a do_redirections
+                // failure inside execute_exec (the `{var}` apply) —
+                // the command never reached the search/execve stage
+                // finish_exec_replacement adjudicates, so complete at
+                // status 1 with the shell alive (see the mark's doc).
+                if self.exec_do_redirections_failed.replace(false) {
+                    self.exit_code = status;
+                    Ok(())
+                } else {
+                    self.finish_exec_replacement(cmd, status)
+                }
+            }
             Err(error) => Err(error),
         };
         self.restore_exported_functions_after_exec(saved);
@@ -5189,25 +5843,25 @@ fn compound_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<CompoundStdi
         (
             command
                 .redirect_out
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(1) == 1),
             CompoundStdioArm::Out,
         ),
         (
-            command.append.as_ref().filter(|r| r.fd.unwrap_or(1) == 1),
+            command.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1),
             CompoundStdioArm::Append,
         ),
         (
             command
                 .redirect_err
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(2) == 2),
             CompoundStdioArm::Err,
         ),
         (
             command
                 .redirect_err_append
-                .as_ref()
+                .as_deref()
                 .filter(|r| r.fd.unwrap_or(2) == 2),
             CompoundStdioArm::ErrAppend,
         ),
@@ -5228,4 +5882,1149 @@ fn compound_stdio_arms_in_parse_order(command: &CommandNode) -> Vec<CompoundStdi
         .collect();
     order.sort_by_key(|(position, _)| *position);
     order.into_iter().map(|(_, arm)| arm).collect()
+}
+
+// ---------------------------------------------------------------------
+// WP-3 consult wiring (1.5.0 debugger design sections 4/5/6; WP-1
+// gap register G-02/G-03/G-05/G-06/G-08/G-13; 150-c REPORT section 5).
+//
+// The executor half of the debugger: the DEBUG-trap funnel above
+// consults the attached session through these methods. Everything
+// here is inert while no driver is installed on this executor —
+// the funnel's gate load is the only cost — and child executors
+// never carry a driver, so no stop can fire inside a synthesized
+// frame (DE-12's model belongs to a later work package).
+// ---------------------------------------------------------------------
+
+/// The verdict of one breakpoint-condition evaluation (design
+/// 5.3): the condition's exit status decides true/false, and a
+/// failed evaluation — an execution error, or a fatal arm the
+/// condition raised against its own list — counts as false and
+/// is reported once per breakpoint. The failure's captured
+/// diagnostic (possibly empty) rides along for that report.
+enum DebugConditionVerdict {
+    True,
+    False,
+    Failed(String),
+}
+
+impl Executor {
+    /// Is a debug session attached to THIS executor? The process
+    /// gate is consulted first (the zero-cost rule of design 4.4);
+    /// the per-executor driver is what makes the attachment ours.
+    pub(crate) fn debugger_session_here(&self) -> bool {
+        crate::debugger::SESSION_ACTIVE.is_armed() && self.debug_driver.is_some()
+    }
+
+    /// Could the consult on THIS executor stop the debuggee at
+    /// the next seam? The session's own predicate
+    /// ([`crate::debugger::DebugSession::can_stop_at_seam`]),
+    /// plus the no-driver case: an executor that carries no
+    /// session has nothing to consult, whatever the process
+    /// gate says. The funnel consult asks this before its
+    /// stop-decision machinery (S4; design 4.4).
+    fn debugger_consult_can_stop(&self) -> bool {
+        match self.debug_driver.as_ref() {
+            Some(driver) => driver.session().can_stop_at_seam(),
+            None => false,
+        }
+    }
+
+    /// WP-8 (design 5.1): register one parsed reader unit's syntax
+    /// view with the attached session, under the file identity the
+    /// engine itself reports for the unit. Called by the two
+    /// file-backed group drivers — the grouped script reader (via
+    /// the `debug_syntax_unit_file` hand-off into
+    /// `run_source_impl`) and the `source` builtin's group runner —
+    /// after parsing and before execution, so a unit's own lines
+    /// are resolvable from its first seam on. With no session
+    /// attached this is one gate check and out.
+    pub(crate) fn debugger_register_syntax(&mut self, file: &str, ast: &crate::parser::Ast) {
+        if !self.debugger_session_here() {
+            return;
+        }
+        let view = crate::api::syntax::SyntaxView::from_ast(file, ast);
+        if let Some(driver) = self.debug_driver.as_mut() {
+            driver.session_mut().register_syntax_view(view);
+        }
+    }
+
+    /// WP-8 (design 5.1): note that a file's reader reached its
+    /// end, so the session may soundly convict lines no parsed
+    /// unit covered. Called by the same two group drivers that
+    /// register views, on their normal-completion path only.
+    pub(crate) fn debugger_note_syntax_complete(&mut self, file: &str) {
+        if !self.debugger_session_here() {
+            return;
+        }
+        if let Some(driver) = self.debug_driver.as_mut() {
+            driver.session_mut().note_syntax_file_complete(file);
+        }
+    }
+
+    /// Install a debug session on this executor. Gate pairing is
+    /// the driver layer's job (150-c REPORT section 5, note 7):
+    /// installation activates the session; termination
+    /// ([`Executor::debugger_note_exit`]) or detach deactivates it.
+    pub(crate) fn install_debug_session(&mut self, driver: crate::debugger::SessionDriver) {
+        // Store first, activate second (PLAN row 11): storing
+        // drops any driver being replaced, and a dropped driver
+        // disarms the gate (SessionDriver's Drop) — that disarm
+        // must land before this session's activation, or the
+        // replacement would leave the new session's gate lowered.
+        self.debug_driver = Some(driver);
+        if let Some(driver) = &self.debug_driver {
+            driver.session().activate();
+        }
+    }
+
+    /// The attached session's driver, if any (frontend and test
+    /// access; the consult itself works through the field).
+    pub(crate) fn debug_driver(&self) -> Option<&crate::debugger::SessionDriver> {
+        self.debug_driver.as_ref()
+    }
+
+    /// The attached session's driver, mutably.
+    pub(crate) fn debug_driver_mut(&mut self) -> Option<&mut crate::debugger::SessionDriver> {
+        self.debug_driver.as_mut()
+    }
+
+    /// Bind this executor's standard streams for a DAP host
+    /// (design section 13): the protocol owns the process's
+    /// stdio, so the debuggee's fd 0 reads the given (empty)
+    /// file — a deterministic EOF — and its fd 1 and fd 2 write
+    /// the given capture files, which the adapter drains into
+    /// DAP `output` events. External children inherit the
+    /// materialized file endpoints, so their output lands in
+    /// the same captures. Returns false when a file could not
+    /// be opened; the caller then refuses the launch rather
+    /// than letting the debuggee write onto the protocol
+    /// channel.
+    pub(crate) fn debugger_bind_stdio(
+        &mut self,
+        stdin_path: &std::path::Path,
+        stdout_path: &std::path::Path,
+        stderr_path: &std::path::Path,
+    ) -> bool {
+        let stdin = match FileFd::open_read(stdin_path.to_path_buf()) {
+            Ok(file) => file,
+            Err(_) => return false,
+        };
+        self.fd_table
+            .open_input(0, FdReadEndpoint::File(stdin), false);
+        for (fd, path) in [(1u32, stdout_path), (2u32, stderr_path)] {
+            let handle = match std::fs::File::create(path) {
+                Ok(file) => file,
+                Err(_) => return false,
+            };
+            let file = FileFd::from_file(handle, path.to_path_buf());
+            self.fd_table
+                .open_output(fd, FdWriteEndpoint::File(file), false);
+        }
+        true
+    }
+
+    /// The location facts a stop reports, read from the same state
+    /// the trap path reads: the ambient line stamp and the
+    /// BASH_SOURCE stack top (the innermost file), plus the frame
+    /// depth.
+    fn debugger_location(&self) -> (Option<crate::debugger::SourceLocation>, usize) {
+        let line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|value| value.parse::<u32>().ok());
+        let file = self.shell_state.bash_source_stack.first().cloned();
+        let location = match (file, line) {
+            (Some(file), Some(line)) => Some(crate::debugger::SourceLocation::new(file, line)),
+            _ => None,
+        };
+        (location, self.shell_state.function_depth)
+    }
+
+    /// Serve the entry stop if it is still pending (DE-01; WP-1
+    /// gap G-08; 150-c REPORT section 5, note 4). The entry stop is
+    /// an already-established stop — the session was constructed
+    /// stopped — so the first funnel arrival serves it instead of
+    /// arming anything new.
+    fn debugger_serve_entry_stop(&mut self) -> Result<(), ExecuteError> {
+        let pending = match self.debug_driver.as_mut() {
+            Some(driver) => driver.take_entry_stop_pending(),
+            None => false,
+        };
+        if pending {
+            self.debugger_serve_stop()?;
+        }
+        Ok(())
+    }
+
+    /// The stop-and-diff watch re-check (design section 5.4;
+    /// PLAN row 10): at every stop, each enabled watch entry is
+    /// re-evaluated and diffed against its previous stop's
+    /// snapshot via [`crate::debugger::Breakpoint::diff_watch`];
+    /// a difference queues a `WatchChanged` event (DE-05) on the
+    /// session before the stop loop serves.
+    ///
+    /// A `watch NAME` entry renders through the variable views
+    /// and carries the VarTable mirror epoch, so an unchanged
+    /// tracked name is proven unchanged by the epoch alone. A
+    /// `watche EXPR` entry re-evaluates under the implicit power
+    /// checker (design section 7.5): a rejected or failed
+    /// re-check is skipped — the entry keeps its previous
+    /// snapshot and nothing executes — exactly the design's
+    /// "skipped and marked" rule. Watch entries never keep the
+    /// consult awake on their own (the table's seam predicate
+    /// excludes them), so a watch alone never slows a free run:
+    /// the design's documented limit, pinned by the row-10
+    /// wiring tests.
+    fn debugger_watch_prepass(&mut self) {
+        // Gather the enabled watch entries first: evaluation
+        // below runs engine machinery and must not hold the
+        // driver borrow while it does.
+        let watches: Vec<(
+            crate::debugger::BreakpointId,
+            crate::debugger::BreakpointKind,
+            String,
+        )> = match self.debug_driver.as_ref() {
+            Some(driver) => driver
+                .session()
+                .breakpoints()
+                .watch_entries()
+                .filter(|entry| entry.enabled)
+                .filter_map(|entry| match &entry.target {
+                    crate::debugger::BreakpointTarget::Expression { text } => {
+                        Some((entry.id, entry.kind, text.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            None => return,
+        };
+        if watches.is_empty() {
+            return;
+        }
+        let mut changes: Vec<crate::debugger::WatchChange> = Vec::new();
+        for (id, kind, text) in watches {
+            let (rendered, epoch) = match kind {
+                crate::debugger::BreakpointKind::Watch => {
+                    // Render from the stop's own inspection
+                    // snapshot (installed by debugger_serve_stop
+                    // just before this pass): the whole value,
+                    // arrays included — a plain `$NAME` reading
+                    // would show only element 0 and hide element
+                    // writes. The VarTable epoch rides along as
+                    // the unchanged-proof (design section 5.4).
+                    let rendered = self
+                        .debug_driver
+                        .as_ref()
+                        .and_then(|driver| driver.session().inspection())
+                        .and_then(|snapshot| snapshot.variable(&text))
+                        .map(crate::debugger::render_watch_value)
+                        .unwrap_or_default();
+                    (rendered, self.shell_state.env_vars.mirror_epoch_of(&text))
+                }
+                crate::debugger::BreakpointKind::WatchExpression => {
+                    let request = crate::debugger::EvaluationRequest {
+                        mode: crate::debugger::PowerMode::Implicit,
+                        text: text.clone(),
+                        frame: None,
+                    };
+                    match self.debugger_evaluate(&request, None) {
+                        Ok(outcome) => match outcome.result {
+                            crate::debugger::EvaluationResult::Value(value) => (Some(value), None),
+                            // Rejected or failed: skipped, snapshot
+                            // kept (design section 7.5).
+                            _ => continue,
+                        },
+                        Err(_) => continue,
+                    }
+                }
+                _ => continue,
+            };
+            if let Some(driver) = self.debug_driver.as_mut() {
+                if let Some(entry) = driver.session_mut().breakpoints_mut().get_mut(id) {
+                    if let Some((old, new)) = entry.diff_watch(rendered, epoch) {
+                        changes.push(crate::debugger::WatchChange {
+                            id,
+                            expression: text,
+                            old_value: old,
+                            new_value: new,
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(driver) = self.debug_driver.as_mut() {
+            for change in changes {
+                driver
+                    .session_mut()
+                    .emit(crate::debugger::DebugEvent::WatchChanged(change));
+            }
+        }
+    }
+
+    /// Serve the stop the session is parked at: run the driver's
+    /// stop loop, then apply its outcome.
+    fn debugger_serve_stop(&mut self) -> Result<(), ExecuteError> {
+        // PLAN row 6 / WP-6: capture the stop's inspection snapshot
+        // from the live engine state and install it on the session
+        // before the stop loop runs, so the frontend renders exactly
+        // the state the debuggee is stopped in — the same views the
+        // §5.3 API exposes, never a second rendering.
+        let inspection = self.capture_inspection();
+        if let Some(driver) = self.debug_driver.as_mut() {
+            driver.session_mut().set_inspection(inspection);
+        }
+        // Design section 5.4 (stop-and-diff): before the stop
+        // loop runs, re-check the session's watch entries against
+        // the state the debuggee is stopped in, so a change is
+        // already queued as DE-05 when the frontend renders this
+        // stop. The check lives here — the stop funnel — not on
+        // any write path.
+        self.debugger_watch_prepass();
+        // The serve loop: an evaluation outcome (WP-7) runs the
+        // request through the consult's own evaluation machinery,
+        // installs the outcome on the session, and serves the
+        // same stop again — the debuggee stays parked. Every
+        // other outcome is applied once, below, and ends the
+        // serve.
+        loop {
+            let outcome = match self.debug_driver.as_mut() {
+                Some(driver) => driver.serve_stop(),
+                None => return Ok(()),
+            };
+            match outcome {
+                crate::debugger::StopLoopOutcome::Evaluate(request) => {
+                    let frame_count = self.debug_driver.as_ref().and_then(|driver| {
+                        driver
+                            .session()
+                            .inspection()
+                            .map(|snapshot| snapshot.frames.len())
+                    });
+                    let evaluation = match self.debugger_evaluate(&request, frame_count) {
+                        Ok(evaluation) => evaluation,
+                        Err(unwind) => {
+                            // A control unwind the user typed at
+                            // the stop (`exit` / `return` / `break`
+                            // / `continue` in an explicit
+                            // evaluation; design 7.4) propagates as
+                            // the debuggee's own flow — which makes
+                            // it a resume: the debuggee is running
+                            // again the moment the unwind leaves
+                            // this serve. Mirror the ForceReturn
+                            // route's discipline (resume first,
+                            // then raise): a session left Stopped
+                            // here would wedge — the consult serves
+                            // only a running session, so no later
+                            // breakpoint, step, or frame-return
+                            // note could ever land again. The
+                            // arming is Continue: the typed unwind
+                            // installed no rule.
+                            if let Some(driver) = self.debug_driver.as_mut() {
+                                let _ = driver
+                                    .session_mut()
+                                    .resume(crate::debugger::StepArming::Continue);
+                            }
+                            return Err(unwind);
+                        }
+                    };
+                    if let Some(driver) = self.debug_driver.as_mut() {
+                        driver.session_mut().set_last_evaluation(evaluation);
+                    }
+                    // An explicit evaluation may have written
+                    // state (design 7.6): refresh the stop's
+                    // snapshot so the frontend renders the state
+                    // the debuggee is now stopped in.
+                    let inspection = self.capture_inspection();
+                    if let Some(driver) = self.debug_driver.as_mut() {
+                        driver.session_mut().set_inspection(inspection);
+                    }
+                }
+                crate::debugger::StopLoopOutcome::Resume(arming) => {
+                    let Some(driver) = self.debug_driver.as_mut() else {
+                        return Ok(());
+                    };
+                    return match driver.session_mut().resume(arming) {
+                        Ok(()) => Ok(()),
+                        Err(_) => {
+                            // The stop loop ended the session while
+                            // parked (exit/die) and still asked to
+                            // resume: no debuggee is left to continue,
+                            // so the run unwinds with the session's
+                            // final status — the same shape as the
+                            // debuggee exiting at this point.
+                            let status = driver
+                                .session()
+                                .termination()
+                                .map(|termination| termination.status())
+                                .unwrap_or(self.exit_code);
+                            Err(ExecuteError::ExitCode(status))
+                        }
+                    };
+                }
+                crate::debugger::StopLoopOutcome::ForceReturn(status) => {
+                    // Design 6.1 (`return [status]`): force the frame
+                    // the debuggee is stopped in to return now. The
+                    // unwind is the engine's own return path — the
+                    // same ExecuteError::Return the `return` builtin
+                    // raises — so the frame's return site reports the
+                    // return (DE-04) carrying the forced status, and
+                    // the finish-style arming installed here stops the
+                    // session in the caller at the return point.
+                    let function_depth = self.shell_state.function_depth;
+                    let in_function = function_depth > 0;
+                    let in_source = self.source_nest_depth > 0;
+                    let forced_status = status.unwrap_or(self.exit_code);
+                    let Some(driver) = self.debug_driver.as_mut() else {
+                        return Ok(());
+                    };
+                    if !in_function && !in_source {
+                        // Rejected at the main frame: there is no frame
+                        // to return from, so the debuggee simply
+                        // resumes (the frontend owns telling the user
+                        // why). A session the stop loop ended while
+                        // parked unwinds with its final status, exactly
+                        // like the Resume outcome's failure shape.
+                        return match driver
+                            .session_mut()
+                            .resume(crate::debugger::StepArming::Continue)
+                        {
+                            Ok(()) => Ok(()),
+                            Err(_) => Err(ExecuteError::ExitCode(
+                                driver
+                                    .session()
+                                    .termination()
+                                    .map(|termination| termination.status())
+                                    .unwrap_or(self.exit_code),
+                            )),
+                        };
+                    }
+                    let arming = if in_function {
+                        crate::debugger::StepArming::Finish {
+                            frame_depth: function_depth,
+                        }
+                    } else {
+                        // A sourced file's return has no function
+                        // return site to service a Finish arming: the
+                        // return point in the caller is its next seam,
+                        // which a step-over armed at this depth names.
+                        crate::debugger::StepArming::StepOver {
+                            max_depth: function_depth,
+                        }
+                    };
+                    return match driver.session_mut().resume(arming) {
+                        Ok(()) => Err(ExecuteError::Return(forced_status)),
+                        Err(_) => Err(ExecuteError::ExitCode(
+                            driver
+                                .session()
+                                .termination()
+                                .map(|termination| termination.status())
+                                .unwrap_or(self.exit_code),
+                        )),
+                    };
+                }
+                crate::debugger::StopLoopOutcome::Detach => {
+                    if let Some(driver) = self.debug_driver.take() {
+                        driver.session().deactivate();
+                    }
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Park the session at a decided stop and serve it. The
+    /// consult only decides stops from the running state; a
+    /// rejection here means the state moved under the decision
+    /// (the session was terminated concurrently) and the stop
+    /// simply does not land.
+    fn debugger_stop_and_serve(
+        &mut self,
+        info: crate::debugger::StopInfo,
+    ) -> Result<(), ExecuteError> {
+        if let Some(driver) = self.debug_driver.as_mut() {
+            if driver.session_mut().stop(info).is_err() {
+                return Ok(());
+            }
+        } else {
+            return Ok(());
+        }
+        self.debugger_serve_stop()
+    }
+
+    /// The funnel consult (design 4.2 step 5; WP-1 gap G-06;
+    /// 150-c REPORT section 5, notes 1/3/8). Asked at every funnel
+    /// arrival while a session is attached — including the
+    /// no-action early return — after the trap action ran and was
+    /// not vetoed. Decides breakpoint, function-breakpoint, and
+    /// stepping stops; a decided stop is served before this
+    /// returns, so the debuggee parks inside the funnel and
+    /// resumes from the same seam. `command_text` is the funnel's
+    /// own frozen text — never reconstructed here (note 8).
+    fn debugger_consult(
+        &mut self,
+        seam: crate::debugger::SeamKind,
+        command_text: &str,
+        seam_facts: Option<(Option<crate::debugger::SourceLocation>, usize)>,
+    ) -> Result<(), ExecuteError> {
+        // WP-8 (design 5.2): a function-entry seam proves the
+        // entered function is defined. The note is resolution
+        // bookkeeping, not a stop decision — later breakpoint
+        // adjudication reads the record it leaves — so it is
+        // taken on every entry arrival while the session runs,
+        // ahead of the inert fast exit below, exactly as it was
+        // taken inside the consult body before.
+        if seam == crate::debugger::SeamKind::FunctionEntry {
+            if let Some(name) = self.shell_state.function_name_stack.first().cloned() {
+                if let Some(driver) = self.debug_driver.as_mut() {
+                    let session = driver.session_mut();
+                    if session.is_running() {
+                        session.note_function_defined(&name);
+                    }
+                }
+            }
+        }
+        // S4 inert fast exit (design 4.4): when nothing on this
+        // executor can stop the debuggee at this seam — no
+        // driver installed here at all (child executors share
+        // the process gate but never carry a session), or a
+        // session that is attached but inert (running under a
+        // Continue arming with no enabled seam entry) — the
+        // consult does not run. Nothing the consult body does
+        // is observable in that shape: there is no condition to
+        // evaluate, no stop to serve, and the $BASH_COMMAND
+        // refresh below exists only for a stop's own reads.
+        // The inert path therefore costs the gate load the
+        // funnel already paid plus this one predicate — the
+        // zero-cost shape the design budgets for the off path.
+        if !self.debugger_consult_can_stop() {
+            return Ok(());
+        }
+        // $BASH_COMMAND at a stop is the about-to-run command
+        // (design 7.3; the section 4.2 ordering sets it before
+        // the consult): for the duration of the consult — the
+        // condition evaluations and any stop it decides, whose
+        // inspection snapshot reads the dynamic face through the
+        // row-6 views — the engine's BASH_COMMAND cell holds
+        // this seam's frozen text. The previous value is restored
+        // on every exit, including a forced return's unwind, so
+        // the trap-action freeze semantics (rubash#546) and the
+        // post-command fallback reads are exactly as they were
+        // outside the consult window. (150-views REPORT section
+        // 5, note 1: the dynamic read used to lag one command,
+        // reporting the last command that had *begun*.)
+        let saved_trap_command = self.shell_state.debug_trap_command.borrow().clone();
+        *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
+        let result = self.debugger_consult_at_seam(seam, command_text, seam_facts);
+        *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
+        result
+    }
+
+    /// The consult body proper; [`Executor::debugger_consult`]
+    /// wraps it with the stop-time `$BASH_COMMAND` refresh.
+    fn debugger_consult_at_seam(
+        &mut self,
+        seam: crate::debugger::SeamKind,
+        command_text: &str,
+        seam_facts: Option<(Option<crate::debugger::SourceLocation>, usize)>,
+    ) -> Result<(), ExecuteError> {
+        use crate::debugger::{HitOutcome, SeamKind, StopInfo, StopReason};
+
+        // niubash#681: the seam's location/depth as captured at
+        // funnel arrival, before the user's DEBUG trap action ran
+        // (see run_debug_trap). The fallback is defensive only —
+        // the funnel always passes a snapshot while a session is
+        // armed, which is the only state in which a consult runs.
+        let (location, depth) = seam_facts.unwrap_or_else(|| self.debugger_location());
+        let function_name = if seam == SeamKind::FunctionEntry {
+            self.shell_state.function_name_stack.first().cloned()
+        } else {
+            None
+        };
+
+        enum Pending {
+            None,
+            Stop(StopInfo),
+            Condition(crate::debugger::BreakpointId, StopReason),
+        }
+        let mut pending = Pending::None;
+        if let Some(driver) = self.debug_driver.as_mut() {
+            let session = driver.session_mut();
+            if session.is_running() {
+                // The WP-8 function-definition note for this
+                // arrival was taken by the consult wrapper, ahead
+                // of its inert fast exit — it lands before this
+                // hit accounting, so a just-resolved entry can
+                // stop at this very entry.
+                // Breakpoint accounting (design 5.1/5.2/5.5):
+                // register_hit counts the hit and spends ignore
+                // credit before any condition is evaluated.
+                let mut candidates: Vec<(crate::debugger::BreakpointId, bool)> = Vec::new();
+                if let Some(location) = &location {
+                    candidates.extend(
+                        session
+                            .breakpoints()
+                            .line_entries_at(&location.file, location.line)
+                            .map(|entry| (entry.id, false)),
+                    );
+                }
+                if let Some(name) = &function_name {
+                    candidates.extend(
+                        session
+                            .breakpoints()
+                            .function_entries_named(name)
+                            .map(|entry| (entry.id, true)),
+                    );
+                }
+                for (id, is_function) in candidates {
+                    let reason = if is_function {
+                        StopReason::FunctionBreakpoint(id)
+                    } else {
+                        StopReason::Breakpoint(id)
+                    };
+                    match session.breakpoints_mut().register_hit(id) {
+                        HitOutcome::Stop { .. } => {
+                            pending = Pending::Stop(StopInfo {
+                                reason,
+                                location: location.clone(),
+                                seam: Some(seam),
+                                frame_depth: depth,
+                                command_text: Some(command_text.to_string()),
+                            });
+                            break;
+                        }
+                        HitOutcome::NeedsCondition { id } => {
+                            pending = Pending::Condition(id, reason);
+                            break;
+                        }
+                        HitOutcome::Disabled | HitOutcome::Ignored | HitOutcome::NoSuchEntry => {}
+                    }
+                }
+                if matches!(pending, Pending::None) {
+                    // Stepping predicates (design section 6; WP-4):
+                    // the arming installed by the last resume is a
+                    // one-shot rule, evaluated by the predicates in
+                    // debugger::stepping — the arming's one owner —
+                    // against the engine's own function depth. A
+                    // Finish arming is primarily serviced at the
+                    // frame's return site; the seam predicate
+                    // carries its shallower-frame backstop.
+                    // The file-aware form (PLAN row 11): `step+`
+                    // scopes to the recorded file identity, so
+                    // the seam's spelling is converged here, at
+                    // the same point registrations converge.
+                    let seam_identity = location
+                        .as_ref()
+                        .map(|loc| crate::debugger::file_identity(&loc.file));
+                    let step_stop = crate::debugger::arming_stops_at_seam_in_file(
+                        session.arming(),
+                        depth,
+                        seam_identity.as_deref(),
+                        session.step_file_scope(),
+                    );
+                    if step_stop {
+                        pending = Pending::Stop(StopInfo {
+                            reason: StopReason::Step,
+                            location: location.clone(),
+                            seam: Some(seam),
+                            frame_depth: depth,
+                            command_text: Some(command_text.to_string()),
+                        });
+                    }
+                }
+            }
+        }
+
+        match pending {
+            Pending::None => Ok(()),
+            Pending::Stop(info) => self.debugger_stop_and_serve(info),
+            Pending::Condition(id, reason) => {
+                // The condition is evaluated without the driver
+                // borrowed (evaluation runs engine code). An entry
+                // that vanished while deciding cannot stop.
+                let text = self
+                    .debug_driver
+                    .as_ref()
+                    .and_then(|driver| driver.session().breakpoints().get(id))
+                    .and_then(|entry| entry.condition.clone());
+                let Some(text) = text else {
+                    return Ok(());
+                };
+                match self.evaluate_debug_condition(&text, location.as_ref().map(|loc| loc.line)) {
+                    DebugConditionVerdict::True => {
+                        // Committing the stop is what consumes a
+                        // one-shot entry (design 5.3).
+                        if let Some(driver) = self.debug_driver.as_mut() {
+                            driver
+                                .session_mut()
+                                .breakpoints_mut()
+                                .commit_conditional_stop(id);
+                        }
+                        self.debugger_stop_and_serve(StopInfo {
+                            reason,
+                            location,
+                            seam: Some(seam),
+                            frame_depth: depth,
+                            command_text: Some(command_text.to_string()),
+                        })
+                    }
+                    DebugConditionVerdict::False => Ok(()),
+                    DebugConditionVerdict::Failed(diagnostic) => {
+                        // Design 5.3: a failed evaluation counts as
+                        // false and is reported once per breakpoint.
+                        // The report is the debugger speaking (the
+                        // captured engine diagnostic rides along,
+                        // indented, quoted as the debuggee-context
+                        // output it is); the driver owns the
+                        // once-per-breakpoint record and the
+                        // announcement.
+                        if let Some(driver) = self.debug_driver.as_mut() {
+                            let mut report =
+                                format!("breakpoint {}: condition '{text}' failed", id.number());
+                            if let Some(loc) = &location {
+                                report.push_str(&format!(" at {}:{}", loc.file, loc.line));
+                            }
+                            report.push_str(", treated as false");
+                            if !diagnostic.is_empty() {
+                                for line in diagnostic.lines() {
+                                    report.push_str("\n  ");
+                                    report.push_str(line);
+                                }
+                            }
+                            driver.announce_condition_error(id, &report);
+                        }
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    /// Design 5.3: a breakpoint condition is a shell command,
+    /// evaluated through the engine's own execution in the current
+    /// frame; its exit status is the verdict. The evaluation runs
+    /// under the funnel's re-entrancy guard (restored afterwards),
+    /// so neither the DEBUG trap nor the consult fires for the
+    /// evaluation's own commands — the fire that led here counts
+    /// as in progress. `$?` is preserved across the evaluation,
+    /// like across a trap firing.
+    ///
+    /// rubash#1962: the evaluation is a guest in the debuggee's
+    /// executor, and three guest disciplines keep it from
+    /// disturbing the host run:
+    ///
+    /// - *Fatal state is snapshot-cloned, never inherited.* The
+    ///   evalerror family and the nounset DISCARD latch are
+    ///   process-of-the-run state: a condition that trips one
+    ///   (`break 1 2` arming the too-many-arguments DISCARD,
+    ///   expansion fatals) must not leave it armed for the
+    ///   debuggee's own abandon checks to consume — that leak
+    ///   silently terminated the debuggee. The whole family is
+    ///   saved on entry and restored on exit; an arm raised
+    ///   *during* the evaluation reclassifies it as failed
+    ///   (design 5.3's error bucket), never as a verdict.
+    /// - *Diagnostics are captured, then placed by the caller.*
+    ///   The evaluation's stderr goes to the executor's capture
+    ///   for its duration (the pipeline-stage mechanism). A
+    ///   verdict's captured bytes are replayed untouched; a
+    ///   failure's ride along in the once-per-breakpoint report
+    ///   instead of spraying per hit, misattributed to the
+    ///   debuggee.
+    /// - *Lines belong to the consult site.* The condition text
+    ///   is re-parsed with the consult line as its base — the
+    ///   evalstring convention (execute_eval_source_inner) — so
+    ///   a diagnostic raised inside the condition reads with the
+    ///   debuggee's file at the line whose consult raised it,
+    ///   not at the condition text's own line 1.
+    fn evaluate_debug_condition(
+        &mut self,
+        text: &str,
+        consult_line: Option<u32>,
+    ) -> DebugConditionVerdict {
+        let line_offset = consult_line.map(|line| line.saturating_sub(1)).unwrap_or(0);
+        let mut tokens = crate::lexer::tokenize(text);
+        if line_offset > 0 {
+            for token in tokens.iter_mut() {
+                token.position += line_offset as usize;
+            }
+        }
+        let ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_line_offset: line_offset as usize,
+                ..Default::default()
+            },
+        );
+        let saved_exit_code = self.exit_code;
+        let saved_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
+        // The fatal-state family (see the doc comment): snapshot
+        // every latch the evaluation could arm, so the restore
+        // below is exact whatever the condition ran.
+        let saved_evalerror_pending = self.evalerror_pending.get();
+        let saved_evalerror_subscript_pending = self.evalerror_subscript_pending.get();
+        let saved_evalerror_failglob_pending = self.evalerror_failglob_pending.get();
+        let saved_evalerror_arith_pending = self.evalerror_arith_pending.get();
+        let saved_evalerror_exit_toomany_pending = self.evalerror_exit_toomany_pending.get();
+        let saved_evalerror_line = self.evalerror_line.get();
+        let saved_nounset_force_eof = self.nounset_force_eof.get();
+        let saved_break_failure_status = self.break_failure_status.take();
+        // The evaluation's diagnostics are captured for its
+        // duration (the outer capture, if any, is restored after).
+        let saved_stderr_capture = self.stderr_capture.take();
+        self.stderr_capture = Some(Vec::new());
+        let result = self.execute_ast(&ast);
+        let status = self.exit_code;
+        let captured = self.stderr_capture.take().unwrap_or_default();
+        self.stderr_capture = saved_stderr_capture;
+        // A fatal arm raised by the evaluation itself (one that
+        // was not already armed on entry) is an evaluation error,
+        // not a verdict: GNU raised it to discard or exit the
+        // *condition's* list, and the debuggee must never see it.
+        let fatal_armed = (self.evalerror_pending.get() && !saved_evalerror_pending)
+            || (self.evalerror_subscript_pending.get() && !saved_evalerror_subscript_pending)
+            || (self.evalerror_failglob_pending.get() && !saved_evalerror_failglob_pending)
+            || (self.evalerror_arith_pending.get() && !saved_evalerror_arith_pending)
+            || (self.evalerror_exit_toomany_pending.get() && !saved_evalerror_exit_toomany_pending)
+            || (self.nounset_force_eof.get() && !saved_nounset_force_eof);
+        self.evalerror_pending.set(saved_evalerror_pending);
+        self.evalerror_subscript_pending
+            .set(saved_evalerror_subscript_pending);
+        self.evalerror_failglob_pending
+            .set(saved_evalerror_failglob_pending);
+        self.evalerror_arith_pending
+            .set(saved_evalerror_arith_pending);
+        self.evalerror_exit_toomany_pending
+            .set(saved_evalerror_exit_toomany_pending);
+        self.evalerror_line.set(saved_evalerror_line);
+        self.nounset_force_eof.set(saved_nounset_force_eof);
+        self.break_failure_status.set(saved_break_failure_status);
+        self.debug_trap_running = saved_trap_running;
+        self.exit_code = saved_exit_code;
+        match result {
+            Ok(()) if !fatal_armed => {
+                // A verdict: the captured stderr was ordinary
+                // debuggee-context output of the user's own
+                // command — replay it where it would have gone
+                // (into an outer capture when one owns the
+                // stream, else the process stderr).
+                if !captured.is_empty() {
+                    if let Some(capture) = self.stderr_capture.as_mut() {
+                        capture.extend_from_slice(&captured);
+                    } else {
+                        let _ = super::shell_options::write_stderr_bytes(&captured);
+                    }
+                }
+                if status == 0 {
+                    DebugConditionVerdict::True
+                } else {
+                    DebugConditionVerdict::False
+                }
+            }
+            _ => {
+                DebugConditionVerdict::Failed(String::from_utf8_lossy(&captured).trim().to_string())
+            }
+        }
+    }
+
+    /// WP-7 (design 7.4/7.5/7.6): run one evaluation the stop
+    /// loop asked for through [`crate::debugger::StopLoopOutcome::Evaluate`].
+    /// The classification is `crate::debugger::evaluation`'s —
+    /// the single owner of the power rules; this path only
+    /// executes what the classification admits:
+    ///
+    /// - Implicit: the whitelist decides; an admitted word is
+    ///   expanded by the engine's own word expansion, a rejected
+    ///   form is never executed — its diagnostic is the outcome.
+    /// - Explicit, one expansion: expanded the same way, at full
+    ///   power (an expansion that assigns or substitutes is the
+    ///   user's own act against their own script, design 5.3).
+    /// - Explicit, anything else: executed as commands in the
+    ///   stopped frame through the engine's own execution, with
+    ///   the DEBUG path suppressed for its duration, exactly as
+    ///   conditions run. This is also the only write-back path
+    ///   (7.6): `x=5`, `arr[2]=v`, `local y=1` are assignments
+    ///   because the real assignment machinery runs them, with
+    ///   its attributes, scope and refusal semantics — there is
+    ///   no debugger-private write channel.
+    ///
+    /// Dynamic faces (`$?`, PIPESTATUS, `$BASH_COMMAND`) read
+    /// through the engine's own dynamic reads — the same getters
+    /// the row-6 views snapshot — never a shadow copy. `frame`
+    /// is validated against the stop's captured frame count;
+    /// execution touches the live frame context, which under the
+    /// shell's dynamic scoping is what stopped-frame evaluation
+    /// can mean (see [`crate::debugger::EvaluationRequest`]).
+    ///
+    /// A control unwind the user deliberately typed (`exit`,
+    /// `return`, `break`, `continue` in an `eval`) propagates as
+    /// the debuggee's own flow, like the same command typed in
+    /// the script; any other execution error becomes a Failed
+    /// outcome carrying the engine's diagnostic and status, and
+    /// the session stays parked.
+    fn debugger_evaluate(
+        &mut self,
+        request: &crate::debugger::EvaluationRequest,
+        frame_count: Option<usize>,
+    ) -> Result<crate::debugger::EvaluationOutcome, ExecuteError> {
+        use crate::debugger::{
+            DiagnosticKind, EvaluationDiagnostic, EvaluationOutcome, EvaluationResult, PowerMode,
+        };
+        let outcome = |result: EvaluationResult| EvaluationOutcome {
+            text: request.text.clone(),
+            mode: request.mode,
+            result,
+        };
+        if let Some(frame) = request.frame {
+            let valid = frame_count.is_some_and(|count| frame < count);
+            if !valid {
+                return Ok(outcome(EvaluationResult::Failed(EvaluationDiagnostic {
+                    kind: DiagnosticKind::Runtime,
+                    message: format!("no frame {frame} at this stop"),
+                    source_name: None,
+                    line: None,
+                    status: None,
+                })));
+            }
+        }
+        let tokens = crate::lexer::tokenize(&request.text);
+        let ast = crate::parser::parse(&tokens);
+        if let Some(diagnostic) = crate::debugger::parse_failure(&ast) {
+            return Ok(outcome(EvaluationResult::Failed(diagnostic)));
+        }
+        match request.mode {
+            PowerMode::Implicit => match crate::debugger::check_implicit(&ast, &request.text) {
+                Ok(word) => {
+                    let word = word.to_string();
+                    let value = self.debugger_expand_evaluation_word(&word);
+                    Ok(outcome(EvaluationResult::Value(value)))
+                }
+                Err(rejection) => Ok(outcome(EvaluationResult::Rejected(rejection.diagnostic()))),
+            },
+            PowerMode::Explicit => {
+                if let Some(word) = crate::debugger::single_expansion_word(&ast) {
+                    let word = word.to_string();
+                    let value = self.debugger_expand_evaluation_word(&word);
+                    return Ok(outcome(EvaluationResult::Value(value)));
+                }
+                match self.debugger_execute_evaluation(&ast)? {
+                    (status, None) => Ok(outcome(EvaluationResult::Status(status))),
+                    (status, Some(message)) => {
+                        Ok(outcome(EvaluationResult::Failed(EvaluationDiagnostic {
+                            kind: DiagnosticKind::Runtime,
+                            message,
+                            source_name: None,
+                            line: None,
+                            status: Some(status),
+                        })))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Expand one evaluation word through the entry command
+    /// preparation itself uses (`expand_word_mut`): its `:=`
+    /// pre-scan applies assignment expansions exactly as a real
+    /// command word's would (an explicit print of `${x:=y}` is a
+    /// full-power act, design 5.3), and the expansion is the
+    /// engine's own. For whitelist-admitted implicit words the
+    /// pre-scan is inert by construction — the checker has
+    /// already refused every writing form — so both power rules
+    /// share this one expansion path and neither builds a shadow.
+    /// Arithmetic writes logged during the expansion are synced
+    /// to the variable table, as the arithmetic eval entries do.
+    fn debugger_expand_evaluation_word(&mut self, word: &str) -> String {
+        let value = self.expand_word_mut(word);
+        crate::executor::arithmetic::sync_arith_writes(self);
+        value
+    }
+
+    /// Execute an explicit evaluation's command list under the
+    /// funnel's re-entrancy guard (restored afterwards), so
+    /// neither the DEBUG trap nor the consult fires for the
+    /// evaluation's own commands. Unlike conditions, `$?` is NOT
+    /// preserved: the executed commands are the user's own, and
+    /// their status is the evaluation's result.
+    ///
+    /// Returns the run's `(status, error)`: `error` is the
+    /// engine's diagnostic text when execution failed without a
+    /// control unwind. A control unwind the user deliberately
+    /// typed (`exit`, `return`, `break`, `continue`) propagates
+    /// as `Err` — the debuggee's own flow, not an outcome.
+    fn debugger_execute_evaluation(
+        &mut self,
+        ast: &crate::parser::Ast,
+    ) -> Result<(i32, Option<String>), ExecuteError> {
+        let saved_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
+        let result = self.execute_ast(ast);
+        self.debug_trap_running = saved_trap_running;
+        match result {
+            Ok(()) => Ok((self.exit_code, None)),
+            Err(
+                error @ (ExecuteError::ExitCode(_)
+                | ExecuteError::Return(_)
+                | ExecuteError::Break(_)
+                | ExecuteError::Continue(_)),
+            ) => Err(error),
+            Err(error) => Ok((self.exit_code, Some(error.to_string()))),
+        }
+    }
+
+    /// Service an asynchronous stop request at the boundary poll
+    /// (DE-07; design 4.4; 150-c REPORT section 5, note 5). Called
+    /// from `run_pending_signal_traps` after signal-trap dispatch:
+    /// a pending request emits its serviced event and parks the
+    /// session with reason [`StopReason::Pause`].
+    fn debugger_service_async_stop(&mut self) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let serve = match self.debug_driver.as_mut() {
+            Some(driver) => {
+                let session = driver.session_mut();
+                session.take_async_stop() && session.is_running()
+            }
+            None => false,
+        };
+        if !serve {
+            return Ok(());
+        }
+        if let Some(driver) = self.debug_driver.as_mut() {
+            driver
+                .session_mut()
+                .emit(crate::debugger::DebugEvent::AsyncStopServiced);
+        }
+        let (location, depth) = self.debugger_location();
+        self.debugger_stop_and_serve(crate::debugger::StopInfo {
+            reason: crate::debugger::StopReason::Pause,
+            location,
+            seam: Some(crate::debugger::SeamKind::BoundaryPoll),
+            frame_depth: depth,
+            command_text: None,
+        })
+    }
+
+    /// DE-06 (design 9.3; PLAN row 12): an exception site whose
+    /// filter the user selected is reached — an ERR trap action
+    /// is about to run, an errexit decision is about to end the
+    /// shell, or a parse error is about to end the current input.
+    /// The site is reported (DE-06) and the session parks at it
+    /// with reason [`StopReason::Exception`], served through the
+    /// one stop path, BEFORE the pending action runs; resuming
+    /// lets the action proceed unchanged — the park is not a
+    /// veto (an errexit exit cannot be cancelled from the stop,
+    /// only inspected before it happens). A site whose filter
+    /// is not selected is neither reported nor parked: the
+    /// selection, written identically by both frontends at the
+    /// WP-15 operation layer, is the session option the
+    /// design's M2 parking item names. A site reached while the
+    /// session is not running free — inside an evaluation at a
+    /// parked stop — produces nothing: a stop is already being
+    /// served, and no second stop may interleave. Callers pass
+    /// the site location when they know it better than the
+    /// ambient line stamp (the parse drivers know the failed
+    /// unit's first line); `None` reads the stamp.
+    pub(crate) fn debugger_note_exception_site(
+        &mut self,
+        kind: crate::debugger::ExceptionKind,
+        status: i32,
+        location: Option<crate::debugger::SourceLocation>,
+    ) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let (fallback_location, depth) = self.debugger_location();
+        let location = location.or(fallback_location);
+        let park = match self.debug_driver.as_mut() {
+            Some(driver) => {
+                let session = driver.session_mut();
+                if !session.is_running() || !session.exception_filter_covers(kind) {
+                    return Ok(());
+                }
+                let site = crate::debugger::ExceptionSite {
+                    kind,
+                    status,
+                    location: location.clone(),
+                };
+                session.note_exception_site(site.clone());
+                session.emit(crate::debugger::DebugEvent::ExceptionSite(site));
+                true
+            }
+            None => false,
+        };
+        if park {
+            self.debugger_stop_and_serve(crate::debugger::StopInfo {
+                reason: crate::debugger::StopReason::Exception(kind),
+                location,
+                seam: None,
+                frame_depth: depth,
+                command_text: None,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// DE-09 (WP-1 gap G-13; 150-c REPORT section 5, note 6): the
+    /// session learns the debuggee's final status from the
+    /// driver/dispatch finish side — never from the EXIT funnel,
+    /// which has dead faces (exec replacement, the no-action
+    /// path). Idempotent: the first finish point to speak wins;
+    /// later ones find the session already terminated. Ends the
+    /// gate pairing.
+    pub(crate) fn debugger_note_exit(&mut self, status: i32) {
+        let Some(driver) = self.debug_driver.as_mut() else {
+            return;
+        };
+        if driver.session().is_terminated() {
+            return;
+        }
+        let _ = driver.session_mut().exit(status);
+        driver.session().deactivate();
+    }
+
+    /// DE-04 (design 5.4): report a frame return to the session,
+    /// emitted at the return site for every return route, and
+    /// service a `Finish` arming naming that frame: the session
+    /// stops in the caller, before the caller's next seam.
+    /// `frame_depth` is read here, while the returning frame is
+    /// still installed; `caller_location` is the call site's
+    /// location as the caller will present it.
+    pub(crate) fn debugger_note_frame_returned(
+        &mut self,
+        function: &str,
+        route: crate::debugger::ReturnRoute,
+        status: i32,
+        caller_location: Option<crate::debugger::SourceLocation>,
+    ) -> Result<(), ExecuteError> {
+        if !self.debugger_session_here() {
+            return Ok(());
+        }
+        let frame_depth = self.shell_state.function_depth;
+        let mut finish_stop = false;
+        if let Some(driver) = self.debug_driver.as_mut() {
+            let session = driver.session_mut();
+            let frame = crate::debugger::FrameReturn {
+                function: Some(function.to_string()),
+                frame_depth,
+                status,
+                route,
+            };
+            // WP-4 (design 6.1): the finish predicate is the
+            // stepping module's, evaluated against the frame as
+            // reported here — the same payload DE-04 carries.
+            finish_stop = session.is_running()
+                && crate::debugger::arming_stops_at_frame_return(session.arming(), &frame);
+            session.emit(crate::debugger::DebugEvent::FrameReturned(frame));
+        }
+        if finish_stop {
+            self.debugger_stop_and_serve(crate::debugger::StopInfo {
+                reason: crate::debugger::StopReason::Step,
+                location: caller_location,
+                seam: Some(crate::debugger::SeamKind::FunctionReturn),
+                frame_depth: frame_depth.saturating_sub(1),
+                command_text: None,
+            })?;
+        }
+        Ok(())
+    }
 }
