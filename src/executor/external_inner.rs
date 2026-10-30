@@ -1859,7 +1859,7 @@ impl Executor {
                 Some(fd) if fd >= 3 => fd,
                 _ => continue,
             };
-            let target = self.expand_redirect_target(redirect);
+            let mut target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_some()
                 || is_closed_redirect_target(&target)
                 || is_null_device(&target)
@@ -1867,7 +1867,7 @@ impl Executor {
             {
                 continue;
             }
-            let write = !matches!(
+            let mut write = !matches!(
                 redirect.kind,
                 crate::parser::RedirectKind::Input
                     | crate::parser::RedirectKind::DuplicateInput
@@ -1885,6 +1885,41 @@ impl Executor {
                 // entry does NOT skip: the command's binding is the more
                 // local one and must win the slot.
                 continue;
+            }
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) {
+                // rubash#2270: a heredoc / here-string entry carries no
+                // filename target — `target` is the delimiter word.
+                // GNU do_redirection_internal treats r_reading_until /
+                // r_deblank_reading_until / r_reading_string like every
+                // other input binding at ANY redirector fd:
+                // here_document_to_fd (redir.c:423) places the body in
+                // a temporary file and the resulting descriptor is
+                // dup2'd onto the redirector (redir.c:1065-1072). The
+                // spawn-side mirror of that contract: materialize the
+                // canonical body text (external_fd_heredoc_input — the
+                // same ladder the /dev/fd operand and <&N faces use)
+                // into a carrier file, then let the ordinary input arm
+                // below open it and deliver it through the same env /
+                // pin channels as a file input redirect, so fd 3 and
+                // fd 0's body (apply_external_stdin_redirect) obey one
+                // installation contract. Without this arm the entry
+                // fell into the write bucket and "opened" the delimiter
+                // as an output file, leaving the child's fd unbound.
+                let Some(body) = self.external_fd_heredoc_input(cmd, fd) else {
+                    continue;
+                };
+                let Ok(carrier) = self.write_process_substitution_temp(&body) else {
+                    continue;
+                };
+                self.shell_state
+                    .procsub_adhoc_carriers
+                    .borrow_mut()
+                    .push(carrier.clone());
+                target = carrier.display().to_string();
+                write = false;
             }
             let opened =
                 if write {
