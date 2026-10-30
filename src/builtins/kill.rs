@@ -3127,6 +3127,25 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             {
                 Disposition::Handler
             }
+            // rubash#2233: SIGHUP is in the same terminating set
+            // (sig.c:128) and the same interactive install: GNU's
+            // interactive shell CATCHES a hangup so termsig_handler
+            // (sig.c:590) can save history, hang up every job
+            // (jobs.c:1783 hangup_all_jobs) and only then die BY the
+            // signal (kill_shell restores SIG_DFL and re-raises). At
+            // SIG_DFL the kernel kills the shell in place — no job
+            // hangup, no EXIT trap, no history save. The mailbox pin
+            // routes the delivery to the boundary dispatch, whose
+            // untrapped branch records the hangup-death mark for
+            // finish_shell's funnel. Entry-ignored SIGHUP stays
+            // ignored (the pin must not un-ignore it), exactly like
+            // the SIGINT pin above.
+            None if interactive
+                && *sig == libc::SIGHUP as i32
+                && !kernel_signals::entry_ignored(*sig) =>
+            {
+                Disposition::Handler
+            }
             // The same sig.c block: an interactive shell also ignores
             // SIGTERM (initialize_shell_signals: `if (interactive) ...
             // set_signal_handler (SIGTERM, SIG_IGN)`), so a directed

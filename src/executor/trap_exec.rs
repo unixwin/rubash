@@ -1537,6 +1537,141 @@ impl Executor {
         }
     }
 
+    /// rubash#2233: GNU jobs.c:1783 hangup_all_jobs — SIGHUP to every
+    /// job's process group, plus SIGCONT to a stopped job's group so
+    /// the HUP is actually taken; jobs marked with `disown -h`
+    /// (jobs.h J_NOHUP) are skipped. Called from finish_shell on the
+    /// two hangup funnels: an interactive shell that received SIGHUP
+    /// (sig.c:621-622 termsig_handler) and an interactive LOGIN shell
+    /// exiting with `shopt -s huponexit' (shell.c:1017-1020
+    /// exit_shell). Completed jobs are skipped: their processes are
+    /// already reaped, and unlike GNU — whose table drops a job at
+    /// notification — this table keeps completed entries until a
+    /// later cleanup, so signalling their groups could only hit a
+    /// recycled pgrp.
+    #[cfg(unix)]
+    pub(crate) fn hangup_all_jobs(&self) {
+        for job in self.shell_state.job_table.jobs.values() {
+            if job.nohup || job.pgrp == 0 {
+                continue;
+            }
+            if job.state == crate::jobs::ProcessState::Completed {
+                continue;
+            }
+            // SAFETY: killpg on recorded job process groups; a group
+            // that vanished since the snapshot answers ESRCH, ignored.
+            unsafe {
+                libc::killpg(job.pgrp as libc::pid_t, libc::SIGHUP);
+                if job.state == crate::jobs::ProcessState::Stopped {
+                    libc::killpg(job.pgrp as libc::pid_t, libc::SIGCONT);
+                }
+            }
+        }
+    }
+
+    /// rubash#2233: whether GNU has a termsig handler installed for
+    /// an untrapped SIGHUP in this shell — true for interactive
+    /// shells (sig.c:315-316) and for ANY shell with an EXIT trap
+    /// armed (sig.c: the terminating set is caught so the trap can
+    /// run before the signal death). Without either, SIGHUP stays at
+    /// SIG_DFL and the kernel kills the shell in place; no drain
+    /// ever sees the delivery.
+    fn hangup_termsig_armed(&self) -> bool {
+        self.shell_state
+            .env_vars
+            .get("__RUBASH_INTERACTIVE")
+            .map(String::as_str)
+            == Some("1")
+            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some()
+    }
+
+    /// rubash#2233: the untrapped-SIGHUP verdict shared by every
+    /// mailbox drain (boundary dispatch, blocked-wait observer, the
+    /// `wait` builtin's drain): where GNU catches the delivery
+    /// (hangup_termsig_armed) it is neither a discard (the shell does
+    /// NOT survive — termsig_handler hangs up the jobs and dies by
+    /// the signal) nor a plain exit (the death must be BY SIGHUP,
+    /// after the finish funnel runs the EXIT trap). Record the
+    /// hangup-death mark and unwind exit-class with 128+SIGHUP;
+    /// finish_shell consumes the mark. Returns true when the
+    /// delivery was a hangup (the caller then unwinds with the
+    /// returned error class), false otherwise.
+    #[cfg(unix)]
+    pub(crate) fn note_untrapped_hangup(&mut self, signal: i32) -> bool {
+        if signal != libc::SIGHUP as i32 || !self.hangup_termsig_armed() {
+            return false;
+        }
+        self.exit_code = 128 + signal;
+        self.hangup_death_pending = true;
+        true
+    }
+
+    /// Non-unix shells have no SIGHUP to settle (the Windows console
+    /// hangup face is a different mechanism); the drains' untrapped
+    /// classification is unchanged there.
+    #[cfg(not(unix))]
+    pub(crate) fn note_untrapped_hangup(&mut self, _signal: i32) -> bool {
+        false
+    }
+
+    /// rubash#2233: poll the mailbox for an untrapped interactive
+    /// SIGHUP WITHOUT running any trap actions. The interactive
+    /// reader's tty-read-error path needs exactly this asymmetry:
+    /// GNU settles an untrapped hangup by signal death even when the
+    /// dead terminal's EIO is what surfaced (termsig preempts — the
+    /// trapped-HUP control dies 128 via the read-error arm because
+    /// the queued trap is NOT serviced first), so the reader may
+    /// classify a queued hangup here but must not dispatch the queue.
+    /// Non-hangup deliveries are re-queued untouched. The kernel
+    /// delivery races the failed read (the handler can land a hair
+    /// after the read returns), so an empty first drain earns one
+    /// short-settle retry before the caller takes the read-error arm.
+    #[cfg(unix)]
+    pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
+        if self.hangup_death_pending {
+            return true;
+        }
+        for attempt in 0..2 {
+            if attempt == 1 {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            let signals = crate::builtins::kill::take_pending_signals_now(std::process::id())
+                .unwrap_or_default();
+            if signals.is_empty() {
+                continue;
+            }
+            let mut rest = Vec::new();
+            let mut found = false;
+            for signal in signals {
+                if !found
+                    && signal == libc::SIGHUP as i32
+                    && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "HUP")
+                        .is_none()
+                    && self.hangup_termsig_armed()
+                {
+                    found = true;
+                } else {
+                    rest.push(signal);
+                }
+            }
+            if !rest.is_empty() {
+                crate::builtins::kill::requeue_pending_signals(rest);
+            }
+            if found {
+                self.exit_code = 128 + libc::SIGHUP as i32;
+                self.hangup_death_pending = true;
+            }
+            return found;
+        }
+        false
+    }
+
+    /// Non-unix: no hangup delivery exists to poll for.
+    #[cfg(not(unix))]
+    pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
+        false
+    }
+
     pub(crate) fn run_pending_signal_traps(&mut self) -> Result<(), ExecuteError> {
         // Pending signals belong to the shell process. A subshell sharing
         // this process (the flat `( ... )` emulation, the in-process
@@ -1621,6 +1756,16 @@ impl Executor {
                 // (trap.c marks SIGQUIT SIG_SPECIAL for that reset).
                 if signal == crate::builtins::kill::SIGQUIT_NUMBER {
                     continue;
+                }
+                // rubash#2233: an untrapped SIGHUP delivered to an
+                // interactive shell is a hangup death (sig.c:590
+                // termsig_handler): the session does NOT survive as
+                // the discard classification below would have it, and
+                // the finish funnel owes the jobs their hangup before
+                // the shell dies by the signal. The helper records the
+                // mark and the exit status; unwind exit-class.
+                if self.note_untrapped_hangup(signal) {
+                    return Err(ExecuteError::ExitCode(128 + signal));
                 }
                 self.exit_code = 128 + signal;
                 // rubash#1662: in an interactive shell this abort is a
@@ -1843,6 +1988,13 @@ impl Executor {
                 // untrapped delivery while blocked is dropped, not fatal.
                 None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
                 None => {
+                    // rubash#2233: an untrapped SIGHUP while blocked is
+                    // the hangup death, not the interactive discard the
+                    // generic arm below records (see the boundary
+                    // dispatch's untrapped branch).
+                    if self.note_untrapped_hangup(signal) {
+                        return Err(ExecuteError::ExitCode(128 + signal));
+                    }
                     // Record $? before the unwind so an interactive host that
                     // only maps ExitCode(code) still reports 130 after Ctrl+C.
                     self.exit_code = 128 + signal;

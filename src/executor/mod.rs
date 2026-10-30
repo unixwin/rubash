@@ -557,6 +557,17 @@ pub struct Executor {
     /// $? = 128+sig), not as a jump_to_top_level exit; run_source_impl
     /// consumes the mark instead of recording an exit jump.
     signal_discard_pending: bool,
+    /// rubash#2233: set by the signal dispatch when an untrapped SIGHUP
+    /// is delivered to an interactive shell. GNU's termsig path
+    /// (sig.c:590 termsig_handler) does not discard and does not exit
+    /// with a plain status: it saves history, hangs up every job
+    /// (jobs.c:1783 hangup_all_jobs), runs the EXIT trap, and dies BY
+    /// SIGHUP (sig.c kill_shell: restore SIG_DFL, re-raise). The
+    /// dispatch cannot run that funnel mid-unwind, so it records the
+    /// mark and unwinds exit-class with 128+SIGHUP;
+    /// script_driver::finish_shell consumes the mark, runs the funnel
+    /// in GNU's order, and performs the signal death at the end.
+    hangup_death_pending: bool,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,

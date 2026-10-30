@@ -4210,6 +4210,53 @@ struct ISearchState {
 /// compound_exec.rs rubash_spawn_inherited_state, keeps it internal).
 pub const READ_STDIN_MARKER: &str = "__RUBASH_READ_STDIN";
 
+/// rubash#2233: GNU general.c:651 check_dev_tty, called from main
+/// (shell.c:410) before anything else: try /dev/tty; if that fails,
+/// open the stdin terminal BY PATH (ttyname(0)). For a session leader
+/// with no controlling terminal yet, the by-path open is what makes
+/// that terminal its controlling terminal under the kernel's open
+/// rules — and only with a controlling terminal does the kernel
+/// deliver SIGHUP to the foreground process group when the terminal
+/// hangs up (master closed, ssh drop). Without it an interactive
+/// shell spawned on a bare pty slave (setsid + inherited fd, the
+/// hosted-embedding shape) never learns of the hangup at all: its
+/// next read just returns EIO and it folds into a graceful EOF exit.
+/// A process that already has a controlling terminal takes the
+/// /dev/tty arm, a non-leader's by-path open cannot acquire, and a
+/// non-tty stdin has no ttyname — every other shape is a no-op.
+#[cfg(unix)]
+pub fn acquire_controlling_terminal() {
+    // SAFETY: plain open/close of the terminal device; no retained
+    // state. ttyname's static buffer is consumed immediately.
+    unsafe {
+        let dev_tty = b"/dev/tty\0";
+        let fd = libc::open(
+            dev_tty.as_ptr() as *const libc::c_char,
+            libc::O_RDWR | libc::O_NONBLOCK,
+        );
+        if fd >= 0 {
+            libc::close(fd);
+            return;
+        }
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            return;
+        }
+        let name = libc::ttyname(0);
+        if name.is_null() {
+            return;
+        }
+        let fd = libc::open(name, libc::O_RDWR | libc::O_NONBLOCK);
+        if fd >= 0 {
+            libc::close(fd);
+        }
+    }
+}
+
+/// Non-unix hosts have no controlling-terminal/SIGHUP model; the
+/// Windows console hangup face is a separate mechanism.
+#[cfg(not(unix))]
+pub fn acquire_controlling_terminal() {}
+
 /// GNU's interactive command reader for every shape this engine serves:
 /// parse.y:1710-1711 routes an interactive shell's reads through
 /// yy_readline_get -> bashline.c bash_readline -> readline(), whose prompt
@@ -4222,6 +4269,12 @@ pub const READ_STDIN_MARKER: &str = "__RUBASH_READ_STDIN";
 /// readline/misc.c rl_operate_and_get_next) executes the current line and
 /// replaces the buffer with the next history entry.
 pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
+    // rubash#2233: GNU acquires the controlling terminal in main
+    // (shell.c:410 check_dev_tty); a library host driving THIS entry
+    // is the shell process, so the acquisition belongs here too (see
+    // acquire_controlling_terminal). Idempotent: a host that already
+    // has a controlling terminal takes the /dev/tty no-op arm.
+    acquire_controlling_terminal();
     // rubash#1662: GNU installs the interactive signal dispositions
     // before the first prompt is read (sig.c:315-316); the command-
     // boundary reconcile only runs after a command completes, so
@@ -4423,6 +4476,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     }
 
     while !eof {
+        // rubash#2233: a hangup death recorded by the signal dispatch
+        // (e.g. the prompt poll swallowed the unwind as an abort) ends
+        // the reader here; finish_shell runs the hangup funnel and the
+        // signal death. finish_shell is the mark's only consumer.
+        if executor.hangup_death_pending() {
+            eof = true;
+            continue;
+        }
         // eval.c:336 parse_command runs PROMPT_COMMAND before each primary
         // prompt read; continuation (PS2) reads do not. `pending` empty
         // marks the start of a new command, i.e. a primary prompt.
@@ -4621,7 +4682,31 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 eof = true;
             }
             Ok(_) => {}
-            Err(_) => eof = true,
+            Err(_err) => {
+                // rubash#2233: a read ERROR on the interactive
+                // terminal (the hangup shape: the master closed and
+                // the blocked read wakes with EIO) reaches the reader
+                // as an end of input — GNU's interactive reader folds
+                // it like EOF (graceful exit, last status, the `exit`
+                // echo below) UNLESS an untrapped SIGHUP is pending,
+                // whose termsig settlement preempts the fold: poll
+                // for the hangup WITHOUT dispatching (a trapped
+                // SIGHUP queued behind the dead terminal must not run
+                // here — GNU's trapped control exits gracefully with
+                // the trap unrun). The poll also covers the delivery
+                // that woke this read with EINTR instead of EIO. The
+                // fatal read-error arm (diagnostic + 128) is the
+                // SCRIPT reader's — see run_stdin_script.
+                #[cfg(unix)]
+                let hangup = stdin_is_tty && executor.poll_untrapped_hangup();
+                #[cfg(not(unix))]
+                let hangup = false;
+                if !hangup && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+                    eprintln!("{}", if login { "logout" } else { "exit" });
+                }
+                eof = true;
+            }
         }
         // readline's echo of the accepted line: the dumb-terminal
         // (non-tty) path echoes through rl_outstream because a pipe has no
@@ -5257,7 +5342,36 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         match line_result {
             Ok(0) => break,
             Ok(_) => {}
-            Err(_) => break,
+            Err(err) => {
+                // rubash#2233: a read ERROR is not EOF in the script
+                // reader. GNU's parser input layer (parse.y
+                // shell_getc, READERR arm, FATAL_READERROR) reports
+                // `script file read error' and exits 128 — the shape
+                // a dead terminal produces (EIO) when the shell reads
+                // commands from a tty without being interactive
+                // (stderr redirected: shell.c:541-547 leaves it a
+                // plain script reader, and its untrapped SIGHUP —
+                // when one is even delivered — is not the verdict
+                // here). An untrapped hangup caught because an EXIT
+                // trap armed the termsig set preempts the arm: poll
+                // for it (without dispatching — a trapped SIGHUP
+                // queued behind the dead terminal does not run; GNU's
+                // measured control exits 128 with the trap unrun),
+                // and let finish_shell settle the signal death.
+                #[cfg(unix)]
+                if !executor.poll_untrapped_hangup() {
+                    let shell_name = executor
+                        .get_env("__RUBASH_SCRIPT_NAME")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "rubash".to_string());
+                    eprintln!("{shell_name}: line {next_line}: script file read error: {err}");
+                    executor.set_last_exit_code(128);
+                }
+                // GNU's arm exits from the read itself: a partially
+                // gathered group is discarded, not executed.
+                pending.clear();
+                break;
+            }
         }
 
         if pending.is_empty() {
@@ -5465,6 +5579,20 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             }
         }
     }
+    // rubash#2233: the hangup-death funnel (sig.c:590 termsig_handler)
+    // hangs the jobs up AFTER the history save above and BEFORE the
+    // EXIT trap below (sig.c:621-622 precedes the run_exit_trap call),
+    // then dies by the signal at the end of this function. The mark
+    // is taken here — finish_shell is its only consumer — so a stale
+    // mark can never leak into a later session in the same process.
+    let hangup_death = executor.take_hangup_death_pending();
+    // sig.c:621-622 gates the job hangup on the shell being
+    // interactive (or a comsub/procsub subshell); a script shell
+    // caught by its EXIT trap dies by the signal without it.
+    #[cfg(unix)]
+    if hangup_death && executor.get_env("__RUBASH_INTERACTIVE") == Some("1") {
+        executor.hangup_all_jobs();
+    }
     // rubash#1853: end-of-stream job notifications. The boundary
     // flush in execute_ast only fires when a further top-level
     // command is walked, so a signal death in the stream's last
@@ -5496,7 +5624,53 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // deferred bodies with their accumulated input (rubash#1336:
     // `exec > >(tee log)` scripts lost the whole log at end-of-script).
     executor.close_all_persistent_output_process_substitutions();
+    // rubash#2233: the huponexit funnel (shell.c:1017-1020
+    // exit_shell) — an interactive LOGIN shell with the shopt set
+    // hangs up its jobs on the normal exit path. GNU's order is trap
+    // then hangup (the exit builtin runs the EXIT trap before
+    // exit_shell), mirrored here: for an `exit`-builtin finish the
+    // EXIT trap was already consumed at dispatch, and for an
+    // end-of-stream finish it ran above; the hangup follows. A
+    // hangup death already hung the jobs up in termsig order (before
+    // the trap) and is not repeated.
+    #[cfg(unix)]
+    if !hangup_death
+        && interactive
+        && executor.get_env("__RUBASH_LOGIN_SHELL") == Some("1")
+        && executor
+            .get_env("__RUBASH_SHOPT_STATE")
+            .is_some_and(|s| s.split('\u{1f}').any(|e| e == "huponexit"))
+    {
+        executor.hangup_all_jobs();
+    }
+    // rubash#2233: the termsig funnel ends in kill_shell (sig.c:649):
+    // restore SIG_DFL and re-raise, so after history, hangup, and the
+    // EXIT trap the process dies BY SIGHUP rather than exiting 129.
+    #[cfg(unix)]
+    if hangup_death {
+        die_by_sighup();
+    }
     code
+}
+
+/// rubash#2233: GNU sig.c kill_shell — restore SIGHUP's default
+/// disposition and re-raise it so the process's wait status reports
+/// death BY SIGHUP. The signal is explicitly unblocked first (a
+/// delivery could have been consumed while masked at some layer);
+/// the plain exit is the fallback that in practice is unreachable.
+#[cfg(unix)]
+fn die_by_sighup() -> ! {
+    // SAFETY: disposition and mask changes plus a self-directed raise
+    // on the way out of the process; nothing is retained.
+    unsafe {
+        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
+        libc::raise(libc::SIGHUP);
+    }
+    std::process::exit(128 + libc::SIGHUP as i32);
 }
 
 /// shell.c:1830-1842 init_interactive + bashhist.c:320-345: create the
