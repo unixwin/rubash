@@ -1090,6 +1090,7 @@ impl Executor {
             host_external_command_handler: None,
             external_route_provider: None,
             external_stdio_slots: None,
+            own_input_bindings: std::collections::HashMap::new(),
             pending_stdin_fold: None,
             #[cfg(windows)]
             elevation_handler: None,
