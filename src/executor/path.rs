@@ -3652,7 +3652,7 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
     // on Windows; do not let unsupported fd/tty spellings become ordinary
     // files below the logical root.
     if cfg!(windows) && (normalized == "/dev" || normalized.starts_with("/dev/")) {
-        return PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE");
+        return PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE");
     }
 
     if cfg!(windows) {
@@ -4719,7 +4719,7 @@ mod tests {
         );
         assert_eq!(
             shell_path_to_windows("/dev/fd/1", &env_vars),
-            PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE")
+            PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE")
         );
     }
 
