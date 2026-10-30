@@ -3033,14 +3033,34 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
     let no_reset = !env_vars.contains_key("__RUBASH_TRAP_RESET");
     // Any armed signal trap forces the slow path. Every trap-table key
     // for a signal shares the __RUBASH_TRAP_SIG prefix — the managed
-    // set's and the fatal pair's alike (rubash#1475: the pair's routing
-    // bits live outside the managed state, but their keys must still
-    // defeat this fast path). One prefix pass over the var keys, no
-    // allocation, no per-signal probing (the managed table outgrew a
-    // fixed probe list with rubash#1511).
-    let any_armed = env_vars
-        .keys()
-        .any(|key| key.starts_with("__RUBASH_TRAP_SIG"));
+    // set's and the fatal quartet's alike (rubash#1475: the pair's
+    // routing bits live outside the managed state, but their keys must
+    // still defeat this fast path). Two detections of the same verdict,
+    // chosen by table size (rubash#2062): on a small table a prefix
+    // pass over the keys is cheaper than hashing ~55 probes; on a
+    // large table that pass is Θ(#variables) at every command
+    // boundary — Θ(n²) over a script that creates n variables — so
+    // probe the fixed key universe instead: the managed table itself
+    // (the same generative table the slow path iterates, so the probe
+    // set cannot fall behind it the way the rubash#1511-era hand list
+    // did) plus the fatal quartet's literal keys, which
+    // reconcile_fatal consults below. Those are the only
+    // __RUBASH_TRAP_SIG* keys with a reader: a user-forged key outside
+    // the universe changes no disposition on either path (the slow
+    // path never consults it), so the verdict is unchanged.
+    let any_armed = if env_vars.len() <= 512 {
+        env_vars
+            .keys()
+            .any(|key| key.starts_with("__RUBASH_TRAP_SIG"))
+    } else {
+        managed_trap_keys()
+            .iter()
+            .any(|(_, _, key)| env_vars.contains_key(key.as_str()))
+            || env_vars.contains_key("__RUBASH_TRAP_SIGSEGV")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGBUS")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGILL")
+            || env_vars.contains_key("__RUBASH_TRAP_SIGFPE")
+    };
     // An armed EXIT trap also forces the slow path: it routes every
     // otherwise-untrapped managed signal through the handler
     // (sig.c:226-229, rubash#1332 — see the disposition loop below).
