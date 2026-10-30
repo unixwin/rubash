@@ -128,6 +128,11 @@ fn caller_script_file_main_frame_control_issue2142() {
     );
 }
 
+// The alias-invocation probe (run the binary under the name `bash`
+// through a symlink) is unix mechanics; std has no symlink spawn on
+// Windows, so this control is unix-only like issue599's probe in the
+// invocation regressions file.
+#[cfg(unix)]
 #[test]
 fn caller_nested_c_frame_source_control_issue2142() {
     // Control: nested `-c` calls — the caller frame is g's frame,
