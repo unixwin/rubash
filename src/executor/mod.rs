@@ -1597,6 +1597,30 @@ pub struct Executor {
         Option<String>,
         Option<crate::shell::variables::Variable>,
     )>,
+    /// rubash#2272: descriptors a `{var}` redirection asks to close
+    /// for the duration of one command — the targets of `{var}<&-` /
+    /// `{var}>&-` and the sources of move-form dups (`{var}<&N-`).
+    /// GNU applies a command's closes in the forked child (external
+    /// commands) or scoped to the command (in-process faces), never
+    /// as a permanent mutation of the parent's fd table: an
+    /// `exec 9<file` binding survives `cmd {v}<&-` with v=9. The
+    /// dynamic-fd applier therefore only RECORDS the closes here;
+    /// apply_external_fd_delivery performs them in the table just
+    /// before stamping what the child inherits, and
+    /// undo_child_fd_var_redirects drops whatever no delivery
+    /// consumed. (The exec face and the compound scope path keep
+    /// their persistent closes — they do not record here.)
+    fd_var_pending_closes: Vec<u32>,
+    /// rubash#2272: snapshots of the fd-table entries (and prior
+    /// fd-closed markers) that apply_external_fd_delivery closed for
+    /// a spawn from fd_var_pending_closes, so
+    /// undo_child_fd_var_redirects can restore the parent's bindings
+    /// once the command completes.
+    fd_var_close_restore: Vec<(
+        u32,
+        Option<crate::executor::fd_table::FdEntry>,
+        Option<String>,
+    )>,
     /// rubash#1646: descriptors a `{var}` redirection opened under
     /// `shopt varredir_close` on a command-scoped application. GNU closes
     /// them when the owning command COMPLETES (redir.c undo_redirections
