@@ -15,7 +15,9 @@ use super::*;
 /// recognizable as an open FIFO at the target that is not one of the
 /// pin sources; overwriting it would corrupt spawn error reporting.
 #[cfg(unix)]
-fn pin_ambient_fds_in_child(pins: &[(std::os::unix::io::RawFd, u32)]) -> std::io::Result<()> {
+pub(in crate::executor) fn pin_ambient_fds_in_child(
+    pins: &[(std::os::unix::io::RawFd, u32)],
+) -> std::io::Result<()> {
     use std::os::unix::io::RawFd;
     let sources: Vec<RawFd> = pins.iter().map(|&(source, _)| source).collect();
     let ceiling = pins
