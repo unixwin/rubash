@@ -2675,7 +2675,17 @@ impl Drop for Executor {
             if current.as_deref() != final_state.as_deref() {
                 continue;
             }
-            match self.process_env_snapshot.get(name) {
+            // rubash#2178: the birth lookup goes through
+            // snapshot_birth_value — on Windows the snapshot's
+            // process-block spelling ("Path") and the journal's shell
+            // spelling ("PATH") name the same variable, and an
+            // exact-spelling miss here deleted the host's variable
+            // instead of restoring it.
+            match crate::executor::local_helpers::snapshot_birth_value(
+                &self.process_env_snapshot,
+                name,
+                cfg!(windows),
+            ) {
                 Some(value) => {
                     if is_valid_process_env(name, value) {
                         env::set_var(name, value);
