@@ -4519,6 +4519,17 @@ impl Executor {
                 "__RUBASH_SUBSHELL_DEPTH",
                 (self.shell_state.subshell_depth.get() + 1).to_string(),
             );
+            // rubash#1582: the same fork makes the coproc child's own
+            // pid the pid of the seeded level (variables.c:1511
+            // get_bashpid = getpid), so the BASHPID origin base rides
+            // with the depth — the `&` respawn and both procsub forms
+            // stamp the pair, and without the base this child's
+            // $BASHPID read its real pid + 1 while its own children
+            // observed the real pid as $PPID.
+            child.env(
+                "__RUBASH_BG_BASHPID_BASE",
+                (self.shell_state.subshell_depth.get() + 1).to_string(),
+            );
         }
 
         // Create pipes for bidirectional communication
