@@ -21,15 +21,13 @@
 //! matching `'` `` at its start_lineno (parse.y:3903-3912), exit 2.
 //!
 //! Rubash's read-time verdict scanner
-//! (src/lexer/continuation.rs `unclosed_input_close_char_posix`) pushes
-//! a quote level ON TOP of the backquote instead, so the verdict names
-//! `"`. That file is captain-exclusive (repo AGENTS.md), so the flip is
-//! delivered as the captain's patch spec in the #1184 sweep report, and
-//! the GNU-expectation pins below carry #[ignore] with the exact
-//! assertions to enable — remove the attribute when the continuation.rs
-//! fix lands. Everything that is ALREADY correct is pinned as running
-//! controls: closed-body shapes (g3/g4/g6/h4), the plain-dquote and
-//! backquote-closed verdicts (g1/g5), single-quote body opacity
+//! (src/lexer/continuation.rs `unclosed_input_close_char_posix`) used to
+//! push a quote level ON TOP of the backquote, so the verdict named
+//! `"`; the scanner now treats quotes as ordinary inside a backquote
+//! body (parse.y:4039), and the GNU-expectation pins below run enabled.
+//! The rest is pinned as running controls: closed-body shapes
+//! (g3/g4/g6/h4), the plain-dquote and backquote-closed verdicts
+//! (g1/g5), single-quote body opacity
 //! (h1/h2 — parse.y:4000-4007 `open == '\''` continue branch), and the
 //! single-diagnostic half of the original finding.
 //!
@@ -139,16 +137,15 @@ fn single_quote_body_is_opaque_to_other_quotes() {
 }
 
 // ---------------------------------------------------------------------------
-// GNU-expectation pins for the residual — #[ignore]d until the
-// captain-exclusive src/lexer/continuation.rs fix lands (patch spec in
-// the #1184 sweep report). Remove the attribute to enable.
+// GNU-expectation pins for the residual — enabled with the
+// src/lexer/continuation.rs backquote-body fix (rubash#1184 f6).
 // ---------------------------------------------------------------------------
 
 fn assert_gnu_backquote_verdict(tag: &str, script: &str) {
     let (_stdout, stderr, code) = run_rubash_file(script, tag);
     assert_eq!(code, Some(2), "stderr: {stderr}");
     assert!(
-        stderr.contains("unexpected EOF while looking for matching `'"),
+        stderr.contains("unexpected EOF while looking for matching ``'"),
         "stderr: {stderr:?}"
     );
     assert!(
@@ -159,9 +156,10 @@ fn assert_gnu_backquote_verdict(tag: &str, script: &str) {
 
 /// `` echo "`x" `` — dquote open, backquote open inside it. GNU
 /// (5.3.20, script file): `` line 1: unexpected EOF while looking for
-/// matching `' ``; rubash currently names `"`.
+/// matching ``' `` (bytes 60 60 27: open-quote, the backquote, close-quote);
+/// rubash used to name `"` here.
 #[test]
-#[ignore = "rubash#1184 f6 residual: the verdict scanner in captain-exclusive src/lexer/continuation.rs pushes a quote level above an open backquote; GNU parse.y:4157-4160 scans the backquote body opaque to quotes. Enable when the captain's continuation.rs patch lands."]
+
 fn backquote_open_inside_dquote_names_backquote() {
     assert_gnu_backquote_verdict(
         "g2",
@@ -174,7 +172,7 @@ fn backquote_open_inside_dquote_names_backquote() {
 /// (parse.y LEX_PASSNEXT), so the body scan is the innermost failing
 /// scan at EOF. GNU names the backquote.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
+
 fn escaped_backtick_inside_body_still_names_backquote() {
     assert_gnu_backquote_verdict(
         "g7",
@@ -186,7 +184,7 @@ fn escaped_backtick_inside_body_still_names_backquote() {
 /// `` echo "`a\\b" `` — an escaped backslash (LEX_PASSNEXT pair) leaves
 /// the body open at EOF. GNU names the backquote.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
+
 fn escaped_backslash_inside_body_still_names_backquote() {
     assert_gnu_backquote_verdict(
         "g8",
@@ -199,7 +197,7 @@ fn escaped_backslash_inside_body_still_names_backquote() {
 /// plain data (no open != close grouping branch), so the verdict is the
 /// backquote, not the `'`. GNU names the backquote.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
+
 fn single_quote_inside_body_is_data_verdict_is_backquote() {
     assert_gnu_backquote_verdict(
         "h3",
@@ -211,7 +209,7 @@ fn single_quote_inside_body_is_data_verdict_is_backquote() {
 /// The filed repro, full expectation: exactly one diagnostic, line 1,
 /// naming the backquote, exit 2.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
+
 fn nested_backquote_eof_names_backquote() {
     let script = r#"echo "3:`echo \`echo \\`echo deep\\\``"
 "#;
@@ -223,7 +221,7 @@ fn nested_backquote_eof_names_backquote() {
         .collect();
     assert_eq!(diags.len(), 1, "stderr: {stderr:?}");
     assert!(
-        stderr.contains("line 1: unexpected EOF while looking for matching `'"),
+        stderr.contains("line 1: unexpected EOF while looking for matching ``'"),
         "stderr: {stderr:?}"
     );
     assert!(

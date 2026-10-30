@@ -607,8 +607,16 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // parse.y:4039 parse_matched_pair: the grouping branch only runs
+        // when open != close, so inside a backquote body (open == close
+        // == '`', recursed into at parse.y:4157-4160) `'` and `"` are
+        // ordinary characters — they neither nest nor close anything.
+        // The quote push arms below must not stack a new level above an
+        // open backquote, or the EOF verdict names the quote instead of
+        // the backquote (rubash#1184 f6).
+        let in_backquote = top.is_some_and(|d| d.close == '`');
         match ch {
-            '\'' if !in_double => {
+            '\'' if !in_double && !in_backquote => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.
                 if posix && squote_is_literal_in_posix_braced_dquote(&stack) {
                     comment_start = false;
@@ -630,7 +638,7 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                     arith: false,
                 });
             }
-            '"' => {
+            '"' if !in_backquote => {
                 stack.push(UnclosedDelim {
                     close: '"',
                     open_line: line,
@@ -4593,8 +4601,11 @@ pub(crate) fn close_char_residuals_advance(
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // Mirror of the one-shot scan's backquote invariant (parse.y:4039;
+        // rubash#1184 f6): quotes are ordinary inside a backquote body.
+        let in_backquote = top.is_some_and(|d| d.close == '`');
         match ch {
-            '\'' if !in_double => {
+            '\'' if !in_double && !in_backquote => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.
                 if posix && squote_is_literal_in_posix_braced_dquote(&state.stack) {
                     state.comment_start = false;
@@ -4616,7 +4627,7 @@ pub(crate) fn close_char_residuals_advance(
                     arith: false,
                 });
             }
-            '"' => {
+            '"' if !in_backquote => {
                 state.stack.push(UnclosedDelim {
                     close: '"',
                     open_line: state.line,
