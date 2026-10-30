@@ -2156,8 +2156,12 @@ fn history_builtin_rejects_extra_and_malformed_arguments() {
     // GNU builtins/history.def + common.c get_numeric_arg()/no_args():
     // the listing form takes at most one numeric operand — a second one
     // is `too many arguments` (EX_USAGE), a non-numeric one is `numeric
-    // argument required`, and -d's optarg is mandatory. no_args jumps to
-    // DISCARD, so no listing is printed on error paths.
+    // argument required`, and -d's optarg is mandatory. no_args
+    // (builtins/common.c:139) ends in jump_to_top_level(DISCARD), so on
+    // the two `too many arguments` probes the rest of the line —
+    // including the trailing `; echo "rN=$?"` — never runs: GNU 5.3.20
+    // prints no r1/r3 lines at all (rubash#2175; measured byte-for-byte
+    // against the oracle, rubash output identical).
     let dir = env::temp_dir().join(format!("rubash-history-args-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create history args probe dir");
@@ -2193,7 +2197,7 @@ fn history_builtin_rejects_extra_and_malformed_arguments() {
         String::from_utf8_lossy(&output.stdout),
         format!(
             concat!(
-                "r1=2\nr2=2\nr3=2\nr4=2\nr5=1\nr6=1\n",
+                "r2=2\nr4=2\nr5=1\nr6=1\n",
                 "    7  history -ar 2>e6.txt; echo \"r6=$?\"\n",
                 "    8  history 2\n",
                 "{name}: line 3: history: too many arguments\n",
@@ -2212,7 +2216,14 @@ fn history_builtin_rejects_extra_and_malformed_arguments() {
 
 #[test]
 fn history_append_without_histfile_reports_failure_and_continues() {
+    // Fixture setup: HISTFILE explicitly removed (unset). GNU 5.3.20
+    // measured: with HISTFILE unset — and equally with HISTFILE set to
+    // the empty string — `history -a` reports
+    // `history: HISTFILE: parameter null or not set` and the script
+    // continues (rubash#2175; the old `filename not specified` wording
+    // is not a GNU 5.3.20 message on either path).
     let output = crate::rubash_command()
+        .env_remove("HISTFILE")
         .arg("-c")
         .arg("echo pre; history -a; echo AFTER")
         .output()
@@ -2220,7 +2231,12 @@ fn history_append_without_histfile_reports_failure_and_continues() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output.stdout), "pre\nAFTER\n");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("history: filename not specified"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("history: HISTFILE: parameter null or not set"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

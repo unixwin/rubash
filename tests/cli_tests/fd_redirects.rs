@@ -317,7 +317,15 @@ fn c_exec_reports_ambiguous_redirect_for_invalid_expanded_fd() {
 }
 
 #[test]
-fn c_exec_keeps_stdout_redirect_after_invalid_expanded_option() {
+fn c_exec_invalid_expanded_option_discards_redirect_and_keeps_stdout() {
+    // GNU 5.3.20 measured (rubash#2175): `exec $fd>FILE` with fd=-1
+    // fails option parsing (`exec: -1: invalid option`), and the whole
+    // exec — redirections included — is discarded: the file is created
+    // empty by the redirection setup but nothing is written to it, and
+    // the shell continues with its original stdout, so `echo after`
+    // lands on stdout. (Renamed from
+    // c_exec_keeps_stdout_redirect_after_invalid_expanded_option,
+    // whose name and expectations asserted the opposite of GNU.)
     let output_path = Path::new("target").join("rubash-cli-exec-invalid-option.txt");
     let _ = fs::remove_file(&output_path);
     let output = crate::rubash_command()
@@ -330,9 +338,9 @@ fn c_exec_keeps_stdout_redirect_after_invalid_expanded_option() {
         .expect("run rubash");
 
     assert!(output.status.success());
-    assert_eq!(stream_text(&output.stdout), "");
+    assert_eq!(stream_text(&output.stdout), "after\n");
     assert!(stream_text(&output.stderr).contains("exec: -1: invalid option"));
-    assert_eq!(read_text(&output_path), "after\n");
+    assert_eq!(read_text(&output_path), "");
     let _ = fs::remove_file(output_path);
 }
 
