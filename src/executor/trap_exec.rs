@@ -1623,6 +1623,11 @@ impl Executor {
                     continue;
                 }
                 self.exit_code = 128 + signal;
+                // rubash#2236: record the death so an in-process
+                // child's exit boundary can queue the parent's
+                // job-death notice for it (a real child's wait(2)
+                // status carries the same fact).
+                crate::builtins::kill::note_adjudicated_signal_death(signal);
                 // rubash#1662: in an interactive shell this abort is a
                 // DISCARD-class unwind (GNU: the interrupted command
                 // ends with 128+sig and the reader prompts again), not
@@ -1877,6 +1882,10 @@ impl Executor {
                     {
                         self.signal_discard_pending = true;
                     }
+                    // rubash#2236: same death record as the boundary
+                    // dispatch — a blocked wait inside an in-process
+                    // child adjudicates the child's death too.
+                    crate::builtins::kill::note_adjudicated_signal_death(signal);
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
             }
