@@ -2449,7 +2449,7 @@ impl Executor {
         //
         // rubash#940: the stdio arms run in PARSE ORDER (their position in
         // `command.redirects`), matching GNU do_redirection_internal
-        // (redir.c:767-955) and the brace path's apply_brace_group_redirects
+        // (redir.c:767-955) and the brace path's prepare_brace_group_redirects
         // — `( :; ) 2>cap.txt > /missing` must perform the `2>` open
         // (truncate/create side effect) BEFORE the `>` open fails, and the
         // failure report must see the binding it established. The old
@@ -2477,6 +2477,133 @@ impl Executor {
         // `1>&3` against the group's binding rather than a spliced-in
         // re-dup of their own fd 1 (which mis-binds inside pipelines).
 
+        Ok(())
+    }
+
+    /// rubash#2246: the entry half of a compound command's stdio
+    /// redirections, WITHOUT the per-leaf splice. GNU runs
+    /// do_redirections ONCE at compound entry (execute_cmd.c:854-883 —
+    /// save_redirects (854), REDIRECTIONS saved per command (866), the
+    /// do_redirections call itself (883); dispose at 1762,
+    /// dispose_command_redirects): the body then executes against the
+    /// bound fd table and no leaf ever re-opens the target. The fd-table
+    /// binding half of that model already lives in
+    /// with_command_input_redirects (open_compound_output_redirects
+    /// walks cmd.redirects in list order and binds each target once);
+    /// what the splice arms additionally performed, and what this pass
+    /// preserves verbatim, is the parse-order ENTRY side effects that
+    /// must land before the binder and the body run:
+    ///
+    /// * target expansion in parse order (each arm's expansion can
+    ///   consume state — command substitutions, arithmetic — that a
+    ///   later arm or the body observes), including the failglob abort
+    ///   (subst.c:12663-12668);
+    /// * the ONE create/truncate of each non-append file target
+    ///   (create_redirect_output_prepared), which also records the
+    ///   noclobber prepared target the binder consumes instead of
+    ///   re-creating — including the rubash#940 ordering where an
+    ///   earlier arm's create precedes a later arm's failure.
+    ///
+    /// Every consumer of the old injected entries already treated them
+    /// as "realized by the fd-table binding — skip" (the ordered walk
+    /// in redirection.rs, plan_external_stdio, the builtin setup walk),
+    /// and command_output_fd_state seeds from the fd table, so dropping
+    /// the splice changes no leaf's visible endpoint — only who pays
+    /// for it: one entry binding instead of a deep clone of the whole
+    /// compound subtree plus one splice walk per wrapper call.
+    ///
+    /// Error contract is the apply pass's: an IoError from a create
+    /// propagates to the wrapper, which adjudicates it through
+    /// note_compound_redirect_failure (rubash#846) exactly as before.
+    pub(in crate::executor) fn prepare_compound_output_redirects(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<(), ExecuteError> {
+        for arm in compound_stdio_arms_in_parse_order(cmd) {
+            match arm {
+                CompoundStdioArm::Out => self.prepare_compound_out_arm(cmd)?,
+                CompoundStdioArm::Append => self.prepare_compound_append_arm(cmd)?,
+                CompoundStdioArm::Err => self.prepare_compound_err_arm(cmd)?,
+                CompoundStdioArm::ErrAppend => self.prepare_compound_err_append_arm(cmd)?,
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_out_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_out
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(1) == 1)
+        {
+            // The expansion reports the word as written, exactly as in
+            // apply_compound_out_arm; the binder re-expands the same
+            // word when it opens the target (the prepared-target record
+            // below is what keeps the create itself single).
+            let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // Mirror of the apply arm's prepare step: `>&1`-style dup
+            // targets are entry-bound already (never created), and
+            // closed targets (`>&-`) create nothing.
+            if !is_closed_redirect_target(&expanded) && redirect_target_fd(&expanded).is_none() {
+                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_append_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd.append.as_deref().filter(|r| r.fd.unwrap_or(1) == 1) {
+            let _expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // The apply arm creates nothing for appends (the binder's
+            // own open creates on demand); the expansion above is the
+            // arm's only entry side effect.
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_err_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_err
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // Mirror of the apply arm's prepare step, including the
+            // /dev/null and closed-target carve-outs.
+            if redirect_target_fd(&expanded).is_none()
+                && !is_closed_redirect_target(&expanded)
+                && !is_null_device(&expanded)
+            {
+                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prepare_compound_err_append_arm(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = cmd
+            .redirect_err_append
+            .as_deref()
+            .filter(|r| r.fd.unwrap_or(2) == 2)
+        {
+            let _expanded = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+        }
         Ok(())
     }
 
@@ -5916,7 +6043,7 @@ fn exec_has_only_redirects(cmd: &CommandNode) -> bool {
 
 /// The four stdio-slot redirect arms of a compound command, ordered by
 /// their position in the command's parse-order redirect list (rubash#940 —
-/// the same contract apply_brace_group_redirects follows for `{ }`,
+/// the same contract prepare_brace_group_redirects follows for `{ }`,
 /// rubash#826). An arm whose mirror entry cannot be found in the list (a
 /// synthesized desugar) keeps its field order after every matched arm, so
 /// the sort is total and stable.

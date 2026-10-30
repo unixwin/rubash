@@ -1124,7 +1124,7 @@ impl Executor {
         // do_redirections, undone on return), so `f &> out` routes BOTH
         // streams (command.h:32-35 r_err_and_out/r_append_err_and_out,
         // applied at redir.c:899-900/1030). Mirror
-        // apply_brace_group_redirects: propagate through the shared helpers
+        // prepare_brace_group_redirects: propagate through the shared helpers
         // so each body command's ordered redirect list — not only the
         // convenience fields — carries the fd-2 leg. Setting
         // `redirect_err_append` alone created the target file but left the

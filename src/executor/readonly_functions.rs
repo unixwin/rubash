@@ -349,7 +349,17 @@ impl Executor {
         // transport_inherited_ignores arm below re-adds in child form —
         // the same strip the respawn env_map applies.
         for (name, value) in crate::executor::env_helpers::process_env_pairs() {
+            // rubash#2259: the invocation-classification keys
+            // (INVOCATION_STATE_ENV_KEYS) never project. This session's
+            // own writes no longer mirror them at all (the gate in
+            // local_helpers), so this arm only fires on a process env
+            // polluted from outside this lineage — a foreign parent's
+            // or an older binary's copy must still not be handed to
+            // this session's children: interactivity and its sibling
+            // shapes are re-derived by every process itself.
             if name == "TMPDIR"
+                || crate::executor::local_helpers::INVOCATION_STATE_ENV_KEYS
+                    .contains(&name.as_str())
                 || !crate::executor::local_helpers::shell_assignment_needs_process_env(&name)
                 || (name.starts_with("__RUBASH_TRAP")
                     && name != crate::builtins::trap::TRAP_ORIG_IGNORES)

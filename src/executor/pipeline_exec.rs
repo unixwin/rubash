@@ -597,6 +597,29 @@ struct TimedPipelineInput {
     eof_at: f64,
 }
 
+/// rubash#2246: does any stdio-slot mirror target of this compound
+/// command need the process-substitution rewrite
+/// (materialize_compound_output_process_substitutions)? That pass only
+/// ever rewrites a mirror target that starts with `>(` (both of its
+/// arms require the prefix), so with no such target the materialize
+/// call is the identity returning an empty vec — and the wrapper may
+/// borrow the command node instead of deep-cloning it just to feed a
+/// mutation that cannot happen. The same gate the subshell and
+/// brace-group wrappers already inline (rubash#117 whitelist
+/// discipline: the condition is a necessary condition of the mutation
+/// arms themselves, so a false negative is impossible).
+pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &CommandNode) -> bool {
+    [
+        command.redirect_out.as_deref(),
+        command.append.as_deref(),
+        command.redirect_err.as_deref(),
+        command.redirect_err_append.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|redirect| redirect.target.starts_with(">("))
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -702,8 +725,8 @@ impl Executor {
             // the body (GNU applies a compound's redirects before executing
             // it, execute_cmd.c:5606 for the builtin/function class and
             // do_redirection_internal for the group class), so a restricted
-            // shell refuses here — BEFORE apply_brace_group_redirects
-            // creates any target file or splices into the body — and skips
+            // shell refuses here — BEFORE prepare_brace_group_redirects
+            // creates any target file — and skips
             // the body with status 1 (GNU: `{ echo down; } >& f` leaves no
             // file, prints "<f>: restricted: cannot redirect output", body
             // never runs). Without this the group's mirrors went straight
@@ -730,39 +753,29 @@ impl Executor {
             }
             // GNU walks the group body by POINTER (execute_command_internal
             // on the COMMAND allocated once at parse; make_cmd.c never
-            // copies). The two deep clones this port paid per brace group —
-            // command.clone() plus brace_group.body.clone() — are O(depth^2)
-            // for nested `{ { ...; } }` (level k copies the remaining
-            // depth-k CommandNodes, ~2.2 KB each) and are taken only to feed
-            // mutations that happen exclusively under the two gates below:
-            //
-            // 1. materialize_compound_output_process_substitutions rewrites a
-            //    redirect target only when it starts with `>(` (both of its
-            //    arms, shared_combined_output_process_substitution and
-            //    materialize_compound_output_redirect, require that prefix);
-            //    with no such target the call is the identity returning an
-            //    empty vec, so the command is borrowed unchanged.
-            // 2. apply_brace_group_redirects splices into the body only for
-            //    a stdio-slot redirect (redirect_out/append with fd==1,
-            //    redirect_err/redirect_err_append with fd==2 — exactly its
-            //    four `if let` admissions); with none, the body slice is
-            //    executed as-is.
-            // Both gates are necessary conditions of the mutation arms
-            // themselves (rubash#117 whitelist discipline): a false negative
-            // is impossible, and a redirect-free group (the common case)
-            // skips both clones.
-            let redirect_needs_ps_rewrite = [
-                command.redirect_out.as_deref(),
-                command.append.as_deref(),
-                command.redirect_err.as_deref(),
-                command.redirect_err_append.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|redirect| redirect.target.starts_with(">("));
+            // copies). The one deep clone left here — command.clone() — is
+            // O(depth^2) for nested `{ { ...; } }` (level k copies the
+            // remaining depth-k CommandNodes, ~2.2 KB each) and is taken
+            // only to feed the one mutation that can still occur:
+            // materialize_compound_output_process_substitutions rewrites a
+            // redirect target only when it starts with `>(` (both of its
+            // arms, shared_combined_output_process_substitution and
+            // materialize_compound_output_redirect, require that prefix);
+            // with no such target the call is the identity returning an
+            // empty vec, so the command is borrowed unchanged
+            // (compound_redirect_needs_procsub_rewrite — the gate is a
+            // necessary condition of the mutation arms themselves,
+            // rubash#117 whitelist discipline, so a false negative is
+            // impossible). The body clone is gone entirely (rubash#2246):
+            // prepare_brace_group_redirects performs the entry side
+            // effects for a stdio-slot redirect (redirect_out/append with
+            // fd==1, redirect_err/redirect_err_append with fd==2 — exactly
+            // its four arm admissions) and the fd-table binding carries
+            // the body, so the stored slice always executes as-is.
             let mut redirect_owned;
             let group_outputs;
-            let redirect_command: &CommandNode = if redirect_needs_ps_rewrite {
+            let redirect_command: &CommandNode = if compound_redirect_needs_procsub_rewrite(command)
+            {
                 redirect_owned = command.clone();
                 group_outputs =
                     self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
@@ -771,7 +784,7 @@ impl Executor {
                 group_outputs = Vec::new();
                 command
             };
-            let brace_splice_needed = command
+            let brace_prepare_needed = command
                 .redirect_out
                 .as_deref()
                 .is_some_and(|r| r.fd.unwrap_or(1) == 1)
@@ -787,21 +800,16 @@ impl Executor {
                     .redirect_err_append
                     .as_deref()
                     .is_some_and(|r| r.fd.unwrap_or(2) == 2);
-            let mut body_owned;
-            let body: &[CommandNode] = if brace_splice_needed {
-                body_owned = brace_group.body.clone();
-                if let Err(error) =
-                    self.apply_brace_group_redirects(redirect_command, &mut body_owned)
-                {
-                    // The application site already reported the failed open
+            if brace_prepare_needed {
+                if let Err(error) = self.prepare_brace_group_redirects(redirect_command) {
+                    // The preparation site already reported the failed open
                     // (GNU redir.c:135 redirection_error) with the parse-order
-                    // fd-2 bindings in force, and undid those bindings. What
-                    // remains is the single adjudication the main dispatch
-                    // owns for a compound's own failed redirection: status 1,
-                    // the ERR trap, errexit — and NO re-dispatch (the old
-                    // fall-through re-ran the same failing command through
-                    // the leaf path, printing the diagnostic twice, rubash#826
-                    // faces 1-2).
+                    // fd-2 bindings in force. What remains is the single
+                    // adjudication the main dispatch owns for a compound's
+                    // own failed redirection: status 1, the ERR trap,
+                    // errexit — and NO re-dispatch (the old fall-through
+                    // re-ran the same failing command through the leaf path,
+                    // printing the diagnostic twice, rubash#826 faces 1-2).
                     return match error {
                         ExecuteError::IoError(_) => self.finish_brace_redirect_failure(command),
                         // A failglob abort was reported at the expansion;
@@ -809,10 +817,8 @@ impl Executor {
                         other => Err(other),
                     };
                 }
-                &body_owned
-            } else {
-                &brace_group.body
-            };
+            }
+            let body: &[CommandNode] = &brace_group.body;
             // `{ list; } N<<EOF` keeps the numbered heredoc fd open for the
             // whole group (redir.c do_redirection_internal applies compound
             // redirections once), like with_loop_fd_heredocs does for loops.
@@ -5153,6 +5159,53 @@ impl Executor {
                 })
                 .is_some_and(|expanded| self.routes_as_builtin(&expanded));
             if !builtin_stage {
+                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
+        }
+
+        // rubash#2255: a NON-builtin stage whose own redirect list
+        // binds a numbered input fd (`3<seed`, `3< <(...)`, `4<&0`)
+        // cannot be served by the inline slot arms below: they run on
+        // this executor against the stage's text payload and hold no
+        // per-element fd table, so the binding — and every `<&N` dup
+        // or /dev/fd/N operand that reads it — is silently dropped
+        // (`cat 3<seed <&3 | wc -c` printed 0). GNU forks the element
+        // and applies its whole ordered list in the child
+        // (redir.c:237 do_redirections), so decline to the external
+        // stage spawner, which applies the list through the shared
+        // path (apply_external_stdin_redirect for fd 0,
+        // apply_external_fd_delivery for the numbered bindings) —
+        // the same decline the fd-0 file gate above makes. Builtin
+        // stages keep the stage-subshell route, whose funnel binds
+        // numbered fds into the clone's table; {var} entries belong
+        // to the dynamic-fd applier, not this gate.
+        {
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| self.routes_as_builtin(&expanded));
+            if !builtin_stage
+                && command.redirects.iter().any(|redirect| {
+                    redirect.fd_var.is_none()
+                        && redirect.fd.is_some_and(|fd| fd >= 3)
+                        && matches!(
+                            redirect.kind,
+                            crate::parser::RedirectKind::Input
+                                | crate::parser::RedirectKind::ReadWrite
+                                | crate::parser::RedirectKind::DuplicateInput
+                                | crate::parser::RedirectKind::CloseInput
+                        )
+                })
+            {
                 return self.execute_external_pipeline_stage(command, input, stdin_inherit);
             }
         }

@@ -2857,9 +2857,19 @@ impl Executor {
         // merged with the shell's env_vars, `__RUBASH_*` keys crossing only
         // through the spawn-inherited whitelist, and the parent's caught
         // traps cancelled for the child (subst.c:6421).
+        // rubash#2259: the process-env base crosses through the same
+        // spawn-inherited adjudication as the env_vars loop below (the
+        // contract the comment above already states) — pre-fix it
+        // ingested the raw environ, so internal `__RUBASH_*` state
+        // planted there by a foreign parent rode into the child
+        // unadjudicated. Explicit stamps inserted after this merge are
+        // unaffected.
         let mut env_map: std::collections::BTreeMap<String, String> =
             crate::executor::env_helpers::process_env_pairs()
                 .into_iter()
+                .filter(|(key, _)| {
+                    !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
+                })
                 .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
