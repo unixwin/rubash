@@ -4785,13 +4785,19 @@ impl Executor {
         // capture above is active, so restore it before propagating —
         // otherwise every later stdout write in the script is swallowed
         // into the orphaned buffer while stderr keeps working.
-        let stage_redirect_rejected = match self.reject_invalid_redirects(command) {
-            Ok(rejected) => rejected,
-            Err(error) => {
-                crate::executor::shell_options::restore_stdout_capture(saved_capture);
-                return Err(error);
-            }
-        };
+        // rubash#2121: a pipeline stage's stdio wiring is the
+        // deferred binding model even for disk commands, so the gate
+        // settles superseded net output entries for this funnel.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(command, true);
+        let stage_redirect_rejected =
+            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
+                Ok(rejected) => rejected,
+                Err(error) => {
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
+            };
         if stage_redirect_rejected.is_some() {
             // The rejected stage already placed its diagnostic on the
             // element's fd 1 (the pipe) via the capture above — GNU's
