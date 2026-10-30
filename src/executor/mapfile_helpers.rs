@@ -195,9 +195,10 @@ impl Executor {
                         // rendezvous, not the marker bytes (same family
                         // as read_redirected_fd).
                         #[cfg(windows)]
-                        if let Some(Ok(bytes)) =
-                            crate::winux_fifo::slurp_marker_bytes(&path, &self.shell_state.env_vars)
-                        {
+                        if let Some(Ok(bytes)) = crate::winuxcmd_fifo::slurp_marker_bytes(
+                            &path,
+                            &self.shell_state.env_vars,
+                        ) {
                             return Some(
                                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
                             );

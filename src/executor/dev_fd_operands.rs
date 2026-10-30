@@ -315,7 +315,7 @@ fn drain_reader_to_temp(
 /// named pipe. The external child's own runtime (WinuxCmd
 /// file_io.cppm open_binary_file → open_fifo_read_handle) creates the
 /// INBOUND server for the marker and blocks in ConnectNamedPipe; the
-/// pump thread below is the WRITER client (`open_winux_fifo_write`,
+/// pump thread below is the WRITER client (`open_winuxcmd_fifo_write`,
 /// GNU's blocking O_WRONLY fifo open), copying the procsub read end
 /// into the pipe byte-wise. A consumer that is not marker-aware reads
 /// the 7 marker bytes — the same degradation every WinuxCmd fifo shows
@@ -341,7 +341,7 @@ fn procsub_fifo_marker_operand(file: &FileFd, m: &mut DevOperandMaterialization)
         std::process::id(),
         SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    if crate::winux_fifo::create_winux_fifo(&path, false).is_err() {
+    if crate::winuxcmd_fifo::create_winuxcmd_fifo(&path, false).is_err() {
         return None;
     }
     let source = match crate::fd::duplicate_handle(file.handle) {
@@ -357,7 +357,7 @@ fn procsub_fifo_marker_operand(file: &FileFd, m: &mut DevOperandMaterialization)
         // ERROR_PIPE_BUSY waits its slice) — no parent-side thread is
         // involved in that wait, so a consumer that never arrives costs
         // only this parked thread, never a shell stall.
-        match crate::winux_fifo::open_winux_fifo_write(&pump_path, &|| false) {
+        match crate::winuxcmd_fifo::open_winuxcmd_fifo_write(&pump_path, &|| false) {
             Ok(sink) => {
                 use std::os::windows::io::IntoRawHandle;
                 let sink = sink.into_raw_handle() as crate::fd::HANDLE;
