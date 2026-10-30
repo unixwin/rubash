@@ -507,6 +507,23 @@ impl Executor {
         // both keys; own-argv handling re-establishes them.
         env_vars.remove("__RUBASH_DEBUGGER_MODE");
         env_vars.remove("__RUBASH_DEBUGGER_ATTEMPTED");
+        // rubash#2259: the rest of the invocation-classification family
+        // (local_helpers::INVOCATION_STATE_ENV_KEYS) gets the F7
+        // adjudication above. Interactivity, login shape and the `-c`
+        // shape are derived by THIS process's own argv/tty handling
+        // after import (main.rs / invocation.rs — GNU shell.c:540-549
+        // derives interactive_shell from the process's own shape,
+        // never from the environment); an ambient copy is a parent's
+        // classification leaking into this process, and pre-fix a
+        // nested shell classified itself by it (the discard
+        // classification rubash#2236 observed). Strip the whole family
+        // (and its process-env mirrors below, so respawn builders
+        // seeded from the process env cannot re-import it either);
+        // own-argv handling re-establishes whatever applies.
+        env_vars.remove("__RUBASH_INTERACTIVE");
+        env_vars.remove("__RUBASH_INTERACTIVE_FLAG_OFF");
+        env_vars.remove("__RUBASH_IS_C");
+        env_vars.remove("__RUBASH_LOGIN_SHELL");
         // rubash#2136: a respawn provenance claim is honored only when
         // the spawner stamp agrees with this process's actual parent
         // (respawn_provenance_validated). An unvalidated claim is
@@ -582,6 +599,12 @@ impl Executor {
         }
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
+            // rubash#2259: the script's current-line frame is the same
+            // diagnostic transport as the script name — a validated
+            // respawn child keeps the frame its spawner stamped, any
+            // other entry must not execute under a foreign parent's
+            // line number.
+            env_vars.remove("__RUBASH_CURRENT_LINE");
             // dollar_vars[0] slot reset at script entry (shell.c:1613) —
             // see main.rs; the snapshot rides the process env otherwise.
             env_vars.remove("__RUBASH_ARGV0_AFTER_UNSET");
@@ -595,6 +618,12 @@ impl Executor {
         mirror_env_remove("__RUBASH_COMSUB_BODY");
         mirror_env_remove("__RUBASH_DEBUGGER_MODE");
         mirror_env_remove("__RUBASH_DEBUGGER_ATTEMPTED");
+        // rubash#2259: the invocation-classification family's mirrors
+        // leave with the table copies stripped above.
+        mirror_env_remove("__RUBASH_INTERACTIVE");
+        mirror_env_remove("__RUBASH_INTERACTIVE_FLAG_OFF");
+        mirror_env_remove("__RUBASH_IS_C");
+        mirror_env_remove("__RUBASH_LOGIN_SHELL");
         // Only the posix pair leaves the process-env mirror (rubash#2137
         // F9): the non-posix SETOPT keys stay as the diagnostic surface
         // they were, and the niu host's pretty-print read of
@@ -605,6 +634,7 @@ impl Executor {
         mirror_env_remove("__RUBASH_COPROC_CHILD");
         if !internal_respawn {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
+            mirror_env_remove("__RUBASH_CURRENT_LINE");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
         mirror_env_remove("__RUBASH_SHELL_NAME");
