@@ -1,7 +1,7 @@
 //! Issue rubash#1899 (Windows): `/dev/shm` is the POSIX shared-memory
 //! tmpfs — a real writable directory namespace — but the path mapper
 //! had no arm for it, so the spelling fell into the `/dev` capability
-//! sentinel (`\\.\WINUXSH_UNSUPPORTED_DEVICE`) and every use failed
+//! sentinel (`\\.\RUBASH_UNSUPPORTED_DEVICE`) and every use failed
 //! or landed in a literal enclave path instead of a usable directory.
 //! The mapper now resolves /dev/shm like its sibling temp namespaces
 //! (/var/tmp discipline, rubash#328): a lazily materialized directory

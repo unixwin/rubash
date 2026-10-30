@@ -1104,7 +1104,7 @@ fn find_user_command_uncached(
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
         // file (execve semantics). The substitute chain below (explicit
-        // compatible-shell env, winuxsh, then a PATH search for `bash`)
+        // compatible-shell env, then a PATH search for `bash`)
         // is the Windows fixture: hosts without /bin need SOME bash to
         // satisfy suite shebangs. On unix the chain would invert lookup
         // priority — e.g. on macOS a homebrew bash at the front of PATH
@@ -1115,9 +1115,6 @@ fn find_user_command_uncached(
         #[cfg(windows)]
         if is_standard_unix_bash_path(name) {
             if let Some(found) = configured_compatible_shell(env_vars) {
-                return Some(found);
-            }
-            if let Some(found) = configured_shell_root_winuxsh(env_vars) {
                 return Some(found);
             }
             if let Some(found) = find_user_command("bash", env_vars) {
@@ -1321,12 +1318,6 @@ fn configured_compatible_shell(env_vars: &HashMap<String, String>) -> Option<Pat
         .get(COMPATIBLE_SHELL_PATH_ENV)
         .filter(|value| !value.is_empty())?;
     let candidate = shell_path_to_windows(value, env_vars);
-    executable_candidate(&candidate, env_vars)
-}
-
-#[cfg(windows)]
-fn configured_shell_root_winuxsh(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
-    let candidate = configured_shell_root(env_vars)?.join("winuxsh.exe");
     executable_candidate(&candidate, env_vars)
 }
 
@@ -3661,7 +3652,7 @@ fn shell_path_to_windows_inner(path: &str, env_vars: &HashMap<String, String>) -
     // on Windows; do not let unsupported fd/tty spellings become ordinary
     // files below the logical root.
     if cfg!(windows) && (normalized == "/dev" || normalized.starts_with("/dev/")) {
-        return PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE");
+        return PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE");
     }
 
     if cfg!(windows) {
@@ -4647,6 +4638,35 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn winux_purge_s5_shell_root_with_only_winuxsh_exe_is_not_adopted() {
+        // Winux purge S5 (probe demolition): the engine no longer probes
+        // <shell-root>/winuxsh.exe when resolving a standard /bin/bash
+        // path. A configured root whose only shell-looking payload is
+        // the legacy exe name must not be adopted; resolution falls
+        // through to the PATH search (empty here, so no result).
+        let root = std::env::temp_dir().join("rubash-winux-purge-s5-winuxsh-only-root");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("winuxsh.exe"), b"").unwrap();
+        let empty_path_dir = std::env::temp_dir().join("rubash-winux-purge-s5-empty-path");
+        let _ = fs::remove_dir_all(&empty_path_dir);
+        fs::create_dir_all(&empty_path_dir).unwrap();
+        let mut env_vars = HashMap::new();
+        env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            root.to_string_lossy().to_string(),
+        );
+        env_vars.insert(
+            "PATH".to_string(),
+            empty_path_dir.to_string_lossy().to_string(),
+        );
+        assert_eq!(find_user_command("/bin/bash", &env_vars), None);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&empty_path_dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn windows_shell_root_maps_root_and_clamps_parent_components() {
         let root = std::env::temp_dir().join("rubash-logical-root-paths");
         let mut env_vars = HashMap::new();
@@ -4699,7 +4719,7 @@ mod tests {
         );
         assert_eq!(
             shell_path_to_windows("/dev/fd/1", &env_vars),
-            PathBuf::from(r"\\.\WINUXSH_UNSUPPORTED_DEVICE")
+            PathBuf::from(r"\\.\RUBASH_UNSUPPORTED_DEVICE")
         );
     }
 
