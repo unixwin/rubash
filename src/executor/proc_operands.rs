@@ -181,7 +181,7 @@ impl Executor {
     /// The exec builtin's operand plumbing (the spawn arms of
     /// `execute_exec_spawn` in trap_exec): the dev-fd pass and the
     /// /proc pass in one call, so the eight arms share one shape. The
-    /// /proc child-class policy resolves the target program from the
+    /// child-class policies resolve the target program from the
     /// word after `exec`; an unresolvable name keeps the words
     /// verbatim — the exec is about to report that failure against
     /// pristine arguments.
@@ -192,11 +192,12 @@ impl Executor {
         stdin: DevOperandStdin<'_>,
         stdout: DevOperandStdout,
     ) -> (Vec<String>, DevOperandMaterialization, ProcMaterialization) {
-        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(args, stdin, stdout);
         let program = cmd
             .words
             .get(1)
             .and_then(|name| self.find_scoped_user_command(name));
+        let (dev_args, dev_ops) =
+            self.materialize_dev_fd_operands(args, stdin, stdout, program.as_deref());
         let (proc_args, proc_ops) = materialize_proc_operands(
             &dev_args,
             cmd.words.get(1).map(String::as_str),

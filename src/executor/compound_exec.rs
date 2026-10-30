@@ -942,6 +942,24 @@ impl Executor {
     /// in a non-interactive shell — not even with `set -m`). The
     /// termination notices already run at the reader boundary
     /// (job_builtins notify path); the start notice was the missing half.
+    ///
+    /// rubash#2214: the notice is gated on the INTERACTIVE flag of the
+    /// context that starts the job, not of the session. GNU's print
+    /// site is `DESCRIBE_PID` (execute_cmd.c:609 — `if (interactive)
+    /// describe_pid (pid)`, jobs.c:1947), and every subshell
+    /// environment clears `interactive` (execute_cmd.c:1637
+    /// execute_in_subshell: "Subshells are neither login nor
+    /// interactive"), so background children started inside `( )`,
+    /// `$( )`, a pipeline stage, or a process substitution never
+    /// print — while a function body running in the main interactive
+    /// context DOES print for its own `&` children (both verified
+    /// against GNU 5.3.20 under a PTY). The fork copies that execute
+    /// those environments carry the session's `__RUBASH_INTERACTIVE`
+    /// marker in their cloned state, so the session-level check alone
+    /// leaked the notice (observed: interactive `nvm ls`, whose
+    /// `( ... & ... ) | sort` alias printers produced `[1] <pid>`
+    /// noise GNU never prints). `in_subshell_environment()` is the
+    /// executor's existing model of exactly that boundary.
     pub(in crate::executor) fn notify_async_job_started(
         &mut self,
         job_id: crate::jobs::JobId,
@@ -952,6 +970,9 @@ impl Executor {
             .env_vars
             .contains_key("__RUBASH_INTERACTIVE")
         {
+            return;
+        }
+        if self.in_subshell_environment() {
             return;
         }
         let _ = self.write_default_stderr(format!("[{job_id}] {pid}\n").as_bytes());
@@ -4678,6 +4699,12 @@ impl Executor {
                     // GNU coproc.c: the coproc is an async child, so $!
                     // (last_made_pid) tracks it like any `&` spawn.
                     self.shell_state.last_background_pid = Some(pid);
+                    // GNU prints the async start notice for a coproc
+                    // too (execute_cmd.c:2580 DESCRIBE_PID (coproc_pid),
+                    // same `interactive` gate as any async launch —
+                    // verified against GNU 5.3.20 under a PTY); route it
+                    // through the same #2214-gated notify as `&` spawns.
+                    self.notify_async_job_started(job_id, pid);
                     // GNU sh_openpipe moves the pipe ends to the highest free
                     // fds below 64 (move_to_high_fd with maxfd 64): rpipe
                     // 63/62 and wpipe 61/60, of which the parent keeps 63 and

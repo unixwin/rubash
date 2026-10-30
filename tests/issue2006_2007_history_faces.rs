@@ -30,8 +30,11 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+mod common;
+use common::wait_bounded;
 
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash2006-2007-{tag}-{}", std::process::id()));
@@ -40,32 +43,9 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
-fn wait_bounded(child: &mut Child, timeout: Duration) -> (Vec<u8>, Vec<u8>) {
-    let start = Instant::now();
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(_) => break,
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("child did not exit within {timeout:?}");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        use std::io::Read;
-        let _ = so.read_to_end(&mut out);
-    }
-    if let Some(mut se) = child.stderr.take() {
-        use std::io::Read;
-        let _ = se.read_to_end(&mut err);
-    }
-    (out, err)
-}
+/// The bounded wait itself is the shared helper in tests/common
+/// (rubash#2197): this binary's private copy carried the pre-#2056
+/// orphan-pipe hang shape and was deleted in favor of it.
 
 fn run_interactive(input: &str, tag: &str) -> String {
     let dir = tempdir(tag);
@@ -89,7 +69,14 @@ fn run_interactive(input: &str, tag: &str) -> String {
         .expect("stdin")
         .write_all(input.as_bytes())
         .expect("feed input");
-    let (out, err) = wait_bounded(&mut child, Duration::from_secs(60));
+    let outcome = wait_bounded(&mut child, Duration::from_secs(60));
+    assert!(
+        !outcome.timed_out,
+        "child {} did not exit within the bound; partial stderr: {}",
+        outcome.pid,
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let (out, err) = (outcome.stdout, outcome.stderr);
     let _ = std::fs::remove_dir_all(&dir);
     let stderr = String::from_utf8_lossy(&err).into_owned();
     let stdout = String::from_utf8_lossy(&out).into_owned();

@@ -23,9 +23,12 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+mod common;
+use common::wait_bounded;
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -38,36 +41,9 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Poll-wait with a hard bound; kill and fail on timeout (a wedged REPL
-/// must fail the test, not hang the suite).
-fn wait_bounded(child: &mut Child, timeout: Duration) -> (Vec<u8>, Vec<u8>, Option<i32>) {
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait().expect("try_wait") {
-            Some(status) => break status,
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("child did not exit within {timeout:?}");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    };
-    // Child exited; its stdio was piped and the sessions driven here
-    // produce only a few lines, so draining the pipes now cannot block.
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        use std::io::Read;
-        let _ = so.read_to_end(&mut out);
-    }
-    if let Some(mut se) = child.stderr.take() {
-        use std::io::Read;
-        let _ = se.read_to_end(&mut err);
-    }
-    (out, err, status.code())
-}
+/// The bounded wait itself is the shared helper in tests/common
+/// (rubash#2197): this binary's private copy carried the pre-#2056
+/// orphan-pipe hang shape and was deleted in favor of it.
 
 /// Spawn `rubash -i` with piped stdio (the repository's interactive
 /// harness form), feed `input`, close stdin, collect both streams.
@@ -92,7 +68,14 @@ fn run_interactive(input: &str, term: &str) -> (String, String) {
         .write_all(input.as_bytes())
         .expect("write stdin");
     drop(child.stdin.take());
-    let (out, err, _code) = wait_bounded(&mut child, Duration::from_secs(30));
+    let outcome = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !outcome.timed_out,
+        "child {} did not exit within the bound; partial stderr: {}",
+        outcome.pid,
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let (out, err) = (outcome.stdout, outcome.stderr);
     let _ = std::fs::remove_dir_all(&dir);
     (
         String::from_utf8_lossy(&out).into_owned(),
@@ -239,8 +222,14 @@ fn issue_1255_read_p_prompt_is_displayed_on_a_tty() {
         .write_all(b"read -p \"PROMPTXYZ>>> \" a; echo \"a=[$a]\"\nhelloinput\nexit\n")
         .expect("write stdin");
     drop(child.stdin.take());
-    let (out, _err, _code) = wait_bounded(&mut child, Duration::from_secs(30));
-    let typescript = String::from_utf8_lossy(&out).into_owned();
+    let outcome = wait_bounded(&mut child, Duration::from_secs(30));
+    assert!(
+        !outcome.timed_out,
+        "child {} did not exit within the bound; partial stderr: {}",
+        outcome.pid,
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let typescript = String::from_utf8_lossy(&outcome.stdout).into_owned();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         typescript.contains("a=[helloinput]"),

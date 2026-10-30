@@ -479,8 +479,15 @@ impl Executor {
             }
         }
 
-        let expanded = self.expand_embedded_parameters(word);
-        if word.contains("$(") || word.contains('`') {
+        // rubash#2216: the walk runs with expansion-result protection
+        // (see expand_embedded_parameters_protecting_results) because
+        // the trailing unescape pass below — gated on the source word
+        // containing `$(` or a backtick, exactly like the mut walker's
+        // — runs over the assembled string and would otherwise eat
+        // backslashes that arrived as expansion DATA (a sibling
+        // variable's value in a redirect operand is the filed shape).
+        let expanded = self.expand_embedded_parameters_protecting_results(word);
+        let expanded = if word.contains("$(") || word.contains('`') {
             restore_command_substitution_output(
                 &restore_protected_replacement_quotes(&unescape_remaining_shell_escapes(&expanded))
                     .replace("\\\\'", "'")
@@ -488,7 +495,15 @@ impl Executor {
             )
         } else {
             restore_protected_replacement_quotes(&expanded)
-        }
+        };
+        // Restore the protection carrier now that the unescape pass has
+        // run (it could not see the carried backslashes, which is the
+        // point). GNU subst.c:4807 dequote_string strips only CTLESC
+        // bytes; the carrier is this boundary's CTLESC port.
+        crate::executor::markers::restore_bare_sentinels(
+            &expanded,
+            &[(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\")],
+        )
     }
 
     pub(in crate::executor) fn expand_braced_parameter_word(

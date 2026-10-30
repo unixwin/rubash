@@ -2431,6 +2431,37 @@ fn posix_aware_child(program: &Path, env_vars: &HashMap<String, String>) -> bool
     is_winuxcmd_applet(program, env_vars)
 }
 
+/// rubash#2225: whether a resolved external program bridges #1903
+/// fifo-marker files when it opens an argv operand path — i.e. its file
+/// layer calls `open_fifo_read_handle` on a `!<fifo>` marker and reads
+/// the live named pipe behind it instead of the 7 marker bytes. That
+/// code lives in the WinuxCmd multicall runtime (file_io.cppm), so the
+/// aware class is exactly the programs whose binary IS that runtime:
+/// the dispatcher itself, or an applet hardlink of it under a WinuxCmd
+/// root — the same identity class `posix_aware_child` routes by, kept
+/// as a separate predicate because the two contracts can drift apart
+/// (argv dialect vs file-open bridging) and each must be tunable on its
+/// own evidence.
+///
+/// Membership under a WinuxCmd tree is NOT sufficient: since 1.4.0 the
+/// tree also ships third-party flat packages (rg / bat / fd / git ...)
+/// and shim forwarders, which contain no WinuxCmd runtime and read a
+/// marker path as plain bytes (the niubash#346 D6 refinement, recorded
+/// on `is_winuxcmd_applet`). Anything outside this class — an unknown
+/// program, a plain copy of an applet, a System32 tool — must be
+/// treated as not aware: the caller falls back to byte-correct
+/// delivery, so every miss costs streaming, never bytes.
+#[cfg(windows)]
+pub(in crate::executor) fn winuxcmd_fifo_marker_aware(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    if is_winuxcmd_dispatcher(program) {
+        return true;
+    }
+    is_winuxcmd_applet(program, env_vars)
+}
+
 /// niubash#346 refined (D6): whether `program` is a hardlink of the tree's
 /// `winuxcmd.exe` — the only class that owns the shell-tree layer. Path
 /// membership under a WinuxCmd root is necessary but not sufficient: a
@@ -5887,6 +5918,71 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&flat);
         let _ = fs::remove_dir_all(&plain);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue2225_fifo_marker_aware_classification() {
+        // The dispatcher itself bridges markers (name match; no file
+        // needed) — its runtime owns open_fifo_read_handle.
+        assert!(winuxcmd_fifo_marker_aware(
+            Path::new(r"C:\tools\winuxcmd\usr\bin\winuxcmd.exe"),
+            &HashMap::new()
+        ));
+
+        // Under the env-configured WinuxCmd root: only hardlinks of the
+        // tree's winuxcmd.exe are the runtime binary. A separate file in
+        // the same tree (third-party package, or a plain COPY of the
+        // dispatcher) contains no bridging runtime and must classify as
+        // not aware — tree membership alone is not awareness (D6).
+        let home_root = std::env::temp_dir().join("rubash-2225-wcmd-home");
+        let _ = fs::remove_dir_all(&home_root);
+        let home_bin = home_root.join("usr").join("bin");
+        fs::create_dir_all(&home_bin).unwrap();
+        fs::write(home_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        fs::hard_link(home_bin.join("winuxcmd.exe"), home_bin.join("cat.exe")).unwrap();
+        fs::write(home_bin.join("rg.exe"), b"third-party").unwrap();
+        fs::copy(home_bin.join("winuxcmd.exe"), home_bin.join("head.exe")).unwrap();
+
+        let mut env = HashMap::new();
+        env.insert(
+            "WINUXCMD_HOME".to_string(),
+            home_root.to_string_lossy().into_owned(),
+        );
+        assert!(winuxcmd_fifo_marker_aware(&home_bin.join("cat.exe"), &env));
+        assert!(
+            !winuxcmd_fifo_marker_aware(&home_bin.join("rg.exe"), &env),
+            "third-party tree member must not receive marker operands"
+        );
+        assert!(
+            !winuxcmd_fifo_marker_aware(&home_bin.join("head.exe"), &env),
+            "a plain copy of the dispatcher is not the runtime binary"
+        );
+        assert!(!winuxcmd_fifo_marker_aware(
+            Path::new(r"C:\Windows\System32\findstr.exe"),
+            &env
+        ));
+        assert!(!winuxcmd_fifo_marker_aware(
+            Path::new(r"D:\elsewhere\node.exe"),
+            &env
+        ));
+
+        // No env configuration: a hardlink applet in a tree carrying the
+        // winuxcmd.exe marker still classifies aware via the per-tree
+        // probe (a PATH-reached install).
+        let root = std::env::temp_dir().join("rubash-2225-wcmd-tree");
+        let _ = fs::remove_dir_all(&root);
+        let usr_bin = root.join("usr").join("bin");
+        fs::create_dir_all(&usr_bin).unwrap();
+        fs::write(usr_bin.join("winuxcmd.exe"), b"MZ").unwrap();
+        fs::hard_link(usr_bin.join("winuxcmd.exe"), usr_bin.join("cat.exe")).unwrap();
+        assert!(winuxcmd_fifo_marker_aware(
+            &usr_bin.join("cat.exe"),
+            &HashMap::new()
+        ));
+
+        let _ = fs::remove_dir_all(&home_root);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]

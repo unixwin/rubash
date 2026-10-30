@@ -26,8 +26,11 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+mod common;
+use common::wait_bounded;
 
 fn tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash1830-{tag}-{}", std::process::id()));
@@ -36,34 +39,9 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// Poll-wait with a hard bound (same form as the bf-c interactive
-/// harness): a wedged REPL must fail the test, not hang the suite.
-fn wait_bounded(child: &mut Child, timeout: Duration) -> (Vec<u8>, Vec<u8>) {
-    let start = Instant::now();
-    loop {
-        match child.try_wait().expect("try_wait") {
-            Some(_) => break,
-            None => {
-                if start.elapsed() > timeout {
-                    let _ = child.kill();
-                    panic!("child did not exit within {timeout:?}");
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    if let Some(mut so) = child.stdout.take() {
-        use std::io::Read;
-        let _ = so.read_to_end(&mut out);
-    }
-    if let Some(mut se) = child.stderr.take() {
-        use std::io::Read;
-        let _ = se.read_to_end(&mut err);
-    }
-    (out, err)
-}
+/// The bounded wait itself is the shared helper in tests/common
+/// (rubash#2197): this binary's private copy carried the pre-#2056
+/// orphan-pipe hang shape and was deleted in favor of it.
 
 #[test]
 fn interactive_histfile_null_rc_and_append_diag_match_gnu() {
@@ -99,7 +77,14 @@ history -w /nonexistent-dir/f; echo \"E rc=$?\"
         .expect("stdin")
         .write_all(input.as_bytes())
         .expect("feed input");
-    let (out, err) = wait_bounded(&mut child, Duration::from_secs(60));
+    let outcome = wait_bounded(&mut child, Duration::from_secs(60));
+    assert!(
+        !outcome.timed_out,
+        "child {} did not exit within the bound; partial stderr: {}",
+        outcome.pid,
+        String::from_utf8_lossy(&outcome.stderr)
+    );
+    let (out, err) = (outcome.stdout, outcome.stderr);
     let stdout = String::from_utf8_lossy(&out).into_owned();
     let stderr = String::from_utf8_lossy(&err).into_owned();
     // Interactive filename-null returns success (history.def); the

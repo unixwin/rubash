@@ -3163,24 +3163,28 @@ impl Executor {
             } else {
                 crate::executor::dev_fd_operands::DevOperandStdout::FdTable
             };
-            let (dev_args, dev_ops) = self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout);
-            stage_dev_ops.push(dev_ops);
-            // rubash#1905: synthetic /proc operands become spawn-time
-            // snapshot files for a child without its own /proc layer;
-            // each stage's record rides beside its dev_ops and is
-            // dropped where those are finished. Internal stages are
+            // The stage's resolved program feeds both operand passes'
+            // child-class policies (rubash#2225's dev-fd gate and
+            // rubash#1905's /proc policy alike). Internal stages are
             // the engine itself re-entered — they keep the literal
             // spelling (their faces serve /proc), so no program is
-            // offered to the policy for them.
-            let proc_program = if internal_pipeline_program_name(program).is_some() {
+            // offered to either policy for them.
+            let stage_program = if internal_pipeline_program_name(program).is_some() {
                 None
             } else {
                 Some(program.as_path())
             };
+            let (dev_args, dev_ops) =
+                self.materialize_dev_fd_operands(args, dev_stdin, dev_stdout, stage_program);
+            stage_dev_ops.push(dev_ops);
+            // rubash#1905: synthetic /proc operands become spawn-time
+            // snapshot files for a child without its own /proc layer;
+            // each stage's record rides beside its dev_ops and is
+            // dropped where those are finished.
             let (proc_args, proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
                 &dev_args,
                 Some(expanded_name),
-                proc_program,
+                stage_program,
                 &self.shell_state.env_vars,
             );
             stage_proc_ops.push(proc_ops);
