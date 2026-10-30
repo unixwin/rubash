@@ -1045,6 +1045,15 @@ impl Executor {
                                     .env_vars
                                     .insert(FD0_MIRROR_FACT.to_string(), fact);
                             }
+                            // rubash#2170: the same displacement as
+                            // bind_command_fd0_input's mirror branch —
+                            // the fed text is the region's fd-0 binding,
+                            // so a superseded fd-table entry (an
+                            // `exec 0<file` File binding) must not keep
+                            // governing the region's readers. The
+                            // region's cloned fd table is restored
+                            // wholesale at the boundary.
+                            self.fd_table.entries.remove(&0);
                         }
                         break;
                     }
