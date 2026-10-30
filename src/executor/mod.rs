@@ -1449,7 +1449,7 @@ pub struct Executor {
     /// clears it between top-level commands as a backstop. rubash#846.
     pub(crate) compound_redirect_failed: Cell<bool>,
     /// rubash#1025: expanded targets a compound command's prepare phase
-    /// (apply_compound_*_arm / apply_brace_group_redirects) already
+    /// (the compound and brace prepare arms) already
     /// created through the noclobber O_EXCL open in
     /// create_redirect_output_prepared. The bind phase
     /// (open_compound_output_redirects) opens the SAME redirect again to

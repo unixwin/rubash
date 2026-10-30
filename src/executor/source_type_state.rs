@@ -75,15 +75,19 @@ impl Executor {
         }
     }
 
-    pub(in crate::executor) fn apply_brace_group_redirects(
+    pub(in crate::executor) fn prepare_brace_group_redirects(
         &mut self,
         command: &CommandNode,
-        body: &mut [CommandNode],
     ) -> Result<(), ExecuteError> {
+        // rubash#2246: the entry half of the group's redirections —
+        // parse-order expansions and the one create per file target;
+        // the body runs against the fd table bound by
+        // with_command_input_redirects (GNU binds once at entry,
+        // execute_cmd.c:854-883), so no per-leaf splice follows.
         // The stdio mirror fields are fd-blind: `3>&1`/`2>&1` also land in
         // `redirect_out`. Only fd-matching entries are stdio redirects;
-        // numbered ones propagate via splice_numbered_output_redirects_in_order
-        // below (GNU do_redirection_internal applies them in parse order).
+        // numbered ones propagate through the fd-table binding
+        // (GNU do_redirection_internal applies them in parse order).
         //
         // rubash#826: the arms run in PARSE ORDER (their relative position in
         // `command.redirects`), not field order — GNU do_redirection_internal
@@ -100,16 +104,14 @@ impl Executor {
         let mut established_err_target: Option<String> = None;
         for arm in brace_stdio_arms_in_parse_order(command) {
             let result = match arm {
-                BraceStdioArm::Out => self.apply_brace_group_out_arm(command, body),
-                BraceStdioArm::Append => self.apply_brace_group_append_arm(command, body),
+                BraceStdioArm::Out => self.prepare_brace_group_out_arm(command),
+                BraceStdioArm::Append => self.prepare_brace_group_append_arm(command),
                 BraceStdioArm::Err => {
-                    self.apply_brace_group_err_arm(command, body, &mut established_err_target)
+                    self.prepare_brace_group_err_arm(command, &mut established_err_target)
                 }
-                BraceStdioArm::ErrAppend => self.apply_brace_group_err_append_arm(
-                    command,
-                    body,
-                    &mut established_err_target,
-                ),
+                BraceStdioArm::ErrAppend => {
+                    self.prepare_brace_group_err_append_arm(command, &mut established_err_target)
+                }
             };
             if let Err(error) = result {
                 // GNU redir.c:135 redirection_error reports the failed open
@@ -160,132 +162,99 @@ impl Executor {
         Ok(())
     }
 
-    fn apply_brace_group_out_arm(
-        &mut self,
-        command: &CommandNode,
-        body: &mut [CommandNode],
-    ) -> Result<(), ExecuteError> {
+    fn prepare_brace_group_out_arm(&mut self, command: &CommandNode) -> Result<(), ExecuteError> {
+        if let Some(redirect) = command
+            .redirect_out
+            .as_deref()
+            .filter(|r| is_stdout_splice_redirect(command, r))
         {
-            if let Some(redirect) = command
-                .redirect_out
-                .as_deref()
-                .filter(|r| is_stdout_splice_redirect(command, r))
-            {
-                let target = self.expand_redirect_target(redirect);
-                // subst.c:12663-12668 failglob: abort before creating or
-                // splicing the failed target into the body.
-                if self.redirect_failglob_aborted() {
-                    return Err(ExecuteError::ExpansionFailure(1));
-                }
-                if redirect_target_fd(&target).is_none() {
-                    self.create_redirect_output_prepared(&target, redirect.clobber)?;
-                }
-                let mut append_redirect = redirect.clone();
-                append_redirect.target = target;
-                append_redirect.append = true;
-                append_redirect.clobber = false;
-                apply_stdout_append_redirect(body, &append_redirect);
+            let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating the
+            // failed target.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            if redirect_target_fd(&target).is_none() {
+                self.create_redirect_output_prepared(&target, redirect.clobber)?;
             }
         }
         Ok(())
     }
 
-    fn apply_brace_group_append_arm(
+    fn prepare_brace_group_append_arm(
         &mut self,
         command: &CommandNode,
-        body: &mut [CommandNode],
     ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = command
+            .append
+            .as_deref()
+            .filter(|r| is_stdout_write_redirect(r))
         {
-            if let Some(redirect) = command
-                .append
-                .as_deref()
-                .filter(|r| is_stdout_write_redirect(r))
-            {
-                let target = self.expand_redirect_target(redirect);
-                // subst.c:12663-12668 failglob: abort before splicing.
-                if self.redirect_failglob_aborted() {
-                    return Err(ExecuteError::ExpansionFailure(1));
-                }
-                let mut append_redirect = redirect.clone();
-                append_redirect.target = target;
-                append_redirect.append = true;
-                apply_stdout_append_redirect(body, &append_redirect);
+            let _target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
             }
         }
         Ok(())
     }
 
-    fn apply_brace_group_err_arm(
+    fn prepare_brace_group_err_arm(
         &mut self,
         command: &CommandNode,
-        body: &mut [CommandNode],
         established_err_target: &mut Option<String>,
     ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = command
+            .redirect_err
+            .as_deref()
+            .filter(|r| is_stderr_splice_redirect(command, r))
         {
-            if let Some(redirect) = command
-                .redirect_err
-                .as_deref()
-                .filter(|r| is_stderr_splice_redirect(command, r))
-            {
-                let target = self.expand_redirect_target(redirect);
-                // subst.c:12663-12668 failglob: abort before creating or
-                // splicing (see the redirect_out arm above).
-                if self.redirect_failglob_aborted() {
-                    return Err(ExecuteError::ExpansionFailure(1));
-                }
-                if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
-                    self.create_redirect_output_prepared(&target, redirect.clobber)?;
-                }
-                let mut append_redirect = redirect.clone();
-                append_redirect.target = target.clone();
-                append_redirect.append = true;
-                append_redirect.clobber = false;
-                apply_stderr_append_redirect(body, &append_redirect);
-                // rubash#826: GNU do_redirection_internal (redir.c:767-955)
-                // rebinds fd 2 to the opened target at application time, so
-                // the group's own later diagnostics — a later arm's failed
-                // open, a nested compound's redirect failure — land in that
-                // file. Track it as the failure-report destination; the
-                // BODY's per-leaf writes keep moving through the splice
-                // above. A standing fd_table[2] binding here would instead
-                // be seen by the walker's downstream `1>&2` dup (issue699
-                // R1.1), which GNU resolves against the fd 2 in force at
-                // the DUP's own parse position.
-                if redirect_target_fd(&target).is_none() {
-                    *established_err_target = Some(target);
-                }
+            let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before creating (see
+            // the redirect_out arm above).
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
+                self.create_redirect_output_prepared(&target, redirect.clobber)?;
+            }
+            // rubash#826: GNU do_redirection_internal (redir.c:767-955)
+            // rebinds fd 2 to the opened target at application time, so
+            // the group's own later diagnostics — a later arm's failed
+            // open, a nested compound's redirect failure — land in that
+            // file. Track it as the failure-report destination for this
+            // preparation's own report routing. A standing fd_table[2]
+            // binding here would instead be seen by the walker's
+            // downstream `1>&2` dup (issue699 R1.1), which GNU resolves
+            // against the fd 2 in force at the DUP's own parse position.
+            if redirect_target_fd(&target).is_none() {
+                *established_err_target = Some(target);
             }
         }
         Ok(())
     }
 
-    fn apply_brace_group_err_append_arm(
+    fn prepare_brace_group_err_append_arm(
         &mut self,
         command: &CommandNode,
-        body: &mut [CommandNode],
         established_err_target: &mut Option<String>,
     ) -> Result<(), ExecuteError> {
+        if let Some(redirect) = command
+            .redirect_err_append
+            .as_deref()
+            .filter(|r| is_stderr_splice_redirect(command, r))
         {
-            if let Some(redirect) = command
-                .redirect_err_append
-                .as_deref()
-                .filter(|r| is_stderr_splice_redirect(command, r))
-            {
-                let target = self.expand_redirect_target(redirect);
-                // subst.c:12663-12668 failglob: abort before splicing.
-                if self.redirect_failglob_aborted() {
-                    return Err(ExecuteError::ExpansionFailure(1));
-                }
-                let mut append_redirect = redirect.clone();
-                append_redirect.target = target.clone();
-                apply_stderr_append_redirect(body, &append_redirect);
-                // rubash#826: the `2>>` arm never opened the target at group
-                // level, so `{ :; } 2>>err.log > /nonexistent/f` lost the
-                // diagnostic (GNU reports it into the append-opened file,
-                // redir.c:135). Track it like the redirect_err arm above.
-                if redirect_target_fd(&target).is_none() {
-                    *established_err_target = Some(target);
-                }
+            let target = self.expand_redirect_target(redirect);
+            // subst.c:12663-12668 failglob: abort before binding.
+            if self.redirect_failglob_aborted() {
+                return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // rubash#826: the `2>>` arm never opened the target at group
+            // level, so `{ :; } 2>>err.log > /nonexistent/f` lost the
+            // diagnostic (GNU reports it into the append-opened file,
+            // redir.c:135). Track it like the redirect_err arm above.
+            if redirect_target_fd(&target).is_none() {
+                *established_err_target = Some(target);
             }
         }
         Ok(())
