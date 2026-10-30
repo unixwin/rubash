@@ -77,6 +77,16 @@ jobs:
           --test issue2043_sync_a_class_regressions
           --test issue2046_sync_b_class_regressions --profile ci
 
+      # rubash#2250: the PIPESTATUS wait-race pins
+      # (tests/issue2250_pipestatus_wait_race_regressions.rs) assert a
+      # pipeline member in exit transit keeps its real status instead of
+      # being killed by the wait path and reported as a SIGPIPE death.
+      # The target is #![cfg(unix)] (explicit fd closing, coreutils
+      # yes/head), so this ubuntu lane is its execution home; no other
+      # CI job runs the target.
+      - name: Run issue2250 PIPESTATUS wait-race pins
+        run: cargo nextest run --test issue2250_pipestatus_wait_race_regressions --profile ci
+
   # rubash#2176: cli_tests used to run as a continue-on-error step inside
   # the rust job above, which made its reds invisible -- the job showed
   # green no matter how the suite did, and that is how the #2163 `-- -c`
