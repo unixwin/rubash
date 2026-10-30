@@ -324,14 +324,24 @@ impl Executor {
                 return Ok(());
             }
         }
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut for_command = for_command.clone();
-        let mut body = Ast {
-            commands: for_command.body,
-        };
-        let result = self.apply_command_output_redirects(&redirect_cmd, &mut body);
+        // rubash#2246: same borrow conversion as the if wrapper — the
+        // cmd + for_command deep clones existed only for the procsub
+        // materialization (gated on a `>(` mirror target) and the
+        // per-leaf body splice, which prepare_compound_output_redirects
+        // replaces with the entry side effects alone.
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        let result = self.prepare_compound_output_redirects(redirect_cmd);
         let status = self.exit_code;
         if let Err(error) = result {
             // rubash#846 (GNU execute_cmd.c:854-883): the for's OWN
@@ -344,7 +354,6 @@ impl Executor {
             finish_result?;
             return Err(error);
         }
-        for_command.body = body.commands;
 
         // GNU execute_cmd.c:3001 `line_number = for_command->line`: the
         // `for` keyword's line is the ambient line_number in force while
@@ -353,7 +362,7 @@ impl Executor {
         let result = self.with_loop_fd_heredocs(cmd, |executor| {
             executor.with_command_input_redirects(cmd, |executor| {
                 executor.with_ambient_line(for_line, |executor| {
-                    executor.execute_for_command(&for_command)
+                    executor.execute_for_command(for_command)
                 })
             })
         });
