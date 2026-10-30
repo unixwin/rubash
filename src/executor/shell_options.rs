@@ -391,10 +391,12 @@ impl Executor {
             return Some(Self::zero_device_file(&target));
         }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
-        // the OS fd-alias layer — a dup of fd N, not a filesystem path.
-        // Windows has no /dev, so resolve against the virtual fd table
-        // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the
-        // console even when fd 0 was a pipeline).
+        // the OS fd-alias layer — an open of fd N's target, not a
+        // filesystem path open of the spelling. Windows has no /dev, so
+        // resolve against the virtual fd table (niubash#118: `< /dev/stdin`
+        // used to open CONIN$ and block on the console even when fd 0 was
+        // a pipeline). open_fd_read_endpoint owns the endpoint-kind
+        // dispatch: regular files re-open fresh, the rest dup (rubash#2256).
         if let Some(fd) = dev_stdio_redirect_fd(target) {
             // rubash#545 (cell 2): a CLOSED /dev/fd/N falls through to the
             // literal open, whose failure reports ENOENT — GNU's errno for
@@ -618,7 +620,92 @@ impl Executor {
         open_redirect_input_file(&win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
 
+    /// rubash#2256: the path an open of fd `fd`'s alias spelling
+    /// (`/dev/fd/N`, `/proc/self/fd/N`, the stdio spellings) re-opens,
+    /// when the descriptor's endpoint is a regular file. GNU's alias
+    /// open is the plain open() of the magic link (redir.c's RF_DEVFD
+    /// dup special case at redir.c:603/:629 compiles only without
+    /// HAVE_DEV_FD), so it is judged against the descriptor's TARGET:
+    /// the read endpoint answers first, then the write endpoint (a
+    /// write-only file fd's target re-opens for reading too — the
+    /// #1963 fallback in the stream serve below relies on that).
+    /// fd 0's inherited endpoint has no FileFd, so the process
+    /// stdin's own disk path answers when stdin is a regular file.
+    /// Every other endpoint kind (pipe, socket, device, byte
+    /// channel) cannot be re-opened and yields None: the alias open
+    /// keeps the dup/stream serve.
+    pub(in crate::executor) fn fd_alias_reopen_path(&self, fd: u32) -> Option<PathBuf> {
+        if let Some(FdReadEndpoint::File(file_fd)) = self.fd_table.read_endpoint(fd) {
+            if file_fd.reopens_fresh() {
+                return Some(file_fd.path.clone());
+            }
+        }
+        if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(fd) {
+            if file_fd.reopens_fresh() {
+                return Some(file_fd.path.clone());
+            }
+        }
+        if fd == 0
+            && matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::InheritedProcessStdin)
+            )
+        {
+            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(0))?;
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// rubash#2256: bind fd 0 to a fresh open of fd `source_fd`'s
+    /// alias target when that endpoint re-opens fresh (the function
+    /// call face, whose save/restore bookkeeping the caller owns);
+    /// false when the endpoint keeps the dup model or the fresh
+    /// open fails, leaving the caller's dup bind to proceed.
+    pub(in crate::executor) fn bind_fd0_fresh_alias(&mut self, source_fd: u32) -> bool {
+        let Some(path) = self.fd_alias_reopen_path(source_fd) else {
+            return false;
+        };
+        match FileFd::open_read(path) {
+            Ok(fresh) => {
+                self.set_fd_input_file(0, fresh, false);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Open fd `fd`'s endpoint the way an open of its alias spelling
+    /// does (rubash#2256): a regular-file endpoint re-opens its
+    /// target path — a fresh open file description at offset 0, the
+    /// source descriptor's offset untouched — and every other
+    /// endpoint kind takes the stream serve. A fresh open that
+    /// fails (the file was unlinked while open: GNU's magic-link
+    /// open still succeeds through the descriptor) falls back to
+    /// the stream serve rather than failing the alias open.
     pub(in crate::executor) fn open_fd_read_endpoint(
+        &self,
+        fd: u32,
+        target: &str,
+    ) -> io::Result<File> {
+        if let Some(path) = self.fd_alias_reopen_path(fd) {
+            if let Ok(file) = File::open(&path) {
+                return Ok(file);
+            }
+        }
+        self.open_fd_read_endpoint_stream(fd, target)
+    }
+
+    /// The stream serve behind [`Executor::open_fd_read_endpoint`]:
+    /// a duplicate of the endpoint's own description (shared
+    /// offset), the materialized remainder for byte-channel
+    /// endpoints. This is the right model for the `<&N` dup
+    /// instruction and for consumers of the descriptor's own stream
+    /// (fd 0's ambient stdin), never for an alias-spelling open of a
+    /// regular file — that dispatch lives in the caller above.
+    pub(in crate::executor) fn open_fd_read_endpoint_stream(
         &self,
         fd: u32,
         target: &str,
@@ -1667,14 +1754,14 @@ impl Executor {
     /// mere existence. Unix-only gate: the Windows device-name layer
     /// keeps the blanket create_new behavior (see the #519 family).
     #[cfg(unix)]
-    fn noclobber_target_is_device_like(path: &std::path::Path) -> bool {
+    pub(in crate::executor) fn noclobber_target_is_device_like(path: &std::path::Path) -> bool {
         std::fs::metadata(path)
             .map(|m| !m.is_file())
             .unwrap_or(false)
     }
 
     #[cfg(not(unix))]
-    fn noclobber_target_is_device_like(_path: &std::path::Path) -> bool {
+    pub(in crate::executor) fn noclobber_target_is_device_like(_path: &std::path::Path) -> bool {
         false
     }
 
@@ -2952,12 +3039,26 @@ impl Executor {
             if is_closed_redirect_target(&target) {
                 return None;
             }
-            // `<&N` / `< /dev/fd/N` / `< /dev/std{N}` are fd aliases: GNU
-            // dup2 makes fd 0 read from fd N's current target, i.e. the
-            // shell's virtual stdin/pipe — never the host path `/dev/stdin`
-            // maps to (niubash#118: `cat < /dev/stdin` must consume the
-            // pipe input, not block opening CONIN$).
+            // `<&N` / `< /dev/fd/N` / `< /dev/std{N}` are fd aliases: fd 0
+            // reads from fd N's current target, i.e. the shell's virtual
+            // stdin/pipe — never the host path `/dev/stdin` maps to
+            // (niubash#118: `cat < /dev/stdin` must consume the pipe
+            // input, not block opening CONIN$). The two spellings are
+            // different instructions, though (rubash#2256): `<&N` is a
+            // dup2 — the consumer shares fd N's stream below — while
+            // the path spelling is an open, which for a regular-file
+            // endpoint re-opens the target and serves the whole file
+            // without moving fd N.
             if let Some(source_fd) = redirect_target_fd(&target) {
+                if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                        if let Ok(bytes) = std::fs::read(&path) {
+                            return Some(
+                                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                            );
+                        }
+                    }
+                }
                 if let Some(input) = self.virtual_fd_stdin_remaining(source_fd) {
                     // GNU dup2 hands the consumer the live stream: bytes
                     // it took are gone for the next reader (procsub.tests
@@ -2974,7 +3075,7 @@ impl Executor {
                 // fd 0 inherited from the process dups the real stdin
                 // handle — a terminal blocks, matching GNU; a null/closed
                 // stdin yields EOF.
-                if let Ok(mut file) = self.open_fd_read_endpoint(source_fd, &target) {
+                if let Ok(mut file) = self.open_fd_read_endpoint_stream(source_fd, &target) {
                     // Raw fd bytes are not necessarily UTF-8 (fd_redirects
                     // c_external_cat_reads_raw_bytes: `exec 3<bin; cat <&3`
                     // must stream 0xff through). Read bytes and re-encode to
@@ -3121,7 +3222,9 @@ impl Executor {
         // shell), so string-stdin consumers must read the rebound endpoint,
         // not the pipe bytes that were current before the exec. A closed
         // fd 0 is EOF; a file endpoint streams its remaining bytes
-        // through the shared-offset dup in open_fd_read_endpoint.
+        // through the shared-offset dup in open_fd_read_endpoint_stream
+        // (this face consumes fd 0's OWN stream — no alias open happens
+        // here, so the fresh-open dispatch must not replay it).
         if self.fd_table.is_closed(0) {
             return Some(String::new());
         }
@@ -3129,7 +3232,7 @@ impl Executor {
             self.fd_table.read_endpoint(0),
             Some(FdReadEndpoint::File(_))
         ) {
-            if let Ok(mut file) = self.open_fd_read_endpoint(0, "fd 0") {
+            if let Ok(mut file) = self.open_fd_read_endpoint_stream(0, "fd 0") {
                 use std::io::Read as _;
                 let mut buf = Vec::new();
                 if file.read_to_end(&mut buf).is_err() && buf.is_empty() {

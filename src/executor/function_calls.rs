@@ -1438,6 +1438,23 @@ impl Executor {
                 || self.fd_table.read_endpoint(source_fd).is_some()
             {
                 let saved = self.fd_table.entries.get(&0).cloned();
+                // rubash#2256: a spelling target (`< /dev/fd/N`, not the
+                // `<&N` dup instruction) on a regular-file endpoint
+                // binds a FRESH open of the target for the call's
+                // duration — the source fd's offset does not move.
+                if !readwrite
+                    && !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput)
+                    && self.bind_fd0_fresh_alias(source_fd)
+                {
+                    return Ok((
+                        None,
+                        false,
+                        Some(FunctionCallStdinBinding {
+                            entry: saved,
+                            env: Vec::new(),
+                        }),
+                    ));
+                }
                 if self.fd_table.dup_input(0, source_fd).is_ok() {
                     return Ok((
                         None,

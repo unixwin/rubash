@@ -2189,10 +2189,12 @@ impl Executor {
                     }
                     continue;
                 }
-                // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: GNU opens a
-                // dup of the descriptor — the in-process equivalent reads
-                // the fd endpoint's remaining bytes (subst.c shared
-                // offset).
+                // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: for stream
+                // endpoints GNU's open attaches to the descriptor — the
+                // in-process equivalent reads the fd endpoint's remaining
+                // bytes (shared offset); a regular-file endpoint re-opens
+                // fresh and serves the whole file (rubash#2256, inside
+                // dev_fd_operand_bytes / dev_fd_operand_live_file).
                 if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&target) {
                     // rubash#1952: an identity cat over a live File
                     // endpoint (a process substitution's pipe, a FIFO)

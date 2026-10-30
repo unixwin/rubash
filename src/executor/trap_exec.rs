@@ -258,8 +258,10 @@ impl Executor {
             return Ok(());
         }
         // rubash#1963: `<> /dev/fd/N` opens the alias through the
-        // kernel on GNU — a closed alias fails the open ENOENT, an
-        // open one binds a dup of the descriptor in both directions.
+        // kernel on GNU — a closed alias fails the open ENOENT.
+        // rubash#2256: an open one whose endpoint is a regular file
+        // re-opens the target fresh (below); every other endpoint
+        // binds a dup of the descriptor in both directions.
         if let Some(alias_fd) = crate::special_paths::fd_alias_target(target) {
             if !super::redirection::dup_source_fd_open(
                 &self.fd_table,
@@ -270,6 +272,23 @@ impl Executor {
                     io::ErrorKind::NotFound,
                     "No such file or directory",
                 ));
+            }
+            if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
+                // One O_RDWR description of the target serves both
+                // directions (the open_readwrite_pair contract); the
+                // source fd's offset does not move.
+                let (read_file, write_file) = FileFd::open_readwrite_pair(path)?;
+                self.set_fd_input_file(fd, read_file, dynamic);
+                self.fd_table
+                    .open_output(fd, FdWriteEndpoint::File(write_file), dynamic);
+                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(fd));
+                self.shell_state
+                    .env_vars
+                    .insert(fd_output_key(fd), target.to_string());
+                return Ok(());
             }
             let _ = self.fd_table.dup_input(fd, alias_fd);
             let _ = self.fd_table.dup_output(fd, alias_fd);

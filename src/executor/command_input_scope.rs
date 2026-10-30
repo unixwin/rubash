@@ -691,12 +691,13 @@ impl Executor {
             // rubash#2235: an fd-alias target (/dev/fd/N,
             // /proc/self/fd/N, /dev/std*) names the fd table's
             // current endpoint at N — GNU resolves the alias through
-            // the descriptor layer (an open of /proc/self/fd/N dups
-            // the description; the rubash#1963 alias service). Bind
-            // by dup'ing that endpoint, never by opening the spelling
+            // the descriptor layer (the rubash#1963 alias service).
+            // Bind from that endpoint, never by opening the spelling
             // as a filesystem path: the process's real fd N is an
             // unrelated descriptor, so the plain open below reports
             // a spurious ENOENT (or worse, opens an unrelated file).
+            // Which bind the endpoint gets — fresh open or dup — is
+            // the endpoint-kind dispatch at the arm itself (rubash#2256).
             // A list-level input procsub materialized for the
             // external composition rewrites its entry to exactly
             // this spelling, so this arm is what lets the in-process
@@ -705,10 +706,28 @@ impl Executor {
             // open's ENOENT is GNU's dangling-alias error.
             if let Some(alias_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
                 if self.fd_table.read_endpoint(alias_fd).is_some() {
-                    let _ = self.fd_table.dup_input(fd, alias_fd);
+                    // rubash#2256: the alias spelling is an open, not a
+                    // dup instruction — a regular-file endpoint binds a
+                    // FRESH open of its target (new description, offset
+                    // 0; the source fd does not move), the ReadWrite
+                    // form re-binds through set_fd_readwrite_file whose
+                    // own alias arm owns the same dispatch for the pair,
+                    // and every other endpoint kind binds by dup. A
+                    // fresh open that fails falls back to the dup (an
+                    // unlinked-but-open target stays readable through
+                    // the descriptor, as GNU's magic-link open does).
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         self.set_fd_readwrite_file(fd, &target, true)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                    } else if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
+                        match FileFd::open_read(path) {
+                            Ok(fresh) => self.set_fd_input_file(fd, fresh, true),
+                            Err(_) => {
+                                let _ = self.fd_table.dup_input(fd, alias_fd);
+                            }
+                        }
+                    } else {
+                        let _ = self.fd_table.dup_input(fd, alias_fd);
                     }
                     continue;
                 }
@@ -1048,6 +1067,46 @@ impl Executor {
                     // DuplicateOutput arm uses for a source with no
                     // fd-table entry (rubash#170 nest4).
                     if let Some(source_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                        // rubash#2256: the alias spelling is an open —
+                        // a regular-file endpoint (either direction: a
+                        // read-bound fd's file truncates/appends exactly
+                        // like a write-bound one's) binds a FRESH open
+                        // of its target, under the same noclobber
+                        // verdict a plain target gets (GNU refuses
+                        // `set -C; echo x > /dev/fd/6` naming the
+                        // spelling). The fresh open's failure is the
+                        // redirect's failure, as GNU's open is. Every
+                        // other endpoint kind keeps the dup below.
+                        if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                            let append = matches!(
+                                redirect.kind,
+                                crate::parser::RedirectKind::Append
+                                    | crate::parser::RedirectKind::CombinedAppend
+                            );
+                            if !append
+                                && !redirect.clobber
+                                && crate::builtins::set::shell_option_enabled(
+                                    &self.shell_state.env_vars,
+                                    "noclobber",
+                                )
+                                && !Self::noclobber_target_is_device_like(&path)
+                            {
+                                return Err(ExecuteError::from(crate::posix_errors::path_error(
+                                    &target,
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::AlreadyExists,
+                                        format!("{target}: cannot overwrite existing file"),
+                                    ),
+                                )));
+                            }
+                            let fresh = FileFd::open_write(path, append, false)
+                                .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                            self.fd_table
+                                .open_output(fd, FdWriteEndpoint::File(fresh), true);
+                            self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                            self.record_output_fd_ledger(fd);
+                            continue;
+                        }
                         if self.fd_table.dup_output(fd, source_fd).is_ok() {
                             self.record_output_fd_ledger(fd);
                             continue;

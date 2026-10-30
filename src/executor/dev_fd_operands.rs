@@ -685,7 +685,17 @@ impl Executor {
                         m.consume_fds.push(fd);
                         drain_handle_to_temp(file.handle, m)
                     } else {
-                        m.consume_fds.push(fd);
+                        // rubash#2256: the child opens the path itself,
+                        // so a regular file re-opens fresh in the child
+                        // and the parent must NOT record the consume
+                        // that would seek this endpoint to EOF when the
+                        // operands finish — under the fresh model fd
+                        // N's offset never moves. Non-regular file
+                        // endpoints (a named fifo's pipe handle) keep
+                        // the consume record.
+                        if !file.reopens_fresh() {
+                            m.consume_fds.push(fd);
+                        }
                         Some(file.path.to_string_lossy().into_owned())
                     }
                 }
@@ -946,9 +956,13 @@ impl Executor {
     }
 
     /// Read a `/dev/fd/N`-family operand for an in-process file builtin
-    /// (emulated cat/sed have no child descriptor table — GNU hands the
-    /// child a dup of the descriptor, so the in-process equivalent is the
-    /// fd endpoint's remaining bytes, consuming the shared offset).
+    /// (emulated cat/sed have no child descriptor table). For stream
+    /// endpoints GNU hands the child a dup of the descriptor, so the
+    /// in-process equivalent is the fd endpoint's remaining bytes,
+    /// consuming the shared offset; a regular-file endpoint is the
+    /// exception — the operand open re-opens it fresh (rubash#2256),
+    /// served whole from offset 0 by the fs::read branch below, and
+    /// the descriptor's own offset does not move.
     /// `None` for an unbound or write-only-pipe fd — callers report ENOENT.
     /// rubash#1952: the live File endpoint a `/dev/fd/N` operand
     /// names, when the command does not rebind that descriptor
@@ -967,7 +981,18 @@ impl Executor {
             return None;
         }
         match self.fd_table.read_endpoint(fd) {
-            Some(FdReadEndpoint::File(file)) => Some(file),
+            Some(FdReadEndpoint::File(file)) => {
+                // rubash#2256: a regular-file endpoint streams from a
+                // FRESH open (offset 0) and its own offset does not
+                // move; other file endpoints (pipes) keep the live
+                // endpoint itself.
+                if file.reopens_fresh() {
+                    if let Ok(fresh) = FileFd::open_read(file.path.clone()) {
+                        return Some(fresh);
+                    }
+                }
+                Some(file)
+            }
             _ => None,
         }
     }
@@ -978,6 +1003,19 @@ impl Executor {
             return None;
         }
         if let Some(read) = &entry.read {
+            // rubash#2256: a regular-file endpoint re-opens fresh for
+            // an operand — the whole file from offset 0, and the
+            // descriptor's own offset does not move (the stream serve
+            // below would hand out only the remaining bytes and
+            // consume them). A failed fresh read falls through to the
+            // stream serve, as the alias open does.
+            if let FdReadEndpoint::File(file) = read {
+                if file.reopens_fresh() {
+                    if let Ok(bytes) = std::fs::read(&file.path) {
+                        return Some(bytes);
+                    }
+                }
+            }
             if let Some(bytes) = self.fd_table.read_all_bytes(fd) {
                 return Some(bytes);
             }

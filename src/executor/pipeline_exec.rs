@@ -5971,8 +5971,8 @@ impl Executor {
     /// inherited handle by design (stdin_string_for_command serves
     /// redirects, virtual endpoints, file endpoints and the
     /// FUNCTION_STDIN mirror — never the process stdin), and slurping a
-    /// file endpoint through open_fd_read_endpoint's shared-offset dup
-    /// would drain the very descriptor the element must read. The stage
+    /// file endpoint through open_fd_read_endpoint_stream's shared-offset
+    /// dup would drain the very descriptor the element must read. The stage
     /// machinery therefore keeps the FUNCTION_STDIN mirror ABSENT (the
     /// #761 streaming treatment) and the element's readers use the
     /// fd-table transports, whose offsets are the descriptor's own — a

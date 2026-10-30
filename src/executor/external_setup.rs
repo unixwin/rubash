@@ -605,11 +605,15 @@ impl Executor {
                             process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
                             return Ok(());
                         }
-                        // `< /dev/fd/N` (and `<&N`) on a file-backed fd dup
-                        // the open file into the child's stdin (GNU redir.c
-                        // dup2 semantics through the /dev/fd device layer):
-                        // DuplicateHandle keeps the shared file offset, so a
-                        // partially-read fd feeds the child only the rest.
+                        // `<&N` on a file-backed fd dups the open file
+                        // into the child's stdin (GNU redir.c dup2
+                        // semantics): DuplicateHandle keeps the shared
+                        // file offset, so a partially-read fd feeds the
+                        // child only the rest. (The `< /dev/fd/N` spelling
+                        // is an open, not this arm — it takes the
+                        // open_input_redirect path below, whose alias
+                        // dispatch re-opens regular files fresh,
+                        // rubash#2256.)
                         Some(FdReadEndpoint::File(file_fd)) => {
                             let dup = crate::fd::duplicate_handle(file_fd.handle)?;
                             process.stdin(Stdio::from(crate::fd::handle_to_file(dup)));
