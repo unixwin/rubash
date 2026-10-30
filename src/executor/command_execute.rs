@@ -72,8 +72,7 @@ impl Executor {
             // the funnel suppresses the flag at the setter (ast_exec), so the
             // post-trap restamp (GNU's :936 behavior after the action) runs.
             let pre_stamped = self.pre_stamped_line.replace(false);
-            let trap_line_scope =
-                self.debug_trap_running && self.shell_state.function_depth > 0;
+            let trap_line_scope = self.debug_trap_running && self.shell_state.function_depth > 0;
             if !pre_stamped || trap_line_scope {
                 if trap_line_scope {
                     if let Some(line) = self.debug_trap_function_line {

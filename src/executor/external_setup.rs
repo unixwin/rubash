@@ -356,6 +356,204 @@ impl Executor {
         Ok(())
     }
 
+    /// The route seam's stdin realization for one call: the OS
+    /// handle the provider reads, derived from the same state
+    /// [`Executor::apply_external_stdin_redirect`] just adjudicated
+    /// for the prepared spawn (which ran first and owns all error
+    /// surfaces — a missing `< file` already failed the command
+    /// there). This walk only re-derives handles from that settled
+    /// state; it returns `None` — the route declines, the prepared
+    /// spawn proceeds — for the shapes it cannot faithfully hold:
+    ///
+    /// - a `<&N` dup of a text/process-substitution endpoint: the
+    ///   spawn arm's materialization CONSUMED the endpoint's text,
+    ///   so no bytes remain to hand the provider;
+    /// - a net (`/dev/tcp`) stdin target: the spawn arm's open is
+    ///   the one connection; a second connect would be observable.
+    ///
+    /// Text sources (heredoc/herestring bodies, the FUNCTION_STDIN
+    /// remainder) materialize to a carrier temp file positioned at
+    /// its start. The text comes from `stdin_string_for_command_mut`
+    /// — the spawn feed's OWN pull, not the read-only variant: the
+    /// read-only pull is capture-shaped (its heredoc readback trims
+    /// trailing newlines, SubstitutionOutput::readback) and its
+    /// bodies would arrive a newline short. Pulling with the feed's
+    /// function also performs the feed's side effects exactly once
+    /// (embedded substitutions run, the FUNCTION_STDIN offset
+    /// advances when the buffer is the source): on Completed /
+    /// Cancelled that is precisely the spawn's accounting, and on
+    /// a decline the realization returns the pulled text so the
+    /// caller hands it to the prepared spawn's feed — the feed
+    /// never pulls (and never re-runs a substitution) twice.
+    ///
+    /// File sources hand over a fresh open or a dup of the
+    /// fd-table description, sharing its offset exactly as the
+    /// child's dup would.
+    pub(in crate::executor) fn route_stdin_handle(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Option<super::external_redirects::RouteStdinRealization> {
+        use super::external_redirects::RouteKeepAlive;
+        use super::external_route::ExternalRouteHandle;
+
+        fn handle_of(file: File) -> (ExternalRouteHandle, Option<RouteKeepAlive>) {
+            let value = super::external_redirects::route_handle_value(&file);
+            (
+                ExternalRouteHandle::Handle(value),
+                Some(RouteKeepAlive::File(file)),
+            )
+        }
+
+        // A text source realized as a carrier temp file at offset 0,
+        // with the pulled text kept for the decline hand-off.
+        let text_file = |this: &Executor,
+                         text: &str|
+         -> Option<(ExternalRouteHandle, Option<RouteKeepAlive>)> {
+            let bytes = crate::executor::substitution_metadata::shell_text_to_raw_bytes(text);
+            let path = this.write_process_substitution_temp_bytes(&bytes).ok()?;
+            this.shell_state
+                .procsub_adhoc_carriers
+                .borrow_mut()
+                .push(path.clone());
+            let file = File::open(&path).ok()?;
+            Some(handle_of(file))
+        };
+
+        let realization = |handle: ExternalRouteHandle,
+                           keep_alive: Option<RouteKeepAlive>,
+                           pulled_text: Option<String>| {
+            super::external_redirects::RouteStdinRealization {
+                handle,
+                keep_alive,
+                pulled_text,
+            }
+        };
+
+        let stdin_body_wins = match crate::executor::shell_options::fd0_stdin_redirect_winner(cmd) {
+            Some(kind) => matches!(
+                kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ),
+            None => {
+                cmd.heredoc.is_some()
+                    || cmd.here_string.is_some()
+                    || cmd
+                        .heredoc_redirects
+                        .iter()
+                        .any(|redirect| redirect.fd == Some(0))
+            }
+        };
+        if stdin_body_wins {
+            // The losing-redirect probe opens already ran inside
+            // apply_external_stdin_redirect; only the body remains.
+            let text = self.stdin_string_for_command_mut(cmd)?;
+            let (handle, keep_alive) = text_file(self, &text)?;
+            return Some(realization(handle, keep_alive, Some(text)));
+        }
+        if let Some(ref redirect) = cmd.redirect_in {
+            let target = self.expand_redirect_target(redirect);
+            if redirect.fd.unwrap_or(0) == 0 {
+                if let Some((fd, _move_fd)) =
+                    redirect_target_fd_and_move(&target).filter(|_| target.starts_with('&'))
+                {
+                    return match self.fd_table.read_endpoint(fd) {
+                        Some(FdReadEndpoint::CoprocStdout { fd: pipe, .. }) => {
+                            let dup = crate::fd::duplicate_handle_inheritable(pipe.handle).ok()?;
+                            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+                            Some(realization(handle, keep_alive, None))
+                        }
+                        Some(FdReadEndpoint::File(file_fd)) => {
+                            let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+                            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+                            Some(realization(handle, keep_alive, None))
+                        }
+                        // Text/procsub endpoint (the spawn arm's
+                        // materialization consumed it) or an absent
+                        // fd (the spawn arm already errored): decline.
+                        _ => None,
+                    };
+                }
+            }
+            if is_closed_redirect_target(&target) {
+                if redirect.fd.unwrap_or(0) == 0 {
+                    let file = route_closed_stdin_file()?;
+                    let (handle, keep_alive) = handle_of(file);
+                    return Some(realization(handle, keep_alive, None));
+                }
+                return None;
+            }
+            if redirect.fd.unwrap_or(0) == 0
+                && redirect_target_fd(&target) == Some(0)
+                && (self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+                    || self.virtual_fd_stdin_remaining(0).is_some())
+            {
+                // `< /dev/stdin` over the virtual stdin: the feed's
+                // own pull (an early return for a non-body winner —
+                // a copy, no offset advance), so the route copy is
+                // the same bytes by construction.
+                let text = self.stdin_string_for_command_mut(cmd)?;
+                let (handle, keep_alive) = text_file(self, &text)?;
+                return Some(realization(handle, keep_alive, Some(text)));
+            }
+            if redirect.fd.unwrap_or(0) == 0 && self.input_fd_redirects_to_process_stdin(&target) {
+                return Some(realization(ExternalRouteHandle::Inherit, None, None));
+            }
+            if crate::special_paths::is_net_redirect_target(&target) {
+                // The spawn arm's connect is the one connection.
+                return None;
+            }
+            let file = if redirect.append {
+                let path =
+                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                if is_con_device_path(&path) {
+                    File::open("CONIN$").ok()?
+                } else {
+                    OpenOptions::new()
+                        .create(true)
+                        .read(true)
+                        .write(true)
+                        .open(&path)
+                        .ok()?
+                }
+            } else {
+                self.open_input_redirect(&target).ok()?
+            };
+            if redirect.fd.unwrap_or(0) == 0 {
+                let (handle, keep_alive) = handle_of(file);
+                return Some(realization(handle, keep_alive, None));
+            }
+            return None;
+        }
+        if self.fd_table.is_closed(0)
+            || (self.fd_table.has_entry(0) && !self.fd_table.is_open_for_read(0))
+        {
+            let file = route_closed_stdin_file()?;
+            let (handle, keep_alive) = handle_of(file);
+            return Some(realization(handle, keep_alive, None));
+        }
+        if let Some(
+            FdReadEndpoint::File(file_fd) | FdReadEndpoint::CoprocStdout { fd: file_fd, .. },
+        ) = self.fd_table.read_endpoint(0)
+        {
+            let dup = crate::fd::duplicate_handle(file_fd.handle).ok()?;
+            let (handle, keep_alive) = handle_of(crate::fd::handle_to_file(dup));
+            return Some(realization(handle, keep_alive, None));
+        }
+        if self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            || self.virtual_fd_stdin_remaining(0).is_some()
+        {
+            // The ambient virtual stdin: the feed's pull drains it
+            // (the offset advance inside stdin_string_for_command_mut
+            // when the buffer is the command's source) — performed
+            // by the pull itself, once, whichever route the call
+            // finally takes.
+            let text = self.stdin_string_for_command_mut(cmd)?;
+            let (handle, keep_alive) = text_file(self, &text)?;
+            return Some(realization(handle, keep_alive, Some(text)));
+        }
+        Some(realization(ExternalRouteHandle::Inherit, None, None))
+    }
+
     pub(in crate::executor) fn execute_external(
         &mut self,
         cmd: &CommandNode,
@@ -1906,3 +2104,20 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
 // solely in the parser (crate::parser::
 // raw_word_has_unquoted_process_substitution); this file used to carry a
 // verbatim copy of the same DFA.
+
+/// The file behind [`closed_stdin`], for the route seam: a
+/// write-only null device on unix (reads fail EBADF, exactly the
+/// closed-fd child contract), the plain null device elsewhere.
+pub(in crate::executor) fn route_closed_stdin_file() -> Option<File> {
+    #[cfg(unix)]
+    {
+        if let Ok(file) = OpenOptions::new().write(true).open("/dev/null") {
+            return Some(file);
+        }
+    }
+    if cfg!(windows) {
+        OpenOptions::new().write(true).open("NUL").ok()
+    } else {
+        File::create("/dev/null").ok()
+    }
+}

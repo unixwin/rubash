@@ -394,7 +394,6 @@ pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> 
         "HOME",
         "USERPROFILE",
         "__RUBASH_SHELL_ROOT",
-        "WINUXSH_ROOT",
         "RUBASH_ROOT",
         "COREUTILS_PATH",
         "SHELL_COREUTILS_DIR",
@@ -2844,7 +2843,7 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
         // A leading backslash is a valid native argument spelling (and is
         // commonly used by utilities for escape sequences such as `\\n`).
         // Only slash-prefixed shell paths belong to the logical root; treating
-        // `\\n` as `/n` changes data arguments into paths under WINUXSH_ROOT.
+        // `\\n` as `/n` changes data arguments into paths under the shell root.
         if arg.starts_with('\\') {
             return arg.to_string();
         }
@@ -2980,8 +2979,9 @@ fn windows_external_absolute_argument_needs_translation(
 /// temp base (niubash#94), /home to the real home's parent
 /// (HOME/USERPROFILE), and the install-tree components {bin,etc,lib,
 /// lib64,opt,sbin,usr,var} join below the configured shell root
-/// (WINUXSH_ROOT et al.) with the same Option B gating native children
-/// already use (niubash#124(b)). `normalized` must already be
+/// (__RUBASH_SHELL_ROOT / RUBASH_ROOT) with the same Option B gating
+/// native children already use (niubash#124(b)). `normalized` must
+/// already be
 /// backslash-folded; only `/`-prefixed spellings name the namespace.
 fn windows_virtual_system_root_argument(
     normalized: &str,
@@ -3251,6 +3251,20 @@ pub fn apply_required_windows_child_environment(
     process: &mut Command,
     env_vars: &HashMap<String, String>,
 ) {
+    for (name, value) in required_windows_child_environment_pairs(env_vars) {
+        process.env(name, value);
+    }
+}
+
+/// The data form of [`apply_required_windows_child_environment`]:
+/// the (name, value) pairs it would set on a child, in its order.
+/// The route seam (external_route) composes a routed call's
+/// environment from pairs, so the two forms share this one body.
+#[cfg(windows)]
+pub fn required_windows_child_environment_pairs(
+    env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
     for name in ["SystemRoot", "WINDIR", "ComSpec"] {
         let value = env_vars
             .get(name)
@@ -3258,7 +3272,7 @@ pub fn apply_required_windows_child_environment(
             .or_else(|| std::env::var(name).ok());
         if let Some(value) = value {
             if !value.contains('\0') {
-                process.env(name, value);
+                pairs.push((name.to_string(), value));
             }
         }
     }
@@ -3286,27 +3300,31 @@ pub fn apply_required_windows_child_environment(
         // rubash#329 source-(a) family, niubash#149), and the drive colon
         // then broke child scripts splicing $HOME into s:...: patterns.
         if !env_vars.contains_key("USERPROFILE") {
-            process.env("USERPROFILE", &native_home);
+            pairs.push(("USERPROFILE".to_string(), native_home.clone()));
         }
         if !env_vars.contains_key("HOME") {
-            process.env("HOME", &native_home);
+            pairs.push(("HOME".to_string(), native_home.clone()));
         }
         if let Some((drive, path)) = windows_drive_and_home_path(&native_home) {
             if !env_vars.contains_key("HOMEDRIVE") {
-                process.env("HOMEDRIVE", drive);
+                pairs.push(("HOMEDRIVE".to_string(), drive));
             }
             if !env_vars.contains_key("HOMEPATH") {
-                process.env("HOMEPATH", path);
+                pairs.push(("HOMEPATH".to_string(), path));
             }
         }
         let base = native_home.trim_end_matches('\\');
         if !env_vars.contains_key("APPDATA") {
-            process.env("APPDATA", format!("{base}\\AppData\\Roaming"));
+            pairs.push(("APPDATA".to_string(), format!("{base}\\AppData\\Roaming")));
         }
         if !env_vars.contains_key("LOCALAPPDATA") {
-            process.env("LOCALAPPDATA", format!("{base}\\AppData\\Local"));
+            pairs.push((
+                "LOCALAPPDATA".to_string(),
+                format!("{base}\\AppData\\Local"),
+            ));
         }
     }
+    pairs
 }
 
 #[cfg(not(windows))]
@@ -3314,6 +3332,13 @@ pub fn apply_required_windows_child_environment(
     _process: &mut Command,
     _env_vars: &HashMap<String, String>,
 ) {
+}
+
+#[cfg(not(windows))]
+pub fn required_windows_child_environment_pairs(
+    _env_vars: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    Vec::new()
 }
 
 #[cfg(windows)]
@@ -3952,8 +3977,8 @@ pub(in crate::executor) fn ensure_var_tmp_dir(_env_vars: &HashMap<String, String
 fn configured_shell_root(env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Walk the chain and take the first NON-EMPTY value: an empty entry must
     // not shadow later names (a host exporting an empty __RUBASH_SHELL_ROOT
-    // alongside WINUXSH_ROOT/RUBASH_ROOT used to disable root resolution).
-    let value = ["__RUBASH_SHELL_ROOT", "WINUXSH_ROOT", "RUBASH_ROOT"]
+    // alongside RUBASH_ROOT used to disable root resolution).
+    let value = ["__RUBASH_SHELL_ROOT", "RUBASH_ROOT"]
         .into_iter()
         .find_map(|name| env_vars.get(name).filter(|value| !value.is_empty()))?;
 
@@ -4578,7 +4603,7 @@ mod tests {
     #[test]
     fn windows_neutral_shell_root_env_drives_root_resolution() {
         // The neutral __RUBASH_SHELL_ROOT name must be sufficient on its own;
-        // WINUXSH_ROOT/RUBASH_ROOT are compatibility fallbacks only.
+        // RUBASH_ROOT is a compatibility fallback only.
         let root = std::env::temp_dir().join("rubash-neutral-shell-root");
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("etc")).unwrap();
@@ -4592,6 +4617,32 @@ mod tests {
             root.join("etc").join("config")
         );
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn winux_purge_s3_configured_shell_root_ignores_winuxsh_root() {
+        // Winux purge S3 (bridge demolition, not a rename): WINUXSH_ROOT
+        // is no longer a root-resolution input. A legacy-only environment
+        // resolves no root at all; the surviving names keep their order
+        // (__RUBASH_SHELL_ROOT leads, RUBASH_ROOT is the fallback).
+        let mut env_vars = HashMap::new();
+        env_vars.insert("WINUXSH_ROOT".to_string(), "/legacy/root".to_string());
+        assert_eq!(configured_shell_root(&env_vars), None);
+
+        env_vars.insert("RUBASH_ROOT".to_string(), "/fallback/root".to_string());
+        assert_eq!(
+            configured_shell_root(&env_vars),
+            Some(PathBuf::from("/fallback/root"))
+        );
+
+        env_vars.insert(
+            "__RUBASH_SHELL_ROOT".to_string(),
+            "/neutral/root".to_string(),
+        );
+        assert_eq!(
+            configured_shell_root(&env_vars),
+            Some(PathBuf::from("/neutral/root"))
+        );
     }
 
     #[cfg(windows)]
@@ -4661,7 +4712,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("rubash-tmpdir-base");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
         env_vars.insert("TMPDIR".to_string(), tmp.to_string_lossy().to_string());
@@ -4701,7 +4752,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-var-tmp-shell-root");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -4746,7 +4797,7 @@ mod tests {
             .join("bob");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert("HOME".to_string(), "/home/bob".to_string());
@@ -4770,7 +4821,7 @@ mod tests {
     fn windows_shell_root_selects_logical_standard_path() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -4819,7 +4870,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert(
@@ -4863,7 +4914,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         env_vars.insert(
@@ -4895,7 +4946,7 @@ mod tests {
 
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             shell_root.to_string_lossy().to_string(),
         );
         let entries = shell_path_process_entries("/usr/bin", &env_vars);
@@ -4934,7 +4985,7 @@ mod tests {
     fn windows_cmd_switches_are_not_mapped_into_shell_root() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
         let program = PathBuf::from(r"C:\Windows\System32\cmd.exe");
@@ -5088,7 +5139,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-native-argv-literals");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -5277,7 +5328,7 @@ mod tests {
         let root = std::env::temp_dir().join("rubash-preserve-backslash-argument");
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().to_string(),
         );
 
@@ -5342,7 +5393,7 @@ mod tests {
     fn windows_unc_path_with_single_leading_backslash_is_restored() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5359,7 +5410,7 @@ mod tests {
     fn windows_unc_path_with_share_is_restored() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5375,7 +5426,7 @@ mod tests {
     fn windows_root_relative_drive_path_not_treated_as_unc() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5392,7 +5443,7 @@ mod tests {
     fn windows_bare_leading_backslash_becomes_unc_root() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5405,7 +5456,7 @@ mod tests {
     fn windows_mnt_drive_paths_map_to_windows_drives() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5441,7 +5492,7 @@ mod tests {
     fn windows_mnt_drive_paths_are_case_insensitive() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5503,7 +5554,7 @@ mod tests {
         // and without a configured root.
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
         assert!(!windows_external_absolute_argument_needs_translation(
@@ -5519,7 +5570,7 @@ mod tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         let mut rooted = HashMap::new();
         rooted.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().into_owned(),
         );
         assert!(windows_external_absolute_argument_needs_translation(
@@ -5545,7 +5596,7 @@ mod tests {
         let env = {
             let mut env_vars = HashMap::new();
             env_vars.insert(
-                "WINUXSH_ROOT".to_string(),
+                "__RUBASH_SHELL_ROOT".to_string(),
                 std::env::temp_dir().to_string_lossy().to_string(),
             );
             env_vars
@@ -5904,7 +5955,7 @@ mod tests {
     fn windows_mnt_drive_paths_do_not_false_positive() {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             std::env::temp_dir().to_string_lossy().to_string(),
         );
 
@@ -5929,7 +5980,8 @@ mod tests {
     // ---- unixwin/niubash#164: virtual system roots for every child class ----
 
     /// Fixture install tree: <root>/usr/bin/{winuxcmd.exe marker,ls.exe},
-    /// <root>/etc/i164.conf. WINUXSH_ROOT points at <root> so the root map
+    /// <root>/etc/i164.conf. __RUBASH_SHELL_ROOT points at <root> so the
+    /// root map
     /// (/usr -> <root>\usr etc.) is active, mirroring the niu host.
     #[cfg(windows)]
     fn i164_fixture_root() -> PathBuf {
@@ -5948,7 +6000,7 @@ mod tests {
     fn i164_rooted_env(root: &Path) -> HashMap<String, String> {
         let mut env_vars = HashMap::new();
         env_vars.insert(
-            "WINUXSH_ROOT".to_string(),
+            "__RUBASH_SHELL_ROOT".to_string(),
             root.to_string_lossy().into_owned(),
         );
         env_vars
