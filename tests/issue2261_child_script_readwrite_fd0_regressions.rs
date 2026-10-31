@@ -217,19 +217,29 @@ echo end
 
 #[test]
 fn issue2261_child_script_numbered_readwrite_control() {
-    // Adjacent control: a numbered `3<>` on a child script already
-    // routes through the scoped redirect face and works; it must
-    // not move.
+    // Adjacent control: a numbered `3<>` on an external command
+    // already routes through the scoped redirect face and works; it
+    // must not move.
+    //
+    // OBSERVER NOTE (rubash#2286): the observing child is the nested
+    // rubash binary re-invoked as a real spawned process, NOT a
+    // `./child.sh` script: rubash runs ENOEXEC scripts in-process,
+    // where spawn-delivered fd bindings do not appear the same way,
+    // so the old script-child green could not by itself prove the
+    // spawn delivery face this control guards (the same harness
+    // defect PR #2283 repaired for the #2270 pins). The observation
+    // is unchanged: the child writes `via3` to its fd 3 and exits 0;
+    // the redirect shape and both expectations are unchanged.
     let fx = fixture("numbered");
-    let (stdout, stderr, _code) = fx.run(
+    let script = format!(
         "\
-printf 'echo via3 >&3\\n' > child.sh
-chmod +x child.sh
 rm -f num.txt
-./child.sh 3<>num.txt; echo \"rc=$?\"
+\"{}\" -c 'echo via3 >&3' 3<>num.txt; echo \"rc=$?\"
 echo \"num.txt: [$(cat num.txt)]\"
 ",
+        env!("CARGO_BIN_EXE_rubash")
     );
+    let (stdout, stderr, _code) = fx.run(&script);
     assert_eq!(stdout, "rc=0\nnum.txt: [via3]\n");
     assert_eq!(stderr, "");
 }
