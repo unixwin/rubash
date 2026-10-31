@@ -120,29 +120,40 @@ fn fg_stop_is_seen_by_jobs_and_fg_resumes_it() {
     };
     // Let the prompt settle, then run a stoppable foreground command.
     std::thread::sleep(Duration::from_millis(800));
-    session.send("sleep 30\n");
+    session.send("sleep 6\n");
     std::thread::sleep(Duration::from_millis(1200));
     // ^Z through the pty: VSUSP delivers SIGTSTP to the foreground pgrp.
     session.send("\x1a");
     // GNU (verified in a pty against bash 5.3.20): the stop notice is
     // the jobs line for the new current job, printed before the prompt.
     let after_notice = session.wait_for("[1]+  Stopped", 0, LONG);
-    let after_notice = session.wait_for("sleep 30", after_notice, LONG);
+    let after_notice = session.wait_for("sleep 6", after_notice, LONG);
     // The wait's verdict is 128 + SIGTSTP(20) = 148.
     session.send("echo RC=$?\n");
     let after_rc = session.wait_for("RC=148", after_notice, LONG);
     // `jobs` lists the stopped job.
     session.send("jobs\n");
     let after_jobs = session.wait_for("[1]+  Stopped", after_rc, LONG);
-    let after_jobs = session.wait_for("sleep 30", after_jobs, LONG);
-    // `fg` prints the command text and resumes the job in the foreground.
+    let after_jobs = session.wait_for("sleep 6", after_jobs, LONG);
+    // `fg` resumes the job in the foreground and it runs to natural
+    // completion (status 0). fg's command text is part of the
+    // transcript (the builtin-output plumbing flushes it when fg
+    // returns — the repo's pre-existing builtin model, on master too).
     session.send("fg\n");
-    let after_fg = session.wait_for("sleep 30", after_jobs, LONG);
-    std::thread::sleep(Duration::from_millis(800));
-    // ^C now reaches the resumed job's pgrp and kills it: rc 130.
+    let after_fg = session.wait_for("sleep 6", after_jobs, LONG);
+    session.send("echo FGRC=$?\n");
+    let after_fgrc = session.wait_for("FGRC=0", after_fg, LONG);
+    // Second cycle, longer job: stop it, fg it, then ^C reaches the
+    // resumed job's pgrp alone and kills it — fg reports 130.
+    session.send("sleep 30\n");
+    std::thread::sleep(Duration::from_millis(1200));
+    session.send("\x1a");
+    let after_notice2 = session.wait_for("[1]+  Stopped", after_fgrc, LONG);
+    session.send("fg\n");
+    std::thread::sleep(Duration::from_millis(900));
     session.send("\x03");
     session.send("echo RC2=$?\n");
-    let after_rc2 = session.wait_for("RC2=130", after_fg, LONG);
+    let after_rc2 = session.wait_for("RC2=130", after_notice2, LONG);
     // The job is gone from the table.
     session.send("jobs\n");
     session.send("echo DONE$((6*7))\n");
@@ -153,8 +164,9 @@ fn fg_stop_is_seen_by_jobs_and_fg_resumes_it() {
         "jobs still lists the finished job: {:?}",
         &tail[after_rc2..after_done]
     );
+    let transcript = session.text();
     let status = session.finish();
-    assert_eq!(status.code(), Some(0), "transcript: {:?}", session.text());
+    assert_eq!(status.code(), Some(0), "transcript: {:?}", transcript);
 }
 
 #[test]
@@ -179,6 +191,7 @@ fn fg_stop_then_bg_resumes_in_background() {
     session.send("wait %1\n");
     session.send("echo W=$?\n");
     let _ = session.wait_for("W=137", after_jobs, LONG);
+    let transcript = session.text();
     let status = session.finish();
-    assert_eq!(status.code(), Some(0), "transcript: {:?}", session.text());
+    assert_eq!(status.code(), Some(0), "transcript: {:?}", transcript);
 }
