@@ -1,40 +1,46 @@
-//! Issue unixwin/rubash#1184 finding 6: the nested-backquote EOF
-//! diagnostic. The original finding (extra
-//! `syntax error in command substitution` line, wrong line number) is
-//! FIXED on master — the first test pins that half as it stands today.
+//! Issue unixwin/rubash#1184 finding 6 (f6 v2): the nested-backquote EOF
+//! diagnostic, under the corrected two-layer design recorded on #1184
+//! (comment-6522658267). This file REPLACES
+//! tests/issue1184_f6_backquote_eof_regressions.rs when the fix lands.
 //!
-//! The narrowed residual is the expected-token CHAR when a dquote AND a
-//! backquote are both open at EOF: GNU names the backquote (innermost),
-//! rubash names the dquote.
+//! GNU's model is two-layer (parse.y): a backquote body is DELIMITED
+//! atomically — the matcher (parse.y:4157-4160 recursing from
+//! read_token_word's shellquote arm) runs parse_matched_pair with
+//! open == close == '`', so the grouping branch (parse.y:4039
+//! `if (open != close)`) never runs inside the body: `'` and `"` there
+//! are ordinary characters, they neither nest nor close anything, and a
+//! bare backtick closes the body (the `ch == close` count-- at
+//! parse.y:3979 precedes the nested-begin branch — old-style
+//! substitution does not nest). EOF mid-gathering therefore reports the
+//! BACKQUOTE at its start_lineno (parse.y:3903-3912). The extracted
+//! body is then PARSED as its own input: quotes group normally inside
+//! it, and a body that is itself unclosed takes the body-parse
+//! diagnostic — `<name>: command substitution: line N: unexpected EOF
+//! while looking for matching \`X'` — with the substitution yielding
+//! empty and status 2 while the outer command line runs on.
 //!
-//! GNU owner: parse.y:5417-5421 read_token_word hands every shellquote
-//! opener (`'`, `"`, backtick) to parse_matched_pair; a backtick inside
-//! a dquote scan recurses into parse_matched_pair (0, '`', '`',
-//! rflags) (parse.y:4157-4160), and because open == close there, the
-//! grouping branch (parse.y:4039 `if (open != close)`) never runs —
-//! `'` and `"` inside the backquote body are ORDINARY CHARACTERS: they
-//! neither open a nesting level nor close the enclosing dquote. A bare
-//! backtick closes the body (the `ch == close` count-- at
-//! parse.y:3979 precedes the nested-begin branch, so old-style command
-//! substitution does not nest). At EOF the innermost failing scan is
-//! the body scan, which reports `` unexpected EOF while looking for
-//! matching `'` `` at its start_lineno (parse.y:3903-3912), exit 2.
+//! Layer 1 of the fix (src/lexer/continuation.rs, captain-exclusive —
+//! lands only under the owner's per-case authorization): in both
+//! verdict scans (`unclosed_input_close_char_posix` and its resumable
+//! mirror `close_char_residuals_advance`), a backquote delimiter on the
+//! stack top suppresses every push arm below it, so the body
+//! contributes no entries to the outer stack. Layer 2
+//! (src/executor/command_substitution.rs): a backquote body whose own
+//! verdict scan reports a pending construct takes the
+//! `command substitution:` diagnostic path instead of executing
+//! leniently.
 //!
-//! Rubash's read-time verdict scanner
-//! (src/lexer/continuation.rs `unclosed_input_close_char_posix`) pushes
-//! a quote level ON TOP of the backquote instead, so the verdict names
-//! `"`. That file is captain-exclusive (repo AGENTS.md), so the flip is
-//! delivered as the captain's patch spec in the #1184 sweep report, and
-//! the GNU-expectation pins below carry #[ignore] with the exact
-//! assertions to enable — remove the attribute when the continuation.rs
-//! fix lands. Everything that is ALREADY correct is pinned as running
-//! controls: closed-body shapes (g3/g4/g6/h4), the plain-dquote and
-//! backquote-closed verdicts (g1/g5), single-quote body opacity
-//! (h1/h2 — parse.y:4000-4007 `open == '\''` continue branch), and the
-//! single-diagnostic half of the original finding.
+//! Byte note (od-verified against GNU bash 5.3.20): the diagnostic
+//! wording is `matching \`` + the delimiter char + `'` — for the
+//! backquote itself that is `matching ` followed by bytes 60 60 27.
+//! The pre-v2 copy of this file asserted the stale needle
+//! `matching \`'` (60 27) for the backquote, which can never match
+//! GNU's output; the assertions below use the true bytes.
 //!
-//! All expectations measured against WSL GNU Bash 5.3.20 script files,
-//! 2026-10-29, master 25039770.
+//! All expectations measured against GNU bash 5.3.20 script files
+//! (local oracle build), master bbd95e37, 2026-10-30. Controls are
+//! shapes already GNU-true on that master; acceptance pins are the
+//! f6 cells (red on that master, green under the two-layer fix).
 
 use std::process::{Command, Stdio};
 
@@ -57,24 +63,26 @@ fn run_rubash_file(script: &str, tag: &str) -> (String, String, Option<i32>) {
     )
 }
 
+fn diagnostic_lines(stderr: &str) -> Vec<&str> {
+    stderr
+        .lines()
+        .filter(|l| l.contains("unexpected EOF") || l.contains("syntax error"))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
-// Running controls — behavior already matching GNU on master 25039770.
+// Running controls — behavior already matching GNU on master bbd95e37.
 // ---------------------------------------------------------------------------
 
-/// The original filed repro. The extra
-/// `syntax error in command substitution` diagnostic is gone and the
-/// line number matches GNU (`line 1`); only the token char still
-/// differs (see the ignored pins below).
+/// The original filed repro: exactly one diagnostic, line 1. (The CHAR
+/// it names is pinned by nested_backquote_eof_names_backquote below.)
 #[test]
 fn nested_backquote_eof_reports_single_diagnostic() {
     let script = r#"echo "3:`echo \`echo \\`echo deep\\\``"
 "#;
     let (_stdout, stderr, code) = run_rubash_file(script, "f6single");
     assert_eq!(code, Some(2), "stderr: {stderr}");
-    let diags: Vec<&str> = stderr
-        .lines()
-        .filter(|l| l.contains("unexpected EOF") || l.contains("syntax error"))
-        .collect();
+    let diags = diagnostic_lines(&stderr);
     assert_eq!(
         diags.len(),
         1,
@@ -100,7 +108,8 @@ fn unclosed_dquote_names_dquote() {
 }
 
 /// Backquote opened AND closed inside a dquote, dquote left open: the
-/// body scan returned, so GNU's innermost open construct is the dquote.
+/// body was delimited completely, so the verdict falls back to the
+/// dquote below it.
 #[test]
 fn closed_backquote_inside_open_dquote_names_dquote() {
     let script = r#"echo "`x`
@@ -113,9 +122,8 @@ fn closed_backquote_inside_open_dquote_names_dquote() {
     );
 }
 
-/// A fully closed backquote body inside a dquote is COMPLETE input
-/// (parse.y:4157 recursion returns into the dquote scan, whose `"`
-/// closes it); the comsub body still executes.
+/// A fully closed backquote body inside a dquote is COMPLETE input;
+/// the comsub body still executes.
 #[test]
 fn closed_backquote_body_dquote_completes() {
     let script = r#"echo "`x`"
@@ -138,96 +146,291 @@ fn single_quote_body_is_opaque_to_other_quotes() {
     assert_eq!(stderr, "");
 }
 
-// ---------------------------------------------------------------------------
-// GNU-expectation pins for the residual — #[ignore]d until the
-// captain-exclusive src/lexer/continuation.rs fix lands (patch spec in
-// the #1184 sweep report). Remove the attribute to enable.
-// ---------------------------------------------------------------------------
+/// quote.tests:117 — quotes group normally INSIDE an extracted body:
+/// `` echo `echo '${'` `` prints `${`. (The shape that falsified the
+/// #2159 single-rule guard in PR #2209: body quotes must NOT be made
+/// transparent at the delimiting layer.)
+#[test]
+fn body_quotes_group_normally_quote_tests_117() {
+    let script = "echo `echo '${'`\n";
+    let (stdout, stderr, code) = run_rubash_file(script, "s4");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "${\n");
+    assert_eq!(stderr, "");
+}
 
-fn assert_gnu_backquote_verdict(tag: &str, script: &str) {
-    let (_stdout, stderr, code) = run_rubash_file(script, tag);
+/// quote.tests:100-102 verbatim — a backquote body spanning physical
+/// lines (backslash-newline inside the body's own single quotes).
+#[test]
+fn multiline_body_quote_tests_100_102() {
+    let script = "a=`echo 'a b c' | sed 's/ /\\\\\n/g' | grep 'b'`\necho $a\n";
+    let (stdout, stderr, code) = run_rubash_file(script, "m1");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "b\n");
+    assert_eq!(stderr, "");
+}
+
+/// quote.tests:103-105 verbatim — same span, unquoted assignment echo.
+#[test]
+fn multiline_body_quote_tests_103_105() {
+    let script = "a=`echo 'a b c' | sed 's/ /\\\\\n/g'`\necho \"$a\"\n";
+    let (stdout, stderr, code) = run_rubash_file(script, "m2");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "a\nb\nc\n");
+    assert_eq!(stderr, "");
+}
+
+/// EOF inside a backquote gather that sits inside a `$(` body already
+/// names the backquote on master (the comsub route scans the unit
+/// atomically); the layer-1 gate must not regress it.
+#[test]
+fn backquote_eof_inside_dollar_paren_names_backquote() {
+    let script = "echo $(`echo 'a\n";
+    let (_stdout, stderr, code) = run_rubash_file(script, "t5");
     assert_eq!(code, Some(2), "stderr: {stderr}");
     assert!(
-        stderr.contains("unexpected EOF while looking for matching `'"),
+        stderr.contains("unexpected EOF while looking for matching ``'"),
+        "stderr: {stderr:?}"
+    );
+}
+
+/// Closed backquote inside an unclosed `$(`: the verdict falls to the
+/// enclosing `)` (EOF-line report, line 2).
+#[test]
+fn closed_backquote_inside_open_dollar_paren_names_paren() {
+    let script = "echo $(`x`\n";
+    let (_stdout, stderr, code) = run_rubash_file(script, "t6");
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert!(
+        stderr.contains("line 2: unexpected EOF while looking for matching `)'"),
+        "stderr: {stderr:?}"
+    );
+}
+
+/// Layer-2 boundary control: a body left open by a KEYWORD (`if`
+/// without `fi`) carries no matched-pair pending construct, so it
+/// stays with the body parser's own diagnostic family — GNU:
+/// `command substitution: line 2: syntax error: unexpected end of
+/// file from \`if' command on line 1`. The verdict pre-check must not
+/// intercept this shape. Already GNU-true on master.
+#[test]
+fn unclosed_keyword_body_keeps_parser_diagnostic() {
+    let script = "x=`if true; then echo x`; echo \"rc=$? x=<$x>\"\n";
+    let (stdout, stderr, code) = run_rubash_file(script, "u8");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "rc=2 x=<>\n");
+    assert!(
+        stderr.contains("command substitution: line 2: syntax error: unexpected end of file"),
         "stderr: {stderr:?}"
     );
     assert!(
-        !stderr.contains("matching `\"'"),
-        "dquote must not be the reported token: {stderr:?}"
+        stderr.contains("from `if' command on line 1"),
+        "stderr: {stderr:?}"
     );
 }
 
-/// `` echo "`x" `` — dquote open, backquote open inside it. GNU
-/// (5.3.20, script file): `` line 1: unexpected EOF while looking for
-/// matching `' ``; rubash currently names `"`.
-#[test]
-#[ignore = "rubash#1184 f6 residual: the verdict scanner in captain-exclusive src/lexer/continuation.rs pushes a quote level above an open backquote; GNU parse.y:4157-4160 scans the backquote body opaque to quotes. Enable when the captain's continuation.rs patch lands."]
-fn backquote_open_inside_dquote_names_backquote() {
-    assert_gnu_backquote_verdict(
-        "g2",
-        r#"echo "`x"
-"#,
+// ---------------------------------------------------------------------------
+// Acceptance pins — layer 1 (reader verdict names the backquote).
+// Red on master bbd95e37; green under the layer-1 gate.
+// ---------------------------------------------------------------------------
+
+fn assert_gnu_backquote_verdict(tag: &str, script: &str, wrong_needles: &[&str]) {
+    let (_stdout, stderr, code) = run_rubash_file(script, tag);
+    assert_eq!(code, Some(2), "stderr: {stderr}");
+    assert_eq!(diagnostic_lines(&stderr).len(), 1, "stderr: {stderr:?}");
+    // GNU's bytes: "matching " + 60 60 27.
+    assert!(
+        stderr.contains("unexpected EOF while looking for matching ``'"),
+        "stderr: {stderr:?}"
     );
+    for needle in wrong_needles {
+        assert!(!stderr.contains(needle), "wrong token named: {stderr:?}");
+    }
+}
+
+/// `` echo "`x" `` — dquote open, backquote open inside it, and the
+/// trailing `"` is body text. GNU names the backquote.
+#[test]
+fn backquote_open_inside_dquote_names_backquote() {
+    assert_gnu_backquote_verdict("g2", "echo \"`x\"\n", &["matching `\"'"]);
 }
 
 /// `` echo "`a\`b" `` — an escaped backtick must not close the body
-/// (parse.y LEX_PASSNEXT), so the body scan is the innermost failing
-/// scan at EOF. GNU names the backquote.
+/// (parse.y LEX_PASSNEXT). GNU names the backquote.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
 fn escaped_backtick_inside_body_still_names_backquote() {
-    assert_gnu_backquote_verdict(
-        "g7",
-        r#"echo "`a\`b"
-"#,
-    );
+    assert_gnu_backquote_verdict("g7", "echo \"`a\\`b\"\n", &["matching `\"'"]);
 }
 
-/// `` echo "`a\\b" `` — an escaped backslash (LEX_PASSNEXT pair) leaves
-/// the body open at EOF. GNU names the backquote.
+/// `` echo "`a\\b" `` — an escaped backslash pair leaves the body
+/// open at EOF. GNU names the backquote.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
 fn escaped_backslash_inside_body_still_names_backquote() {
-    assert_gnu_backquote_verdict(
-        "g8",
-        r#"echo "`a\\b"
-"#,
-    );
+    assert_gnu_backquote_verdict("g8", "echo \"`a\\\\b\"\n", &["matching `\"'"]);
 }
 
-/// `` echo "`x'y" `` — a single quote inside the backquote body is
-/// plain data (no open != close grouping branch), so the verdict is the
-/// backquote, not the `'`. GNU names the backquote.
+/// `` echo "`x'y" `` — a single quote inside the body is plain data.
+/// GNU names the backquote, not the `'`.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
 fn single_quote_inside_body_is_data_verdict_is_backquote() {
-    assert_gnu_backquote_verdict(
-        "h3",
-        r#"echo "`x'y"
-"#,
-    );
+    assert_gnu_backquote_verdict("h3", "echo \"`x'y\"\n", &["matching `''"]);
+}
+
+/// `` echo `echo 'a `` (EOF) — EOF mid-gathering, no dquote wrapper:
+/// the quote inside the gathering body is not a pending construct.
+/// GNU names the backquote.
+#[test]
+fn eof_mid_gathering_squote_names_backquote() {
+    assert_gnu_backquote_verdict("t1", "echo `echo 'a\n", &["matching `''"]);
+}
+
+/// `` echo `echo "a `` (EOF) — same with a dquote inside the body.
+/// GNU names the backquote.
+#[test]
+fn eof_mid_gathering_dquote_names_backquote() {
+    assert_gnu_backquote_verdict("t3", "echo `echo \"a\n", &["matching `\"'"]);
 }
 
 /// The filed repro, full expectation: exactly one diagnostic, line 1,
-/// naming the backquote, exit 2.
+/// naming the backquote (bytes 60 60 27), exit 2.
 #[test]
-#[ignore = "rubash#1184 f6 residual: see backquote_open_inside_dquote_names_backquote."]
 fn nested_backquote_eof_names_backquote() {
     let script = r#"echo "3:`echo \`echo \\`echo deep\\\``"
 "#;
     let (_stdout, stderr, code) = run_rubash_file(script, "f6full");
     assert_eq!(code, Some(2), "stderr: {stderr}");
-    let diags: Vec<&str> = stderr
-        .lines()
-        .filter(|l| l.contains("unexpected EOF") || l.contains("syntax error"))
-        .collect();
-    assert_eq!(diags.len(), 1, "stderr: {stderr:?}");
+    assert_eq!(diagnostic_lines(&stderr).len(), 1, "stderr: {stderr:?}");
     assert!(
-        stderr.contains("line 1: unexpected EOF while looking for matching `'"),
+        stderr.contains("line 1: unexpected EOF while looking for matching ``'"),
         "stderr: {stderr:?}"
     );
     assert!(
         !stderr.contains("syntax error in command substitution"),
         "stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance pins — layer 2 (an unclosed BODY takes the
+// `command substitution:` diagnostic; the outer line runs on, the
+// substitution yields empty, its status is 2). Red on master
+// bbd95e37 (the reader verdict pre-empts or the route misfires);
+// green under layers 1+2.
+// ---------------------------------------------------------------------------
+
+fn assert_unclosed_body_diagnostic(
+    tag: &str,
+    script: &str,
+    expected_stdout: &str,
+    expected_diag: &str,
+) {
+    let (stdout, stderr, code) = run_rubash_file(script, tag);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, expected_stdout, "stderr: {stderr:?}");
+    assert_eq!(diagnostic_lines(&stderr).len(), 1, "stderr: {stderr:?}");
+    assert!(stderr.contains(expected_diag), "stderr: {stderr:?}");
+}
+
+/// `` x=`echo 'a` `` — the body is delimited fine; the BODY is
+/// unclosed. GNU: `command substitution: line 1: ... matching \`''`,
+/// x empty, the assignment's status is 2, the script continues.
+#[test]
+fn unclosed_squote_body_takes_comsub_diagnostic() {
+    assert_unclosed_body_diagnostic(
+        "u1",
+        "x=`echo 'a`; echo \"rc=$? x=<$x>\"\n",
+        "rc=2 x=<>\n",
+        "command substitution: line 1: unexpected EOF while looking for matching `''",
+    );
+}
+
+/// `` x=`echo "a` `` — same, naming the body's dquote.
+#[test]
+fn unclosed_dquote_body_takes_comsub_diagnostic() {
+    assert_unclosed_body_diagnostic(
+        "u2",
+        "x=`echo \"a`; echo \"rc=$? x=<$x>\"\n",
+        "rc=2 x=<>\n",
+        "command substitution: line 1: unexpected EOF while looking for matching `\"'",
+    );
+}
+
+/// The diagnostic line is the line of the command containing the
+/// substitution (the body's start line), not a body-relative line.
+#[test]
+fn unclosed_body_diagnostic_line_is_command_line() {
+    assert_unclosed_body_diagnostic(
+        "u1l3",
+        "echo first\necho second\nx=`echo 'a`; echo \"rc=$? x=<$x>\"\n",
+        "first\nsecond\nrc=2 x=<>\n",
+        "command substitution: line 3: unexpected EOF while looking for matching `''",
+    );
+}
+
+/// An unclosed body inside a dquote: the enclosing command still
+/// prints (with the substitution empty).
+#[test]
+fn unclosed_body_inside_dquote_still_prints() {
+    assert_unclosed_body_diagnostic(
+        "u4",
+        "echo \"v=`echo 'a`\"\n",
+        "v=\n",
+        "command substitution: line 1: unexpected EOF while looking for matching `''",
+    );
+}
+
+/// An unclosed `$(` INSIDE the body: matched-pair pendings other than
+/// quotes take the same family, at the body's EOF line (the `$(`
+/// report is the yyerror/EOF-line form: body line 1 + 1 = line 2).
+#[test]
+fn unclosed_dollar_paren_body_takes_comsub_diagnostic() {
+    assert_unclosed_body_diagnostic(
+        "u5",
+        "x=`echo $(x`; echo \"rc=$? x=<$x>\"\n",
+        "rc=2 x=<>\n",
+        "command substitution: line 2: unexpected EOF while looking for matching `)'",
+    );
+}
+
+/// An unclosed `${` inside the body names `}` at its open line.
+#[test]
+fn unclosed_dollar_brace_body_takes_comsub_diagnostic() {
+    assert_unclosed_body_diagnostic(
+        "u6",
+        "x=`echo ${x`; echo \"rc=$? x=<$x>\"\n",
+        "rc=2 x=<>\n",
+        "command substitution: line 1: unexpected EOF while looking for matching `}'",
+    );
+}
+
+/// The heredoc route reaches body execution without any reader
+/// verdict over the body text (heredoc bodies are opaque to the
+/// reader scan): the same diagnostic must come out of the expansion
+/// path. GNU: stdout `x=`, the line-1 `command substitution:`
+/// diagnostic naming `'`.
+#[test]
+fn unclosed_body_in_heredoc_expansion_takes_comsub_diagnostic() {
+    assert_unclosed_body_diagnostic(
+        "l2",
+        "cat <<EOF\nx=`echo 'a`\nEOF\n",
+        "x=\n",
+        "command substitution: line 1: unexpected EOF while looking for matching `''",
+    );
+}
+
+/// Design §2.3 (added under the landing brief): a body containing an
+/// unclosed NESTED backquote — after \` restoration the inner
+/// backquote opens a nested substitution whose own body never
+/// closes. The verdict scan over the restored body reports the
+/// nested backquote, and the one diagnostic format composes
+/// `matching ` + bytes 60 60 27 with no special case.
+/// Oracle-verified byte-for-byte against GNU bash 5.3.20.
+#[test]
+fn unclosed_nested_backquote_body_names_backquote() {
+    assert_unclosed_body_diagnostic(
+        "nested",
+        "x=`echo \\`echo 'a`; echo \"rc=$? x=<$x>\"\n",
+        "rc=2 x=<>\n",
+        "command substitution: line 1: unexpected EOF while looking for matching ``'",
     );
 }
