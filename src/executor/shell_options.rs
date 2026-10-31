@@ -182,6 +182,55 @@ impl Executor {
         self.open_input_redirect_impl(target, false)
     }
 
+    /// rubash#2329: positional form of the input probe for a
+    /// command's own input entry — when the target is an fd-alias
+    /// PATH spelling whose source fd this command's list bound
+    /// earlier (redir.c:237 do_redirections), the probe opens the
+    /// IN-LIST binding (a plain file, fresh), not the ambient
+    /// table's entry for that fd and not the literal spelling
+    /// (which names no file on Windows, and a different descriptor
+    /// on Unix). A list-closed source fails like GNU's open of the
+    /// dangling spelling (ENOENT). Every other verdict keeps the
+    /// ambient probe.
+    pub(in crate::executor) fn probe_input_redirect_positional(
+        &self,
+        cmd: &CommandNode,
+        redirect: &Redirect,
+        target: &str,
+    ) -> io::Result<()> {
+        if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+            if let Some(source_fd) = redirect_target_fd(target) {
+                let position = cmd
+                    .redirects
+                    .iter()
+                    .rposition(|entry| {
+                        entry.fd.unwrap_or(0) == redirect.fd.unwrap_or(0)
+                            && entry.kind == redirect.kind
+                            && self.expand_redirect_target(entry) == target
+                    })
+                    .unwrap_or(cmd.redirects.len());
+                use crate::executor::external_setup::InListBinding;
+                match self.in_list_binding(cmd, position, source_fd) {
+                    InListBinding::File(path) => {
+                        return std::fs::File::open(&path)
+                            .map(|_| ())
+                            .map_err(|error| crate::posix_errors::path_error(target, error));
+                    }
+                    InListBinding::Closed => {
+                        return Err(crate::posix_errors::path_error(
+                            target,
+                            io::Error::from(io::ErrorKind::NotFound),
+                        ));
+                    }
+                    InListBinding::Other
+                    | InListBinding::AmbientOf(_)
+                    | InListBinding::NotBound => {}
+                }
+            }
+        }
+        self.probe_input_redirect(target).map(|_| ())
+    }
+
     /// `<> word` validity probe: r_input_output opens O_RDWR|O_CREAT with
     /// mode 0666 (make_cmd.c:682, consumed by redir.c:702 redir_open), so
     /// probing a missing name CREATES it — the open is part of the
@@ -2666,6 +2715,35 @@ impl Executor {
         Some(self.open_fresh_alias_file(&path, target, append, clobber))
     }
 
+    /// rubash#2329: the positional form of
+    /// `open_alias_spelling_fresh_output` — the file the spelling
+    /// opens is the one bound AT THE SPELLING'S LIST POSITION
+    /// (redir.c:237 do_redirections), so when the command's own
+    /// earlier entries bound the aliased fd the in-list binding
+    /// decides; the ambient resolver serves only unbound or
+    /// ambient-chained aliases.
+    pub(in crate::executor) fn open_alias_spelling_fresh_output_positional(
+        &self,
+        cmd: &CommandNode,
+        position: usize,
+        target: &str,
+        append: bool,
+        clobber: bool,
+    ) -> Option<io::Result<File>> {
+        if redirect_target_is_dup_spelling(target) {
+            return None;
+        }
+        let fd = redirect_target_fd(target)?;
+        use crate::executor::external_setup::InListBinding;
+        let path = match self.in_list_binding(cmd, position, fd) {
+            InListBinding::File(path) => path,
+            InListBinding::AmbientOf(source_fd) => self.fd_alias_reopen_path(source_fd)?,
+            InListBinding::NotBound => self.fd_alias_reopen_path(fd)?,
+            InListBinding::Other | InListBinding::Closed => return None,
+        };
+        Some(self.open_fresh_alias_file(&path, target, append, clobber))
+    }
+
     pub(in crate::executor) fn output_fd_redirects_to_stderr(&self, target: &str) -> bool {
         if redirect_target_fd(target).map_or(false, |fd| {
             matches!(
@@ -3434,7 +3512,36 @@ impl Executor {
             // endpoint re-opens the target and serves the whole file
             // without moving fd N.
             if let Some(source_fd) = redirect_target_fd(&target) {
+                // rubash#2329: the descriptor the spelling names is
+                // the one bound AT THE WINNER'S LIST POSITION
+                // (redir.c:237 do_redirections) — an in-list plain
+                // file binding serves a fresh read of that file;
+                // the ambient resolutions below serve only unbound
+                // or ambient-chained aliases.
+                use crate::executor::external_setup::InListBinding;
+                let winner_position = cmd
+                    .redirects
+                    .iter()
+                    .rposition(|entry| {
+                        entry.fd.unwrap_or(0) == 0
+                            && entry.kind == redirect.kind
+                            && self.expand_redirect_target(entry) == target
+                    })
+                    .unwrap_or(cmd.redirects.len());
+                let in_list_verdict = self.in_list_binding(cmd, winner_position, source_fd);
+                let effective_fd = match &in_list_verdict {
+                    InListBinding::AmbientOf(ambient_fd) => *ambient_fd,
+                    _ => source_fd,
+                };
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    if let InListBinding::File(path) = &in_list_verdict {
+                        if let Ok(bytes) = std::fs::read(path) {
+                            return Some(
+                                crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
+                            );
+                        }
+                        return None;
+                    }
                     // rubash#2276: a socket endpoint's spelling-open
                     // fails ENXIO (see fd_alias_spelling_open_error) —
                     // decline the text serve instead of falling
@@ -3443,10 +3550,21 @@ impl Executor {
                     // failure for gated commands; an ungated
                     // synthesized command must not stream the socket
                     // either.
-                    if self.fd_alias_spelling_open_error(source_fd).is_some() {
+                    if !matches!(
+                        in_list_verdict,
+                        InListBinding::Other | InListBinding::Closed
+                    ) && self.fd_alias_spelling_open_error(effective_fd).is_some()
+                    {
                         return None;
                     }
-                    if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                    let reopen_path = match &in_list_verdict {
+                        InListBinding::AmbientOf(ambient_fd) => {
+                            self.fd_alias_reopen_path(*ambient_fd)
+                        }
+                        InListBinding::NotBound => self.fd_alias_reopen_path(source_fd),
+                        _ => None,
+                    };
+                    if let Some(path) = reopen_path {
                         if let Ok(bytes) = std::fs::read(&path) {
                             return Some(
                                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
@@ -3454,11 +3572,11 @@ impl Executor {
                         }
                     }
                 }
-                if let Some(input) = self.virtual_fd_stdin_remaining(source_fd) {
+                if let Some(input) = self.virtual_fd_stdin_remaining(effective_fd) {
                     // GNU dup2 hands the consumer the live stream: bytes
                     // it took are gone for the next reader (procsub.tests
                     // count_lines `wc -l < $1` five times → 1,0,0,0,0).
-                    self.fd_table.drain_input_to_eof(source_fd);
+                    self.fd_table.drain_input_to_eof(effective_fd);
                     return Some(input);
                 }
                 if source_fd == 0
@@ -3484,7 +3602,7 @@ impl Executor {
                 // fd 0 inherited from the process dups the real stdin
                 // handle — a terminal blocks, matching GNU; a null/closed
                 // stdin yields EOF.
-                if let Ok(mut file) = self.open_fd_read_endpoint_stream(source_fd, &target) {
+                if let Ok(mut file) = self.open_fd_read_endpoint_stream(effective_fd, &target) {
                     // Raw fd bytes are not necessarily UTF-8 (fd_redirects
                     // c_external_cat_reads_raw_bytes: `exec 3<bin; cat <&3`
                     // must stream 0xff through). Read bytes and re-encode to

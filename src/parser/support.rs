@@ -144,17 +144,38 @@ pub(super) fn collect_compound_word_value(
         // span and the unspaced text glued to it (`[[ -n <(echo hi)x ]]`
         // tests the fd path with an `x` suffix). A word-initial span is
         // its own token run here, so keep consuming following fragments
-        // while they carry no leading whitespace: another span appends
-        // its target, a word-ish fragment appends its value. Fragments
-        // after whitespace start the next word, exactly as before.
+        // while they are ADJACENT to the text consumed so far: another
+        // span appends its target, a word-ish fragment appends its
+        // value. A fragment after whitespace starts the next word.
+        //
+        // rubash#2390: adjacency is judged by token COLUMN, not by
+        // `leading_ws`. The lexer's whitespace capture is gated
+        // (lexer/mod.rs ws_capture_armed: only lines containing `((`,
+        // `[[` or `case` populate leading_ws), so on a for/select list
+        // line every token's leading_ws is empty and the old test
+        // never saw a boundary — the continuation swallowed the rest
+        // of the list into the first substitution's word. Columns are
+        // the always-maintained ground truth the capture itself
+        // derives gaps from (Token::column is a byte offset into the
+        // logical line): a fragment continues the word iff it starts
+        // exactly where the consumed text ends. A token whose column
+        // does not continue the run (synthetic or non-monotonic
+        // columns included) ends the word — the pre-#1933 behavior,
+        // which is the safe direction.
         let mut value = process_substitution.target;
         let mut cursor = next_i + 1;
+        let mut end_column = tokens
+            .get(next_i)
+            .map(|token| token.column + token.raw.len());
         while let Some(token) = tokens.get(cursor) {
-            if !token.leading_ws.is_empty() {
+            if end_column != Some(token.column) {
                 break;
             }
             if let Some((more, more_next)) = any_process_substitution_word_target(tokens, cursor) {
                 value.push_str(&more.target);
+                end_column = tokens
+                    .get(more_next)
+                    .map(|token| token.column + token.raw.len());
                 cursor = more_next + 1;
                 continue;
             }
@@ -167,6 +188,7 @@ pub(super) fn collect_compound_word_value(
                     | TokenKind::BraceExpand
             ) {
                 value.push_str(&token.value);
+                end_column = Some(token.column + token.raw.len());
                 cursor += 1;
                 continue;
             }

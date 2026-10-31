@@ -506,7 +506,9 @@ impl Executor {
                 self.probe_input_redirect_readwrite(&target)
                     .map_err(|e| crate::posix_errors::path_error(&target, e))?;
             } else {
-                self.probe_input_redirect(&target)?;
+                // rubash#2329: positional — a spelling target's
+                // source may be bound by this command's own list.
+                self.probe_input_redirect_positional(cmd, redirect, &target)?;
             }
         }
 
@@ -655,7 +657,9 @@ impl Executor {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
-                        self.probe_input_redirect(&target)?;
+                        // rubash#2329: positional — see
+                        // probe_input_redirect_positional.
+                        self.probe_input_redirect_positional(cmd, redirect, &target)?;
                     }
                 }
                 crate::parser::RedirectKind::ReadWrite => {

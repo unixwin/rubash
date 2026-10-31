@@ -528,8 +528,14 @@ impl Executor {
         // ENOENT (`read -r z < /dev/fd/6` -> "/dev/fd/6: No such file or
         // directory", rc 1). The alias branch below stages an empty mirror,
         // which made `read` see plain EOF and return 1 with no diagnostic.
+        // rubash#2329: "closed" is judged at the spelling's own list
+        // position (redir.c:237 do_redirections): an entry earlier in
+        // THIS command's list may bind the source (a plain file, a
+        // materialized endpoint, or a chain ending at an ambient fd),
+        // and that binding — not the ambient table — decides whether
+        // the open dangles.
         if read_fd.is_none() {
-            for redirect in &cmd.redirects {
+            for (position, redirect) in cmd.redirects.iter().enumerate() {
                 if redirect.kind != crate::parser::RedirectKind::Input
                     || redirect.fd.unwrap_or(0) != 0
                     || redirect.fd_var.is_some()
@@ -540,11 +546,22 @@ impl Executor {
                 else {
                     continue;
                 };
-                if !super::redirection::dup_source_fd_open(
-                    &self.fd_table,
-                    source,
-                    &std::collections::HashMap::new(),
-                ) {
+                use crate::executor::external_setup::InListBinding;
+                let source_open = match self.in_list_binding(cmd, position, source) {
+                    InListBinding::File(_) | InListBinding::Other => true,
+                    InListBinding::AmbientOf(ambient_fd) => super::redirection::dup_source_fd_open(
+                        &self.fd_table,
+                        ambient_fd,
+                        &std::collections::HashMap::new(),
+                    ),
+                    InListBinding::Closed => false,
+                    InListBinding::NotBound => super::redirection::dup_source_fd_open(
+                        &self.fd_table,
+                        source,
+                        &std::collections::HashMap::new(),
+                    ),
+                };
+                if !source_open {
                     let mut stderr = Vec::new();
                     let _ = writeln!(
                         &mut stderr,
@@ -920,15 +937,45 @@ impl Executor {
                 // `read x < /dev/fd/6` re-reads the first record
                 // instead of walking the shared offset.
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    // rubash#2329: the spelling resolves against the
+                    // descriptor as bound at THIS entry's position in
+                    // the command's own list (redir.c:237
+                    // do_redirections; the RF_DEVFD open, redir.c:603):
+                    // an in-list plain-file binding reopens THAT file
+                    // fresh — the ambient judgments below must not
+                    // speak for it (an ambient socket on the same
+                    // number is a different binding) — and a dup chain
+                    // ending at an ambient fd judges that fd instead.
+                    let position = cmd
+                        .redirects
+                        .iter()
+                        .rposition(|entry| {
+                            entry.fd.unwrap_or(0) == redirect.fd.unwrap_or(0)
+                                && entry.kind == redirect.kind
+                                && self.expand_redirect_target(entry) == expanded_target
+                        })
+                        .unwrap_or(cmd.redirects.len());
+                    use crate::executor::external_setup::InListBinding;
+                    let (judged_fd, in_list_path) = match self.in_list_binding(cmd, position, fd) {
+                        InListBinding::File(path) => (fd, Some(path)),
+                        InListBinding::AmbientOf(ambient_fd) => (ambient_fd, None),
+                        InListBinding::Other | InListBinding::Closed | InListBinding::NotBound => {
+                            (fd, None)
+                        }
+                    };
                     // rubash#2276: a socket endpoint's spelling-open
                     // fails ENXIO in GNU — decline the serve (the
                     // read reports no input, its failure shape; the
                     // dup machinery below is the `<&N` descriptor
                     // face and must keep streaming sockets).
-                    if self.fd_alias_spelling_open_error(fd).is_some() {
+                    if in_list_path.is_none()
+                        && self.fd_alias_spelling_open_error(judged_fd).is_some()
+                    {
                         return None;
                     }
-                    if let Some(path) = self.fd_alias_reopen_path(fd) {
+                    if let Some(path) =
+                        in_list_path.or_else(|| self.fd_alias_reopen_path(judged_fd))
+                    {
                         if let Ok(fresh) = FileFd::open_read(path) {
                             if let Some(scratch) = self.allocate_dynamic_fd() {
                                 self.fd_table.open_input(
