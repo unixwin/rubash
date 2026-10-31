@@ -103,7 +103,7 @@ impl ArithEvalError {
 /// `[<carrier><hex>]` span back to `[<subscript text>]`; a span cut by
 /// the display truncation decodes its whole hex pairs and keeps the
 /// dangling remainder out. Text without the carrier is returned as-is.
-fn de_carrier_arith_text(text: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn de_carrier_arith_text(text: &str) -> std::borrow::Cow<'_, str> {
     let carrier = super::ARITH_ASSOC_KEY_MARKER;
     if !text.contains(carrier) {
         return std::borrow::Cow::Borrowed(text);
