@@ -15,6 +15,14 @@ impl Executor {
         let _ancestor_route = (self.shell_state.subshell_depth.get() > 0
             && self.shell_pid == std::process::id())
         .then(crate::builtins::kill::arm_ancestor_route);
+        // rubash#2352: stamp any ancestor entries this dispatch queues
+        // with the status completed before the builtin started (see
+        // kill.rs ANCESTOR_SENDER_STATUS). Armed unconditionally — the
+        // direct-child route's entries are queued from inside this
+        // same dispatch — for exactly the dispatch's span.
+        #[cfg(unix)]
+        let _ancestor_sender_status =
+            crate::builtins::kill::arm_ancestor_sender_status(self.exit_code);
         if let Some(result) = self.intercept_fake_bashpid_kill(cmd) {
             return result;
         }

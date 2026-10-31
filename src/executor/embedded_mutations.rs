@@ -2051,8 +2051,11 @@ impl Executor {
             || (crate::builtins::set::shell_option_enabled(
                 &self.shell_state.env_vars,
                 "functrace",
-            ) && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                .is_some_and(|action| !action.is_empty()));
+            ) && crate::builtins::trap::active_trap_action_ref(
+                &self.shell_state.env_vars,
+                "DEBUG",
+            )
+            .is_some());
         if command_substitution_function_call_is_trivial(source, &words)
             && !comsub_trap_context_disqualifies
         {
