@@ -103,7 +103,7 @@ impl ArithEvalError {
 /// `[<carrier><hex>]` span back to `[<subscript text>]`; a span cut by
 /// the display truncation decodes its whole hex pairs and keeps the
 /// dangling remainder out. Text without the carrier is returned as-is.
-fn de_carrier_arith_text(text: &str) -> std::borrow::Cow<'_, str> {
+pub(super) fn de_carrier_arith_text(text: &str) -> std::borrow::Cow<'_, str> {
     let carrier = super::ARITH_ASSOC_KEY_MARKER;
     if !text.contains(carrier) {
         return std::borrow::Cow::Borrowed(text);
@@ -307,6 +307,11 @@ pub(super) enum ArithLValue {
     Indexed {
         name: String,
         index: i128,
+        /// The full `name[sub]` token text as written, for the bind-time
+        /// diagnostic: GNU's assign path reports the lvalue token verbatim
+        /// (`a[0-4]`, `a[ -4 ]`), not the resolved index (arrayfunc.c
+        /// assign_array_element_internal -> err_badarraysub(name)).
+        bind_display: String,
     },
     /// Array element with a raw subscript expression that must be evaluated
     /// lazily *after* the RHS of an assignment, matching GNU expr.c:1395-1401

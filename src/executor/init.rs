@@ -761,6 +761,11 @@ impl Executor {
             String,
             Vec<crate::parser::CommandLineSpan>,
         > = std::collections::HashMap::new();
+        // rubash#2332: (prelude definition count, root-body spans)
+        // from the __RUBASH_FORK_ROOT_SPANS stamp; lands in the
+        // ShellState literal below for the -c driver's re-seed.
+        let mut respawn_root_line_spans: Option<(usize, Vec<crate::parser::CommandLineSpan>)> =
+            None;
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
@@ -801,6 +806,13 @@ impl Executor {
             if let Some(value) = env_vars.get(super::compound_exec::FORK_FN_SPANS_TRANSPORT) {
                 respawn_function_line_spans =
                     super::compound_exec::decode_function_line_spans(value);
+            }
+            // rubash#2332: root-body source-line spans (see
+            // FORK_ROOT_SPANS_TRANSPORT); the -c driver's reader units
+            // re-seed the re-parsed body's node lines from these
+            // (script_driver::run_source_impl).
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_ROOT_SPANS_TRANSPORT) {
+                respawn_root_line_spans = super::compound_exec::decode_root_line_spans(value);
             }
         }
         // rubash#2202: function bodies that crossed as BASH_FUNC
@@ -959,6 +971,14 @@ impl Executor {
                 bash_source_stack: Vec::new(),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
+                respawn_root_line_spans: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(_, spans)| spans.clone()),
+                respawn_root_span_skip: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(skip, _)| *skip)
+                    .unwrap_or(0),
+                respawn_root_span_cursor: 0,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
@@ -1127,6 +1147,8 @@ impl Executor {
             command_string_final_pending: Cell::new(false),
             exec_replace_final_frame: Cell::new(false),
             exec_replace_dispatch_stamp: Cell::new(0),
+            root_line_span_run_armed: Cell::new(false),
+            source_run_active: Cell::new(false),
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),
@@ -1206,19 +1228,35 @@ impl Executor {
         };
         for (fd, (read_h, write_h, path)) in inherited_fd_handles {
             let path = PathBuf::from(path.unwrap_or_default());
+            // rubash#2333: on Unix the stamped handle is the PARENT's
+            // descriptor number. The spawn's pin pass installed that
+            // descriptor AT `fd` in this child (pre_exec dup2), so
+            // the endpoint must adopt THIS process's descriptor at
+            // `fd`; reading the stamped number verbatim reads
+            // whatever the pins left at that number — with two or
+            // more delivered carriers that is the NEXT slot's
+            // carrier (a +1 rotation: fd 3 served fd 4's heredoc
+            // body, fd 4 served fd 5's, the last slot served EOF).
+            // With one carrier the numbers coincide, which is why
+            // single-heredoc nesting passed. Windows handle values
+            // transfer verbatim across CreateProcess inheritance —
+            // dup_adopted_fd returns None there, and the stamped
+            // value stays authoritative.
+            let adopted = crate::fd::dup_adopted_fd(fd);
+            let restore_handle = |stamped: crate::fd::HANDLE| adopted.unwrap_or(stamped);
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
-                    handle,
+                    handle: restore_handle(handle),
                     path: path.clone(),
                 })
             });
             let write_rc = match write_h {
                 Some(handle) => match &read_rc {
-                    // Same handle value: parent's read/write endpoints
+                    // Same stamped value: parent's read/write endpoints
                     // shared one open file description — keep it shared.
-                    Some(rc) if rc.handle == handle => Some(rc.clone()),
+                    Some(rc) if read_h == Some(handle) => Some(rc.clone()),
                     _ => Some(Rc::new(FileFd {
-                        handle,
+                        handle: restore_handle(handle),
                         path: path.clone(),
                     })),
                 },

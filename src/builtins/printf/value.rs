@@ -108,6 +108,14 @@ pub(super) fn format_value(
     if nonfinite {
         width_spec.zero_pad = false;
     }
+    // The '0' flag is defined only for numeric conversions. GNU hands
+    // %s/%c to libc printf via the PF macro (builtins/printf.def), where
+    // glibc ignores '0' for non-numeric conversions, and routes %b/%q/%Q
+    // through printstr (printf.def:861), which honors only '-' among the
+    // flags and always pads with spaces (rubash#2336).
+    if matches!(spec.specifier, 's' | 'S' | 'c' | 'C' | 'b' | 'q' | 'Q') {
+        width_spec.zero_pad = false;
+    }
     // GNU getintmax/getuintmax (printf.def:1416+): a PRESENT but empty
     // numeric operand makes strtoimax leave ep==s, so chk_converror calls
     // sh_invalidnum (`printf: : invalid number') and renders 0; a MISSING

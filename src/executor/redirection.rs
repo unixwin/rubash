@@ -2058,7 +2058,7 @@ impl Executor {
         cmd: &CommandNode,
         state: &mut OutputFdState,
     ) -> Result<bool, ExecuteError> {
-        for redirect in &cmd.redirects {
+        for (index, redirect) in cmd.redirects.iter().enumerate() {
             // rubash#1359: a `{var}` redirection is a redir_varassign
             // (GNU redir.c:1133-1166) — it allocates a fresh descriptor
             // >= 10 and is applied exactly once by
@@ -2182,7 +2182,8 @@ impl Executor {
                             && redirect_target_fd(&target)
                                 .is_some_and(|source_fd| state.fd_target(source_fd).is_none());
                     if let Some(source_fd) = redirect_target_fd(&target).filter(|_| {
-                        !self.dev_stdio_target_reopens_disk(&target, state) && !dead_path_spelled_fd
+                        !self.dev_stdio_target_reopens_disk(cmd, index, &target, state)
+                            && !dead_path_spelled_fd
                     }) {
                         let Some(source_target) = state.fd_target(source_fd).cloned() else {
                             self.write_bad_fd_redirect_diagnostic(
@@ -2221,7 +2222,7 @@ impl Executor {
                         state.saw_output_redirect = true;
                         continue;
                     }
-                    self.open_command_output_target(state, fd, &target, redirect)?;
+                    self.open_command_output_target(cmd, index, state, fd, &target, redirect)?;
                     // GNU do_redirections stops at the first failing
                     // redirect (redir.c:246): later targets must not
                     // open once one failed (rubash#1844).
@@ -2238,7 +2239,7 @@ impl Executor {
                         state.redirect_failed = true;
                         return Ok(true);
                     }
-                    self.open_command_output_target(state, 1, &target, redirect)?;
+                    self.open_command_output_target(cmd, index, state, 1, &target, redirect)?;
                     if state.redirect_failed {
                         return Ok(true);
                     }
@@ -2342,7 +2343,9 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         }
-                        self.open_command_output_target(state, target_fd, path, redirect)?;
+                        self.open_command_output_target(
+                            cmd, index, state, target_fd, path, redirect,
+                        )?;
                         if state.redirect_failed {
                             return Ok(true);
                         }
@@ -2394,7 +2397,13 @@ impl Executor {
     /// Pipeline staging (deferred writes) and virtual bindings (pipes,
     /// captures) keep the dup semantics GNU gets from opening a pipe's
     /// /proc/self/fd entry.
-    fn dev_stdio_target_reopens_disk(&self, target: &str, state: &OutputFdState) -> bool {
+    fn dev_stdio_target_reopens_disk(
+        &self,
+        cmd: &CommandNode,
+        index: usize,
+        target: &str,
+        state: &OutputFdState,
+    ) -> bool {
         let Some(source_fd) = crate::executor::execution_misc::dev_stdio_redirect_fd(target) else {
             return false;
         };
@@ -2422,6 +2431,21 @@ impl Executor {
         if state.defer_stdout_writes {
             return false;
         }
+        // rubash#2329: an in-list binding of the source fd at this
+        // position decides before the ambient table (redir.c:237
+        // do_redirections): a plain file bound earlier in THIS list
+        // reopens fresh; a materialized or closed in-list binding
+        // keeps the dup/failure faces below from speaking for the
+        // ambient binding instead.
+        use crate::executor::external_setup::InListBinding;
+        match self.in_list_binding(cmd, index, source_fd) {
+            InListBinding::File(_) => return true,
+            InListBinding::AmbientOf(ambient_fd) => {
+                return self.fd_alias_reopen_path(ambient_fd).is_some();
+            }
+            InListBinding::Other | InListBinding::Closed => return false,
+            InListBinding::NotBound => {}
+        }
         // rubash#2256 (wave 2): the alias-layer resolver is the
         // authority — it also sees a source bound READ-ONLY to a
         // regular file, which has no write endpoint at all: the
@@ -2445,6 +2469,8 @@ impl Executor {
 
     fn open_command_output_target(
         &mut self,
+        cmd: &CommandNode,
+        index: usize,
         state: &mut OutputFdState,
         fd: u32,
         target: &str,
@@ -2507,7 +2533,22 @@ impl Executor {
             // ENXIO before any of the serves below (the shared clone
             // is the pipe rule, not the socket rule), reported
             // through the same open-failure protocol.
-            if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+            // rubash#2329: the binding the spelling opens is the
+            // one installed AT THIS LIST POSITION (redir.c:237) —
+            // an in-list file binding supplies the path and skips
+            // the ambient ENXIO judgment (which judges a different
+            // binding); the ambient arms serve only unbound or
+            // ambient-chained sources.
+            use crate::executor::external_setup::InListBinding;
+            let in_list_verdict = self.in_list_binding(cmd, index, source_fd);
+            let spelling_open_error = match &in_list_verdict {
+                InListBinding::File(_) | InListBinding::Other | InListBinding::Closed => None,
+                InListBinding::AmbientOf(ambient_fd) => {
+                    self.fd_alias_spelling_open_error(*ambient_fd)
+                }
+                InListBinding::NotBound => self.fd_alias_spelling_open_error(source_fd),
+            };
+            if let Some(error) = spelling_open_error {
                 let error = crate::posix_errors::path_error(target, error);
                 if state.open_failure_via_error {
                     let mut slot = state.first_open_error.borrow_mut();
@@ -2523,7 +2564,13 @@ impl Executor {
                 state.redirect_failed = true;
                 return Ok(());
             }
-            if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+            let in_list_path = match in_list_verdict {
+                InListBinding::File(path) => Some(path),
+                InListBinding::AmbientOf(ambient_fd) => self.fd_alias_reopen_path(ambient_fd),
+                InListBinding::NotBound => self.fd_alias_reopen_path(source_fd),
+                InListBinding::Other | InListBinding::Closed => None,
+            };
+            if let Some(path) = in_list_path {
                 // Routing resolution (OutputFdState::resolve_only_
                 // numbered): the element's setup already performed
                 // this fresh open for its descriptor; a second one

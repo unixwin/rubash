@@ -477,7 +477,10 @@ impl Executor {
         // the view) were correct.
         if matches!(name, "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO") && !attrs.assoc {
             if let Some(values) = self.dynamic_stack_array_values(name) {
-                return Some(values.into_iter().next().unwrap_or_default());
+                // GNU subst.c:10131: the scalar read of a bare array
+                // name is element 0 — absent (NULL) when the view is
+                // empty, never a fabricated "" (rubash#2334).
+                return values.into_iter().next();
             }
         }
         if let Some(value) = self.array_element_parameter_value(name) {
