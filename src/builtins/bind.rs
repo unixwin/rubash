@@ -2722,10 +2722,21 @@ mod tests {
             "self-insert",
             "accept-line",
             "beginning-of-line",
-            "history-incremental-search-backward",
+            // GNU's incremental search (C-r): funmap.c:131 registers
+            // it as reverse-search-history.
+            "reverse-search-history",
         ] {
             assert!(is_known_function(name), "{name} should be known");
         }
         assert!(!is_known_function("no-such-fn"));
+        // `history-incremental-search-backward` is a zsh/zle widget
+        // name, not a readline function: funmap.c carries only the
+        // non-incremental-* family (funmap.c:114-117), the name
+        // appears nowhere in the GNU tree, and the 5.3.20 oracle's
+        // own `bind -q history-incremental-search-backward` answers
+        // "unknown function name" (rc 1). Do not re-add it by
+        // symmetry with history-search-backward /
+        // history-substring-search-backward.
+        assert!(!is_known_function("history-incremental-search-backward"));
     }
 }
