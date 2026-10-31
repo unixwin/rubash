@@ -165,12 +165,28 @@ fn issue2292_group_heredoc_reaches_pipeline_stage_grandchild() {
 #[test]
 fn issue2292_group_second_command_reads_ambient_heredoc() {
     let dir = scratch("second");
-    // The first body command binds its own fd 3 (its output is
-    // discarded); the second has no redirects and must inherit
-    // the group's ambient binding. On the pre-fix tree the second
-    // command read EBADF.
+    // The first body command binds its own fd 3 to a file (its
+    // read is discarded); the second has no redirects and must
+    // inherit the group's ambient binding, intact after the
+    // sibling's scoped bind/restore. On the pre-fix tree the
+    // second command read EBADF.
+    //
+    // The sibling bind is a FILE on purpose. The heredoc variant
+    // (`{ cmd 3<<INNER >/dev/null; cmd; } 3<<OUTER`) is NOT this
+    // issue's shape: heredoc body correlation under a compound
+    // crosses the two bodies on current master — the first
+    // command is served OUTER, the second INNER, and the
+    // in-process face loses the ambient body too. That is the
+    // pre-existing nested-heredoc defect tracked as rubash#2305
+    // (cluster probes p9/p9d/p9f; adjudication in the cluster
+    // REPORT-ADDENDUM.md), not #2292's spawn-delivery mechanism:
+    // GNU scopes each list's redirects with an undo list
+    // (redir.c:237 do_redirections, RX_UNDOABLE; the body
+    // travels with its own redirect node, redir.c:423
+    // here_document_to_fd), so both pins' expectations are
+    // GNU's — only the mechanism under test differs.
     let script = format!(
-        "{{ {} 3<<INNER >/dev/null; {}; }} 3<<OUTER\ninner-body\nINNER\nouter-body\nOUTER\n",
+        "{{ {} 3<inner.txt >/dev/null; {}; }} 3<<OUTER\nouter-body\nOUTER\n",
         obs3(),
         obs3()
     );
