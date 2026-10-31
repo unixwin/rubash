@@ -1955,8 +1955,17 @@ pub(crate) fn compound_residuals_advance(
                 index += 1;
                 continue;
             }
-            // A subshell/grouping paren ends the assignment-prefix region:
-            // GNU reports `echo a=(b` immediately instead of continuing.
+            // A subshell/grouping paren is not itself an assignment opener
+            // (GNU reports `echo a=(b` immediately instead of continuing —
+            // the `opens_compound` check above already failed on the
+            // argument-position state), but the paren OPENS a list context:
+            // the word after `(` is at command position again, where an
+            // assignment word is acceptable (parse.y:3157-3164
+            // command_token_position / assignment_acceptable over the
+            // previous token; the subshell grammar reads a compound_list).
+            // rubash#2274: leaving `seen_command_word` set here made
+            // `( A=(\n...` read as closed, exactly like the `f() { A=(`
+            // shape whose `{` the classifier now resets.
             if !state.word.is_empty() {
                 let mut seen_command_word = state.seen_command_word;
                 let mut declaration_context = state.declaration_context;
@@ -1970,7 +1979,8 @@ pub(crate) fn compound_residuals_advance(
                 state.word.clear();
                 state.word_pure = true;
             }
-            state.seen_command_word = true;
+            state.seen_command_word = false;
+            state.declaration_context = false;
             state.comment_start = true;
             index += 1;
             continue;
@@ -2010,18 +2020,26 @@ pub(crate) fn compound_residuals_advance(
         }
 
         if ch == ';' || ch == '|' || ch == '&' {
-            if state.compound_depth == 0 && !state.word.is_empty() {
-                let mut seen_command_word = state.seen_command_word;
-                let mut declaration_context = state.declaration_context;
-                classify_top_level_word(
-                    &state.word,
-                    &mut seen_command_word,
-                    &mut declaration_context,
-                );
-                state.seen_command_word = seen_command_word;
-                state.declaration_context = declaration_context;
-                state.word.clear();
-                state.word_pure = true;
+            if state.compound_depth == 0 {
+                if !state.word.is_empty() {
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
+                    classify_top_level_word(
+                        &state.word,
+                        &mut seen_command_word,
+                        &mut declaration_context,
+                    );
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                    state.word_pure = true;
+                }
+                // A separator ends the simple command whether or not a
+                // word was pending at it: when whitespace already flushed
+                // the word (`true && A=(...`), the reset must still land,
+                // or the next word never re-enters the assignment-prefix
+                // region (parse.y:3157-3164 command_token_position;
+                // rubash#2274).
                 state.seen_command_word = false;
                 state.declaration_context = false;
             }
@@ -2038,11 +2056,31 @@ pub(crate) fn compound_residuals_advance(
     park
 }
 
+/// Reserved words that introduce a command list (or a single command):
+/// the word AFTER one of them is at command position, where an
+/// assignment word is acceptable again (parse.y:3157-3164
+/// command_token_position / assignment_acceptable; the grammar reads a
+/// compound_list after `{`/`then`/`do`/`else`, a condition list after
+/// `if`/`elif`/`while`/`until`, and a pipeline after `!`/`time`).
+/// rubash#2274: without this arm the classifier marked every such word
+/// as a plain command word, so a same-line `name=(` after the opener
+/// (`f() { A=(`, `then A=(`, `do A=(`) never re-entered the
+/// assignment-prefix region and the compound scan read the still-open
+/// array list as closed.
+const COMMAND_LIST_OPENER_WORDS: [&str; 10] = [
+    "{", "then", "do", "else", "if", "elif", "while", "until", "!", "time",
+];
+
 fn classify_top_level_word(
     word: &str,
     seen_command_word: &mut bool,
     declaration_context: &mut bool,
 ) {
+    if COMMAND_LIST_OPENER_WORDS.contains(&word) {
+        *seen_command_word = false;
+        *declaration_context = false;
+        return;
+    }
     if !*seen_command_word && DECLARATION_COMMAND_WORDS.contains(&word) {
         *declaration_context = true;
         return;

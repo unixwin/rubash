@@ -2789,12 +2789,47 @@ impl Executor {
         );
         self.pipeline_stdout_stream = saved_pipeline_stream;
 
-        let (mut producer_status, producer_out, producer_err, mut producer_error) =
+        let (mut producer_status, mut producer_out, mut producer_err, mut producer_error) =
             match producer_result {
                 Ok(Some((out, err, status))) => (status, out, err, None),
                 Ok(None) => (0, String::new(), String::new(), None),
                 Err(error) => (0, String::new(), String::new(), Some(error)),
             };
+        // rubash#2294: route the producer's captured streams through
+        // the stage's own resolved redirects, exactly as the
+        // sequential stage loop routes every stage (each element's
+        // own redirections run inside the element after the pipe is
+        // bound — execute_cmd.c:2620 execute_pipeline, redir.c:237
+        // do_redirections). The stage spawner wires a `2>file`
+        // stage's stderr as a capture pipe precisely so this
+        // driver's routing walk places the payload in the file;
+        // without the walk the payload escaped to the shell's real
+        // stderr below and the file was never written. The gate
+        // mirrors the loop's: a stage that wired its fds directly
+        // onto their targets (or a function stage that applied its
+        // redirects to its fd table) claims so via the pre-wired
+        // latch, a restricted-refused stage must not have its
+        // redirects materialized, and compound stages applied
+        // theirs internally. The consumers are already spawned, so
+        // a routing error folds into producer_error (reaped and
+        // returned at the end) instead of aborting the driver here.
+        if producer_error.is_none() {
+            let stage_fds_pre_wired = self.pipeline_stage_fds_pre_wired.replace(false);
+            let stage_restricted_refused = self.pipeline_stage_restricted_refused.replace(false);
+            if !stage_fds_pre_wired
+                && !stage_restricted_refused
+                && !command_is_compound_pipeline_stage(commands[0])
+            {
+                if let Err(error) = self.route_pipeline_stage_streams(
+                    commands[0],
+                    &mut producer_out,
+                    &mut producer_err,
+                    &mut producer_status,
+                ) {
+                    producer_error = Some(error);
+                }
+            }
+        }
         // A compound producer streams through fd 1 (producer_out empty); an
         // inline arm that returned buffered bytes gets them written before the
         // writer closes. A broken pipe here is the same SIGPIPE shape.
@@ -2852,9 +2887,10 @@ impl Executor {
             }
         }
 
-        // The producer element's own stderr was redirected inside the body
-        // when the stage carried a `2>...`; whatever escaped belongs on the
-        // ambient fd 2 (GNU routes a stage's stray stderr to the shell's).
+        // The routing walk above (rubash#2294) placed whatever the
+        // producer's own `2>...` claimed; what remains in producer_err
+        // escaped the stage's redirects and belongs on the ambient
+        // fd 2 (GNU routes a stage's stray stderr to the shell's).
         if producer_error.is_none() && !producer_err.is_empty() {
             self.write_default_stderr(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&producer_err),
