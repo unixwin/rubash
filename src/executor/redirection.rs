@@ -714,6 +714,14 @@ impl Executor {
 
         for (index, redirect) in candidates.iter().enumerate() {
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
+                // rubash#2292: a here-string DOES bind its redirector
+                // for the ordered-effects scan — GNU stages the body
+                // on a real descriptor at this list position
+                // (here_document_to_fd, redir.c:423, reached for
+                // r_reading_string at redir.c:1072), so a later
+                // `<&N` dup in the same list copies it. The entry
+                // otherwise needs no gate checks and keeps its skip.
+                opened.insert(redirect.fd.unwrap_or(0), true);
                 continue;
             }
             // GNU redir.c:298 redirection_expand -> expand_words_no_vars:
@@ -847,8 +855,19 @@ impl Executor {
                 continue;
             }
             if !(file_open_kind || is_dup_kind) {
-                // Non-file, non-dup kinds (heredocs etc.) carry no fd
-                // effects for the scan either.
+                // rubash#2292: a heredoc entry DOES bind its
+                // redirector for the scan — GNU's here_document_to_fd
+                // (redir.c:423) places the body on a real descriptor
+                // at this list position and do_redirections dup2's it
+                // onto the redirector (redir.c:1065-1072), so a later
+                // `<&N` dup in the same list copies that body
+                // (`cat 3<<EOF <<EOF2 <&3` was rejected with EBADF
+                // because the entry recorded no effect). Other
+                // non-file, non-dup kinds carry no fd effects for
+                // the scan.
+                if matches!(redirect.kind, crate::parser::RedirectKind::HereDoc) {
+                    opened.insert(redirect.fd.unwrap_or(0), true);
+                }
                 continue;
             }
 
