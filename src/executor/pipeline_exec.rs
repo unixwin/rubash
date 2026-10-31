@@ -5150,13 +5150,18 @@ impl Executor {
         // authority for the readonly/special classes: report it here,
         // exactly once, and kill the element the same way.
         if let Some((name, message)) = self.parameter_assignment_error(command) {
-            let class = if matches!(message, "readonly variable" | "bad array subscript") {
+            let class = if matches!(message, "readonly variable" | "bad array subscript" | "") {
                 2
             } else {
                 1
             };
-            let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
-            self.write_diagnostic_fd2(line.as_bytes());
+            // rubash#2369: an empty message is the silent att_noassign
+            // class (subst.c:8153) — the element is killed with the
+            // class-2 DISCARD status but no diagnostic is written.
+            if !message.is_empty() {
+                let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
+                self.write_diagnostic_fd2(line.as_bytes());
+            }
             return Ok(Some((
                 String::new(),
                 String::new(),
