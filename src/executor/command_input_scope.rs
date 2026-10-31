@@ -930,6 +930,14 @@ impl Executor {
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 let file_fd = FileFd::from_file(file, target.clone().into());
                 self.set_fd_input_file(fd, file_fd, true);
+            } else if crate::special_paths::is_random_device(&target) {
+                // niubash#758: the entropy devices read as an
+                // unbounded CSPRNG stream — bind the pump-fed
+                // random source.
+                let file = Self::random_device_file(&target)
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.set_fd_input_file(fd, file_fd, true);
             } else if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
                 // Registry first (rubash#1917, same ladder-skip family
                 // as the exec-fd face): synthetic /proc content has no
