@@ -4019,12 +4019,17 @@ pub(crate) fn dollar_word_group_len(
 //                                        the EOF — `]'`, NOT the `}' report
 //   `echo $(echo $[1+2`               -> `]'` at the `$[` line inside the
 //                                        command substitution
-//   `echo "$[1+2"`                    -> the hunt is bounded by the dquote
-//                                        span; at the span's closing quote a
-//                                        still-open hunt reports the DQUOTE
-//                                        (`"'`) — w1-w4 probes (` ]`, `"]`,
-//                                        ` x ] y`, `; echo done` all keep
-//                                        `"'`)
+//   `echo "$[1+2"`                    -> the hunt is NOT bounded by the
+//                                        dquote span (rubash#2227): the
+//                                        span's closing quote opens a quote
+//                                        unit INSIDE the hunt whose EOF
+//                                        reports the DQUOTE (`"'`) at the
+//                                        UNIT's line — w1-w4 probes (` ]`,
+//                                        `"]`, ` x ] y`, `; echo done`)
+//                                        all sit on the span's line, where
+//                                        unit line and span line coincide;
+//                                        `echo "a $[1+<NL>2"` names `"'`
+//                                        at line 2 (#2227 face 2)
 //   `echo "$[`"`                      -> a backtick inside the span reports
 //                                        itself (parse.y:4157 open=='"'
 //                                        backtick arm)
@@ -4545,23 +4550,29 @@ fn db_scan_comsub_body(
 }
 
 /// A double-quoted span: the whole span is consumed by read_token_word's
-/// shellquote arm (parse.y:5419-5437), but a `$[` hunt opened INSIDE it is
-/// bounded by the span's closing quote — at that quote a still-open hunt
-/// reports the DQUOTE at the span's line (q2/w1-w4 probes: `echo "$[1+2"`
-/// and every trailing shape name `"'; q12 `"$[x[0]"` too). An unclosed
-/// backtick inside reports itself (q13/a7: parse.y:4157 open=='"' arm). A
-/// `'` inside a dquote is DATA (bash dquote rules) — no quote recursion. If
-/// the span itself never closes, the quote family owns the verdict: Defer.
-/// The fourth member carries the pending span-hunt state to the caller when
-/// the span CLOSED with the hunt still open.
-fn db_scan_dquote_span(
-    chars: &[char],
-    open: usize,
-    mut line: usize,
-) -> (DbScan, usize, usize, Option<(usize, usize)>) {
+/// shellquote arm (parse.y:5419-5437). A `$[` hunt opened INSIDE the span
+/// runs the same parse_matched_pair grouping scan as an unquoted hunt —
+/// the span's closing quote does NOT bound it; inside the hunt a quote
+/// character recurses as a unit (parse.y:4040-4051), so the hunt is
+/// delegated to `db_scan_bracket_hunt` verbatim (rubash#2227). Verdicts:
+/// `echo "$[1+2"` -> `"'` (the span's closing quote OPENS a quote unit
+/// inside the hunt and that unit's EOF names the quote at the UNIT's
+/// line — the w1-w4/q12 probes sit on one line, where the unit's line
+/// and the span's line coincide); `echo "a $[1+<newline>2"` -> `"'` at
+/// line 2, the unit's line, not the span's (#2227 face 2, GNU 5.3.20);
+/// `echo "$[1+2" "` -> `]'` (the trailing quote CLOSES the unit the
+/// first one opened and the hunt then dies at EOF — the verdict the q6
+/// detour through `db_tail_has_unclosed_quote` used to defer to the
+/// generic close-char family now comes straight from the hunt). An
+/// unclosed backtick inside the span still reports itself via Defer
+/// (q13/a7: parse.y:4157 open=='"' arm — the generic quote family owns
+/// that verdict, exactly as before). A `'` inside a dquote is DATA
+/// (bash dquote rules) — no quote recursion at the span level. If the
+/// span itself never closes, the quote family owns the verdict: Defer.
+fn db_scan_dquote_span(chars: &[char], open: usize, mut line: usize) -> (DbScan, usize, usize) {
+    let span_line = line;
     let mut i = open + 1;
     let mut escaped = false;
-    let mut hunt: Option<(usize, usize)> = None; // (index past `$[`, depth)
     while i < chars.len() {
         let ch = chars[i];
         if escaped {
@@ -4581,7 +4592,7 @@ fn db_scan_dquote_span(
         }
         if ch == '`' {
             // parse.y:4157: backticks inside a dquote span recurse as units;
-            // EOF names the backtick (q13).
+            // EOF names the backtick (q13) — yielded to the quote family.
             let (event, next, next_line) = db_scan_quote_unit(chars, i, line, '`', false);
             match event {
                 DbScan::Closed => {
@@ -4589,43 +4600,34 @@ fn db_scan_dquote_span(
                     line = next_line;
                     continue;
                 }
-                DbScan::Defer => return (DbScan::Defer, i, line, None),
-                DbScan::Report(report) => {
-                    return (DbScan::Report(report), i, line, None);
-                }
+                _ => return (DbScan::Defer, i, line),
             }
         }
-        // The span's closing quote ends the span (and any open hunt inside
-        // it — w1-w4: the hunt is bounded by the span).
+        // The span's closing quote ends the span when no hunt is open.
         if ch == '"' {
-            return (DbScan::Closed, i + 1, line, hunt);
+            return (DbScan::Closed, i + 1, line);
         }
         if ch == '$' && chars.get(i + 1) == Some(&'[') {
-            if hunt.is_none() {
-                hunt = Some((i + 2, 1usize));
-                i += 2;
-                continue;
-            }
-            // Nested `$[` inside an open span hunt: the `[`/`]` pair is
-            // counted as ordinary hunt depth below; treat the `$` as data.
-            i += 1;
-            continue;
-        }
-        if let Some((_, depth)) = hunt.as_mut() {
-            if ch == '[' {
-                *depth += 1;
-            } else if ch == ']' {
-                *depth -= 1;
-                if *depth == 0 {
-                    hunt = None;
+            // The hunt's root is the span: GNU's failed parse starts at
+            // the quoted word, so the prefix cut uses the span's line
+            // even when the EOF verdict names a unit inside the hunt.
+            let (event, next, next_line) =
+                db_scan_bracket_hunt(chars, i + 2, line, line, span_line);
+            match event {
+                DbScan::Closed => {
+                    i = next;
+                    line = next_line;
+                    continue;
                 }
+                DbScan::Report(report) => return (DbScan::Report(report), i, line),
+                _ => return (DbScan::Defer, i, line),
             }
         }
         i += 1;
     }
     // EOF: the span itself is unclosed — the quote family owns the verdict
     // (its `"'` report matches GNU for `echo "$[1+2`).
-    (DbScan::Defer, i, line, None)
+    (DbScan::Defer, i, line)
 }
 
 /// Opaque `$(( ... ))` arithmetic-command span: quotes and backticks are
@@ -4682,33 +4684,6 @@ fn db_skip_dparen_span(chars: &[char], open: usize, mut line: usize) -> Option<(
         }
     }
     None
-}
-
-/// True when `chars[from..]` holds an unterminated `'`/`"`/backtick (quote
-/// parity walk with escapes). Used to decide whether a dquote-span hunt
-/// report should yield to a LATER unclosed quote (q6: `echo "$[1+2" "` names
-/// `]'` — the trailing unclosed dquote wins there; the quote family already
-/// owns that input, so the detector must answer None).
-fn db_tail_has_unclosed_quote(chars: &[char], from: usize) -> bool {
-    let mut single = false;
-    let mut double = false;
-    let mut backtick = false;
-    let mut escaped = false;
-    for &ch in &chars[from..] {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if backtick || double => escaped = true,
-            '\\' => {}
-            '\'' if !double && !backtick => single = !single,
-            '"' if !single && !backtick => double = !double,
-            '`' if !single => backtick = !backtick,
-            _ => {}
-        }
-    }
-    single || double || backtick
 }
 
 /// Line (1-based) of the char at `index` — only used for construct-line
@@ -4814,26 +4789,17 @@ pub fn unclosed_dollar_bracket_eof(input: &str) -> Option<DollarBracketEof> {
                 }
             }
             '"' => {
-                let (event, next, next_line, hunt_open) = db_scan_dquote_span(&chars, i, line);
+                let (event, next, next_line) = db_scan_dquote_span(&chars, i, line);
                 match event {
                     DbScan::Closed => {
-                        // A hunt left open at the span's closing quote
-                        // reports the DQUOTE at the span's line — unless a
-                        // LATER unclosed quote exists (q6 yields to `]').
-                        if hunt_open.is_some() {
-                            if db_tail_has_unclosed_quote(&chars, next) {
-                                return None;
-                            }
-                            let span_line = line_of_char(&chars, i);
-                            return Some(DollarBracketEof {
-                                closer: '"',
-                                report_line: span_line,
-                                construct_line: span_line,
-                            });
-                        }
                         i = next;
                         line = next_line;
                     }
+                    // A `$[` hunt inside the span owns its EOF verdict
+                    // (rubash#2227: the hunt is delegated, not bounded by
+                    // the span — w1's `"'`, q6's `]'` and the face-2 line
+                    // attribution all come from the hunt itself now).
+                    DbScan::Report(report) => return Some(report),
                     _ => return None,
                 }
             }
