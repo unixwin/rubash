@@ -113,12 +113,29 @@ fn issue2281_dup_before_close_is_delivered_then_close_lands() {
 #[test]
 fn issue2281_rebind_after_close_wins_for_later_dup() {
     let dir = scratch("shape4");
-    let script = format!(
+    // The two descriptors are reported by SEPARATE observers on purpose:
+    // fd 10 is a dup of fd 9, so both share one open file description
+    // (redir.c do_redirection_internal, dup2) — an observer that reads
+    // fd 9 first drains the shared offset and fd 10 then reads at EOF.
+    // GNU bash 5.3.20 with a single [9, 10] observer yields fd9=F9 and
+    // fd10 empty, and rubash byte-matches it; the property under test
+    // (the same-list rebind `9<f9` wins for the later dup `{w}<&9`) is
+    // therefore asserted per descriptor, each in a fresh run whose
+    // observer reads only that descriptor (oracle: probes/followup/
+    // r_oracle.sh + obs_10_only.sh, PR #2300 follow-up addendum).
+    let script9 = format!(
         "exec 9<seed; v=9; {} {{v}}<&- 9<f9 {{w}}<&9",
-        observer(&[9, 10])
+        observer(&[9])
     );
-    let (stdout, stderr, code) = rubash_in(&dir, &script);
-    assert_eq!(stdout, "fd9=F9\nfd10=F9\n", "stderr: {stderr}");
+    let (stdout, stderr, code) = rubash_in(&dir, &script9);
+    assert_eq!(stdout, "fd9=F9\n", "stderr: {stderr}");
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    let script10 = format!(
+        "exec 9<seed; v=9; {} {{v}}<&- 9<f9 {{w}}<&9",
+        observer(&[10])
+    );
+    let (stdout, stderr, code) = rubash_in(&dir, &script10);
+    assert_eq!(stdout, "fd10=F9\n", "stderr: {stderr}");
     assert_eq!(code, Some(0), "stderr: {stderr}");
 }
 
