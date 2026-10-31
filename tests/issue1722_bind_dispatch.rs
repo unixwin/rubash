@@ -110,6 +110,34 @@ fn issue1722_bind_x_fires_mid_line_and_mutates_the_buffer() {
 }
 
 #[test]
+fn issue1722_builtin_exit_and_builtin_builtin_dispatch() {
+    // ble.sh ends an attached session through an `exit` wrapper that
+    // calls `builtin exit`; the `builtin` dispatch table was missing
+    // `exit` (and `builtin` itself), so the session end reported
+    // `builtin: exit: not a shell builtin` and never exited. GNU
+    // builtin.def calls the named builtin's function directly.
+    let run_c = |script: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", script])
+            .output()
+            .expect("run rubash -c")
+    };
+    let out = run_c("builtin exit 3");
+    assert_eq!(out.status.code(), Some(3), "builtin exit 3: {out:?}");
+    let out = run_c("builtin builtin echo BOK1722");
+    assert_eq!(out.status.code(), Some(0), "builtin builtin: {out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("BOK1722"),
+        "builtin builtin echo output: {out:?}"
+    );
+    let out = run_c("builtin exit abc; echo AFTER1722 rc=$?");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("AFTER1722 rc=2"),
+        "numeric error must fail with 2 and continue: {out:?}"
+    );
+}
+
+#[test]
 fn issue1722_function_binding_and_macro_binding_dispatch() {
     let text = run_pty_session(&[
         // C-g rebound from its default (abort) to unix-line-discard.
