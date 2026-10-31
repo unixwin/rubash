@@ -1168,19 +1168,35 @@ impl Executor {
         };
         for (fd, (read_h, write_h, path)) in inherited_fd_handles {
             let path = PathBuf::from(path.unwrap_or_default());
+            // rubash#2333: on Unix the stamped handle is the PARENT's
+            // descriptor number. The spawn's pin pass installed that
+            // descriptor AT `fd` in this child (pre_exec dup2), so
+            // the endpoint must adopt THIS process's descriptor at
+            // `fd`; reading the stamped number verbatim reads
+            // whatever the pins left at that number — with two or
+            // more delivered carriers that is the NEXT slot's
+            // carrier (a +1 rotation: fd 3 served fd 4's heredoc
+            // body, fd 4 served fd 5's, the last slot served EOF).
+            // With one carrier the numbers coincide, which is why
+            // single-heredoc nesting passed. Windows handle values
+            // transfer verbatim across CreateProcess inheritance —
+            // dup_adopted_fd returns None there, and the stamped
+            // value stays authoritative.
+            let adopted = crate::fd::dup_adopted_fd(fd);
+            let restore_handle = |stamped: crate::fd::HANDLE| adopted.unwrap_or(stamped);
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
-                    handle,
+                    handle: restore_handle(handle),
                     path: path.clone(),
                 })
             });
             let write_rc = match write_h {
                 Some(handle) => match &read_rc {
-                    // Same handle value: parent's read/write endpoints
+                    // Same stamped value: parent's read/write endpoints
                     // shared one open file description — keep it shared.
-                    Some(rc) if rc.handle == handle => Some(rc.clone()),
+                    Some(rc) if read_h == Some(handle) => Some(rc.clone()),
                     _ => Some(Rc::new(FileFd {
-                        handle,
+                        handle: restore_handle(handle),
                         path: path.clone(),
                     })),
                 },
