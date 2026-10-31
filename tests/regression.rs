@@ -4851,6 +4851,66 @@ mod issue_1917 {
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
         assert_eq!(stdout, "root:111\nself:111\npids:many", "stderr:\n{stderr}");
     }
+
+    /// A-3b: the status TEXT shape — the lines downstream tools grep
+    /// for (proc(5): Name, Pid, PPid at minimum), with the Pid line
+    /// naming the reader itself (the shell's own $$) and PPid a plain
+    /// number. Holds on Linux's real procfs and on the Windows
+    /// simulation alike; on Windows it pins the simulation's format,
+    /// which is the point.
+    #[test]
+    fn issue1917_a3b_status_text_shape() {
+        let dir = case_scratch("1917-a3b");
+        let (stdout, stderr, status) = run(&dir, "cat /proc/self/status; echo \"SELF=$$\"");
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        let self_pid: u32 = stdout
+            .lines()
+            .find_map(|line| line.strip_prefix("SELF="))
+            .and_then(|value| value.trim().parse().ok())
+            .expect("SELF marker line");
+        let field = |name: &str| -> String {
+            stdout
+                .lines()
+                .find(|line| line.starts_with(name))
+                .unwrap_or_else(|| panic!("status lacks a {name} line:\n{stdout}"))
+                .split_once(':')
+                .unwrap()
+                .1
+                .trim()
+                .to_string()
+        };
+        assert!(!field("Name").is_empty(), "Name line empty:\n{stdout}");
+        assert_eq!(
+            field("Pid").parse::<u32>().ok(),
+            Some(self_pid),
+            "Pid line must name the reading shell itself:\n{stdout}"
+        );
+        assert!(
+            field("PPid").parse::<u32>().is_ok(),
+            "PPid line must be a plain number:\n{stdout}"
+        );
+    }
+
+    /// P1c under #1917's own number (the rendezvous machinery itself
+    /// is #1903's, pinned in mod issue_1903): the issue's acceptance
+    /// shape verbatim — an engine `mkfifo` whose node serves a
+    /// background-writer / foreground-`cat` round trip and then a
+    /// `read` round trip on the same node. Windows-only: the node is
+    /// the WinuxCmd marker + named-pipe rendezvous; off Windows the
+    /// platform's real fifo (and the real mkfifo binary) own the
+    /// shape, and the engine declines its internal mkfifo there.
+    #[test]
+    #[cfg(windows)]
+    fn issue1917_p1c_mkfifo_round_trip() {
+        let dir = case_scratch("1917-p1c");
+        let (stdout, stderr, status) = run(
+            &dir,
+            "mkfifo f; echo hi > f & cat f; \
+             printf 'second\\n' > f & read -r line < f; echo \"read:$line\"",
+        );
+        assert_eq!(status, Some(0), "stderr:\n{stderr}");
+        assert_eq!(stdout, "hi\nread:second", "stderr:\n{stderr}");
+    }
 }
 
 /// rubash#1900: /proc/<pid>/exe and /proc/<pid>/cwd were not
