@@ -234,6 +234,18 @@ impl Executor {
                     .insert(for_command.variable.clone(), value.clone());
                 for_command.variable.clone()
             } else {
+                // GNU execute_cmd.c:3081-3095: an att_noassign loop
+                // variable fails the bind check (ASSIGN_DISALLOWED)
+                // before the body ever runs — EXECUTION_FAILURE, no
+                // diagnostic (bind_variable_internal prints only for
+                // readonly), and no POSIX FORCE_EOF (that jump is
+                // gated on readonly_p). The funnel swallows the same
+                // bind silently, so the verdict is taken here
+                // (rubash#2369).
+                if self.assignment_target_is_noassign(&for_command.variable) {
+                    self.exit_code = 1;
+                    return Ok(());
+                }
                 // POSIX-mode notes item 37: a failed loop-variable bind
                 // (readonly violation) exits the non-interactive POSIX shell
                 // (GNU execute_cmd.c:3085-3089 jumps FORCE_EOF — the
