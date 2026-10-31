@@ -139,6 +139,26 @@ cat < <(f) > /dev/null
     assert_eq!(out, format!("a={a}\nb={b}\n"));
 }
 
+/// Process substitution (output form): the consumer child gets the
+/// prelude text, so this rides the definition-time re-seed — the
+/// producer form above rides the BASH_FUNC import re-seed.
+#[test]
+fn issue2202_outprocsub_fn_child_reports_each_body_line() {
+    let case = make_case("outprocsub");
+    let body = "\
+f() {
+  echo \"a=$LINENO\" >> \"$OUT\"
+  echo \"b=$LINENO\" >> \"$OUT\"
+}
+true > >(f)
+sleep 0.5
+";
+    let out = run_script(&case, body);
+    let a = line_of(body, "a=$LINENO");
+    let b = line_of(body, "b=$LINENO");
+    assert_eq!(out, format!("a={a}\nb={b}\n"));
+}
+
 /// Compound bodies inside the transported function: if/for bodies
 /// keep their own lines through the span transport (the traversal is
 /// structural, not line-count based).
