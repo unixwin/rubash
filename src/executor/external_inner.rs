@@ -2146,6 +2146,17 @@ impl Executor {
                 target = carrier.display().to_string();
                 write = false;
             }
+            // rubash#2298: a `<>` entry classifies as input for the
+            // stash lookup above, but its open is neither the input
+            // ladder (O_RDONLY — the child then holds a read-only
+            // description and a write through the slot fails EBADF)
+            // nor the output ladder: GNU r_input_output opens
+            // O_RDWR|O_CREAT (make_cmd.c:682; redir.c:725 redir_open)
+            // and the single description serves both directions in
+            // the child. probe_input_redirect_readwrite is that
+            // classified readwrite open (the same ladder the builtin
+            // faces probe `<>` with).
+            let readwrite = redirect.kind == crate::parser::RedirectKind::ReadWrite;
             let mut opened_file: Option<std::fs::File> = None;
             let raw = if let Some(file) = &stashed {
                 file.handle
@@ -2160,6 +2171,8 @@ impl Executor {
                         self.create_redirect_output(&target, redirect.clobber)
                             .map_err(|error| crate::posix_errors::path_error(&target, error))
                     }
+                } else if readwrite {
+                    self.probe_input_redirect_readwrite(&target)
                 } else {
                     self.open_input_redirect(&target)
                 };
@@ -2184,17 +2197,29 @@ impl Executor {
             };
             #[cfg(unix)]
             command_fd_pins.push((dup, fd));
-            process.env(
-                format!("__RUBASH_FD_{}HANDLE_{fd}", if write { "W" } else { "" }),
-                format!("{dup:#x}"),
-            );
-            process.env(
-                format!("__RUBASH_FD_{}PATH_{fd}", if write { "W" } else { "" }),
-                match &stashed {
-                    Some(file) => file.path.to_string_lossy().into_owned(),
-                    None => target.clone(),
-                },
-            );
+            let path_label = match &stashed {
+                Some(file) => file.path.to_string_lossy().into_owned(),
+                None => target.clone(),
+            };
+            // rubash#2298: a self-opened `<>` description serves
+            // both directions, so stamp BOTH env channels with the
+            // one dup — the child's startup restore pairs equal
+            // HANDLE/WHANDLE values into a single shared FileFd
+            // (init.rs), and the pin above already delivers the
+            // descriptor itself to foreign children. A stash-backed
+            // entry keeps the read-channel stamp only: the stash is
+            // an earlier entry's description, whose access mode is
+            // that entry's own.
+            let stamp_read = !write;
+            let stamp_write = write || (readwrite && opened_file.is_some());
+            if stamp_read {
+                process.env(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
+                process.env(format!("__RUBASH_FD_PATH_{fd}"), path_label.clone());
+            }
+            if stamp_write {
+                process.env(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                process.env(format!("__RUBASH_FD_WPATH_{fd}"), path_label);
+            }
             parent_side_dups.push(dup);
             // rubash#2272: remember the description delivered at this
             // slot for a later {var} dup in the same list (see
