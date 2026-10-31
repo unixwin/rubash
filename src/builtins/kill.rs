@@ -2284,6 +2284,21 @@ mod kernel_signals {
     /// signal_hook handler.
     static HANDLER_SET: AtomicU64 = AtomicU64::new(0);
 
+    /// The signal_hook dispatcher's installed sigaction, captured verbatim
+    /// at the first live handler install (rubash#2348). signal-hook's
+    /// Handle caches each signal's registration, so a later add_signal for
+    /// the same signal is a no-op — but reconcile's Default/Ignore
+    /// transitions overwrite the OS disposition with raw sigaction calls
+    /// (SIG_DFL / SIG_IGN). After such a flip the backend slot is still
+    /// registered while the kernel no longer routes deliveries to it, so
+    /// re-arming a trap on that signal (GNU trap.c:838 set_signal
+    /// reinstalling trap_handler after the trap.c:1398 REVERT round-trip)
+    /// silently leaves the flipped disposition in place: a Default death
+    /// or an Ignore swallow sticks. ensure_handler detects the desync —
+    /// Handler wish, non-handler OS disposition — and reinstalls this
+    /// captured dispatcher, reconnecting the still-registered slot.
+    static BACKEND_ACTION: OnceLock<libc::sigaction> = OnceLock::new();
+
     /// Packed per-signal disposition state (2 bits each: 0=Default,
     /// 1=Ignore, 2=Handler) so the per-boundary reconcile skips
     /// unchanged signals — no sigaction traffic on the steady-state
@@ -2382,6 +2397,29 @@ mod kernel_signals {
         let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
         if unsafe { libc::sigaction(sig, std::ptr::null(), &mut current) } != 0 {
             return Err(io::Error::last_os_error());
+        }
+        if current.sa_sigaction == libc::SIG_DFL || current.sa_sigaction == libc::SIG_IGN {
+            // rubash#2348: the OS disposition is not the backend
+            // dispatcher even though the Handler wish is live — a raw
+            // Default/Ignore flip overwrote it while signal-hook kept
+            // the registration cached, so the add_signal above (if any)
+            // installed nothing. Reinstall the captured dispatcher; the
+            // still-registered slot (including its chained previous
+            // disposition) receives deliveries again. First-ever install
+            // cannot reach here with an empty cell: add_signal has just
+            // put the dispatcher in place, so `current` would name it.
+            if let Some(backend) = BACKEND_ACTION.get() {
+                let backend = *backend;
+                if unsafe { libc::sigaction(sig, &backend, std::ptr::null_mut()) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                current = backend;
+            }
+        } else if BACKEND_ACTION.get().is_none() {
+            // First live install: capture the dispatcher verbatim (its
+            // SA_RESTART bit is normalized by the shared block below,
+            // and again on every reinstall, which re-enters that block).
+            let _ = BACKEND_ACTION.set(current);
         }
         if current.sa_flags & libc::SA_RESTART != 0 {
             current.sa_flags &= !libc::SA_RESTART;
