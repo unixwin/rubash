@@ -33,6 +33,7 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -42,6 +43,7 @@ const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 const SIGUSR1: i32 = 10;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 const SIGUSR1: i32 = 30;
+const SIGINT: i32 = 2;
 
 fn scratch(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -239,4 +241,91 @@ fn issue2348_clear_then_exit_trap_still_runs() {
     let out = run_script(&dir, &script);
     assert_eq!(out.stdout, "body\nEXITED\n");
     assert_eq!(out.status.code(), Some(0));
+}
+
+// ---------------------------------------------------------------- #2347
+
+/// The audit RC4 cell: entry-ignored SIGINT, `trap - INT` reverts to
+/// the fatal default, so the first self-sent INT kills the shell.
+#[test]
+fn issue2347_trap_reset_on_entry_ignored_int_kills() {
+    let (dir, script) = case(
+        "igreset",
+        "trap - INT\nkill -INT $$\necho alive-after-reset-attempt\ntrap 'echo NOPE2' INT\nkill -INT $$\necho alive-after-trap-attempt\n",
+    );
+    let out = run_script_entry_ignored(&dir, "INT", &script);
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.status.signal(), Some(SIGINT));
+}
+
+/// Boundary: trap-set on an entry-ignored signal stays a POSIX no-op.
+#[test]
+fn issue2347_trap_set_on_entry_ignored_int_stays_noop() {
+    let (dir, script) = case("igset", "trap 'echo NOPE' INT\nkill -INT $$\necho alive\n");
+    let out = run_script_entry_ignored(&dir, "INT", &script);
+    assert_eq!(out.stdout, "alive\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Boundary: no trap op at all — the entry ignore simply holds.
+#[test]
+fn issue2347_entry_ignored_int_without_reset_stays_ignored() {
+    let (dir, script) = case("ignone", "kill -INT $$\necho alive\n");
+    let out = run_script_entry_ignored(&dir, "INT", &script);
+    assert_eq!(out.stdout, "alive\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Boundary: `trap -` on entry-ignored TERM stays a no-op (the
+/// trap.def special case is SIGINT-only).
+#[test]
+fn issue2347_trap_reset_on_entry_ignored_term_stays_noop() {
+    let (dir, script) = case("igterm", "trap - TERM\nkill -TERM $$\necho alive\n");
+    let out = run_script_entry_ignored(&dir, "TERM", &script);
+    assert_eq!(out.stdout, "alive\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Boundary: `trap -` on entry-ignored USR1 stays a no-op.
+#[test]
+fn issue2347_trap_reset_on_entry_ignored_usr1_stays_noop() {
+    let (dir, script) = case("igusr1", "trap - USR1\nkill -USR1 $$\necho alive\n");
+    let out = run_script_entry_ignored(&dir, "USR1", &script);
+    assert_eq!(out.stdout, "alive\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Boundary: `trap -` on entry-ignored QUIT stays a no-op (SIGQUIT's
+/// forced-IGN treatment is the opposite hard-code and already
+/// matched GNU before this fix).
+#[test]
+fn issue2347_trap_reset_on_entry_ignored_quit_stays_noop() {
+    let (dir, script) = case("igquit", "trap - QUIT\nkill -QUIT $$\necho alive\n");
+    let out = run_script_entry_ignored(&dir, "QUIT", &script);
+    assert_eq!(out.stdout, "alive\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+/// Control: the ordinary (not entry-ignored) SIGINT reset dies by
+/// SIGINT in both shells — USR1's sibling assertion keeps the death
+/// form honest (a surviving shell would print `alive`).
+#[test]
+fn issue2347_normal_int_reset_still_kills() {
+    let (dir, script) = case(
+        "normalreset",
+        "trap 'echo H' INT\ntrap - INT\nkill -INT $$\necho alive\n",
+    );
+    let out = run_script(&dir, &script);
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.status.signal(), Some(SIGINT));
+}
+
+/// Control for the death-form assertions: an untrapped USR1 delivery
+/// really does kill by SIGUSR1 on this platform.
+#[test]
+fn issue2347_untrapped_usr1_death_form_control() {
+    let (dir, script) = case("usr1death", "kill -USR1 $$\necho alive\n");
+    let out = run_script(&dir, &script);
+    assert_eq!(out.stdout, "");
+    assert_eq!(out.status.signal(), Some(SIGUSR1));
 }

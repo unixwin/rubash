@@ -2531,11 +2531,17 @@ mod kernel_signals {
                 }
                 Disposition::Default => {
                     let entry_ignored = ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0;
-                    let base = if entry_ignored || sig == libc::SIGQUIT as i32 {
-                        libc::SIG_IGN
-                    } else {
-                        libc::SIG_DFL
-                    };
+                    // rubash#2347: a reverted entry-ignored SIGINT takes
+                    // the fatal default, not the entry-ignore base
+                    // (trap.def:228-251 REVERT special case).
+                    let base =
+                        if sig == libc::SIGINT as i32 && SIGINT_REVERTED.load(Ordering::Relaxed) {
+                            libc::SIG_DFL
+                        } else if entry_ignored || sig == libc::SIGQUIT as i32 {
+                            libc::SIG_IGN
+                        } else {
+                            libc::SIG_DFL
+                        };
                     set_kernel_handler(sig, base);
                     HANDLER_SET.fetch_and(!bit(sig), Ordering::SeqCst);
                     // A delivery that raced the flip may have left the
@@ -2570,6 +2576,40 @@ mod kernel_signals {
     /// (rubash#1662) may route them to the handler.
     pub(super) fn entry_ignored(sig: i32) -> bool {
         is_managed(sig) && ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0
+    }
+
+    /// rubash#2347: set once `trap - SIGINT` runs against an
+    /// entry-ignored SIGINT. GNU restore_default_signal early-returns on
+    /// hard-ignored signals, but trap_builtin's REVERT branch then
+    /// unconditionally installs the fatal SIGINT handler anyway
+    /// (builtins/trap.def:228-251, citing POSIX interp 751) — the one
+    /// signal whose REVERT overrides the entry ignore. SIGQUIT is the
+    /// opposite hard-code (forced SIG_IGN, already matched) and TERM /
+    /// USR1 reverts stay no-ops, so this flag keys on SIGINT alone.
+    /// Once set, SIGINT's Default wish resolves to the plain fatal
+    /// default instead of the entry-ignore base, and the interactive
+    /// SIGINT pin may route it again. Trap-set on SIGINT stays a
+    /// hard-ignore no-op (trap.rs), exactly as in GNU.
+    static SIGINT_REVERTED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn sigint_reverted() -> bool {
+        SIGINT_REVERTED.load(Ordering::Relaxed)
+    }
+
+    /// Apply the trap.def REVERT special case for an entry-ignored
+    /// SIGINT, synchronously like the builtin does: a non-interactive
+    /// shell gets the fatal default (SIG_DFL) right now — reconcile's
+    /// fast path may otherwise skip a table that reads all-Default —
+    /// while an interactive shell only records the flag and lets the
+    /// reconcile below install its SIGINT pin (GNU installs
+    /// sigint_sighandler there).
+    pub(super) fn revert_sigint(interactive: bool) {
+        SIGINT_REVERTED.store(true, Ordering::Relaxed);
+        if !interactive {
+            set_kernel_handler(libc::SIGINT as i32, libc::SIG_DFL);
+            HANDLER_SET.fetch_and(!bit(libc::SIGINT as i32), Ordering::SeqCst);
+            store_state(libc::SIGINT as i32, 0);
+        }
     }
 
     /// Whether the boundary dispatcher can adjudicate `sig` at all
@@ -3195,6 +3235,16 @@ fn extend_trap_keys(keys: &mut Vec<(i32, String, String)>) {
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn extend_trap_keys(_keys: &mut Vec<(i32, String, String)>) {}
 
+/// rubash#2347: the trap builtin's REVERT special case for an
+/// entry-ignored SIGINT (builtins/trap.def:228-251). Called from
+/// trap.rs's `trap - SIGINT` path, which remove_trap has already
+/// (correctly, per the hard-ignore rule) treated as a table no-op;
+/// this is the disposition half GNU's builtin performs anyway.
+#[cfg(unix)]
+pub fn revert_entry_ignored_sigint(interactive: bool) {
+    kernel_signals::revert_sigint(interactive);
+}
+
 /// Map the executor's trap table onto the kernel dispositions (unix arm of
 /// rubash#226). Mirrors GNU's per-signal rules: `trap 'action' SIG` installs
 /// the handler (sig.c:830, sa_flags=0), `trap '' SIG` sets SIG_IGN, no trap
@@ -3300,6 +3350,19 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
                 && !reset_contains(reset, short),
         );
         let want = match env_vars.get(key.as_str()) {
+            // rubash#2347: a reverted entry-ignored SIGINT
+            // (trap.def:228-251) outranks the table: the seeded
+            // entry-ignore entry (an "" action) must not re-impose
+            // Ignore on every boundary reconcile. Non-interactive it
+            // sits at the fatal default; interactive it rides the
+            // SIGINT pin (GNU's sigint_sighandler).
+            _ if *sig == libc::SIGINT as i32 && kernel_signals::sigint_reverted() => {
+                if interactive {
+                    Disposition::Handler
+                } else {
+                    Disposition::Default
+                }
+            }
             // A real action and not reset-listed -> handler (trap.c
             // trap_builtin -> sig.c:830 set_signal_handler).
             Some(action) if !action.is_empty() && !reset_contains(reset, short) => {
@@ -3326,7 +3389,7 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             // ignored (the pin must not un-ignore it).
             None if interactive
                 && *sig == libc::SIGINT as i32
-                && !kernel_signals::entry_ignored(*sig) =>
+                && (!kernel_signals::entry_ignored(*sig) || kernel_signals::sigint_reverted()) =>
             {
                 Disposition::Handler
             }
