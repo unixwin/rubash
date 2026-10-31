@@ -725,6 +725,10 @@ impl Executor {
         // and the PIPESTATUS cell seeds the literal's pipestatus
         // fields.
         let mut respawn_inherited_frames: Option<crate::shell::state::InheritedForkFrames> = None;
+        let mut respawn_function_line_spans: std::collections::HashMap<
+            String,
+            Vec<crate::parser::CommandLineSpan>,
+        > = std::collections::HashMap::new();
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
@@ -757,6 +761,14 @@ impl Executor {
             }
             if let Some(value) = env_vars.get(super::compound_exec::FORK_PIPESTATUS_TRANSPORT) {
                 respawn_pipestatus = crate::shell::state::decode_pipestatus_state(value);
+            }
+            // rubash#2202: per-function source-line spans (see
+            // FORK_FN_SPANS_TRANSPORT); define_function re-seeds the
+            // prelude's re-parsed bodies from these at definition
+            // time and consumes each entry.
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_FN_SPANS_TRANSPORT) {
+                respawn_function_line_spans =
+                    super::compound_exec::decode_function_line_spans(value);
             }
         }
         for key in super::compound_exec::FORK_TRANSPORT_KEYS {
@@ -876,6 +888,7 @@ impl Executor {
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 inherited_fork_frames: respawn_inherited_frames,
+                respawn_function_line_spans,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
