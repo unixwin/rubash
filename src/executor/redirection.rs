@@ -1357,6 +1357,7 @@ impl Executor {
                 && !crate::special_paths::is_synthetic_link_path(&target)
                 && !crate::special_paths::is_zero_device(&target)
                 && !crate::special_paths::is_full_device(&target)
+                && !crate::special_paths::is_random_device(&target)
             {
                 // rubash#2240: anchor like the Input probe below —
                 // this probe's open CREATES the file (the `<>` open
@@ -1416,8 +1417,11 @@ impl Executor {
                 // The zero/full devices (rubash#1898): same skip —
                 // the classified input ladder owns their outcome;
                 // their mapped name is the /dev capability sentinel.
+                // The entropy devices (niubash#758) are the same
+                // shape and skip the same way.
                 && !crate::special_paths::is_zero_device(&target)
                 && !crate::special_paths::is_full_device(&target)
+                && !crate::special_paths::is_random_device(&target)
             {
                 let path = self.session_path(crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
@@ -2357,9 +2361,12 @@ impl Executor {
             // sentinel on Windows); every write fails ENOSPC through
             // OutputTarget::FullDevice.
             state.fds.insert(fd, OutputTarget::FullDevice);
-        } else if crate::special_paths::is_zero_device(target) {
+        } else if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_random_device(target)
+        {
             // rubash#1898: /dev/zero discards writes exactly like the
-            // null device.
+            // null device. The entropy devices discard writes the
+            // same way (niubash#758).
             state.fds.insert(fd, OutputTarget::Null);
         } else if let Some(source_fd) =
             crate::executor::execution_misc::dev_stdio_redirect_fd(target)

@@ -202,12 +202,19 @@ impl Executor {
         // come from the pump-fed zero source; /dev/zero writes go to
         // the null sink; /dev/full writes bind the FullDevice
         // endpoint, whose faces fail ENOSPC through sh_chkwrite
-        // exactly like the direct redirect faces.
+        // exactly like the direct redirect faces. The entropy
+        // devices (niubash#758) bind the same way: reads from the
+        // pump-fed CSPRNG source, writes to the null sink.
         if crate::special_paths::is_zero_device(target)
             || crate::special_paths::is_full_device(target)
+            || crate::special_paths::is_random_device(target)
         {
             let full = crate::special_paths::is_full_device(target);
-            let read_file = Self::zero_device_file(&target)?;
+            let read_file = if crate::special_paths::is_random_device(target) {
+                Self::random_device_file(&target)?
+            } else {
+                Self::zero_device_file(&target)?
+            };
             let read_fd = FileFd::from_file(read_file, target.into());
             self.set_fd_input_file(fd, read_fd, dynamic);
             if full {
@@ -379,8 +386,11 @@ impl Executor {
         // rubash#1898: device write binds — /dev/zero discards
         // through the null sink; /dev/full binds the FullDevice
         // endpoint (its writes fail ENOSPC through sh_chkwrite).
+        // The entropy devices discard writes through the same null
+        // sink (niubash#758).
         if crate::special_paths::is_zero_device(&target)
             || crate::special_paths::is_full_device(&target)
+            || crate::special_paths::is_random_device(&target)
         {
             if crate::special_paths::is_full_device(&target) {
                 self.fd_table
@@ -4330,6 +4340,15 @@ impl Executor {
                         // pump-fed source handle (a real handle, so
                         // the descriptor behaves like the device).
                         let file = Self::zero_device_file(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        let file_fd = FileFd::from_file(file, target.clone().into());
+                        self.set_fd_input_file(fd, file_fd, fd != 0);
+                    } else if crate::special_paths::is_random_device(&target) {
+                        // niubash#758: the entropy devices read as
+                        // an unbounded CSPRNG stream — the pump-fed
+                        // random source, the zero arm's construction
+                        // with a different byte source.
+                        let file = Self::random_device_file(&target)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                         let file_fd = FileFd::from_file(file, target.clone().into());
                         self.set_fd_input_file(fd, file_fd, fd != 0);
