@@ -87,6 +87,13 @@ fn main() {
 }
 
 fn run_main() -> i32 {
+    // rubash#2233: GNU calls check_dev_tty from main (shell.c:410)
+    // before dispatching any mode — a session leader started on a
+    // bare tty slave acquires it as its controlling terminal here,
+    // which is what later delivers SIGHUP on hangup. The library
+    // interactive entry repeats the (idempotent) acquisition for
+    // hosts that embed the engine instead of this binary.
+    rubash::script_driver::acquire_controlling_terminal();
     // Initialize locale state from environment (LC_ALL > LC_CTYPE > LANG)
     rubash::locale::init_locale();
 

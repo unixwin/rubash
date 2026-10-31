@@ -99,6 +99,57 @@ impl Executor {
         if is_closed_redirect_target(&target) {
             return None;
         }
+        // rubash#2235: an fd-alias target (/dev/fd/N, /proc/self/fd/N)
+        // names the fd table's endpoint at N (the rubash#1963 alias
+        // layer) — above all a list-level input procsub the
+        // materializer rewrote to exactly this spelling. Serve the
+        // record from that endpoint through a scratch fd, mirroring
+        // the streamed `<(` arm above; the path slurp below would
+        // read the process's unrelated real fd N (or fail on it).
+        // rubash#2256 (wave 2): the alias is an open() (GNU redir.c),
+        // so a source the resolver names as a regular file is read
+        // through a FRESH FileFd — offset 0, the source descriptor's
+        // own offset unmoved — instead of a clone of the source's
+        // endpoint, whose shared offset made repeated
+        // `read < /dev/fd/6` calls walk the file instead of
+        // re-reading its first record.
+        if let Some(alias_fd) = dev_stdio_redirect_fd(&target) {
+            let fresh_endpoint = self
+                .fd_alias_reopen_path(alias_fd)
+                .and_then(|path| FileFd::open_read(path).ok())
+                .map(FdReadEndpoint::File);
+            let endpoint = fresh_endpoint.or_else(|| self.fd_table.read_endpoint(alias_fd));
+            if let Some(endpoint) = endpoint {
+                if let Some(scratch) = self.allocate_dynamic_fd() {
+                    self.fd_table.open_input(scratch, endpoint, true);
+                    let line = self.fd_table.read_text(
+                        scratch,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                    self.fd_table.entries.remove(&scratch);
+                    return Some(match line {
+                        Some(line) => trim_read_input(
+                            line,
+                            delimiter,
+                            char_limit,
+                            exact_char_limit,
+                            escape_aware,
+                            raw,
+                        ),
+                        None => {
+                            if !self.fd_table.read_timed_out {
+                                self.read_eof_no_delimiter = true;
+                            }
+                            String::new()
+                        }
+                    });
+                }
+            }
+        }
         // niubash#177: same operand resolution as open_input_redirect — a
         // virtual-root input operand may exist only under its `.exe`
         // spelling on disk.

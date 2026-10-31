@@ -557,6 +557,17 @@ pub struct Executor {
     /// $? = 128+sig), not as a jump_to_top_level exit; run_source_impl
     /// consumes the mark instead of recording an exit jump.
     signal_discard_pending: bool,
+    /// rubash#2233: set by the signal dispatch when an untrapped SIGHUP
+    /// is delivered to an interactive shell. GNU's termsig path
+    /// (sig.c:590 termsig_handler) does not discard and does not exit
+    /// with a plain status: it saves history, hangs up every job
+    /// (jobs.c:1783 hangup_all_jobs), runs the EXIT trap, and dies BY
+    /// SIGHUP (sig.c kill_shell: restore SIG_DFL, re-raise). The
+    /// dispatch cannot run that funnel mid-unwind, so it records the
+    /// mark and unwinds exit-class with 128+SIGHUP;
+    /// script_driver::finish_shell consumes the mark, runs the funnel
+    /// in GNU's order, and performs the signal death at the end.
+    hangup_death_pending: bool,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,
@@ -1449,7 +1460,7 @@ pub struct Executor {
     /// clears it between top-level commands as a backstop. rubash#846.
     pub(crate) compound_redirect_failed: Cell<bool>,
     /// rubash#1025: expanded targets a compound command's prepare phase
-    /// (apply_compound_*_arm / apply_brace_group_redirects) already
+    /// (the compound and brace prepare arms) already
     /// created through the noclobber O_EXCL open in
     /// create_redirect_output_prepared. The bind phase
     /// (open_compound_output_redirects) opens the SAME redirect again to
@@ -1597,6 +1608,30 @@ pub struct Executor {
         Option<String>,
         Option<crate::shell::variables::Variable>,
     )>,
+    /// rubash#2272: descriptors a `{var}` redirection asks to close
+    /// for the duration of one command — the targets of `{var}<&-` /
+    /// `{var}>&-` and the sources of move-form dups (`{var}<&N-`).
+    /// GNU applies a command's closes in the forked child (external
+    /// commands) or scoped to the command (in-process faces), never
+    /// as a permanent mutation of the parent's fd table: an
+    /// `exec 9<file` binding survives `cmd {v}<&-` with v=9. The
+    /// dynamic-fd applier therefore only RECORDS the closes here;
+    /// apply_external_fd_delivery performs them in the table just
+    /// before stamping what the child inherits, and
+    /// undo_child_fd_var_redirects drops whatever no delivery
+    /// consumed. (The exec face and the compound scope path keep
+    /// their persistent closes — they do not record here.)
+    fd_var_pending_closes: Vec<u32>,
+    /// rubash#2272: snapshots of the fd-table entries (and prior
+    /// fd-closed markers) that apply_external_fd_delivery closed for
+    /// a spawn from fd_var_pending_closes, so
+    /// undo_child_fd_var_redirects can restore the parent's bindings
+    /// once the command completes.
+    fd_var_close_restore: Vec<(
+        u32,
+        Option<crate::executor::fd_table::FdEntry>,
+        Option<String>,
+    )>,
     /// rubash#1646: descriptors a `{var}` redirection opened under
     /// `shopt varredir_close` on a command-scoped application. GNU closes
     /// them when the owning command COMPLETES (redir.c undo_redirections
@@ -1723,6 +1758,30 @@ pub struct Executor {
     /// produced it; reset at the start of every
     /// `apply_external_redirects`.
     external_stdio_slots: Option<external_redirects::PlannedStdioSlots>,
+    /// rubash#2235: bindings of the command's OWN numbered input
+    /// redirects (`3<file`, `3< <(...)`) that
+    /// `apply_external_stdin_redirect` opened while resolving an
+    /// fd-0 dup (`<&3`) against the command's ordered list — GNU's
+    /// do_redirections (redir.c:237) walks ONE list in the child, so
+    /// the dup and the binding share one open file description.
+    /// Stashed here so the immediately following
+    /// `spawn_external_process` stamps/pins the SAME description for
+    /// the child's fd slot instead of opening the target a second
+    /// time. Reset at the start of every `apply_external_redirects`.
+    own_input_bindings:
+        std::collections::HashMap<u32, std::rc::Rc<crate::executor::fd_table::FileFd>>,
+    /// rubash#2238: a foreground external command that inherits the
+    /// shell's stdin stream (the FUNCTION_STDIN mirror or a virtual
+    /// fd-0 text endpoint) is handed a duplicate of one open file
+    /// description holding the unread remainder, so the child's reads
+    /// advance a position the parent can measure — GNU fd 0 is one
+    /// kernel description whose offset every consumer shares
+    /// (lib/sh/zread.c:99). The pending fold records that description
+    /// between `apply_external_stdin_redirect` and the settle in
+    /// `execute_external`, which moves the stream cursor by exactly
+    /// the measured consumption instead of the old drain-to-EOF
+    /// accounting. `None` outside that window.
+    pending_stdin_fold: Option<external_setup::PendingStdinFold>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,
     external_file_builtins_enabled: bool,

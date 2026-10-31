@@ -1522,6 +1522,10 @@ pub struct WhitelistedSpawn {
     /// passed as CreateProcessW's lpCurrentDirectory. None keeps the
     /// process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#2241: job-control process grouping for async respawns.
+    /// Unix-only semantics (Windows has no process groups); accepted
+    /// for struct parity and ignored by this backend.
+    pub new_process_group: bool,
 }
 
 fn push_quoted_arg(cmdline: &mut Vec<u16>, arg: &str) {

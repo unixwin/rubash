@@ -345,6 +345,18 @@ impl Executor {
         std::mem::take(&mut self.signal_discard_pending)
     }
 
+    /// rubash#2233: non-consuming read of the hangup-death mark (see
+    /// Executor::hangup_death_pending) — the interactive reader peeks
+    /// to break its loop; finish_shell is the sole consumer.
+    pub fn hangup_death_pending(&self) -> bool {
+        self.hangup_death_pending
+    }
+
+    /// rubash#2233: take-style read of the hangup-death mark.
+    pub fn take_hangup_death_pending(&mut self) -> bool {
+        std::mem::take(&mut self.hangup_death_pending)
+    }
+
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
     /// 11, M-3): queue `signal` for this process through the
     /// engine's own delivery machinery — the same queue the

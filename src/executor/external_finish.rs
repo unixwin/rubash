@@ -54,14 +54,17 @@ impl Executor {
             // current binding (implicit std fds write their default stream)
             // instead of reopening the alias as a literal Windows path
             // (write_dev_stdio_redirect_output, rubash#216).
-            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+            if let Some(result) =
+                self.write_dev_stdio_redirect_output(&target, output, false, redirect.clobber)
+            {
                 return result;
             }
             let file = self.create_redirect_output(&target, redirect.clobber)?;
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
-            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output) {
+            if let Some(result) = self.write_dev_stdio_redirect_output(&target, output, true, true)
+            {
                 return result;
             }
             // Classified append open (rubash#1964): the raw mapped
@@ -313,12 +316,36 @@ impl Executor {
         self.apply_command_output_redirects(cmd, &mut ast)?;
         // A `${THIS_SH} script 3>&1`-style invocation is a process boundary:
         // the child's fd table is the parent's copy, so the command's
-        // numbered output redirections bind real slots for the child's whole
+        // numbered redirections bind real slots for the child's whole
         // run (redir.c do_redirection_internal) — and, like GNU's forked
-        // child, they are undone when the child exits: see the
-        // restore_compound_output_redirects call after the parent restores
-        // below.
-        let bound_output_fds = self.open_compound_output_redirects(cmd)?;
+        // child, they are undone when the child exits: see the restore
+        // calls after the parent restores below. rubash#2279: the input
+        // side of that contract was missing here — only the numbered
+        // OUTPUTS bound, so `./reader.sh 3<seed` ran the script with no
+        // fd 3 at all (and a parent fd 3 unshadowed, so the child read
+        // and consumed the parent's own binding). Bind the numbered
+        // heredocs and inputs first, in the compound binder's order
+        // (with_command_input_redirects: heredocs, numbered inputs,
+        // outputs, fd 0), ahead of the fd-0 install below so a `3<&0`
+        // dup still resolves against the pre-command stdin; fd-0
+        // heredocs stay with the command-input scope (include_stdin
+        // false). A failed later bind unwinds the earlier ones.
+        let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
+        let saved_numbered_inputs = match self.open_compound_numbered_input_redirects(cmd) {
+            Ok(saved) => saved,
+            Err(error) => {
+                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
+                return Err(error);
+            }
+        };
+        let bound_output_fds = match self.open_compound_output_redirects(cmd) {
+            Ok(fds) => fds,
+            Err(error) => {
+                self.restore_compound_numbered_input_redirects(saved_numbered_inputs);
+                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
+                return Err(error);
+            }
+        };
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
@@ -582,11 +609,65 @@ impl Executor {
             {
                 return None;
             }
-            let path = shell_path_to_windows(&target, &self.shell_state.env_vars);
-            FileFd::open_read(path).ok()
+            // rubash#2249: anchor the operand with the same ladder
+            // function_call_stdin uses (rubash#2240): map the spelling,
+            // apply the virtual-root .exe resolution, then anchor a
+            // relative result at the SESSION cwd. The bare mapped path
+            // resolved against the STARTUP directory, so after a `cd`
+            // this install missed the child's file — silently served
+            // by the text fallback below when no same-named file
+            // existed at the startup directory, but binding the WRONG
+            // file as a live endpoint when a decoy did. The empty word
+            // stays un-joined (the #2211 empty-operand rule).
+            let path = if target.is_empty() {
+                shell_path_to_windows(&target, &self.shell_state.env_vars)
+            } else {
+                self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ))
+            };
+            // rubash#2261: a `<>` redirect is GNU's r_input_output
+            // (make_cmd.c:682-683 — the redirect's flags are
+            // O_RDWR|O_CREAT; redir.c:725 redir_open performs the
+            // open): ONE descriptor serving both directions, so the
+            // install must bind the read-write pair exactly like the
+            // function-call face does (function_call_stdin,
+            // rubash#2249) — the plain open_read below installed only
+            // the read endpoint, and a child write like `echo x >&0`
+            // failed Bad file descriptor. A failed pair open falls
+            // through to function_call_stdin below, which reports the
+            // failing target (or binds its own pair) as for `<`. Net
+            // targets keep that same fall-through: their ladder result
+            // names no filesystem object, and function_call_stdin's
+            // net arm binds the connected socket in both directions.
+            if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                && !crate::special_paths::is_net_redirect_target(&target)
+            {
+                let (read_file, write_file) = FileFd::open_readwrite_pair(path).ok()?;
+                return Some((read_file, Some((write_file, target))));
+            }
+            FileFd::open_read(path).ok().map(|file| (file, None))
         });
-        if let Some(file) = file_stdin {
+        if let Some((file, write_end)) = file_stdin {
             self.set_fd_input_file(0, file, false);
+            if let Some((write_file, target)) = write_end {
+                // rubash#2261: the write half of the `<>` pair plus
+                // the fd-0 output env bookkeeping set_fd_readwrite_file
+                // keeps (mirrors save_and_apply_fd0_readwrite_env on
+                // the function face). The undo needs no per-binding
+                // record here: saved_fd_table / saved_env above
+                // snapshot the whole table and env before this install
+                // and are restored after the child runs — the same
+                // save/restore contract the function face spells out
+                // per binding (FunctionCallStdinBinding).
+                self.fd_table
+                    .open_output(0, FdWriteEndpoint::File(write_file), false);
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(0));
+                self.shell_state.env_vars.insert(fd_output_key(0), target);
+            }
             self.shell_state.env_vars.remove(FUNCTION_STDIN);
             self.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             self.shell_state.env_vars.remove(INHERIT_PROCESS_STDIN);
@@ -775,6 +856,26 @@ impl Executor {
         } else {
             None
         };
+        // rubash#2279: the caller's `{var}` delivery records
+        // (fd_var_external_undo / fd_var_pending_closes /
+        // fd_var_close_restore, recorded by apply_dynamic_fd_var_
+        // redirects in the simple-command funnel) are single-slot: the
+        // FIRST simple command the child runs re-enters the applier,
+        // which clears all three lists, and the caller's paired undo
+        // (execute_external's undo_child_fd_var_redirects) then replays
+        // nothing — the `{v}` variable assignment and its descriptor
+        // leaked into the parent (an empty script leaked nothing,
+        // because no inner command ever cleared the lists). GNU's
+        // varassign happens in the forked child (redir.c:1133-1166
+        // redir_varassign under do_redirections in the child,
+        // execute_cmd.c:5884) and dies with it; park the records for
+        // the span of the run — the child's own deliveries clear and
+        // consume their own — and hand them back at the restore block
+        // below so the caller's undo still runs against the parent's
+        // pre-command state.
+        let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
+        let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
+        let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
         let result = if uses_history_driver && fresh_shell {
             // bashhist.c pre_process_line / shell.c reader loop: expand and
             // record history group-by-group so `!!`/`!str` see the entries
@@ -881,6 +982,22 @@ impl Executor {
         // pre-bind state captured at bind time, after the parent restores,
         // so the emulation matches the child-process boundary.
         self.restore_compound_output_redirects(bound_output_fds);
+        // rubash#2279: the numbered input/heredoc binds from the entry
+        // above unwind here, after the wholesale restores (their saved
+        // entries name the pre-bind state, so replaying them returns
+        // each shadowed slot — and the env channels the binder touched
+        // — to exactly what the parent held, including a parent fd the
+        // child must never have consumed).
+        self.restore_compound_numbered_input_redirects(saved_numbered_inputs);
+        self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
+        // rubash#2279: hand the caller's `{var}` delivery records back
+        // (parked above before the run) so execute_external's
+        // undo_child_fd_var_redirects replays them now — closing the
+        // allocated descriptor and restoring the variable's prior
+        // value (or unset) in the parent.
+        self.fd_var_external_undo = saved_fd_var_external_undo;
+        self.fd_var_pending_closes = saved_fd_var_pending_closes;
+        self.fd_var_close_restore = saved_fd_var_close_restore;
         if fresh_shell {
             // Discard signals that arrived while the emulated child was
             // alive — GNU's real child exits with its queue — then hand the

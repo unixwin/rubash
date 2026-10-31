@@ -1801,6 +1801,7 @@ impl Executor {
             exit_code: self.exit_code,
             parse_error_occurred: false,
             signal_discard_pending: false,
+            hangup_death_pending: false,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
@@ -1984,6 +1985,8 @@ impl Executor {
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
+            fd_var_pending_closes: Vec::new(),
+            fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
             read_deadline: None,
             read_timed_out: false,
@@ -2011,6 +2014,11 @@ impl Executor {
             host_external_command_handler: None,
             external_route_provider: self.external_route_provider.clone(),
             external_stdio_slots: None,
+            own_input_bindings: std::collections::HashMap::new(),
+            // A forked comsub child starts with no pending stdin fold:
+            // the fold belongs to the parent's in-flight external
+            // dispatch, whose child description the fork does not own.
+            pending_stdin_fold: None,
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,

@@ -2107,6 +2107,48 @@ mod kernel_signals {
     pub(super) fn note_self_delivery(sig: i32) {
         if is_managed(sig) {
             KERNEL_CAUSED.fetch_and(!bit(sig), Ordering::Relaxed);
+            // rubash#2241: the sender record agrees — a self delivery
+            // is an in-group, shell-only addressing by construction.
+            record_sender_pid(sig, std::process::id() as i32);
+        }
+    }
+
+    /// Sender pid of the most recently drained kill(2)-caused delivery,
+    /// indexed by signal number (0 = none recorded, kernel-caused, or
+    /// no sender information). Companion to KERNEL_CAUSED: the origin
+    /// bit alone cannot tell a GROUP-addressed kill(2) — the delivery
+    /// bats' CTRL-C tests use (kill -INT -- -pgid, rubash#2241) — from
+    /// one addressed to this shell alone (rubash#1034's deferral
+    /// shape); the sender's process-group membership can, because a
+    /// group delivery's sender necessarily sits OUTSIDE the target
+    /// group while a shell-only `kill -INT $$` from one of the shell's
+    /// own jobs comes from INSIDE it. Consumed only by the
+    /// virtual-child model in trap_exec::sleep_interruptibly.
+    static LAST_SENDER_PID: OnceLock<Mutex<[i32; 128]>> = OnceLock::new();
+
+    fn sender_pid_table() -> &'static Mutex<[i32; 128]> {
+        LAST_SENDER_PID.get_or_init(|| Mutex::new([0; 128]))
+    }
+
+    fn record_sender_pid(sig: i32, pid: i32) {
+        if !is_managed(sig) || !(0..128).contains(&sig) {
+            return;
+        }
+        if let Ok(mut table) = sender_pid_table().lock() {
+            table[sig as usize] = pid;
+        }
+    }
+
+    /// Sender pid recorded for the latest drained delivery of `sig`
+    /// (see LAST_SENDER_PID); None when nothing usable was recorded.
+    pub(super) fn last_delivery_sender_pid(sig: i32) -> Option<u32> {
+        if !is_managed(sig) || !(0..128).contains(&sig) {
+            return None;
+        }
+        let table = sender_pid_table().lock().ok()?;
+        match table[sig as usize] {
+            pid if pid > 0 => Some(pid as u32),
+            _ => None,
         }
     }
 
@@ -2956,11 +2998,23 @@ mod kernel_signals {
                 if is_managed(origin.signal) {
                     if matches!(origin.cause, Cause::Kernel) {
                         KERNEL_CAUSED.fetch_or(bit(origin.signal), Ordering::Relaxed);
+                        // rubash#2241: a kernel delivery has no sender
+                        // process; clear any stale sender record so the
+                        // virtual-child model never pairs this arrival
+                        // with an earlier kill(2)'s sender.
+                        record_sender_pid(origin.signal, 0);
                         if origin.signal == libc::SIGINT {
                             SIGINT_KERNEL_EPOCH.fetch_add(1, Ordering::Relaxed);
                         }
                     } else {
                         KERNEL_CAUSED.fetch_and(!bit(origin.signal), Ordering::Relaxed);
+                        // rubash#2241: keep the sender for the
+                        // group-addressing test in the virtual-child
+                        // model (see LAST_SENDER_PID).
+                        record_sender_pid(
+                            origin.signal,
+                            origin.process.map(|p| p.pid).unwrap_or(0),
+                        );
                     }
                 }
                 origin.signal
@@ -3238,6 +3292,25 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             {
                 Disposition::Handler
             }
+            // rubash#2233: SIGHUP is in the same terminating set
+            // (sig.c:128) and the same interactive install: GNU's
+            // interactive shell CATCHES a hangup so termsig_handler
+            // (sig.c:590) can save history, hang up every job
+            // (jobs.c:1783 hangup_all_jobs) and only then die BY the
+            // signal (kill_shell restores SIG_DFL and re-raises). At
+            // SIG_DFL the kernel kills the shell in place — no job
+            // hangup, no EXIT trap, no history save. The mailbox pin
+            // routes the delivery to the boundary dispatch, whose
+            // untrapped branch records the hangup-death mark for
+            // finish_shell's funnel. Entry-ignored SIGHUP stays
+            // ignored (the pin must not un-ignore it), exactly like
+            // the SIGINT pin above.
+            None if interactive
+                && *sig == libc::SIGHUP as i32
+                && !kernel_signals::entry_ignored(*sig) =>
+            {
+                Disposition::Handler
+            }
             // The same sig.c block: an interactive shell also ignores
             // SIGTERM (initialize_shell_signals: `if (interactive) ...
             // set_signal_handler (SIGTERM, SIG_IGN)`), so a directed
@@ -3366,6 +3439,14 @@ pub fn kernel_handler_installed(signal: i32) -> bool {
 #[cfg(unix)]
 pub fn last_delivery_kernel_caused(signal: i32) -> bool {
     kernel_signals::last_delivery_kernel_caused(signal)
+}
+
+/// Sender pid of the most recently drained kill(2) delivery of
+/// `signal`, when one was recorded (rubash#2241; see
+/// kernel_signals::LAST_SENDER_PID).
+#[cfg(unix)]
+pub fn last_delivery_sender_pid(signal: i32) -> Option<u32> {
+    kernel_signals::last_delivery_sender_pid(signal)
 }
 
 /// Monotonic count of kernel-caused SIGINT deliveries drained so far
@@ -3769,6 +3850,47 @@ pub fn child_pre_exec_reset_async() -> std::io::Result<()> {
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
     Ok(())
+}
+
+/// rubash#2241: the child side of job-control process grouping. GNU
+/// jobs.c make_child places every job child into the job's process
+/// group between fork and exec (jobs.c:2390 `setpgid (mypid,
+/// pipeline_pgrp)`); for a single-process job pipeline_pgrp is the
+/// child's own pid (jobs.c:2446-2449). Without it the child stays in
+/// the shell's inherited group and the group-addressed signal form
+/// `kill -SIG -- -$!` — the only way to emulate a terminal ^C against
+/// a whole job tree — fails with ESRCH. Spawn sites select this
+/// fragment only when the monitor option is on; the decision is the
+/// parent's, made at hook-selection time, never re-read in the child
+/// (rubash#866). The parent repeats the call after the spawn returns
+/// (see [`group_spawned_child`]).
+#[cfg(unix)]
+pub fn child_pre_exec_setpgid() -> std::io::Result<()> {
+    if unsafe { libc::setpgid(0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Composed pre_exec hook for a job-control async spawn: the plain
+/// entry-disposition reset, then the grouping fragment above.
+#[cfg(unix)]
+pub fn child_pre_exec_reset_grouped() -> std::io::Result<()> {
+    child_pre_exec_reset()?;
+    child_pre_exec_setpgid()
+}
+
+/// Parent half of the job-control grouping (rubash#2241): GNU repeats
+/// the child's setpgid in the parent after fork (jobs.c:2455, "to
+/// avoid possible race conditions", POSIX Rationale B.4.3.3) so the
+/// group already exists when the spawn returns and `$!` names it. A
+/// failure is an expected race — the child grouped itself first, or
+/// already exited — and is ignored, as in GNU.
+#[cfg(unix)]
+pub fn group_spawned_child(pid: u32) {
+    unsafe {
+        libc::setpgid(pid as libc::pid_t, pid as libc::pid_t);
+    }
 }
 
 #[cfg(all(test, unix))]

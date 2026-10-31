@@ -1795,6 +1795,17 @@ mod issue_niubash_404 {
     /// a sourced file does not, which is why `bash --rcfile rc -i -c 'echo
     /// AFTER'` with `exit 3` in the rc stays silent while `bash -i -c 'exit 3'`
     /// echoes.
+    ///
+    /// The reader phase is simulated with the process's OWN `-i` flag —
+    /// GNU's classification input (shell.c:540-549 derives `interactive`
+    /// from the invocation itself, never from the environment). An
+    /// earlier revision of this pin stamped `__RUBASH_INTERACTIVE=1`
+    /// into the child env instead; that stamp is a parent's
+    /// classification riding the environment, and rubash#2259 made it
+    /// classify nothing (the leak the issue2259 pins assert against), so
+    /// the stamp shape is a plain non-interactive `-c` shell now —
+    /// exactly as GNU treats it (the var is rubash-internal; GNU ignores
+    /// it and prints no echo for that shape either).
     #[test]
     fn case_1_exit_echo_suppressed_inside_sourced_file() {
         let dir = case_scratch("404.1");
@@ -1807,7 +1818,6 @@ mod issue_niubash_404 {
                 .env_clear()
                 .env("PATH", minimal_path())
                 .env("HOME", &dir)
-                .env("__RUBASH_INTERACTIVE", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1821,7 +1831,7 @@ mod issue_niubash_404 {
         };
 
         // Reader-phase exit: the echo is required.
-        let (_, stderr, code) = run(&["--norc", "-c", "exit 3"]);
+        let (_, stderr, code) = run(&["--norc", "-i", "-c", "exit 3"]);
         assert_eq!(code, Some(3), "stderr:\n{stderr}");
         assert!(
             stderr.lines().any(|line| line == "exit"),
@@ -1829,7 +1839,7 @@ mod issue_niubash_404 {
         );
 
         // Exit inside the sourced file: no echo.
-        let (stdout, stderr, code) = run(&["--norc", "-c", ". rc.sh"]);
+        let (stdout, stderr, code) = run(&["--norc", "-i", "-c", ". rc.sh"]);
         assert_eq!(code, Some(3), "stderr:\n{stderr}");
         assert_eq!(stdout.trim_end(), "RAN", "stdout:\n{stdout}");
         assert!(

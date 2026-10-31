@@ -2043,7 +2043,9 @@ impl Executor {
                 // aliased fd (write_dev_stdio_redirect_output) — reopening
                 // the alias as a literal path hit CONOUT$ and failed with
                 // Permission denied under a redirected stderr (rubash#216).
-                if let Some(result) = self.write_dev_stdio_redirect_output(&target, &output) {
+                if let Some(result) =
+                    self.write_dev_stdio_redirect_output(&target, &output, true, true)
+                {
                     result?;
                     self.exit_code = 0;
                     return Ok(true);
@@ -2087,7 +2089,9 @@ impl Executor {
                 if crate::executor::execution_misc::is_closed_redirect_target(&target) {
                     return Err(super::external_finish::cat_closed_stdout_error());
                 }
-                if let Some(result) = self.write_dev_stdio_redirect_output(&target, &output) {
+                if let Some(result) =
+                    self.write_dev_stdio_redirect_output(&target, &output, false, redirect.clobber)
+                {
                     result?;
                     self.exit_code = 0;
                     return Ok(true);
@@ -2189,10 +2193,12 @@ impl Executor {
                     }
                     continue;
                 }
-                // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: GNU opens a
-                // dup of the descriptor — the in-process equivalent reads
-                // the fd endpoint's remaining bytes (subst.c shared
-                // offset).
+                // `/dev/std*`, `/dev/fd/N`, `/proc/self/fd/N`: for stream
+                // endpoints GNU's open attaches to the descriptor — the
+                // in-process equivalent reads the fd endpoint's remaining
+                // bytes (shared offset); a regular-file endpoint re-opens
+                // fresh and serves the whole file (rubash#2256, inside
+                // dev_fd_operand_bytes / dev_fd_operand_live_file).
                 if let Some(fd) = crate::executor::dev_fd_operands::dev_operand_fd(&target) {
                     // rubash#1952: an identity cat over a live File
                     // endpoint (a process substitution's pipe, a FIFO)

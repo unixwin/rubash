@@ -227,7 +227,10 @@ fn internal_pipeline_program_name(program: &std::path::Path) -> Option<&str> {
 /// as the observable contract (same convention as builtins/kill.rs
 /// signal_process's TerminateProcess(128+signal)). Death notices are not
 /// affected: exit_status_signal stays None on Windows, matching GNU's
-/// silence for SIGPIPE deaths of foreground members in scripts.
+/// silence for SIGPIPE deaths of foreground members in scripts. Since
+/// rubash#2250 the hard-kill feeding this synthesis is armed only by
+/// non-Unix waits; on Unix a member's reaped status is reported verbatim
+/// and a reported 141 is always a genuine kernel SIGPIPE death.
 fn lingerer_sigpipe_status() -> std::process::ExitStatus {
     // SIGPIPE is 13 on every platform bash models (builtins/kill.rs signal
     // table). Windows: the raw value IS the exit code (GetExitCodeProcess)
@@ -341,6 +344,23 @@ fn wait_for_windows_pipeline_member(
     // unconditional deadline killed healthy producers mid-stream and
     // truncated `seq 5000000 | wc -l`-shaped pipelines at whatever had flowed
     // by the cap (silent data loss, rc=0, per-run drift).
+    //
+    // rubash#2250: the deadline is a Windows-only emulation and must never
+    // arm on Unix. A downstream exit proves only that this member's write
+    // end reached EOF — not that the member died. A member in exit transit
+    // (an interpreter child's teardown after its last write, EXIT-trap
+    // work, plain scheduling latency on a loaded host) is still a live
+    // process, and GNU's wait_for reports the status it eventually exits
+    // with, verbatim (jobs.c process_exit_status). Arming the deadline on
+    // Unix converted that transit into a fabricated SIGPIPE death: the
+    // member was SIGKILLed and PIPESTATUS recorded 141 instead of its real
+    // status (~50% for shell-process producers in the #2236 battery). On
+    // Unix the emulation is also unnecessary: SIGPIPE is SIG_DFL
+    // process-wide since rubash#1333, so a member that keeps writing into
+    // the dead pipe dies of the kernel's SIGPIPE on its own and this wait
+    // reaps that genuine 141. The arming and kill below are therefore
+    // runtime-gated with cfg!(not(unix)) — compiled everywhere (the
+    // Windows path stays byte-identical), never armed on Unix.
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(5);
     const NATURAL_EXIT_WINDOW: std::time::Duration = std::time::Duration::from_millis(100);
     let mut downstream = downstream;
@@ -358,10 +378,12 @@ fn wait_for_windows_pipeline_member(
             Some(next) => next.try_wait().map_err(ExecuteError::IoError)?.is_some(),
             None => true,
         };
-        if downstream_gone && kill_deadline.is_none() {
+        if cfg!(not(unix)) && downstream_gone && kill_deadline.is_none() {
             kill_deadline = Some(std::time::Instant::now() + NATURAL_EXIT_WINDOW);
         }
-        if kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+        if cfg!(not(unix))
+            && kill_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
             // D10: hard-kill the whole tree — winuxcmd `powershell` is a
             // dispatcher whose `pwsh` grandchild would otherwise outlive
             // this Child and hold the niu stdout-pump write end open.
@@ -575,6 +597,56 @@ struct TimedPipelineInput {
     eof_at: f64,
 }
 
+/// rubash#2246: does any stdio-slot mirror target of this compound
+/// command need the process-substitution rewrite
+/// (materialize_compound_output_process_substitutions)? That pass only
+/// ever rewrites a mirror target that starts with `>(` (both of its
+/// arms require the prefix), so with no such target the materialize
+/// call is the identity returning an empty vec — and the wrapper may
+/// borrow the command node instead of deep-cloning it just to feed a
+/// mutation that cannot happen. The same gate the subshell and
+/// brace-group wrappers already inline (rubash#117 whitelist
+/// discipline: the condition is a necessary condition of the mutation
+/// arms themselves, so a false negative is impossible).
+pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &CommandNode) -> bool {
+    [
+        command.redirect_out.as_deref(),
+        command.append.as_deref(),
+        command.redirect_err.as_deref(),
+        command.redirect_err_append.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|redirect| redirect.target.starts_with(">("))
+}
+
+/// rubash#2255 (§8 face): a list-only redirect that merely DUPS a
+/// stdio descriptor (`3>&1`, `4<&0`, move forms included) does not
+/// trigger the shell-writer decline in execute_shell_writer_pipeline.
+/// At the two-stage composition this path demonstrably delivers such
+/// a dup: the producer child's only foreign pipe is its own stream
+/// pipe — the stdio alias the pin guard (rubash#1626/#2284)
+/// recognizes — so the dup of fd 1/2 lands. Declining would reroute
+/// the producer to the sequential stage spawner, whose fd delivery
+/// cannot dup a capture-pipe stdio endpoint onto a numbered slot
+/// today (`sh -c 'echo o >&3' 3>&1 | wc -c` regressed from printing
+/// 2 to a child EBADF when the decline covered dups) — a
+/// pre-existing sequential-face defect, visible at mid/last stage
+/// positions on master, and not one of §8's shapes. File, close,
+/// and dup-of-a-non-stdio-fd bindings keep the decline: those are
+/// exactly the pins the consumer-chain pipes break. (At ≥3 stages
+/// the stdio dup is lost on BOTH paths today; the exemption
+/// preserves master behaviour there instead of changing its shape.)
+fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_none()
+        && matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput
+        )
+        && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -680,8 +752,8 @@ impl Executor {
             // the body (GNU applies a compound's redirects before executing
             // it, execute_cmd.c:5606 for the builtin/function class and
             // do_redirection_internal for the group class), so a restricted
-            // shell refuses here — BEFORE apply_brace_group_redirects
-            // creates any target file or splices into the body — and skips
+            // shell refuses here — BEFORE prepare_brace_group_redirects
+            // creates any target file — and skips
             // the body with status 1 (GNU: `{ echo down; } >& f` leaves no
             // file, prints "<f>: restricted: cannot redirect output", body
             // never runs). Without this the group's mirrors went straight
@@ -708,39 +780,29 @@ impl Executor {
             }
             // GNU walks the group body by POINTER (execute_command_internal
             // on the COMMAND allocated once at parse; make_cmd.c never
-            // copies). The two deep clones this port paid per brace group —
-            // command.clone() plus brace_group.body.clone() — are O(depth^2)
-            // for nested `{ { ...; } }` (level k copies the remaining
-            // depth-k CommandNodes, ~2.2 KB each) and are taken only to feed
-            // mutations that happen exclusively under the two gates below:
-            //
-            // 1. materialize_compound_output_process_substitutions rewrites a
-            //    redirect target only when it starts with `>(` (both of its
-            //    arms, shared_combined_output_process_substitution and
-            //    materialize_compound_output_redirect, require that prefix);
-            //    with no such target the call is the identity returning an
-            //    empty vec, so the command is borrowed unchanged.
-            // 2. apply_brace_group_redirects splices into the body only for
-            //    a stdio-slot redirect (redirect_out/append with fd==1,
-            //    redirect_err/redirect_err_append with fd==2 — exactly its
-            //    four `if let` admissions); with none, the body slice is
-            //    executed as-is.
-            // Both gates are necessary conditions of the mutation arms
-            // themselves (rubash#117 whitelist discipline): a false negative
-            // is impossible, and a redirect-free group (the common case)
-            // skips both clones.
-            let redirect_needs_ps_rewrite = [
-                command.redirect_out.as_deref(),
-                command.append.as_deref(),
-                command.redirect_err.as_deref(),
-                command.redirect_err_append.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .any(|redirect| redirect.target.starts_with(">("));
+            // copies). The one deep clone left here — command.clone() — is
+            // O(depth^2) for nested `{ { ...; } }` (level k copies the
+            // remaining depth-k CommandNodes, ~2.2 KB each) and is taken
+            // only to feed the one mutation that can still occur:
+            // materialize_compound_output_process_substitutions rewrites a
+            // redirect target only when it starts with `>(` (both of its
+            // arms, shared_combined_output_process_substitution and
+            // materialize_compound_output_redirect, require that prefix);
+            // with no such target the call is the identity returning an
+            // empty vec, so the command is borrowed unchanged
+            // (compound_redirect_needs_procsub_rewrite — the gate is a
+            // necessary condition of the mutation arms themselves,
+            // rubash#117 whitelist discipline, so a false negative is
+            // impossible). The body clone is gone entirely (rubash#2246):
+            // prepare_brace_group_redirects performs the entry side
+            // effects for a stdio-slot redirect (redirect_out/append with
+            // fd==1, redirect_err/redirect_err_append with fd==2 — exactly
+            // its four arm admissions) and the fd-table binding carries
+            // the body, so the stored slice always executes as-is.
             let mut redirect_owned;
             let group_outputs;
-            let redirect_command: &CommandNode = if redirect_needs_ps_rewrite {
+            let redirect_command: &CommandNode = if compound_redirect_needs_procsub_rewrite(command)
+            {
                 redirect_owned = command.clone();
                 group_outputs =
                     self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
@@ -749,7 +811,7 @@ impl Executor {
                 group_outputs = Vec::new();
                 command
             };
-            let brace_splice_needed = command
+            let brace_prepare_needed = command
                 .redirect_out
                 .as_deref()
                 .is_some_and(|r| r.fd.unwrap_or(1) == 1)
@@ -765,21 +827,16 @@ impl Executor {
                     .redirect_err_append
                     .as_deref()
                     .is_some_and(|r| r.fd.unwrap_or(2) == 2);
-            let mut body_owned;
-            let body: &[CommandNode] = if brace_splice_needed {
-                body_owned = brace_group.body.clone();
-                if let Err(error) =
-                    self.apply_brace_group_redirects(redirect_command, &mut body_owned)
-                {
-                    // The application site already reported the failed open
+            if brace_prepare_needed {
+                if let Err(error) = self.prepare_brace_group_redirects(redirect_command) {
+                    // The preparation site already reported the failed open
                     // (GNU redir.c:135 redirection_error) with the parse-order
-                    // fd-2 bindings in force, and undid those bindings. What
-                    // remains is the single adjudication the main dispatch
-                    // owns for a compound's own failed redirection: status 1,
-                    // the ERR trap, errexit — and NO re-dispatch (the old
-                    // fall-through re-ran the same failing command through
-                    // the leaf path, printing the diagnostic twice, rubash#826
-                    // faces 1-2).
+                    // fd-2 bindings in force. What remains is the single
+                    // adjudication the main dispatch owns for a compound's
+                    // own failed redirection: status 1, the ERR trap,
+                    // errexit — and NO re-dispatch (the old fall-through
+                    // re-ran the same failing command through the leaf path,
+                    // printing the diagnostic twice, rubash#826 faces 1-2).
                     return match error {
                         ExecuteError::IoError(_) => self.finish_brace_redirect_failure(command),
                         // A failglob abort was reported at the expansion;
@@ -787,10 +844,8 @@ impl Executor {
                         other => Err(other),
                     };
                 }
-                &body_owned
-            } else {
-                &brace_group.body
-            };
+            }
+            let body: &[CommandNode] = &brace_group.body;
             // `{ list; } N<<EOF` keeps the numbered heredoc fd open for the
             // whole group (redir.c do_redirection_internal applies compound
             // redirections once), like with_loop_fd_heredocs does for loops.
@@ -2418,6 +2473,41 @@ impl Executor {
         {
             return Ok(None);
         }
+        // rubash#2255 (§8 face): an EXTERNAL producer carrying its own
+        // numbered or {var} redirect (a list-only entry such as
+        // `3<seed`) must not take this path. The producer runs through
+        // the sequential stage spawner, whose fd delivery opens the
+        // binding and registers a pre_exec pin for its slot — but this
+        // path has already spawned the consumers on pre-created pipes,
+        // so the producer child is forked while those foreign
+        // anonymous pipes occupy the low descriptor slots. One parks
+        // exactly on the pin's target, and the pin guard
+        // (pin_ambient_fds_in_child, rubash#1626/#2284) cannot tell a
+        // foreign pipe apart from std's exec-error channel, so it
+        // skips the pin and the binding is silently dropped
+        // (`sh -c 'cat <&3' 3<seed.txt | cat | wc -c` printed 0; the
+        // child had no fd 3 at all, while fd >= 4 targets survived —
+        // the foreign pipes only reach the lowest slots). GNU
+        // applies the element's own list in its fork
+        // (execute_cmd.c:2620 execute_pipeline; redir.c:237
+        // do_redirections), so decline to the sequential stage loop,
+        // which spawns stage 0 in a clean fd layout and delivers the
+        // binding — the same decline the concurrent admissions make
+        // for list-only members (concurrent_external_stage_spec).
+        // Compound and function producers bind their numbered
+        // redirects through their own stage funnels, not the pin,
+        // and keep this path. A redirect that merely dups a stdio
+        // descriptor (`3>&1`) is likewise exempt — this path
+        // delivers it at the two-stage composition, and the
+        // sequential spawner cannot (see redirect_is_stdio_dup).
+        if !command_is_compound_pipeline_stage(commands[0])
+            && !self.command_first_word_is_function(commands[0])
+            && commands[0].redirects.iter().any(|redirect| {
+                redirect.is_list_only_redirect() && !redirect_is_stdio_dup(redirect)
+            })
+        {
+            return Ok(None);
+        }
         // The producer's own fd-1 target must be the pipe: `>file` needs the
         // sequential routing walk. A stderr redirect is fine — the element's
         // body applies it internally (execute_compound_pipeline_stage).
@@ -2649,6 +2739,46 @@ impl Executor {
                     None => true,
                 }
         };
+        // rubash#2244: start draining the last member's stdout/stderr NOW —
+        // before the in-process producer runs, not after it returns. This
+        // path's producer is the shell itself (the all-external path's
+        // members are processes, so a drain started after their spawns
+        // still races nothing in-process): the producer streams into
+        // pipe[0], the last member copies pipe[0] into its captured stdout
+        // pipe, and with nobody reading that pipe the chain wedges once
+        // pipe[0] plus the capture pipe are both full (2 x 64 KiB on
+        // Linux — `{ ...; } | cat` hung hard past 131072 bytes of output,
+        // the consumer blocked in pipe write, the producer blocked in
+        // write_pipeline_stream). This is the niubash#158 discipline the
+        // #2094 fix applied to the external spawn path: GNU forks every
+        // element (execute_cmd.c:2620 execute_pipeline), so the rightmost
+        // element's output is drained concurrently by construction and a
+        // forked producer's written bytes are never recalled. The drain
+        // target is therefore decided here from the ambient context alone
+        // (final_member_stdout_streams_to_host reads only the member's
+        // redirects and the pipeline's fd/capture state, all settled
+        // before the producer runs): when the producer later errors, any
+        // bytes already streamed to the host stay emitted — the fork
+        // model's observable — while everything not yet emitted keeps the
+        // discard contract exactly (the buffered producer_out write below
+        // stays gated on producer_error, the collected stderr is still
+        // only written on a clean producer, and the Err still propagates).
+        let last_index = consumer_count - 1;
+        let stdout_target = if self.final_member_stdout_streams_to_host(
+            consumers.last().expect("pipeline has at least two stages"),
+        ) {
+            PipelineDrainTarget::StreamHostStdout
+        } else {
+            PipelineDrainTarget::Collect
+        };
+        let last_stdout = processes[last_index]
+            .stdout
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, stdout_target));
+        let last_stderr = processes[last_index]
+            .stderr
+            .take()
+            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         let saved_pipeline_stream = self.pipeline_stdout_stream;
         self.pipeline_stdout_stream = stream_handle;
         let producer_result = self.execute_pipeline_stage(
@@ -2685,32 +2815,12 @@ impl Executor {
         // the first consumer.
         drop(producer_writer.take());
 
-        // Reap the consumers exactly like the all-external path: drain the
-        // last member's stdout/stderr first (niubash#158), then wait each
-        // member against its immediate downstream so the Windows broken-pipe
-        // window only arms after that downstream exited.
+        // Reap the consumers exactly like the all-external path (the last
+        // member's drains have been running since before the producer —
+        // rubash#2244 above): wait each member against its immediate
+        // downstream so the Windows broken-pipe window only arms after
+        // that downstream exited.
         let mut results: Vec<(String, String, i32)> = vec![Default::default(); consumer_count];
-        let last_index = consumer_count - 1;
-        // When the producer exited cleanly the last consumer's payload goes
-        // only to write_pipeline_output below, so it may stream live — unless
-        // a producer error makes that write (and the payload) get discarded.
-        let stream_stdout = producer_error.is_none()
-            && self.final_member_stdout_streams_to_host(
-                consumers.last().expect("pipeline has at least two stages"),
-            );
-        let stdout_target = if stream_stdout {
-            PipelineDrainTarget::StreamHostStdout
-        } else {
-            PipelineDrainTarget::Collect
-        };
-        let last_stdout = processes[last_index]
-            .stdout
-            .take()
-            .map(|reader| spawn_pipe_drain(reader, stdout_target));
-        let last_stderr = processes[last_index]
-            .stderr
-            .take()
-            .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         for index in 0..last_index {
             let (head, tail) = processes.split_at_mut(index + 1);
             let member = head.last_mut().expect("member index inside pipeline");
@@ -3402,8 +3512,11 @@ impl Executor {
     /// hands the LAST pipe's read end to the in-shell tail as fd 0 (via
     /// `pipeline_stdin_stream`), so the tail pulls the stream on demand. When
     /// the tail stops reading (it exits, or reads one record), its read end is
-    /// dropped, the producers meet EPIPE, and each lingering member is reaped
-    /// with the SIGPIPE-shaped status 141 (`wait_for_windows_pipeline_member`).
+    /// dropped and the producers meet EPIPE: on Unix a producer that keeps
+    /// writing dies of the kernel's SIGPIPE and is reaped with its genuine
+    /// 141, while on Windows the lingering member is reaped with the
+    /// SIGPIPE-shaped status 141 (`wait_for_windows_pipeline_member`;
+    /// rubash#2250).
     /// Admission is a WHITELIST: the tail must be a literal builtin from
     /// `streaming_builtin_tail` and every prefix member a plain external, so a
     /// shape this path cannot faithfully stream keeps the existing executor.
@@ -3575,9 +3688,11 @@ impl Executor {
 
         // Reap the producer chain BEFORE propagating any tail error: each
         // member is waited against its immediate downstream, and the last
-        // member against nothing (the tail is already gone), so a lingering
-        // producer is SIGPIPE-shaped after the natural exit window
-        // (wait_for_windows_pipeline_member -> 141).
+        // member against nothing (the tail is already gone). On Windows a
+        // lingering producer is SIGPIPE-shaped after the natural exit
+        // window (wait_for_windows_pipeline_member -> 141); on Unix the
+        // wait is unbounded and the producer's reaped status is reported
+        // verbatim — a genuine SIGPIPE death included (rubash#2250).
         let mut statuses: Vec<i32> = Vec::with_capacity(tail_index + 1);
         for index in 0..tail_index {
             let (head, downstream) = processes.split_at_mut(index + 1);
@@ -4066,16 +4181,29 @@ impl Executor {
                     status
                 }
                 None => {
-                    // The sequential tail consumed this member's output and
-                    // the downstream already exited, so a member still alive
-                    // here is the broken-pipe lingerer — report the SIGPIPE
-                    // shape GNU observes (rubash#382; lingerer_sigpipe_status).
-                    // Tree-kill first (D10): a dispatcher grandchild would
-                    // otherwise outlive this Child and pin niu's exit drain.
-                    kill_lingerer(&mut process);
-                    process.wait().map_err(ExecuteError::IoError)?;
+                    // The last member has exited, but that proves only that
+                    // this member's write end reached EOF (or that the last
+                    // member stopped reading) — not that this member died.
+                    // A member still alive here may simply be in exit
+                    // transit: an interpreter child doing teardown after
+                    // its last write, EXIT-trap work, or scheduling latency
+                    // under load. GNU's wait_for (jobs.c:3064) blocks for
+                    // the member's own exit and surfaces the reaped status
+                    // verbatim (jobs.c process_exit_status); the shell
+                    // never kills a member from its wait path and never
+                    // rewrites a status. The previous arm did both — one
+                    // try_wait, then a tree-kill plus the synthesized
+                    // SIGPIPE shape (rubash#382) — which fabricated a 141
+                    // for any member caught in transit (rubash#2250: ~50%
+                    // for shell-process producers piped into `cat`). Wait
+                    // for the member's real exit instead: a member that
+                    // keeps writing into the dead pipe dies of the
+                    // kernel's SIGPIPE on its own (SIGPIPE is SIG_DFL
+                    // process-wide since rubash#1333), so a genuine 141
+                    // still arrives — as a reaped status, not a synthesis.
+                    let status = process.wait().map_err(ExecuteError::IoError)?;
                     super::read_helpers::note_reaped_child_cpu(&process);
-                    lingerer_sigpipe_status()
+                    status
                 }
             };
             results.push((
@@ -5097,6 +5225,53 @@ impl Executor {
             }
         }
 
+        // rubash#2255: a NON-builtin stage whose own redirect list
+        // binds a numbered input fd (`3<seed`, `3< <(...)`, `4<&0`)
+        // cannot be served by the inline slot arms below: they run on
+        // this executor against the stage's text payload and hold no
+        // per-element fd table, so the binding — and every `<&N` dup
+        // or /dev/fd/N operand that reads it — is silently dropped
+        // (`cat 3<seed <&3 | wc -c` printed 0). GNU forks the element
+        // and applies its whole ordered list in the child
+        // (redir.c:237 do_redirections), so decline to the external
+        // stage spawner, which applies the list through the shared
+        // path (apply_external_stdin_redirect for fd 0,
+        // apply_external_fd_delivery for the numbered bindings) —
+        // the same decline the fd-0 file gate above makes. Builtin
+        // stages keep the stage-subshell route, whose funnel binds
+        // numbered fds into the clone's table; {var} entries belong
+        // to the dynamic-fd applier, not this gate.
+        {
+            let first_raw = command
+                .word_metadata
+                .first()
+                .map(|metadata| metadata.raw.as_str());
+            let builtin_stage = command
+                .words
+                .first()
+                .and_then(|name| {
+                    self.expand_command_word(command, 0, name, first_raw)
+                        .into_iter()
+                        .next()
+                })
+                .is_some_and(|expanded| self.routes_as_builtin(&expanded));
+            if !builtin_stage
+                && command.redirects.iter().any(|redirect| {
+                    redirect.fd_var.is_none()
+                        && redirect.fd.is_some_and(|fd| fd >= 3)
+                        && matches!(
+                            redirect.kind,
+                            crate::parser::RedirectKind::Input
+                                | crate::parser::RedirectKind::ReadWrite
+                                | crate::parser::RedirectKind::DuplicateInput
+                                | crate::parser::RedirectKind::CloseInput
+                        )
+                })
+            {
+                return self.execute_external_pipeline_stage(command, input, stdin_inherit);
+            }
+        }
+
         // rubash#2124: a builtin element carrying a /dev/tcp|udp input
         // redirect (fd-0 winner or a numbered fd) must run in the
         // stage subshell, where the simple-command funnel's bind
@@ -5911,8 +6086,8 @@ impl Executor {
     /// inherited handle by design (stdin_string_for_command serves
     /// redirects, virtual endpoints, file endpoints and the
     /// FUNCTION_STDIN mirror — never the process stdin), and slurping a
-    /// file endpoint through open_fd_read_endpoint's shared-offset dup
-    /// would drain the very descriptor the element must read. The stage
+    /// file endpoint through open_fd_read_endpoint_stream's shared-offset
+    /// dup would drain the very descriptor the element must read. The stage
     /// machinery therefore keeps the FUNCTION_STDIN mirror ABSENT (the
     /// #761 streaming treatment) and the element's readers use the
     /// fd-table transports, whose offsets are the descriptor's own — a

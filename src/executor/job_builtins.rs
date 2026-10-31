@@ -1848,6 +1848,12 @@ impl Executor {
                 // not fatal, not interrupting.
                 Some(_) => continue,
                 None => {
+                    // rubash#2233: an untrapped SIGHUP interrupting the
+                    // wait is the hangup death, not the discard below
+                    // (see the boundary dispatch's untrapped branch).
+                    if self.note_untrapped_hangup(signal) {
+                        return Err(ExecuteError::ExitCode(128 + signal));
+                    }
                     // rubash#1825: the same classification the boundary
                     // dispatch's untrapped branch makes
                     // (run_pending_signal_traps): record the status and,

@@ -235,9 +235,12 @@ pub(in crate::executor) fn first_leaf_command_line(cmd: &CommandNode) -> Option<
 /// (jobs.c:649) and substituted by `jobs -x` (builtins/jobs.def
 /// execute_list_with_replacements `itos (j->pgrp)`, rubash#1096): with job
 /// control the first pipeline pid becomes the group; without job control
-/// every job shares the shell's own pgrp. Rubash never calls setpgid, but
-/// the RECORDED value is what `jobs -x` prints, and without job control
-/// GNU's value is exactly the live shell pgrp — so read getpgid(0) here.
+/// every job shares the shell's own pgrp. The RECORDED value is what
+/// `jobs -x` prints, and without job control GNU's value is exactly the
+/// live shell pgrp — so read getpgid(0) here. Since rubash#2241 the
+/// job-control case is also the child's real group: the async spawn
+/// sites setpgid the child into it (child side jobs.c:2390, parent
+/// side jobs.c:2455), so the record and the kernel state agree.
 /// Non-unix has no pgrp concept; the job pid keeps today's observable.
 fn async_job_pgrp(first_pid: u32, job_control: bool) -> u32 {
     if !job_control {
@@ -1093,7 +1096,15 @@ impl Executor {
                 use std::os::unix::process::CommandExt;
                 if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 {
-                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
+                    // rubash#2241: with job control the child also takes
+                    // its own process group (GNU jobs.c:2390 make_child).
+                    // (The rubash#2233 Gap-2 hunk that added a bare
+                    // pre_exec setpgid at this same site was dropped in
+                    // the merge with master: reset_grouped already
+                    // composes reset + setpgid, and the parent-side
+                    // group_spawned_child below completes the pair —
+                    // keeping both would setpgid twice.)
+                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset_grouped);
                 } else {
                     process.pre_exec(crate::builtins::kill::child_pre_exec_reset_async);
                 }
@@ -1110,6 +1121,13 @@ impl Executor {
                         &self.shell_state.env_vars,
                         "monitor",
                     );
+                    // rubash#2241: parent half of the grouping
+                    // (GNU jobs.c:2455) — the recorded pgrp in
+                    // async_job_pgrp already assumed this group exists.
+                    #[cfg(unix)]
+                    if job_control {
+                        crate::builtins::kill::group_spawned_child(pid);
+                    }
                     let job_id = self.shell_state.job_table.register_process_with_stages(
                         pid,
                         display_source.clone(),
@@ -1138,9 +1156,21 @@ impl Executor {
             .unwrap_or_else(|| "rubash".into());
         // Environment block for the child: process env merged with the
         // shell's env_vars (same filter the old Command::env loop applied).
+        // rubash#2259: the process-env base crosses through the same
+        // spawn-inherited adjudication as the env_vars loop below —
+        // pre-fix it ingested the raw environ, so any internal
+        // `__RUBASH_*` state a foreign parent (or an older binary's
+        // mirror) had planted there rode into the respawned child
+        // unadjudicated, including the parent's invocation
+        // classification. Explicit stamps inserted after this merge
+        // (SHELL_PID, the spawner stamp, the trap reset table, ...)
+        // are unaffected.
         let mut env_map: std::collections::BTreeMap<String, String> =
             crate::executor::env_helpers::process_env_pairs()
                 .into_iter()
+                .filter(|(key, _)| {
+                    !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
+                })
                 .collect();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
@@ -1159,11 +1189,14 @@ impl Executor {
         // forwarded above and must survive this reset filter.
         // Strip by the KEYS PRESENT IN env_map, not the live trap table:
         // stale OS-env copies of removed traps (the std::env mirror writes
-        // through setattr apply.rs but is not cleaned on trap removal) ride
-        // into env_map via the process-env ingest above, and a strip driven by
-        // env_vars would leave them (trap.tests: __RUBASH_TRAP_SIGHUP/
-        // __RUBASH_TRAP_SIGUSR2 leaked into the monitored `sleep N &`
-        // children after `trap - HUP`/`trap - USR2` had cleared the table).
+        // through setattr apply.rs but is not cleaned on trap removal) used
+        // to ride into env_map via the process-env ingest above — the
+        // rubash#2259 adjudication on that ingest now drops them there —
+        // and a strip driven by env_vars would leave any copy that still
+        // arrived (trap.tests: __RUBASH_TRAP_SIGHUP/__RUBASH_TRAP_SIGUSR2
+        // leaked into the monitored `sleep N &` children after
+        // `trap - HUP`/`trap - USR2` had cleared the table). The retain
+        // stays as the boundary assertion regardless of the ingest route.
         env_map.retain(|key, _| {
             !(key.starts_with("__RUBASH_TRAP") && key != "__RUBASH_TRAP_ORIG_IGN")
         });
@@ -1539,6 +1572,13 @@ impl Executor {
             extra_handles,
             // G-02: the respawned child starts in the session cwd.
             cwd: Some(self.shell_state.cwd.clone()),
+            // rubash#2241: under job control the respawned async child
+            // leads its own process group (GNU jobs.c:2390 make_child),
+            // matching the pgrp the job table records for it below.
+            new_process_group: crate::builtins::set::shell_option_enabled(
+                &self.shell_state.env_vars,
+                "monitor",
+            ),
         });
         for h in owned_handles {
             crate::fd::close_handle(h);
@@ -3331,14 +3371,34 @@ impl Executor {
             return self.execute_if_command(if_command);
         }
 
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut if_command = if_command.clone();
-        // rubash#846 (GNU execute_cmd.c:854-883): an apply-stage IoError
-        // is the if's OWN redirect failure — mark it for the `!` flip
-        // sites. Body-stage errors flow through unmarked and flip normally.
-        let result = match apply_if_redirects(self, &redirect_cmd, &mut if_command) {
+        // rubash#2246: GNU walks the stored tree by pointer and binds
+        // the redirects once at entry (execute_cmd.c:854-883). The
+        // deep clones this wrapper used to take — cmd.clone() plus
+        // if_command.clone() — existed only to feed mutations: the
+        // procsub materialization (gated on a `>(` mirror target, the
+        // compound_redirect_needs_procsub_rewrite whitelist) and the
+        // per-leaf splice, which prepare_compound_output_redirects now
+        // replaces with the entry side effects alone (the fd-table
+        // binding in with_command_input_redirects does the rest).
+        // Without a `>(` target both clones are skipped and the
+        // original tree executes as-is.
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        // rubash#846 (GNU execute_cmd.c:854-883): a prepare-stage
+        // IoError is the if's OWN redirect failure — mark it for the
+        // `!` flip sites. Body-stage errors flow through unmarked and
+        // flip normally.
+        let result = match self.prepare_compound_output_redirects(redirect_cmd) {
             Err(error) => {
                 if matches!(error, ExecuteError::IoError(_)) {
                     self.note_compound_redirect_failure();
@@ -3351,7 +3411,7 @@ impl Executor {
             // template; if/case/for/select carried no staging at all.
             Ok(()) => self.with_loop_fd_heredocs(cmd, |executor| {
                 executor.with_command_input_redirects(cmd, |executor| {
-                    executor.execute_if_command(&if_command)
+                    executor.execute_if_command(if_command)
                 })
             }),
         };
@@ -3377,15 +3437,28 @@ impl Executor {
                 return Ok(());
             }
         }
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut loop_command = loop_command.clone();
-        // rubash#846 (GNU execute_cmd.c:854-883): an apply-stage IoError
-        // is the loop's OWN redirect failure — mark it for the `!` flip
-        // sites. Body-stage errors flow through unmarked and flip normally.
-        let result = match apply_redirects_to_commands(self, &redirect_cmd, &mut loop_command.body)
-        {
+        // rubash#2246: same borrow conversion as the if wrapper —
+        // cmd.clone() + loop_command.clone() existed only for the
+        // procsub materialization (gated on a `>(` mirror target) and
+        // the per-leaf splice (replaced by
+        // prepare_compound_output_redirects + the entry fd binding).
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        // rubash#846 (GNU execute_cmd.c:854-883): a prepare-stage
+        // IoError is the loop's OWN redirect failure — mark it for the
+        // `!` flip sites. Body-stage errors flow through unmarked and
+        // flip normally.
+        let result = match self.prepare_compound_output_redirects(redirect_cmd) {
             Err(error) => {
                 if matches!(error, ExecuteError::IoError(_)) {
                     self.note_compound_redirect_failure();
@@ -3394,7 +3467,7 @@ impl Executor {
             }
             Ok(()) => self.with_loop_fd_heredocs(cmd, |executor| {
                 executor.with_command_input_redirects(cmd, |executor| {
-                    executor.execute_loop_command(&loop_command)
+                    executor.execute_loop_command(loop_command)
                 })
             }),
         };
@@ -3494,128 +3567,60 @@ impl Executor {
 
         // GNU executes the `( list )` body by POINTER (execute_in_subshell
         // walks the Subshell->command the parser allocated once; make_cmd.c
-        // never copies). The clones below exist only to feed mutations:
-        // materialize_compound_output_process_substitutions rewrites a
-        // target only when it starts with `>(` (both arms require that
-        // prefix — see execute_brace_group_pipeline), and
-        // apply_command_output_redirects splices into the body only for a
-        // stdio-slot redirect; with neither, the stored slice runs as-is.
-        let redirect_needs_ps_rewrite = [
-            cmd.redirect_out.as_deref(),
-            cmd.append.as_deref(),
-            cmd.redirect_err.as_deref(),
-            cmd.redirect_err_append.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|redirect| redirect.target.starts_with(">("));
+        // never copies). The clone below exists only to feed the one
+        // remaining mutation: materialize_compound_output_process_substitutions
+        // rewrites a target only when it starts with `>(` (both arms
+        // require that prefix — the
+        // compound_redirect_needs_procsub_rewrite gate). The per-leaf
+        // splice that used to force a body copy is gone (rubash#2246):
+        // prepare_compound_output_redirects performs the entry side
+        // effects and with_command_input_redirects binds the fd table,
+        // so the stored slice always runs as-is.
         let mut redirect_owned;
         let group_outputs;
-        let redirect_cmd: &CommandNode = if redirect_needs_ps_rewrite {
-            redirect_owned = cmd.clone();
-            group_outputs =
-                self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
-            &redirect_owned
-        } else {
-            group_outputs = Vec::new();
-            cmd
-        };
-        // Numbered redirects are duplicated in parser stdio fields. Keep only
-        // true stdio fields in compound preparation; the original redirect
-        // list is applied to each body command below. Conservative admission:
-        // any stdio slot present means apply_command_output_redirects may
-        // splice, so the body is copied; a slot-free subshell borrows.
-        let body_splice_needed = cmd.redirect_out.is_some()
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        // Numbered redirects are duplicated in parser stdio fields. Keep
+        // only true stdio fields in the entry preparation below; numbered
+        // redirects propagate exclusively through the ordered `redirects`
+        // list (bound by with_command_input_redirects). Any stdio slot
+        // present means the preparation has arms to run.
+        let prepare_needed = cmd.redirect_out.is_some()
             || cmd.append.is_some()
             || cmd.redirect_err.is_some()
             || cmd.redirect_err_append.is_some();
-        let mut stdio_redirect_cmd = redirect_cmd.clone();
-        // Compound redirections on fd 0-2 keep their stdio mirror fields;
-        // only a genuinely NUMBERED redirect (fd > 2) is stripped, because
-        // those propagate exclusively through the ordered `redirects` list
-        // (the mirror fields are fd-blind — a `3>&1` can land in
-        // `redirect_out`). Treating the explicit fd digit of `2>`/`1>&2` as
-        // "numbered" stripped fd-1/fd-2 redirections too, defeating both the
-        // per-leaf splice and `cd`'s redirected-io binding: a subshell
-        // `( cd /no_such ) 2>e` leaked the diagnostic to the real stderr
-        // (rubash#699 R1.4).
-        let is_numbered = |redirect: &Redirect| {
-            let fd = redirect.fd.unwrap_or_else(|| {
-                redirect
-                    .operator
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(0)
-            });
-            fd > 2
-        };
-        if stdio_redirect_cmd
-            .redirect_in
-            .as_deref()
-            .is_some_and(is_numbered)
-        {
-            stdio_redirect_cmd.redirect_in = None;
-        }
-        if stdio_redirect_cmd
-            .redirect_out
-            .as_deref()
-            .is_some_and(is_numbered)
-        {
-            stdio_redirect_cmd.redirect_out = None;
-        }
-        if stdio_redirect_cmd
-            .append
-            .as_deref()
-            .is_some_and(is_numbered)
-        {
-            stdio_redirect_cmd.append = None;
-        }
-        if stdio_redirect_cmd
-            .redirect_err
-            .as_deref()
-            .is_some_and(is_numbered)
-        {
-            stdio_redirect_cmd.redirect_err = None;
-        }
-        if stdio_redirect_cmd
-            .redirect_err_append
-            .as_deref()
-            .is_some_and(is_numbered)
-        {
-            stdio_redirect_cmd.redirect_err_append = None;
-        }
-        let mut body_owned: Option<Vec<CommandNode>> = None;
-        if body_splice_needed {
-            let mut body_ast = Ast {
-                commands: subshell_command.body.clone(),
-            };
+        if prepare_needed {
+            let stdio_redirect_cmd = subshell_stdio_redirect_cmd(redirect_cmd);
             // rubash#846 (GNU execute_cmd.c:1759-1762): the subshell's own
             // redirect failure in the forked child exits inverted — the
             // parent wait-side (:763) flips it back, netting status 1 with
             // no flip. Mark it so an enclosing `!` suppresses its flip.
-            if let Err(error) =
-                self.apply_command_output_redirects(&stdio_redirect_cmd, &mut body_ast)
-            {
+            if let Err(error) = self.prepare_compound_output_redirects(&stdio_redirect_cmd) {
                 if matches!(error, ExecuteError::IoError(_)) {
                     self.note_compound_redirect_failure();
                 }
                 // rubash#940: the subshell boundary owns its saved state on
                 // every exit path — GNU's forked child dies with its own
                 // copy and nothing leaks back (execute_cmd.c:1576). The
-                // early apply-failure return skipped the restore below and
-                // leaked subshell_depth + the child trap reset into the
-                // parent.
+                // early prepare-failure return must not skip the restore
+                // below and leak subshell_depth + the child trap reset into
+                // the parent.
                 self.restore_flat_subshell(saved_state);
                 self.fd_table = saved_fd_table;
                 self.command_expansion_failed.set(saved_expansion_failed);
                 self.exec_replaced = saved_exec_replaced;
                 return Err(error);
             }
-            body_owned = Some(body_ast.commands);
         }
-        let body: &[CommandNode] = body_owned.as_deref().unwrap_or(&subshell_command.body);
+        let body: &[CommandNode] = &subshell_command.body;
         // rubash#720 form 1: GNU execute_cmd.c:1799-1806 (execute_in_subshell)
         // marks a user subshell's WHOLE body CMD_NO_FORK when it is a single
         // simple or subshell command; execute_cmd.c:662-663 runs a subshell
@@ -3652,6 +3657,9 @@ impl Executor {
         // body's output.
         let mut body_status: Option<i32> = None;
         let mut trap_result: Option<Result<i32, ExecuteError>> = None;
+        // rubash#2246: storage for the EXIT trap's stdio node, built
+        // lazily inside the body closure (see the trap call site).
+        let mut trap_stdio_redirect_cmd: Option<CommandNode> = None;
         let result = self.with_loop_fd_heredocs(cmd, |executor| {
             executor.with_ambient_line(subshell_line, |executor| {
                 executor.with_command_input_redirects(cmd, |executor| {
@@ -3725,10 +3733,32 @@ impl Executor {
                     // can only have been registered by the body itself; a
                     // trap action that calls exit N replaces the subshell
                     // status (bash exit_shell semantics).
-                    trap_result = Some(executor.run_exit_trap_for_status_with_output_redirects(
-                        status,
-                        Some(&stdio_redirect_cmd),
-                    ));
+                    // rubash#2246: the stdio node is consumed only when an
+                    // EXIT trap action actually runs —
+                    // run_exit_trap_for_status_with_output_redirects
+                    // early-outs on exec_replaced and on a missing/empty
+                    // EXIT action before touching it — so build it here,
+                    // behind the same two verdicts (get_trap_action peeks
+                    // with take_exit_trap's reset-disposition guard),
+                    // instead of deep-cloning the whole command node for
+                    // every subshell execution.
+                    let trap_redirect_arg = if !executor.exec_replaced
+                        && crate::builtins::trap::get_trap_action(
+                            &executor.shell_state.env_vars,
+                            "EXIT",
+                        )
+                        .is_some_and(|action| !action.is_empty())
+                    {
+                        trap_stdio_redirect_cmd = Some(subshell_stdio_redirect_cmd(redirect_cmd));
+                        trap_stdio_redirect_cmd.as_ref()
+                    } else {
+                        None
+                    };
+                    trap_result =
+                        Some(executor.run_exit_trap_for_status_with_output_redirects(
+                            status,
+                            trap_redirect_arg,
+                        ));
                     Ok(())
                 })
             })
@@ -3936,11 +3966,34 @@ impl Executor {
     where
         F: FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     {
+        let saved_fd_inputs = self.bind_numbered_heredoc_redirects(cmd, true);
+        let result = f(self);
+        self.restore_numbered_heredoc_redirects(saved_fd_inputs);
+        result
+    }
+
+    /// The binding half of with_loop_fd_heredocs, split out so a caller
+    /// whose body is not a single closure — the in-process script child
+    /// (execute_direct_shell_script), whose run spans its whole
+    /// save/swap/restore bracket — can bind the same set and restore it
+    /// at its own boundary. Returns the shadowed fd-table entries for
+    /// restore_numbered_heredoc_redirects. `include_stdin` false skips
+    /// an explicit fd-0 heredoc: that face's fd 0 is served by its
+    /// command-input scope, exactly like open_compound_numbered_input_
+    /// redirects leaves fd-0 file inputs to the fd-0 binder.
+    pub(in crate::executor) fn bind_numbered_heredoc_redirects(
+        &mut self,
+        cmd: &CommandNode,
+        include_stdin: bool,
+    ) -> Vec<(u32, Option<crate::executor::fd_table::FdEntry>)> {
         let mut saved_fd_inputs = Vec::new();
         for redirect in &cmd.heredoc_redirects {
             let Some(fd) = redirect.fd else {
                 continue;
             };
+            if fd == 0 && !include_stdin {
+                continue;
+            }
             if redirect.body.is_none() && redirect.body_carrier.is_none() {
                 continue;
             }
@@ -3957,8 +4010,15 @@ impl Executor {
             self.fd_table
                 .open_input(fd, FdReadEndpoint::text(&body), true);
         }
+        saved_fd_inputs
+    }
 
-        let result = f(self);
+    /// The restore half of bind_numbered_heredoc_redirects: each bound
+    /// slot returns to the entry it shadowed (or to unbound).
+    pub(in crate::executor) fn restore_numbered_heredoc_redirects(
+        &mut self,
+        saved_fd_inputs: Vec<(u32, Option<crate::executor::fd_table::FdEntry>)>,
+    ) {
         for (fd, old_entry) in saved_fd_inputs {
             match old_entry {
                 Some(entry) => {
@@ -3969,7 +4029,6 @@ impl Executor {
                 }
             }
         }
-        result
     }
 
     fn if_command_needs_alias_scan(&self, if_command: &IfCommand) -> bool {
@@ -4684,6 +4743,16 @@ impl Executor {
                 }
             }
 
+            // rubash#2241: a coproc is an async child — under job
+            // control it leads its own process group like any other
+            // async spawn (GNU jobs.c:2390 make_child).
+            #[cfg(unix)]
+            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
+                unsafe {
+                    use std::os::unix::process::CommandExt as _;
+                    child.pre_exec(crate::builtins::kill::child_pre_exec_setpgid);
+                }
+            }
             suppress_orphan_console(&mut child);
             child.current_dir(&self.shell_state.cwd);
             match child.spawn() {
@@ -4716,6 +4785,12 @@ impl Executor {
                         &self.shell_state.env_vars,
                         "monitor",
                     );
+                    // rubash#2241: parent half of the grouping
+                    // (GNU jobs.c:2455).
+                    #[cfg(unix)]
+                    if job_control {
+                        crate::builtins::kill::group_spawned_child(pid);
+                    }
                     let job_id = self.shell_state.job_table.register_process_with_stages(
                         pid,
                         bash_command_source_text(cmd),
@@ -5986,11 +6061,24 @@ impl Executor {
             });
         }
 
-        let mut redirect_cmd = cmd.clone();
-        let group_outputs =
-            self.materialize_compound_output_process_substitutions(&mut redirect_cmd)?;
-        let mut case_command = case_command.clone();
-        let result = self.apply_case_command_redirects(&redirect_cmd, &mut case_command);
+        // rubash#2246: same borrow conversion as the if wrapper — the
+        // cmd + case_command deep clones existed only for the procsub
+        // materialization (gated on a `>(` mirror target) and the
+        // per-clause splice, which prepare_case_command_redirects
+        // replaces with the entry side effects alone.
+        let mut redirect_owned;
+        let group_outputs;
+        let redirect_cmd: &CommandNode =
+            if super::pipeline_exec::compound_redirect_needs_procsub_rewrite(cmd) {
+                redirect_owned = cmd.clone();
+                group_outputs =
+                    self.materialize_compound_output_process_substitutions(&mut redirect_owned)?;
+                &redirect_owned
+            } else {
+                group_outputs = Vec::new();
+                cmd
+            };
+        let result = self.prepare_case_command_redirects(redirect_cmd);
         let status = self.exit_code;
         if let Err(error) = result {
             // rubash#846 (GNU execute_cmd.c:854-883): the case's OWN
@@ -6009,7 +6097,7 @@ impl Executor {
         let result = self.with_loop_fd_heredocs(cmd, |executor| {
             executor.with_command_input_redirects(cmd, |executor| {
                 executor.with_ambient_line(case_line, |executor| {
-                    executor.execute_case_command(&case_command)
+                    executor.execute_case_command(case_command)
                 })
             })
         });
@@ -6022,11 +6110,16 @@ impl Executor {
         Ok(())
     }
 
-    fn apply_case_command_redirects(
-        &mut self,
-        cmd: &CommandNode,
-        case_command: &mut CaseCommand,
-    ) -> Result<(), ExecuteError> {
+    /// rubash#2246: the entry half of the case command's redirect arms
+    /// with the per-clause splice removed — the same arm admissions
+    /// (is_stdout_splice_redirect / is_stdout_write_redirect /
+    /// is_stderr_splice_redirect, out/err else-if exclusivity), the
+    /// same expansions in the same order, and the same
+    /// create_redirect_output entry creates. The clause bodies run
+    /// against the fd table bound by with_command_input_redirects;
+    /// GNU binds a case command's redirections once at entry like
+    /// every compound (execute_cmd.c:854-883).
+    fn prepare_case_command_redirects(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         if let Some(redirect) = cmd
             .redirect_out
             .as_deref()
@@ -6036,23 +6129,12 @@ impl Executor {
             if redirect_target_fd(&target).is_none() {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = target;
-            append_redirect.append = true;
-            append_redirect.clobber = false;
-            for clause in &mut case_command.clauses {
-                apply_stdout_append_redirect(&mut clause.body, &append_redirect);
-            }
         } else if let Some(redirect) = cmd
             .append
             .as_deref()
             .filter(|r| is_stdout_write_redirect(r))
         {
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_redirect_target(redirect);
-            for clause in &mut case_command.clauses {
-                apply_stdout_append_redirect(&mut clause.body, &append_redirect);
-            }
+            let _target = self.expand_redirect_target(redirect);
         }
 
         if let Some(redirect) = cmd
@@ -6064,23 +6146,12 @@ impl Executor {
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
                 self.create_redirect_output(&target, redirect.clobber)?;
             }
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = target;
-            append_redirect.append = true;
-            append_redirect.clobber = false;
-            for clause in &mut case_command.clauses {
-                apply_stderr_append_redirect(&mut clause.body, &append_redirect);
-            }
         } else if let Some(redirect) = cmd
             .redirect_err_append
             .as_deref()
             .filter(|r| is_stderr_splice_redirect(cmd, r))
         {
-            let mut append_redirect = redirect.clone();
-            append_redirect.target = self.expand_redirect_target(redirect);
-            for clause in &mut case_command.clauses {
-                apply_stderr_append_redirect(&mut clause.body, &append_redirect);
-            }
+            let _target = self.expand_redirect_target(redirect);
         }
 
         Ok(())
@@ -6247,34 +6318,68 @@ pub(in crate::executor) fn compound_command_has_redirects(cmd: &CommandNode) -> 
         || !cmd.process_substitutions.is_empty()
 }
 
-fn apply_if_redirects(
-    executor: &mut Executor,
-    cmd: &CommandNode,
-    if_command: &mut IfCommand,
-) -> Result<(), ExecuteError> {
-    apply_redirects_to_commands(executor, cmd, &mut if_command.condition)?;
-    apply_redirects_to_commands(executor, cmd, &mut if_command.then_body)?;
-    for branch in &mut if_command.elif_branches {
-        apply_redirects_to_commands(executor, cmd, &mut branch.condition)?;
-        apply_redirects_to_commands(executor, cmd, &mut branch.body)?;
-    }
-    if let Some(body) = &mut if_command.else_body {
-        apply_redirects_to_commands(executor, cmd, body)?;
-    }
-    Ok(())
-}
-
-fn apply_redirects_to_commands(
-    executor: &mut Executor,
-    cmd: &CommandNode,
-    commands: &mut Vec<CommandNode>,
-) -> Result<(), ExecuteError> {
-    let mut ast = Ast {
-        commands: std::mem::take(commands),
+/// The subshell command node with genuinely NUMBERED (fd > 2) stdio
+/// mirror fields stripped. Compound redirections on fd 0-2 keep their
+/// stdio mirror fields; only a numbered redirect is stripped, because
+/// those propagate exclusively through the ordered `redirects` list
+/// (the mirror fields are fd-blind — a `3>&1` can land in
+/// `redirect_out`). Treating the explicit fd digit of `2>`/`1>&2` as
+/// "numbered" stripped fd-1/fd-2 redirections too, defeating both the
+/// entry preparation and `cd`'s redirected-io binding: a subshell
+/// `( cd /no_such ) 2>e` leaked the diagnostic to the real stderr
+/// (rubash#699 R1.4). Building this node deep-clones the command
+/// (body subtree included), so callers build it only on paths that
+/// consume it (rubash#2246).
+fn subshell_stdio_redirect_cmd(redirect_cmd: &CommandNode) -> CommandNode {
+    let mut stdio_redirect_cmd = redirect_cmd.clone();
+    let is_numbered = |redirect: &Redirect| {
+        let fd = redirect.fd.unwrap_or_else(|| {
+            redirect
+                .operator
+                .chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0)
+        });
+        fd > 2
     };
-    executor.apply_command_output_redirects(cmd, &mut ast)?;
-    *commands = ast.commands;
-    Ok(())
+    if stdio_redirect_cmd
+        .redirect_in
+        .as_deref()
+        .is_some_and(is_numbered)
+    {
+        stdio_redirect_cmd.redirect_in = None;
+    }
+    if stdio_redirect_cmd
+        .redirect_out
+        .as_deref()
+        .is_some_and(is_numbered)
+    {
+        stdio_redirect_cmd.redirect_out = None;
+    }
+    if stdio_redirect_cmd
+        .append
+        .as_deref()
+        .is_some_and(is_numbered)
+    {
+        stdio_redirect_cmd.append = None;
+    }
+    if stdio_redirect_cmd
+        .redirect_err
+        .as_deref()
+        .is_some_and(is_numbered)
+    {
+        stdio_redirect_cmd.redirect_err = None;
+    }
+    if stdio_redirect_cmd
+        .redirect_err_append
+        .as_deref()
+        .is_some_and(is_numbered)
+    {
+        stdio_redirect_cmd.redirect_err_append = None;
+    }
+    stdio_redirect_cmd
 }
 
 fn flatten_if_command_for_alias_scan(
