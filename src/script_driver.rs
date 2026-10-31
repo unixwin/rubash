@@ -3493,8 +3493,11 @@ fn run_source_impl(
         // exits 2. The verdict shapes (WSL GNU 5.2.21/5.3.0 probes,
         // 2026-10-12): unquoted hunt -> `]'; a quote/backtick recursion
         // inside names ITSELF (a5: `echo $[\n'q` -> `'` line 2); a hunt
-        // bounded by a double-quoted span names the DQUOTE at the span's
-        // line (q2/w1-w4: `echo "$[1+2"` -> `"'`); reported ahead of the
+        // inside a double-quoted span is NOT bounded by the span — the
+        // span's closing quote opens a quote unit inside the hunt whose
+        // EOF names the DQUOTE at the UNIT's line (q2/w1-w4 sit on the
+        // span's line, where the two coincide; rubash#2227 face 2 splits
+        // them: `echo "a $[1+<NL>2"` -> `"'` at line 2); reported ahead of the
         // generic close-char path because the hunt owns the EOF even when a
         // `${` is also unclosed (`echo ${x[$[1}` -> `]', not `}').
         if let Some(eof) = crate::lexer::unclosed_dollar_bracket_eof(input) {
