@@ -2287,9 +2287,22 @@ impl Executor {
                     continue;
                 }
             }
+            // rubash#2304: the null device is NOT skipped here. GNU
+            // do_redirection_internal hands every file target to
+            // redir_open (redir.c:949), and /dev/null is not one of
+            // redir.c's special filenames, so it takes the plain open
+            // with the kind's flags (redir.c:745; `<>` is
+            // O_RDWR|O_CREAT, make_cmd.c:682) and the descriptor is
+            // delivered like any file's. The #180 skip predates the
+            // classified open ladders; all three arms below now own
+            // the null class explicitly and return a real descriptor
+            // of the mapped device (open_classified_input's null arm,
+            // create_redirect_output's null arm,
+            // probe_input_redirect_readwrite's NullDevice fall-through
+            // to the raw mapped open), so dropping the binding here
+            // only manufactured EBADF in the child.
             if redirect_target_fd(&target).is_some()
                 || is_closed_redirect_target(&target)
-                || is_null_device(&target)
                 || target.starts_with("<(")
             {
                 continue;

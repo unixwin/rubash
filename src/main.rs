@@ -1486,9 +1486,18 @@ fn run_script_file_with_init(
     // "bash ls" finds and then refuses the binary /bin/ls.
     let mut path = executor.resolve_shell_path(script);
     let mut bytes = fs::read(&path).ok();
+    // rubash#2302: when the PATH search below supplies the file, GNU
+    // open_shell_script REPLACES filename with the found path
+    // (shell.c:1595-1597: filename = path_filename) and push_source
+    // records THAT name in BASH_SOURCE (shell.c:1640 push_source
+    // (filename)) — while dollar_vars[0] keeps script_name as spelled
+    // (shell.c:1613). Remember the found name for the reader seed.
+    let mut path_found_name: Option<String> = None;
     if bytes.is_none() && !script.contains('/') && !script.contains('\\') {
         if let Some(found) = executor.find_script_on_path(script) {
             if let Ok(found_bytes) = fs::read(&found) {
+                path_found_name =
+                    Some(executor.script_identity_display_path(&found.to_string_lossy()));
                 path = found;
                 bytes = Some(found_bytes);
             }
@@ -1562,7 +1571,13 @@ fn run_script_file_with_init(
     } else {
         script.to_string()
     };
-    executor.set_env("__RUBASH_SCRIPT_NAME", &script_name);
+    // rubash#2302: __RUBASH_SCRIPT_NAME is the reader-name carrier (it
+    // seeds BASH_SOURCE and the in-script diagnostic names), so it
+    // takes the PATH-found name when the search supplied the file;
+    // BASH_ARGV0 ($0) keeps the spelled name either way (shell.c:1613
+    // vs shell.c:1640, above).
+    let reader_name = path_found_name.as_deref().unwrap_or(&script_name);
+    executor.set_env("__RUBASH_SCRIPT_NAME", reader_name);
     executor.set_env("BASH_ARGV0", &script_name);
     // shell.c:1613 rebinds dollar_vars[0] to script_name at every script
     // entry, so a parent's BASH_ARGV0 assignment snapshot must not survive
