@@ -843,7 +843,12 @@ impl Executor {
     /// field has no list twin (synthesized commands). The alias
     /// resolvers judge an in-list binding at the spelling's own
     /// position (redir.c:237 do_redirections).
-    fn output_entry_position(&self, cmd: &CommandNode, fd: u32, target: &str) -> usize {
+    pub(in crate::executor) fn output_entry_position(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+        target: &str,
+    ) -> usize {
         cmd.redirects
             .iter()
             .rposition(|entry| {
