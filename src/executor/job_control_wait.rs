@@ -111,14 +111,4 @@ impl Executor {
         }
     }
 
-    /// Queue the boundary stop notice for a job the job-control wait
-    /// just observed stopping (rubash#2398). The line itself renders
-    /// at the next reader boundary inside
-    /// report_pending_signal_notices, in the same position GNU's
-    /// notify_of_job_status prints it (eval.c:355) — the job-table
-    /// state at render time is what fills the line in, so only the
-    /// pid is queued.
-    pub(crate) fn queue_stopped_job_notice(&self, pid: u32) {
-        self.pending_stopped_job_notices.borrow_mut().push(pid);
-    }
 }

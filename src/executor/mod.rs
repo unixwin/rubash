@@ -974,13 +974,6 @@ pub struct Executor {
     /// (print_pipeline JLIST_STANDARD), everything else is silent.
     /// (pid, signal, command text, foreground).
     pending_signal_notices: std::cell::RefCell<Vec<(u32, i32, String, bool)>>,
-    /// rubash#2398: pids of jobs the job-control wait observed
-    /// stopping, queued for the boundary stop notice
-    /// (`[N]+ Stopped  <cmd>`, GNU jobs.c notify_of_job_status via
-    /// eval.c:355). Rendered from live job-table state by
-    /// report_pending_signal_notices, ahead of the signal-death
-    /// notices queued above.
-    pending_stopped_job_notices: std::cell::RefCell<Vec<u32>>,
     /// Depth of `with_traps_suspended` scopes currently active. GNU has no
     /// notion of host housekeeping commands: when an embedding host runs
     /// internal commands through execute_ast (startup/shutdown hooks,

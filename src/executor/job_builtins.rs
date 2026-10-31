@@ -1093,54 +1093,46 @@ impl Executor {
     ///   a foreground TERM death lands);
     /// - background TERM/INT/PIPE or trapped deaths: silent.
     pub(crate) fn report_pending_signal_notices(&mut self) -> Result<(), ExecuteError> {
-        // rubash#2398: stop notices first — GNU's notify_of_job_status
-        // reports the stop at this same boundary, and a stop the
-        // job-control wait just observed belongs ahead of any death
-        // notices the same command queued.
-        let stopped = std::mem::take(&mut *self.pending_stopped_job_notices.borrow_mut());
-        let mut out = self.format_stopped_job_notices(&stopped);
         let notices = std::mem::take(&mut *self.pending_signal_notices.borrow_mut());
-        out.push_str(&self.format_signal_notices(notices));
+        let out = self.format_signal_notices(notices);
         if !out.is_empty() {
             crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
         }
         Ok(())
     }
 
-    /// Render queued stop notices (rubash#2398) in the notification
-    /// shape GNU uses for a freshly stopped job — the `jobs` short
-    /// line (jobs.c:2207 pretty_print_job: `[%d]%c `, state padded to
-    /// LONGEST_SIGNAL_DESC 27): `[1]+  Stopped                  sleep 30`.
-    /// A job that already left the Stopped state before the boundary
-    /// (resumed and reaped by the same command line) prints nothing.
-    fn format_stopped_job_notices(&self, pids: &[u32]) -> String {
-        let mut out = String::new();
-        for &pid in pids {
-            let Some(job) = self
-                .shell_state
-                .job_table
-                .pid_to_job
-                .get(&pid)
-                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
-            else {
-                continue;
-            };
-            if job.state != crate::jobs::ProcessState::Stopped {
-                continue;
-            }
-            let marker = if self.shell_state.job_table.current_job() == Some(job.id) {
-                '+'
-            } else if self.shell_state.job_table.previous_job() == Some(job.id) {
-                '-'
-            } else {
-                ' '
-            };
-            out.push_str(&format!(
-                "[{}]{}  {:<27}{}\n",
-                job.id, marker, "Stopped", job.command
-            ));
+    /// Render the stop notice for a job the job-control wait just
+    /// observed stopping (rubash#2398), in the shape GNU's
+    /// notify_of_job_status uses for a freshly stopped job — the
+    /// `jobs` short line (jobs.c:2207 pretty_print_job: `[%d]%c `,
+    /// state padded to LONGEST_SIGNAL_DESC 27):
+    /// `[1]+  Stopped                  sleep 30`. The waits print it
+    /// synchronously, where GNU's wait_for reports the foreground
+    /// job's stop as the wait completes (jobs.c:3385's
+    /// notify_and_cleanup inside wait_for) — the command-boundary
+    /// flush above runs a command later than the prompt this notice
+    /// precedes. None when the job is no longer stopped.
+    pub(in crate::executor) fn format_stopped_job_notice(&self, pid: u32) -> Option<String> {
+        let job = self
+            .shell_state
+            .job_table
+            .pid_to_job
+            .get(&pid)
+            .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))?;
+        if job.state != crate::jobs::ProcessState::Stopped {
+            return None;
         }
-        out
+        let marker = if self.shell_state.job_table.current_job() == Some(job.id) {
+            '+'
+        } else if self.shell_state.job_table.previous_job() == Some(job.id) {
+            '-'
+        } else {
+            ' '
+        };
+        Some(format!(
+            "[{}]{}  {:<27}{}\n",
+            job.id, marker, "Stopped", job.command
+        ))
     }
 
     /// End-of-stream notification step (rubash#1853). The per-command
@@ -1859,8 +1851,8 @@ impl Executor {
     /// wait_for_background_pid uses (trap.c:604-611 — the signal wins
     /// the race, the job stays live and waitable). A re-stop is a
     /// first-class outcome: the job goes back to Stopped in the
-    /// table, its handle returns to background_children, the boundary
-    /// stop notice is queued, and the caller maps the outcome to
+    /// table, its handle returns to background_children, and the
+    /// caller prints the stop notice and maps the outcome to
     /// 128 + stop-signal.
     #[cfg(unix)]
     fn wait_for_fg_job_control(&mut self, pid: u32) -> Result<WaitPidOutcome, ExecuteError> {
@@ -1916,7 +1908,6 @@ impl Executor {
                 entry.foreground = false;
                 entry.background = true;
             }
-            self.queue_stopped_job_notice(pid);
             self.background_children.insert(pid, child);
             return Ok(WaitPidOutcome::Stopped {
                 job_id,
@@ -2758,9 +2749,17 @@ impl Executor {
         };
         match wait_outcome? {
             WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => Ok(status),
-            // Unreachable in practice: fg SIGCONTs and marks the job
-            // running above, before the wait. Mapped for exhaustiveness.
-            WaitPidOutcome::Stopped { stop_signal, .. } => Ok(128 + stop_signal),
+            // The job stopped again under fg's wait (reachable via
+            // wait_for_fg_job_control, rubash#2398): GNU reports the
+            // stop as fg's own output — the notice rides fg's stderr
+            // so it lands after the command text printed above, in
+            // the order wait_for's notify produces it.
+            WaitPidOutcome::Stopped { stop_signal, .. } => {
+                if let Some(line) = self.format_stopped_job_notice(pid) {
+                    let _ = stderr.write_all(line.as_bytes());
+                }
+                Ok(128 + stop_signal)
+            }
             WaitPidOutcome::NotFound => {
                 self.write_job_not_found("fg", job, stderr)?;
                 Ok(1)

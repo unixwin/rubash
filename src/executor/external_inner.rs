@@ -1881,7 +1881,12 @@ impl Executor {
                         entry.background = true;
                     }
                 }
-                self.queue_stopped_job_notice(pid);
+                // The stop notice prints here, as the wait completes
+                // (jobs.c:3385) — see format_stopped_job_notice for
+                // why it cannot ride the boundary flush.
+                if let Some(line) = self.format_stopped_job_notice(pid) {
+                    crate::executor::shell_options::write_stderr_bytes(line.as_bytes())?;
+                }
                 self.background_children
                     .insert(pid, crate::fd::SpawnedChild::from(child));
                 // jobs.c:3243: the wait's verdict for a stopped job
@@ -3435,7 +3440,10 @@ impl Executor {
         // jobs.c:4077 subshell_environment condition).
         #[cfg(unix)]
         let fg_job_control = self.job_control_channel_active()
-            && self.external_stdio_outcome.is_none()
+            && !matches!(
+                self.external_stdio_outcome,
+                Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
+            )
             && !self.external_needs_fd_copy_capture(cmd);
         // rubash#229: restore GNU's child signal dispositions between fork
         // and exec (trap.c:1489 restore_original_signals) — without this a
@@ -3702,7 +3710,25 @@ impl Executor {
                         .map_err(ExecuteError::IoError)?;
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                     } else {
-                        let status = self.wait_external_child(&mut child)?;
+                        // rubash#2398: the LiveHandles outcome is the
+                        // plain interactive shape (the stdio plan arms
+                        // it for every planned spawn) — the job-control
+                        // wait claims it exactly like the no-outcome
+                        // plain branch below; only CapturePipe outcomes
+                        // stay on the existing wait (see fg_job_control).
+                        #[cfg(unix)]
+                        let wait_result = if fg_job_control {
+                            self.wait_fg_child_job_control(
+                                child,
+                                self.signal_notice_command_text(cmd),
+                                bash_job_stage_commands(cmd),
+                            )
+                        } else {
+                            self.wait_external_child(&mut child)
+                        };
+                        #[cfg(not(unix))]
+                        let wait_result = self.wait_external_child(&mut child);
+                        let status = wait_result?;
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
