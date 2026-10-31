@@ -14,6 +14,22 @@ pub(in crate::executor) struct SavedNumberedFd {
     fd_closed: Option<String>,
 }
 
+impl SavedNumberedFd {
+    pub(in crate::executor) fn fd(&self) -> u32 {
+        self.fd
+    }
+
+    /// The pre-command fd-table entry this snapshot restores.
+    pub(in crate::executor) fn saved_entry(&self) -> Option<&FdEntry> {
+        self.entry.as_ref()
+    }
+
+    /// The pre-command fd-closed marker this snapshot restores.
+    pub(in crate::executor) fn saved_fd_closed(&self) -> Option<&String> {
+        self.fd_closed.as_ref()
+    }
+}
+
 /// Saved fd-0 state for a command-scoped input binding: the fd-table slot
 /// snapshot plus the FUNCTION_STDIN text-channel pair it may have replaced
 /// (see bind_command_fd0_input).
@@ -565,7 +581,26 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
-        for redirect in &cmd.redirects {
+        self.open_compound_numbered_input_redirects_in(cmd, 0, cmd.redirects.len(), &mut saved)?;
+        Ok(saved)
+    }
+
+    /// The numbered-input binding loop over the redirect range
+    /// `[start, end)`, accumulating saved slots into `saved` (the
+    /// first snapshot of a slot wins, so segmented calls restore the
+    /// pre-command entry exactly like one whole-list call).
+    /// rubash#2310: the same-exe script face binds its inputs in
+    /// segments split at the command's `{var}` entries so each such
+    /// entry's effect can be applied at its own list position; every
+    /// other caller binds the whole list in one call, unchanged.
+    pub(in crate::executor) fn open_compound_numbered_input_redirects_in(
+        &mut self,
+        cmd: &CommandNode,
+        start: usize,
+        end: usize,
+        saved: &mut Vec<SavedNumberedFd>,
+    ) -> Result<(), ExecuteError> {
+        for redirect in &cmd.redirects[start..end] {
             // The fd before the operator defaults like GNU: input-side
             // redirects without an explicit number target fd 0
             // (`{ list; } <&3` dups fd 3 onto the group's stdin).
@@ -807,7 +842,7 @@ impl Executor {
                 self.set_fd_input_file(fd, file, true);
             }
         }
-        Ok(saved)
+        Ok(())
     }
 
     pub(in crate::executor) fn restore_compound_numbered_input_redirects(

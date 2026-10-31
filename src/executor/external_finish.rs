@@ -331,13 +331,21 @@ impl Executor {
         // heredocs stay with the command-input scope (include_stdin
         // false). A failed later bind unwinds the earlier ones.
         let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
-        let saved_numbered_inputs = match self.open_compound_numbered_input_redirects(cmd) {
-            Ok(saved) => saved,
-            Err(error) => {
-                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
-                return Err(error);
-            }
-        };
+        // rubash#2310: the numbered inputs bind in segments split
+        // at the command's `{var}` entries, applying each such
+        // entry's dup/close effect at its list position — the
+        // applier resolved those entries against the ambient table
+        // before dispatch, but GNU's one ordered walk
+        // (redir.c:237) services them against the command's own
+        // earlier binds.
+        let saved_numbered_inputs =
+            match self.bind_script_numbered_inputs_and_fd_vars(cmd, &saved_numbered_heredocs) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
+                    return Err(error);
+                }
+            };
         let bound_output_fds = match self.open_compound_output_redirects(cmd) {
             Ok(fds) => fds,
             Err(error) => {
