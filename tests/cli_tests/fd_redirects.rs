@@ -237,14 +237,28 @@ fn c_external_command_reports_write_error_for_closed_stdout() {
     // rubash#1035: the helper has no `#!`, so the kernel could not exec it
     // and GNU runs it as a shell script in-process (shell_execve ENOEXEC
     // fallback) — the write error surfaces as the script-internal `echo`
-    // diagnostic, byte-matching bash
-    // (`<path>/emitout: line 1: echo: write error: ...`; $0 keeps the
-    // invoked spelling here). Windows keeps the shell-spawn path, where
-    // the parent reports the command-level write error as before.
+    // diagnostic, byte-matching bash. The diagnostic prefix is the path
+    // actually opened — for a bare command word that is the PATH-resolved
+    // path (GNU findcmd.c records the found path; verified against GNU
+    // bash 5.3.20 on both the -c and program faces, 2026-10-31). The
+    // earlier bare-name expectation pinned the pre-#2302 deviation.
+    // Windows keeps the shell-spawn path, where the parent reports the
+    // command-level write error as before.
     #[cfg(unix)]
     assert_eq!(
         stream_text(&output.stderr),
-        "emitout: line 1: echo: write error: Bad file descriptor\n"
+        format!(
+            "{}: line 1: echo: write error: Bad file descriptor\n",
+            if script_path.is_absolute() {
+                script_path.display().to_string()
+            } else {
+                std::env::current_dir()
+                    .unwrap()
+                    .join(&script_path)
+                    .display()
+                    .to_string()
+            }
+        )
     );
     #[cfg(not(unix))]
     assert_eq!(

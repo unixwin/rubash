@@ -302,6 +302,14 @@ impl Executor {
         args: &[String],
         call_cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
+        // rubash#2281: take any {var} closes the function fast path
+        // deferred for this call (defer_fd_var_closes_for_function_
+        // call). They are performed inside the redirect wraps below,
+        // once the call's binds are installed; an early return drops
+        // them unapplied, which is the net-zero outcome for a call
+        // whose body never runs. Other execute_function call sites
+        // never defer, so the take is empty there.
+        let deferred_fd_var_closes = std::mem::take(&mut self.fd_var_deferred_closes);
         let Some(body) = self.shell_state.functions.get(name).cloned() else {
             return Ok(());
         };
@@ -853,17 +861,33 @@ impl Executor {
                 // the call's do_redirections first, the definition's
                 // stored redirects inside execute_function).
                 executor.with_call_numbered_input_redirects(call_cmd, |executor| {
-                    let body_run = |executor: &mut Executor| {
-                        executor.with_ambient_line(body_open_line, |executor| {
-                            executor.execute_ast_inner(&body_ast.commands)
-                        })
-                    };
-                    match &definition_body_redirects {
-                        Some(definition) => {
-                            executor.with_numbered_fd_bindings(definition, body_run)
+                    // rubash#2281: the call's deferred {var} closes
+                    // land here — both redirect wraps have installed
+                    // the call's binds, so a close recorded after a
+                    // bind of the same descriptor (`f 3<f {v}<&-`)
+                    // revokes that bind, as GNU's one ordered walk
+                    // (execute_cmd.c:5606) does. Their snapshots
+                    // replay as soon as the body finishes, before the
+                    // wraps unwind their own restores.
+                    let close_snapshots =
+                        executor.apply_deferred_fd_var_closes(&deferred_fd_var_closes, call_cmd);
+                    let body_result = {
+                        let body_run = |executor: &mut Executor| {
+                            executor.with_ambient_line(body_open_line, |executor| {
+                                executor.execute_ast_inner(&body_ast.commands)
+                            })
+                        };
+                        match &definition_body_redirects {
+                            Some(definition) => {
+                                executor.with_numbered_fd_bindings(definition, body_run)
+                            }
+                            None => body_run(executor),
                         }
-                        None => body_run(executor),
+                    };
+                    if !close_snapshots.is_empty() {
+                        executor.restore_fd_var_close_snapshots(close_snapshots);
                     }
+                    body_result
                 })
             })
         };

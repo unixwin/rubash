@@ -114,6 +114,15 @@ impl Executor {
         // `read < /dev/fd/6` calls walk the file instead of
         // re-reading its first record.
         if let Some(alias_fd) = dev_stdio_redirect_fd(&target) {
+            // rubash#2276: a socket endpoint's spelling-open fails
+            // ENXIO in GNU, so the alias serve below must not stream
+            // it; decline the whole resolution (the redirect's
+            // failure is reported by the binding face — falling
+            // through to the path slurp would read the process's
+            // unrelated real fd instead).
+            if self.fd_alias_spelling_open_error(alias_fd).is_some() {
+                return None;
+            }
             let fresh_endpoint = self
                 .fd_alias_reopen_path(alias_fd)
                 .and_then(|path| FileFd::open_read(path).ok())

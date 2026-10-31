@@ -991,6 +991,13 @@ impl Executor {
                         return Some(fresh);
                     }
                 }
+                // rubash#2276: a socket endpoint's spelling-open
+                // fails ENXIO in GNU — decline the live serve (the
+                // byte serve below declines too, and the caller
+                // reports the alias layer's ENXIO).
+                if crate::fd::is_socket_handle(file.handle) {
+                    return None;
+                }
                 Some(file)
             }
             _ => None,
@@ -1000,6 +1007,13 @@ impl Executor {
     pub(in crate::executor) fn dev_fd_operand_bytes(&mut self, fd: u32) -> Option<Vec<u8>> {
         let entry = self.fd_table.entries.get(&fd)?.clone();
         if entry.closed {
+            return None;
+        }
+        // rubash#2276: a socket endpoint's spelling-open fails ENXIO
+        // in GNU — never drain the stream for an operand. Callers
+        // that report the failure consult fd_alias_spelling_open_error
+        // for the reason.
+        if self.fd_alias_spelling_open_error(fd).is_some() {
             return None;
         }
         if let Some(read) = &entry.read {
