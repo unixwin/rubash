@@ -5505,6 +5505,280 @@ impl Executor {
         self.restore_fd_var_close_snapshots(close_restore);
     }
 
+    /// rubash#2310: the same-exe script face's ordered input binding.
+    /// GNU applies a command's redirections as ONE ordered walk in
+    /// the child (redir.c:237 do_redirections; each dup copies the
+    /// descriptor as bound at its own position, redir.c:1138-1193,
+    /// dup2 at :1193). rubash splits that walk: the dynamic-fd
+    /// applier (apply_dynamic_fd_var_redirects) runs in the parent
+    /// ahead of dispatch and resolves every `{var}` dup against the
+    /// AMBIENT table, while the numbered input binds land only in
+    /// execute_direct_shell_script — so a `{var}` dup whose source
+    /// an earlier entry of the command's OWN list binds kept the
+    /// ambient copy (`rubash obs.sh {v}<&- 9<f9 {w}<&9` delivered
+    /// the parent's seed at the var's slot where GNU delivers f9),
+    /// and the `{var}` closes the applier recorded were never
+    /// performed for the in-process child at all. This binder
+    /// restores the walk order for the input side: it binds the
+    /// numbered inputs in segments split at each `{var}` entry and
+    /// applies that entry's child-visible effect
+    /// (apply_script_fd_var_entry) at its list position, so at each
+    /// such entry the fd table holds exactly the bindings GNU's
+    /// walk would have produced by then. The numbered output binds
+    /// keep their own pass afterwards, as before.
+    pub(in crate::executor) fn bind_script_numbered_inputs_and_fd_vars(
+        &mut self,
+        cmd: &CommandNode,
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) -> Result<Vec<super::command_input_scope::SavedNumberedFd>, ExecuteError> {
+        // The applier's deferred-close records belong to THIS
+        // command; the script face consumes them here (performed at
+        // their positions below). The spawn delivery prologue is the
+        // other consumer and never runs for a command the script
+        // face takes; unperformed records are dropped by
+        // undo_child_fd_var_redirects either way (see the
+        // fd_var_pending_closes field comment in mod.rs).
+        let mut pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
+        let mut performed_closes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut saved: Vec<super::command_input_scope::SavedNumberedFd> = Vec::new();
+        let mut start = 0usize;
+        for position in 0..cmd.redirects.len() {
+            if cmd.redirects[position].fd_var.is_none() {
+                continue;
+            }
+            self.open_compound_numbered_input_redirects_in(cmd, start, position, &mut saved)?;
+            self.apply_script_fd_var_entry(
+                cmd,
+                position,
+                &mut pending_closes,
+                &mut performed_closes,
+                &saved,
+                heredoc_saved,
+            )?;
+            start = position + 1;
+        }
+        self.open_compound_numbered_input_redirects_in(
+            cmd,
+            start,
+            cmd.redirects.len(),
+            &mut saved,
+        )?;
+        Ok(saved)
+    }
+
+    /// rubash#2310: whether an entry of the command's OWN list
+    /// before `position` binds `fd` on the input side (a numbered
+    /// input/read-write/dup/close entry, or a numbered heredoc) —
+    /// i.e. whether the fd table's state for `fd` at that walk
+    /// position is governed by the list rather than the ambient
+    /// table. `{var}` entries do not count: the applier binds them
+    /// into the same table in list order, so its own resolution
+    /// already sees them at their positions.
+    fn script_own_input_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
+        if cmd
+            .heredoc_redirects
+            .iter()
+            .any(|entry| entry.fd == Some(fd))
+        {
+            return true;
+        }
+        cmd.redirects[..position].iter().any(|entry| {
+            entry.fd_var.is_none()
+                && entry.fd.unwrap_or(0) == fd
+                && matches!(
+                    entry.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::CloseInput
+                )
+        })
+    }
+
+    /// rubash#2310: perform one deferred `{var}` close for the
+    /// in-process script child, mirroring the spawn delivery
+    /// prologue's bookkeeping (apply_external_fd_delivery): snapshot
+    /// the slot into fd_var_close_restore so
+    /// undo_child_fd_var_redirects restores the parent's binding
+    /// once the command completes, then flag the slot closed for
+    /// the child's run (the endpoints stay in place; readers consult
+    /// the closed flag). The snapshot must carry the PRE-COMMAND
+    /// state of the slot: when an earlier own-list bind already
+    /// snapshotted the slot (the numbered-input accumulator, or the
+    /// heredoc saves), that snapshot is the pre-command state — the
+    /// current entry is the child's own binding, and replaying it
+    /// at undo time would leak the binding into the parent (the
+    /// undo's variable loop closes the descriptor the close entry's
+    /// variable names; only this replay puts the parent's binding
+    /// back). `performed` guards against performing one descriptor
+    /// twice (two entries can name the same fd), which would
+    /// snapshot the already-closed state.
+    fn perform_script_fd_var_close(
+        &mut self,
+        fd: u32,
+        performed: &mut std::collections::HashSet<u32>,
+        saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) {
+        if !performed.insert(fd) {
+            return;
+        }
+        let (entry, marker) = match saved_inputs.iter().find(|saved| saved.fd() == fd) {
+            Some(saved) => (
+                saved.saved_entry().cloned(),
+                saved.saved_fd_closed().cloned(),
+            ),
+            None => match heredoc_saved.iter().find(|(saved_fd, _)| *saved_fd == fd) {
+                Some((_, saved_entry)) => (
+                    saved_entry.clone(),
+                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                ),
+                None => (
+                    self.fd_table.entries.get(&fd).cloned(),
+                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                ),
+            },
+        };
+        self.fd_var_close_restore.push((fd, entry, marker));
+        if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
+            entry.closed = true;
+        }
+        self.shell_state
+            .env_vars
+            .insert(fd_closed_key(fd), "1".to_string());
+    }
+
+    /// rubash#2310: apply one `{var}` entry's child-visible effect
+    /// at its list position during the script face's segmented
+    /// input binding (bind_script_numbered_inputs_and_fd_vars). The
+    /// dynamic-fd applier already ran in the parent: it bound the
+    /// file kinds outright (an open installs the same binding at
+    /// any position), copied dup sources from the AMBIENT table,
+    /// and recorded closes instead of performing them. At the
+    /// entry's segment point the fd table holds the command's own
+    /// earlier binds, so:
+    /// - a dup whose source an earlier own-list entry binds is
+    ///   re-resolved against the table as of this position — the
+    ///   same own-list-first correction the spawn face's
+    ///   deliver_fd_var_dup makes at delivery time (GNU's one
+    ///   ordered walk, redir.c:237);
+    /// - a close is performed in the table (the spawn face
+    ///   performs the same records in its delivery prologue).
+    /// A dup whose source no earlier own-list entry binds keeps
+    /// the applier's ambient copy — already the at-position
+    /// binding.
+    fn apply_script_fd_var_entry(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+        pending_closes: &mut Vec<(usize, u32)>,
+        performed_closes: &mut std::collections::HashSet<u32>,
+        saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) -> Result<(), ExecuteError> {
+        let redirect = &cmd.redirects[position];
+        let Some(name) = redirect.fd_var.as_deref() else {
+            return Ok(());
+        };
+        match redirect.kind {
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                // GNU redir.c:1239-1248 (r_close_this +
+                // REDIR_VARASSIGN): the descriptor the variable
+                // holds at this position closes for the child.
+                if let Some(fd) = self.dynamic_fd_variable_value(name) {
+                    self.perform_script_fd_var_close(
+                        fd,
+                        performed_closes,
+                        saved_inputs,
+                        heredoc_saved,
+                    );
+                    if let Some(index) = pending_closes.iter().position(|pending| pending.1 == fd) {
+                        pending_closes.remove(index);
+                    }
+                }
+                Ok(())
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                let target = self.expand_redirect_target(redirect);
+                let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) else {
+                    return Ok(());
+                };
+                let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
+                if self.script_own_input_binding_before(cmd, position, source_fd) {
+                    match self.dynamic_fd_variable_value(name) {
+                        Some(var_fd) => {
+                            // Replace the applier's ambient copy
+                            // with a dup of the descriptor as bound
+                            // at this position — one shared
+                            // description, like dup2 (redir.c:1193).
+                            if write {
+                                self.copy_persistent_output_fd(var_fd, source_fd);
+                            } else {
+                                self.copy_persistent_input_fd(var_fd, source_fd);
+                            }
+                        }
+                        None => {
+                            // The applier bound nothing: it saw
+                            // only the ambient table, where the
+                            // source was closed, but an own-list
+                            // entry opened it. Bind now, at this
+                            // position — the allocator sees the
+                            // command's own binds, so the number
+                            // is the one GNU's walk assigns
+                            // (redir.c:1144-1150 F_DUPFD).
+                            if self.fd_table.is_open(source_fd) {
+                                let Some(fd) = self.allocate_dynamic_fd() else {
+                                    return Err(ExecuteError::IoError(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        self.fd_dup_error_payload(&target),
+                                    )));
+                                };
+                                if write {
+                                    self.copy_persistent_output_fd(fd, source_fd);
+                                } else {
+                                    self.copy_persistent_input_fd(fd, source_fd);
+                                }
+                                if !self.set_dynamic_fd_variable(name, fd) {
+                                    // GNU redir.c:1161-1166:
+                                    // redir_varassign failure closes
+                                    // the just-duplicated fd.
+                                    self.close_persistent_fd(fd)?;
+                                    return Err(ExecuteError::IoError(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        format!("{name}: cannot assign fd to variable"),
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+                if move_source {
+                    // A move's source close takes effect at the
+                    // dup's position for the child. The applier
+                    // recorded it in fd_var_pending_closes when it
+                    // serviced the dup; when it could not (the
+                    // repair above just performed the dup), the
+                    // move applies from that binding instead.
+                    let recorded = pending_closes
+                        .iter()
+                        .position(|pending| pending.1 == source_fd)
+                        .map(|index| pending_closes.remove(index));
+                    if recorded.is_some() || self.dynamic_fd_variable_value(name).is_some() {
+                        self.perform_script_fd_var_close(
+                            source_fd,
+                            performed_closes,
+                            saved_inputs,
+                            heredoc_saved,
+                        );
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
         &mut self,
         redirect: &Redirect,
