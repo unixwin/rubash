@@ -199,6 +199,21 @@ impl Executor {
                 self.builtin_wrapper_depth -= 1;
                 result
             }
+            // rubash#1722: `exit` and `builtin` itself were missing
+            // from this table, so `builtin exit` (which ble.sh's exit
+            // wrapper issues when the session ends) reported
+            // `builtin: exit: not a shell builtin` and did not exit.
+            // GNU's builtin table (builtins/*.def) contains both:
+            // builtin.def calls the named builtin's function directly,
+            // so `builtin exit` IS exit_builtin (same argument shape,
+            // same jump), and `builtin builtin ...` recurses.
+            "exit" => self.execute_exit_command_word(&builtin_cmd)?,
+            "builtin" => {
+                self.builtin_wrapper_depth += 1;
+                let result = self.execute_builtin_direct_command(&builtin_cmd);
+                self.builtin_wrapper_depth -= 1;
+                result
+            }
             "logout" => {
                 self.exit_code = self.execute_logout(&builtin_cmd)?;
                 Ok(())
