@@ -103,9 +103,10 @@ pub(in crate::executor) const FORK_ARGV_BOTTOM_TRANSPORT: &str = "__RUBASH_FORK_
 pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_IN_FUNCTION";
 pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
 pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
+pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_SPANS";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 9] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 10] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -115,6 +116,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 9] = [
     FORK_IN_FUNCTION_TRANSPORT,
     FORK_MAIN_FRAME_TRANSPORT,
     FORK_PIPESTATUS_TRANSPORT,
+    FORK_FN_SPANS_TRANSPORT,
 ];
 
 impl Executor {
@@ -186,8 +188,101 @@ impl Executor {
         if self.has_script_main_frame() || inherited.is_some_and(|frames| frames.has_main_frame) {
             entries.push((FORK_MAIN_FRAME_TRANSPORT.to_string(), "1".to_string()));
         }
+        // rubash#2202: per-function source-line spans for exactly the
+        // bodies background_function_prelude re-renders into the
+        // child. GNU's forked child executes the parent's parsed
+        // tree, whose nodes keep their parse lines (make_cmd.c:196);
+        // the respawn child's re-parse collapses every body onto the
+        // prelude's own lines, so the recorded span is the only way
+        // back to per-command definition lines. Each entry is `name=`
+        // plus comma-joined `line.end_line.logical_line` triples
+        // (0 = None) in collect_command_line_spans traversal order;
+        // the set rides the indexed-array codec like its siblings.
+        let span_entries: Vec<String> = self
+            .shell_state
+            .functions
+            .iter()
+            .filter(|(name, _)| is_exportable_function_name(name))
+            .map(|(name, body)| {
+                let mut spans = Vec::new();
+                crate::parser::collect_command_line_spans(&body.commands, &mut spans);
+                let rendered = spans
+                    .iter()
+                    .map(|span| {
+                        format!(
+                            "{}.{}.{}",
+                            span.line.unwrap_or(0),
+                            span.end_line.unwrap_or(0),
+                            span.logical_line.unwrap_or(0)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{name}={rendered}")
+            })
+            .collect();
+        if !span_entries.is_empty() {
+            entries.push((
+                FORK_FN_SPANS_TRANSPORT.to_string(),
+                format_indexed_array_values(span_entries),
+            ));
+        }
         entries
     }
+}
+
+/// rubash#2202: decode a __RUBASH_FORK_FN_SPANS stamp value into the
+/// per-function span map the child's definition path consumes
+/// (init.rs). Malformed entries are dropped individually — a span
+/// that cannot be parsed must never reach the re-seed.
+pub(in crate::executor) fn decode_function_line_spans(
+    value: &str,
+) -> std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>> {
+    fn parse_slot(text: &str) -> Option<Option<usize>> {
+        match text.parse::<usize>() {
+            Ok(0) => Some(None),
+            Ok(line) => Some(Some(line)),
+            Err(_) => None,
+        }
+    }
+    let mut map = std::collections::HashMap::new();
+    for entry in array_values(value) {
+        let Some((name, nodes)) = entry.split_once('=') else {
+            continue;
+        };
+        let mut spans = Vec::new();
+        let mut valid = true;
+        if !nodes.is_empty() {
+            for triple in nodes.split(',') {
+                let fields: Vec<&str> = triple.split('.').collect();
+                if fields.len() != 3 {
+                    valid = false;
+                    break;
+                }
+                match (
+                    parse_slot(fields[0]),
+                    parse_slot(fields[1]),
+                    parse_slot(fields[2]),
+                ) {
+                    (Some(line), Some(end_line), Some(logical_line)) => {
+                        spans.push(crate::parser::CommandLineSpan {
+                            line,
+                            end_line,
+                            logical_line,
+                        });
+                    }
+                    _ => {
+                        valid = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if valid {
+            map.insert(name.to_string(), spans);
+        }
+    }
+    map
 }
 
 /// The parent-source line of the first command that will execute from

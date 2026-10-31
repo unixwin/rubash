@@ -430,7 +430,7 @@ impl Executor {
             }
         }
 
-        let (imported_functions, imported_function_def_infos, failed_function_imports) =
+        let (mut imported_functions, imported_function_def_infos, failed_function_imports) =
             import_exported_functions_from_env(&env_vars);
         // GNU variables.c: an imported function keeps att_exported — it
         // shows as `declare -fx` and re-exports to grandchildren
@@ -725,6 +725,10 @@ impl Executor {
         // and the PIPESTATUS cell seeds the literal's pipestatus
         // fields.
         let mut respawn_inherited_frames: Option<crate::shell::state::InheritedForkFrames> = None;
+        let mut respawn_function_line_spans: std::collections::HashMap<
+            String,
+            Vec<crate::parser::CommandLineSpan>,
+        > = std::collections::HashMap::new();
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
@@ -757,6 +761,34 @@ impl Executor {
             }
             if let Some(value) = env_vars.get(super::compound_exec::FORK_PIPESTATUS_TRANSPORT) {
                 respawn_pipestatus = crate::shell::state::decode_pipestatus_state(value);
+            }
+            // rubash#2202: per-function source-line spans (see
+            // FORK_FN_SPANS_TRANSPORT); define_function re-seeds the
+            // prelude's re-parsed bodies from these at definition
+            // time and consumes each entry.
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_FN_SPANS_TRANSPORT) {
+                respawn_function_line_spans =
+                    super::compound_exec::decode_function_line_spans(value);
+            }
+        }
+        // rubash#2202: function bodies that crossed as BASH_FUNC
+        // entries — the coproc and process-substitution producer
+        // spawns transport the function table that way, not as
+        // prelude text — get the same span re-seed at birth. The
+        // entry is consumed here (not left for define_function): the
+        // imported body is the definition this shell holds, and a
+        // definition executed later must keep its own lines.
+        if !respawn_function_line_spans.is_empty() {
+            let names: Vec<String> = imported_functions.keys().cloned().collect();
+            for name in names {
+                if let Some(spans) = respawn_function_line_spans.remove(&name) {
+                    if let Some(body) = imported_functions.get_mut(&name) {
+                        let mut commands = body.commands.clone();
+                        if crate::parser::apply_command_line_spans(&mut commands, &spans) {
+                            *body = std::rc::Rc::new(crate::parser::Ast { commands });
+                        }
+                    }
+                }
             }
         }
         for key in super::compound_exec::FORK_TRANSPORT_KEYS {
@@ -876,6 +908,7 @@ impl Executor {
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 inherited_fork_frames: respawn_inherited_frames,
+                respawn_function_line_spans,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),

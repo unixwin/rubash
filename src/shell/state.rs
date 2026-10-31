@@ -160,6 +160,15 @@ pub struct ShellState {
     /// shells; the dynamic views read the child's own frames above
     /// these, exactly like GNU's fork copying the parent's stacks.
     pub(crate) inherited_fork_frames: Option<InheritedForkFrames>,
+    /// rubash#2202: per-function source-line spans a respawned child
+    /// was born with (the __RUBASH_FORK_FN_SPANS stamp; see
+    /// parser::CommandLineSpan). When the definition of a named
+    /// function executes in the child, the re-parsed body's node
+    /// lines are re-seeded from the recorded span and the entry is
+    /// consumed — a later redefinition keeps its own lines. Empty
+    /// for ordinary shells.
+    pub(crate) respawn_function_line_spans:
+        std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>>,
     /// variables.c variable_context — local scope stacks.
     pub(crate) local_var_scopes: Vec<HashMap<String, Option<String>>>,
     pub(crate) local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -667,6 +676,7 @@ impl Clone for ShellState {
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
+            respawn_function_line_spans: self.respawn_function_line_spans.clone(),
             local_var_scopes: self.local_var_scopes.clone(),
             local_attr_scopes: self.local_attr_scopes.clone(),
             local_typed_scopes: self.local_typed_scopes.clone(),
