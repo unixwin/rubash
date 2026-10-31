@@ -761,6 +761,13 @@ impl Executor {
                         continue;
                     }
                     if let Some(source) = redirect_target_fd(&target) {
+                        // rubash#2276: a socket endpoint's
+                        // spelling-open fails ENXIO (see
+                        // fd_alias_spelling_open_error) — the dup
+                        // below is the pipe rule, not the socket rule.
+                        if let Some(error) = self.fd_alias_spelling_open_error(source) {
+                            return Err(crate::posix_errors::path_error(&target, error).into());
+                        }
                         // rubash#2256: a spelling target (`> /dev/fd/N`)
                         // on a regular-file endpoint binds a FRESH open
                         // of the target; every other endpoint keeps the

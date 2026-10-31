@@ -66,6 +66,40 @@ pub(in crate::executor) struct StageStdioContext {
     pub dup_channels: Vec<(u32, u32, crate::fd::HANDLE)>,
 }
 
+/// rubash#2281: apply one recorded {var} pending close during the
+/// delivery walk (see apply_external_fd_delivery): perform the close
+/// in the table (Executor::apply_fd_var_pending_close) and revoke
+/// anything already delivered for that slot - the ambient env
+/// stamps, a command pin, and the walk's own binding records - so
+/// the child does not inherit the slot and a later entry can no
+/// longer source it. The parent-side duplicate handles stay in the
+/// caller's list and are closed after the spawn, as before: with
+/// the env keys gone the child never learns them.
+fn apply_pending_close_at(
+    executor: &mut Executor,
+    process: &mut Command,
+    command_fd_pins: &mut FdPinVec,
+    walk_opened: &mut std::collections::HashMap<
+        u32,
+        std::rc::Rc<crate::executor::fd_table::FileFd>,
+    >,
+    numbered_dup_bindings: &mut std::collections::HashMap<u32, NumberedDupBinding>,
+    fd: u32,
+) {
+    executor.apply_fd_var_pending_close(fd);
+    for key in [
+        format!("__RUBASH_FD_HANDLE_{fd}"),
+        format!("__RUBASH_FD_PATH_{fd}"),
+        format!("__RUBASH_FD_WHANDLE_{fd}"),
+        format!("__RUBASH_FD_WPATH_{fd}"),
+    ] {
+        process.env_remove(key);
+    }
+    command_fd_pins.retain(|&(_, target)| target != fd);
+    walk_opened.remove(&fd);
+    numbered_dup_bindings.remove(&fd);
+}
+
 /// rubash#1626: pin the shell's ambient fd-table descriptors at their
 /// slot numbers in a forked child, between fork and exec — GNU's child
 /// inherits every descriptor `exec N>file` bound, at the same number.
@@ -2028,32 +2062,22 @@ impl Executor {
         // simply see one extra env var (same limitation the background path
         // documents).
         let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
-        // rubash#2272: perform this command's deferred {var} closes
+        // rubash#2272/#2281: this command's deferred {var} closes
         // (close-form targets and move-form dup sources, recorded by
-        // the dynamic-fd applier in fd_var_pending_closes) in the
-        // table before stamping what the child inherits: GNU applies
-        // them in the fork, so the child must not inherit those
-        // slots, while the parent's bindings survive the command —
-        // the snapshots taken here are what
-        // undo_child_fd_var_redirects restores afterwards. Only the
-        // closed flag is set: the endpoints stay in place so the
-        // {var} dup resolution below can still read a source
-        // description from them (the stamp and the pin computation
-        // both skip closed slots).
-        if !self.fd_var_pending_closes.is_empty() {
-            let pending = std::mem::take(&mut self.fd_var_pending_closes);
-            for fd in pending {
-                let entry = self.fd_table.entries.get(&fd).cloned();
-                let marker = self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned();
-                self.fd_var_close_restore.push((fd, entry, marker));
-                if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
-                    entry.closed = true;
-                }
-                self.shell_state
-                    .env_vars
-                    .insert(fd_closed_key(fd), "1".to_string());
-            }
-        }
+        // the dynamic-fd applier in fd_var_pending_closes with their
+        // redirect-list positions) are performed in the table
+        // POSITIONALLY during the delivery walk below - GNU applies
+        // them in the fork, in list order (redir.c:237), so a close
+        // revokes what earlier entries delivered at its slot and a
+        // later entry's dup source is still open at its own turn if
+        // its position precedes the close. The snapshots taken as
+        // each close applies are what undo_child_fd_var_redirects
+        // restores afterwards; the parent's bindings survive the
+        // command. The ambient stamp loop below runs first and stamps
+        // every open slot - a close applied later in the walk revokes
+        // its slot's stamps again (apply_pending_close_at).
+        let pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
+        let mut pending_close_idx = 0usize;
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed {
                 continue;
@@ -2136,6 +2160,25 @@ impl Executor {
             &mut parent_side_dups,
         );
         for (position, redirect) in cmd.redirects.iter().enumerate() {
+            // rubash#2281: closes recorded at earlier positions take
+            // effect before this entry is served - they revoke this
+            // slot's earlier deliveries (see apply_pending_close_at)
+            // and mark the table entry closed, so a {var} dup below
+            // can no longer resolve a source through them.
+            while pending_close_idx < pending_closes.len()
+                && pending_closes[pending_close_idx].0 < position
+            {
+                let fd = pending_closes[pending_close_idx].1;
+                pending_close_idx += 1;
+                apply_pending_close_at(
+                    self,
+                    &mut process,
+                    &mut command_fd_pins,
+                    &mut walk_opened,
+                    &mut numbered_dup_bindings,
+                    fd,
+                );
+            }
             if redirect.fd_var.is_some() {
                 self.deliver_fd_var_redirect(
                     cmd,
@@ -2481,6 +2524,22 @@ impl Executor {
             // fork); the dup above is what the child holds.
             drop(opened_file);
         }
+        // rubash#2281: closes whose position is the list's last
+        // entry (or any defensive remainder) land now, before the
+        // heredoc deliveries below and before the ambient pin
+        // computation reads the table.
+        while pending_close_idx < pending_closes.len() {
+            let fd = pending_closes[pending_close_idx].1;
+            pending_close_idx += 1;
+            apply_pending_close_at(
+                self,
+                &mut process,
+                &mut command_fd_pins,
+                &mut walk_opened,
+                &mut numbered_dup_bindings,
+                fd,
+            );
+        }
         // rubash#2272: `{var}<<EOF` bindings live in
         // heredoc_redirects, not redirects; the applier installed
         // their bodies as Text endpoints in the fd table. Deliver
@@ -2584,10 +2643,11 @@ impl Executor {
     /// - File kinds (`<`, `>`, `>>`, `<>`): a File endpoint in the
     ///   table — the ambient stamp/pin in apply_external_fd_delivery
     ///   already delivers it at the var's number. Nothing to add.
-    /// - Close forms: the applier recorded the close; the delivery
-    ///   prologue above performed it in the table, so the ambient
-    ///   stamp skips the slot — the child inherits it closed, as
-    ///   GNU's child does. Nothing to add.
+    /// - Close forms: the applier recorded the close with this
+    ///   entry's position; the delivery walk applies it when the
+    ///   walk passes that position (apply_pending_close_at), so the
+    ///   ambient stamp is revoked for the slot and the child
+    ///   inherits it closed, as GNU's child does. Nothing to add.
     /// - Heredoc / here-string: a Text endpoint — no OS descriptor
     ///   exists to stamp. Materialize the body into a carrier file
     ///   and deliver the carrier at the var's number (the #2270
