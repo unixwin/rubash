@@ -579,6 +579,29 @@ impl Executor {
                         }
                         continue;
                     }
+                    // rubash#2285: an fd-alias PATH spelling is an OPEN
+                    // over the alias layer (redir.c:725 redir_open, in
+                    // do_redirections at redir.c:237), not a dup — for
+                    // a regular-file endpoint the open is FRESH
+                    // (rubash#2256), including a read-only binding,
+                    // which has no write endpoint for the dup
+                    // resolution below to find: the plan declined on
+                    // it and the legacy arms then served the child
+                    // the shell's real stdout. Only fds 1/2 are
+                    // realized here; a numbered target's fresh open
+                    // belongs to the spawn delivery walk
+                    // (apply_external_fd_delivery, rubash#2295).
+                    if fd <= 2 {
+                        if let Some(opened) = self.open_alias_spelling_fresh_output(
+                            &target,
+                            redirect.append,
+                            redirect.clobber,
+                        ) {
+                            let file = opened?;
+                            slots.insert(fd, ExternalStdioSlot::Handle(file));
+                            continue;
+                        }
+                    }
                     if let Some(source_fd) = redirect_target_fd(&target) {
                         // Self-dup: no-op (rubash#1236).
                         if source_fd == fd {
@@ -838,6 +861,13 @@ impl Executor {
                     process.stdout(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stdout(&target) {
+                } else if let Some(opened) =
+                    self.open_alias_spelling_fresh_output(&target, true, true)
+                {
+                    // rubash#2285: append form of the alias arm in
+                    // apply_external_stdout_target — a fresh
+                    // O_APPEND open of the resolved regular file.
+                    process.stdout(Stdio::from(opened?));
                 } else if self.has_output_fd_target(&target) {
                     process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
                 } else if redirect_target_fd(&target).is_none() {
@@ -901,6 +931,13 @@ impl Executor {
             process.stdout(Stdio::piped());
             self.external_stdio_piped_fallback = true;
         } else if self.output_fd_redirects_to_stdout(target) {
+        } else if let Some(opened) = self.open_alias_spelling_fresh_output(target, false, clobber) {
+            // rubash#2285: fd-alias PATH spelling resolving to a
+            // regular file — fresh open (see the stdio plan's alias
+            // arm); a read-bound source has no write endpoint, so
+            // without this arm no branch fired and the child
+            // inherited the real stdout.
+            process.stdout(Stdio::from(opened?));
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
         } else if redirect_target_fd(target).is_none() {
@@ -934,6 +971,12 @@ impl Executor {
                 process.stderr(Stdio::piped());
                 self.external_stdio_piped_fallback = true;
             } else if self.output_fd_redirects_to_stderr(&target) {
+            } else if let Some(opened) =
+                self.open_alias_spelling_fresh_output(&target, false, redirect.clobber)
+            {
+                // rubash#2285: fd-2 form of the alias arm in
+                // apply_external_stdout_target.
+                process.stderr(Stdio::from(opened?));
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
@@ -965,6 +1008,12 @@ impl Executor {
                     process.stderr(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stderr(&target) {
+                } else if let Some(opened) =
+                    self.open_alias_spelling_fresh_output(&target, true, true)
+                {
+                    // rubash#2285: append form of the fd-2 alias arm
+                    // above.
+                    process.stderr(Stdio::from(opened?));
                 } else if self.has_output_fd_target(&target) {
                     process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
                 } else if redirect_target_fd(&target).is_none() {
