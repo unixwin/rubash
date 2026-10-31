@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::expand_braced_ops::split_once_outside_subscript_str;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
@@ -1573,6 +1574,41 @@ impl Executor {
     /// body or a $(...) body is not an expansion start of THIS word
     /// (quote.tests:117 `echo \`echo '${'\```). Heredoc bodies keep the raw
     /// scan because quotes are literal there.
+    /// The nested-error verdict for the operator word of one `${...}`
+    /// span: GNU expands that word exactly when the operator selects it
+    /// (`-`/`=` when the parameter is unset, `:-`/`:=` when unset or
+    /// null, `+` when set, `:+` when set and non-null —
+    /// subst.c parameter_brace_expand / parameter_brace_expand_rhs), so
+    /// only then can an error inside the word fire. The `?`/`:?` message
+    /// word is NOT handled here: it is expanded by
+    /// parameter_brace_expand_error under its own rule, at the `:?`
+    /// check above. The operator is identified by the first split whose
+    /// left side is a valid parameter reference, which keeps
+    /// operator-shaped text inside a message or pattern from being
+    /// mistaken for the span's own operator (rubash#2343).
+    fn nested_operator_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+        for op in [":=", ":-", ":+", "=", "-", "+"] {
+            let Some((var_name, word)) = split_once_outside_subscript_str(inner, op) else {
+                continue;
+            };
+            if !is_parameter_error_name(var_name) {
+                continue;
+            }
+            let value = self.parameter_error_value(var_name);
+            let word_evaluated = match op {
+                ":=" | ":-" => value.as_deref().map(str::is_empty).unwrap_or(true),
+                "=" | "-" => value.is_none(),
+                ":+" => value.as_deref().is_some_and(|value| !value.is_empty()),
+                _ => value.is_some(),
+            };
+            if !word_evaluated {
+                return None;
+            }
+            return self.parameter_expansion_error_in_word(word);
+        }
+        None
+    }
+
     fn parameter_expansion_error_in_word_context(
         &self,
         word: &str,
@@ -2023,6 +2059,17 @@ impl Executor {
                     value.is_none()
                 };
                 if is_error {
+                    // GNU subst.c:8216-8230 parameter_brace_expand_error
+                    // expands the message word (expand_string) before it
+                    // reports; a `:?` failure inside that word is itself
+                    // fatal, pre-empts the outer report, and names the
+                    // INNER variable (rubash#2343: `${a:?${b:?inner}}`
+                    // reports `b: inner`, never `a: inner`).
+                    if !message.is_empty() {
+                        if let Some(nested) = self.parameter_expansion_error_in_word(message) {
+                            return Some(nested);
+                        }
+                    }
                     let message = if message.is_empty() {
                         if require_non_empty {
                             "parameter null or not set".to_string()
@@ -2042,6 +2089,16 @@ impl Executor {
                         Self::FATAL_PARAMETER_EXPANSION_STATUS,
                     ));
                 }
+            }
+            // GNU subst.c parameter_brace_expand: the word of a `-`/`+`/`=`
+            // family operator is expanded (parameter_brace_expand_rhs)
+            // exactly when the operator selects it, and a failure inside
+            // that word — a nested `${inner:?msg}` above all — is fatal
+            // and reported for the inner parameter (rubash#2343:
+            // `${a:-${b:?inner}}` with a unset reports `b: inner` and
+            // aborts; it never yields the message text as a value).
+            if let Some(nested) = self.nested_operator_word_error(inner) {
+                return Some(nested);
             }
             if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {
                 if length < 0 {
