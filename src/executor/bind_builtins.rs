@@ -593,6 +593,16 @@ impl Executor {
         self.shell_state.bind_registry.borrow().snapshot()
     }
 
+    /// The `bind -r` / `bind -u` removals — (keyseq, keymap) pairs a
+    /// host must subtract from the DEFAULT key tables when mirroring
+    /// them, because GNU's unbind mutates the maps themselves,
+    /// defaults included (rubash#2337). Pairs with
+    /// [`Executor::bind_registry_snapshot`] and the registry
+    /// generation counter.
+    pub fn bind_removed_keyseqs(&self) -> Vec<(String, Option<String>)> {
+        self.shell_state.bind_registry.borrow().removals()
+    }
+
     /// The invoking key sequences for one function in one keymap over
     /// the effective map (see
     /// [`crate::shell::bind_registry::BindRegistry::invoking_keyseqs`]).
@@ -722,21 +732,13 @@ impl Executor {
 
     fn unbind_function_for_keymap(&mut self, name: &str, keymap: Option<&str>) {
         // unbind_command removes the bindings in the CURRENT keymap only
-        // (bind.def:375-393 rl_unbind_function_in_map).
-        let registry = self.shell_state.bind_registry.clone();
-        let mut registry = registry.borrow_mut();
-        let doomed: Vec<(String, Option<String>)> = registry
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(&entry.kind, BindKind::Function { name: bound } if bound == name)
-                    && same_keymap(entry.keymap.as_deref(), keymap)
-            })
-            .map(|entry| (entry.keyseq.clone(), entry.keymap.clone()))
-            .collect();
-        for (keyseq, bound_keymap) in doomed {
-            registry.unbind_keyseq_for_keymap(&keyseq, bound_keymap.as_deref());
-        }
+        // (bind.def:375-393 rl_unbind_function_in_map) — session entries
+        // AND the keymap's defaults for the function (rubash#2337; the
+        // registry records the default removals).
+        self.shell_state
+            .bind_registry
+            .borrow_mut()
+            .unbind_function_for_keymap(name, keymap);
     }
 }
 
