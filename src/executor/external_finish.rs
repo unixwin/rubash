@@ -420,6 +420,10 @@ impl Executor {
                 // SHLVL takes the startup increment (rubash#2058's
                 // keep applies only to fork-shaped respawns).
                 false,
+                // An in-process fork copy, not a process birth: the
+                // parent's serialized environment keeps the anti-leak
+                // heuristic (rubash#2212).
+                false,
             );
             // The in-process child shares the parent's OS process, so the
             // child's PPID is the parent shell's pid (a real child would see
