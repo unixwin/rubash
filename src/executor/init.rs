@@ -841,6 +841,17 @@ impl Executor {
             mirror_env_remove(key);
             false
         });
+        // rubash#2084: a root executor that outlives its construction
+        // (the library form) holds a share of the process signal
+        // policy; the acquisition snapshots the host dispositions
+        // BEFORE the registration below applies the entry policy, and
+        // the last root's Drop restores them. The process-exit form
+        // holds no share: the process dies with the executor, so its
+        // dispositions are unobservable afterwards.
+        let owns_session_process_state = !process_exit;
+        if owns_session_process_state {
+            crate::builtins::kill::session_dispositions_acquire();
+        }
         let owns_signal_mailbox = if coproc_child_claimed && internal_respawn {
             // A blocked coprocess reader cannot consume a queued TERM,
             // so the child never owns the mailbox registration. The
@@ -875,6 +886,13 @@ impl Executor {
                 // the process, carries the session's cwd.
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
                 array_compact_budget: HashMap::new(),
+                // rubash#2130: born unshaped — the ambient carriers
+                // were stripped from the import above (#2259), and
+                // the owning host declares the shape through the
+                // funnels (builder / argv classification) after
+                // construction.
+                invocation_interactive: false,
+                invocation_login: false,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
@@ -969,6 +987,13 @@ impl Executor {
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
             owns_signal_mailbox,
+            owns_session_process_state,
+            birth_process_umask: if owns_session_process_state {
+                crate::builtins::umask::snapshot_process_umask()
+            } else {
+                None
+            },
+            session_set_umask: None,
             is_process_exit_executor: process_exit,
             background_children: HashMap::new(),
             procsub_feed_handles: Vec::new(),

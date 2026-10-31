@@ -928,10 +928,7 @@ impl Executor {
         // GNU execute_cmd.c:3267 REAP() runs once per loop iteration; an
         // empty table makes the scan plus cleanup below no-ops, so skip the
         // consults too. Any `&` spawn restores the full path next iteration.
-        let interactive = self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE");
+        let interactive = self.invocation_interactive();
         let job_control =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         if interactive && job_control {
@@ -1870,13 +1867,7 @@ impl Executor {
                     // re-queued on this path: this delivery IS the
                     // wait's verdict.
                     self.exit_code = 128 + signal;
-                    if self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        == Some("1")
-                    {
+                    if self.invocation_interactive() {
                         self.signal_discard_pending = true;
                     }
                     return Err(ExecuteError::ExitCode(128 + signal));

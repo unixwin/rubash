@@ -1063,11 +1063,7 @@ impl Executor {
         job_id: crate::jobs::JobId,
         pid: u32,
     ) {
-        if !self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if !self.invocation_interactive() {
             return;
         }
         if self.in_subshell_environment() {

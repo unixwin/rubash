@@ -1534,11 +1534,7 @@ impl Executor {
     /// the DISCARD applies there (WSL probe: `bash -i xq.sh` prints the
     /// error and still runs the next line).
     pub(in crate::executor) fn expansion_error_is_interactive_discard(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_INTERACTIVE")
-            .map(String::as_str)
-            == Some("1")
+        self.invocation_interactive()
             && self
                 .shell_state
                 .env_vars
@@ -1563,11 +1559,7 @@ impl Executor {
     /// job), so no depth/comsub condition applies there the way it
     /// does to expansion-error fatality.
     pub(in crate::executor) fn interactive_reader_session(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_INTERACTIVE")
-            .map(String::as_str)
-            == Some("1")
+        self.invocation_interactive()
             && self
                 .shell_state
                 .env_vars

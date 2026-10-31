@@ -1882,6 +1882,11 @@ impl Executor {
             // spawn-realized BASHPID level carries over unchanged.
             bashpid_origin_depth: self.bashpid_origin_depth,
             owns_signal_mailbox: false,
+            // rubash#2084: a fork copy holds no signal-policy share
+            // and journals no umask — it is not a root session.
+            owns_session_process_state: false,
+            birth_process_umask: self.birth_process_umask,
+            session_set_umask: None,
             is_process_exit_executor: false,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),

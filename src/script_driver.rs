@@ -3617,11 +3617,7 @@ fn run_source_impl(
                         // error.c print_offending_line is non-interactive
                         // only (parse.y:6865) — the same gate the parser's
                         // source echoes use.
-                        if !executor
-                            .shell_state()
-                            .env_vars
-                            .contains_key("__RUBASH_INTERACTIVE")
-                        {
+                        if !executor.invocation_interactive() {
                             let offending = input
                                 .lines()
                                 .nth(line.saturating_sub(1))
@@ -4300,7 +4296,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     static JOB_CONTROL_DEFAULT_APPLIED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     if !JOB_CONTROL_DEFAULT_APPLIED.swap(true, std::sync::atomic::Ordering::Relaxed)
-        && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        && executor.invocation_interactive()
         && executor.get_env("__RUBASH_SETOPT_monitor").is_none()
     {
         executor.set_shell_option("monitor", true);
@@ -4596,10 +4592,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 // C-d on an empty buffer ends the session the same way the
                 // piped path's Ok(0) arm does: the synthesized `exit` (or
                 // `logout`) echoes to stderr first (builtins/exit.def:59-62).
-                if st.buffer.is_empty()
-                    && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
-                {
-                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+                if st.buffer.is_empty() && executor.invocation_interactive() {
+                    let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
                 }
                 if !st.buffer.is_empty() {
@@ -4701,8 +4695,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                             && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET)));
                 #[cfg(not(unix))]
                 let hangup = false;
-                if !hangup && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
-                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+                if !hangup && executor.invocation_interactive() {
+                    let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
                 }
                 eof = true;
@@ -4733,8 +4727,8 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                             && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET)));
                 #[cfg(not(unix))]
                 let hangup = false;
-                if !hangup && executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
-                    let login = executor.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+                if !hangup && executor.invocation_interactive() {
+                    let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
                 }
                 eof = true;
@@ -5560,7 +5554,7 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
     }
 
     let status = executor.last_exit_code();
-    let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
+    let interactive = executor.invocation_interactive();
     finish_shell(executor, status, interactive)
 }
 
@@ -5651,9 +5645,7 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // caught by its EXIT trap — and any shell dying by another
     // terminating signal — dies by the signal without it.
     #[cfg(unix)]
-    if termsig_death == Some(libc::SIGHUP as i32)
-        && executor.get_env("__RUBASH_INTERACTIVE") == Some("1")
-    {
+    if termsig_death == Some(libc::SIGHUP as i32) && executor.invocation_interactive() {
         executor.hangup_all_jobs();
     }
     // rubash#1853: end-of-stream job notifications. The boundary
@@ -5699,7 +5691,7 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     #[cfg(unix)]
     if termsig_death.is_none()
         && interactive
-        && executor.get_env("__RUBASH_LOGIN_SHELL") == Some("1")
+        && executor.invocation_login()
         && executor
             .get_env("__RUBASH_SHOPT_STATE")
             .is_some_and(|s| s.split('\u{1f}').any(|e| e == "huponexit"))
@@ -5723,7 +5715,7 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
         Some(late) => {
             if termsig_death.is_none()
                 && late == libc::SIGHUP as i32
-                && executor.get_env("__RUBASH_INTERACTIVE") == Some("1")
+                && executor.invocation_interactive()
             {
                 executor.hangup_all_jobs();
             }

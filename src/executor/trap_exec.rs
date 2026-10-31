@@ -637,12 +637,7 @@ impl Executor {
                         write_result?;
                         let posix_mode =
                             self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                        let interactive = self
-                            .shell_state
-                            .env_vars
-                            .get("__RUBASH_INTERACTIVE")
-                            .map(String::as_str)
-                            == Some("1");
+                        let interactive = self.invocation_interactive();
                         // evalstring.c:588-595: the ONLY exit for a
                         // main-grammar parse error in the eval'd string —
                         // non-interactive + posix + bare eval/source (not
@@ -1606,14 +1601,11 @@ impl Executor {
     /// sigint handler (sig.c sigint_sighandler), whose verdict is a
     /// top-level DISCARD, never the termsig death — so it is never
     /// armed here, EXIT trap or not.
+    /// rubash#2130: interactivity is judged by the typed invocation
+    /// shape, not the env carrier.
     #[cfg(unix)]
     fn termsig_death_armed(&self, signal: i32) -> bool {
-        let interactive = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_INTERACTIVE")
-            .map(String::as_str)
-            == Some("1");
+        let interactive = self.invocation_interactive();
         if interactive && signal == libc::SIGINT as i32 {
             return false;
         }
@@ -1890,13 +1882,7 @@ impl Executor {
                 // an exit jump for the unit. Non-interactive shells keep
                 // the exit classification (the delivery is how a script
                 // shell dies at 128+sig, running any EXIT trap).
-                if self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    == Some("1")
-                {
+                if self.invocation_interactive() {
                     self.signal_discard_pending = true;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));
@@ -2136,13 +2122,7 @@ impl Executor {
                     // classification reads), never the process env.
                     // Non-interactive sessions set nothing and keep the
                     // exit classification byte-identically.
-                    if self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        == Some("1")
-                    {
+                    if self.invocation_interactive() {
                         self.signal_discard_pending = true;
                     }
                     // rubash#2236: same death record as the boundary
@@ -6809,12 +6789,7 @@ impl Executor {
             // running, $? = 127).
             let execfail =
                 crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "execfail");
-            let interactive = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                == Some("1");
+            let interactive = self.invocation_interactive();
             if status == 0
                 || self.shell_state.subshell_depth.get() > 0
                 || (!interactive && !execfail)
