@@ -1620,6 +1620,11 @@ impl Executor {
         let mut state = self.command_output_fd_state();
         if pipeline_stage {
             state.defer_stdout_writes = true;
+            // rubash#2359: arm the stage judgment in
+            // dev_stdio_target_reopens_disk — without this the flag
+            // stayed at its constructor default and the gate's
+            // preflight arm was dead code (see the gate).
+            state.preflight_stage_stdio = true;
         }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             return Ok(false);
@@ -2360,9 +2365,6 @@ impl Executor {
     /// captures) keep the dup semantics GNU gets from opening a pipe's
     /// /proc/self/fd entry.
     fn dev_stdio_target_reopens_disk(&self, target: &str, state: &OutputFdState) -> bool {
-        if state.defer_stdout_writes {
-            return false;
-        }
         let Some(source_fd) = crate::executor::execution_misc::dev_stdio_redirect_fd(target) else {
             return false;
         };
@@ -2370,8 +2372,24 @@ impl Executor {
         // spelling (source fd 0/1/2) against the stage's bindings —
         // the element's fd 1 is its pipe — never against the ambient
         // process stdio the fd table describes; the dup shortcut
-        // below is the stage's service for those spellings.
-        if state.preflight_stage_stdio && source_fd <= 2 {
+        // below is the stage's service for those spellings. A
+        // NUMBERED source fd names an ambient binding the stage
+        // inherits unchanged, so the preflight judges it by the
+        // same ambient rule as every other face (the resolver).
+        // The defer_stdout_writes blanket below exists to keep the
+        // ROUTING walks off the reopen judgment; it must not reach
+        // the preflight's numbered-fd judgment — with it in front,
+        // `echo x > /dev/fd/3 | cat` (fd 3 a regular file, set -C)
+        // wrote through the shared handle where GNU's stage child
+        // refuses the fresh open (redir.c:676 noclobber_open over
+        // redir_open's plain open, redir.c:725).
+        if state.preflight_stage_stdio {
+            if source_fd <= 2 {
+                return false;
+            }
+            return self.fd_alias_reopen_path(source_fd).is_some();
+        }
+        if state.defer_stdout_writes {
             return false;
         }
         // rubash#2256 (wave 2): the alias-layer resolver is the
