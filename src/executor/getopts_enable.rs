@@ -264,6 +264,13 @@ impl Executor {
             );
             return 2;
         }
+        // GNU getopts.def (getopts_bind_variable -> bind_variable): an
+        // att_noassign name variable fails the bind silently and the
+        // call reports failure (oracle: `getopts "a" BASH_SOURCE -a`
+        // exits 2 with no output) (rubash#2369).
+        if self.assignment_target_is_noassign(variable) {
+            return 2;
+        }
         if variable == "OPTIND" {
             return self.getopts_bind_optind_name(value, stderr);
         }

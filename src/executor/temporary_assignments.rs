@@ -293,6 +293,16 @@ impl Executor {
                     Some(capture_var_attrs(&self.shell_state.env_vars, target)),
                 ));
             }
+            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
+            // target (att_noassign carrier, resolved through namerefs)
+            // makes assign_in_env return 0 — the binding never enters
+            // the temporary environment at all: no store, no export,
+            // and the command still runs with its own status
+            // (rubash#2369). The previous-value snapshots above stay
+            // (restoring them is a no-op).
+            if self.assignment_target_is_noassign(resolved_target.as_deref().unwrap_or(base_name)) {
+                continue;
+            }
             // GNU variables.c:3564-3578 assign_in_env: when the name does not
             // resolve (find_variable NULL — e.g. a nameref with an empty or
             // invalid cell), the tempenv binding falls back to the literal
@@ -1046,6 +1056,28 @@ impl Executor {
         }
     }
 
+    /// GNU variables.h:243 ASSIGN_DISALLOWED, the noassign half: the
+    /// bind target of `name` — nameref-resolved, subscript stripped —
+    /// carries att_noassign (variables.c:1839 FUNCNAME, 1886 GROUPS,
+    /// 1889 BASH_ARGC, 1890 BASH_ARGV, 1892 BASH_SOURCE, 1893
+    /// BASH_LINENO). The plain-statement funnel swallows such binds
+    /// silently (bind_variable_internal, variables.c:3130/3152), so
+    /// callers whose GNU counterpart inspects the bind result consult
+    /// this instead: read (read.def:1156 bind_read_variable), for /
+    /// select (execute_cmd.c:3082/3585), mapfile (mapfile.def:205),
+    /// printf -v (printf.def:114), make_local_variable
+    /// (variables.c:2654), assign_in_env (variables.c:3589) and the
+    /// parameter-brace `=`/`:=` rhs (subst.c:8153) all fail the
+    /// operation when the target is disallowed (rubash#2369).
+    pub(in crate::executor) fn assignment_target_is_noassign(&self, name: &str) -> bool {
+        let base = name.split('[').next().unwrap_or(name);
+        let resolved = self
+            .nameref_target_name(base)
+            .unwrap_or_else(|| base.to_string());
+        let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
+        is_noassign_bash_array(resolved_base)
+    }
+
     pub(in crate::executor) fn apply_shell_assignment(
         &mut self,
         name: &str,
@@ -1511,15 +1543,18 @@ impl Executor {
         if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
             return true;
         }
-        // PIPESTATUS is the one noassign-list array whose cell is an
-        // ordinary bindable variable in GNU (variables.c:6291 gates
-        // only the status WRITER on the cell shape): a scalar or
-        // compound bind creates a real cell the writer then respects,
-        // so it takes the generic store below and the caller's
+        // GNU bind_variable_internal (variables.c:3130/3152): a plain
+        // bind to an att_noassign variable is a silent no-op — the
+        // entry is returned unchanged and no diagnostic prints (only
+        // readonly prints err_readonly). The carriers (FUNCNAME,
+        // GROUPS, BASH_ARGC, BASH_ARGV, BASH_SOURCE, BASH_LINENO) keep
+        // the swallow: their storage is the frame stack / dynamic
+        // getters. PIPESTATUS is not a carrier (variables.c:6299-6301
+        // make_new_array_variable carries no att_noassign), so it
+        // takes the generic store below and the caller's
         // note_pipestatus_assignment derives the shape from the
-        // stored form (rubash#1364). The stack arrays (BASH_ARGC &
-        // friends) keep the swallow: their storage is the frame stack.
-        if is_noassign_bash_array(base_name) && base_name != "PIPESTATUS" && !append {
+        // stored form (rubash#1364, rubash#2369).
+        if is_noassign_bash_array(base_name) && !append {
             return true;
         }
         let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);

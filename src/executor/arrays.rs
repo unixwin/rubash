@@ -1646,8 +1646,15 @@ pub(super) fn slice_array_values(
 }
 
 pub(super) fn is_noassign_bash_array(name: &str) -> bool {
+    // GNU att_noassign carriers (variables.h:133 att_noassign 0x0004000):
+    // FUNCNAME (variables.c:1839), GROUPS (variables.c:1886), BASH_ARGC
+    // (variables.c:1889), BASH_ARGV (variables.c:1890), BASH_SOURCE
+    // (variables.c:1892), BASH_LINENO (variables.c:1893). PIPESTATUS is
+    // NOT one: variables.c:6299-6301 creates it with plain
+    // make_new_array_variable, so binds to it are ordinary stores
+    // (rubash#2369).
     matches!(
         name,
-        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "PIPESTATUS"
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
     )
 }

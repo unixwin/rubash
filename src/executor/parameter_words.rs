@@ -1691,7 +1691,17 @@ impl Executor {
             if self.reject_bad_array_subscript_assignment(name, prev_status) {
                 return;
             }
-            if self.apply_indirect_parameter_assignment(name, bound.clone()) {
+            if self.apply_indirect_parameter_assignment(name, bound.clone(), prev_status) {
+                return;
+            }
+            // GNU subst.c:8153 (parameter_brace_expand_rhs): the bind
+            // was attempted (the set-test above failed) and the target
+            // is att_noassign — ASSIGN_DISALLOWED refuses it with no
+            // diagnostic and the expansion fails (EX_BADUSAGE DISCARD),
+            // unlike the plain-statement bind, which the funnel
+            // swallows silently with status 0 (rubash#2369).
+            if self.assignment_target_is_noassign(name) {
+                self.latch_parameter_assignment_failure(prev_status);
                 return;
             }
             if !is_shell_name(name) {
@@ -1733,7 +1743,13 @@ impl Executor {
             if self.reject_bad_array_subscript_assignment(name, prev_status) {
                 return;
             }
-            if self.apply_indirect_parameter_assignment(name, bound.clone()) {
+            if self.apply_indirect_parameter_assignment(name, bound.clone(), prev_status) {
+                return;
+            }
+            // GNU subst.c:8153: same att_noassign refusal as the `:=`
+            // arm above (rubash#2369).
+            if self.assignment_target_is_noassign(name) {
+                self.latch_parameter_assignment_failure(prev_status);
                 return;
             }
             if !is_shell_name(name) {
@@ -1745,7 +1761,12 @@ impl Executor {
         }
     }
 
-    fn apply_indirect_parameter_assignment(&mut self, name: &str, value: String) -> bool {
+    fn apply_indirect_parameter_assignment(
+        &mut self,
+        name: &str,
+        value: String,
+        prev_status: i32,
+    ) -> bool {
         let Some(indirect_name) = name.strip_prefix('!') else {
             return false;
         };
@@ -1760,6 +1781,12 @@ impl Executor {
         }
         if !is_shell_name(&target_name) {
             return false;
+        }
+        // GNU subst.c:8153: an indirect target carrying att_noassign
+        // refuses the bind the same way (rubash#2369).
+        if self.assignment_target_is_noassign(&target_name) {
+            self.latch_parameter_assignment_failure(prev_status);
+            return true;
         }
         self.apply_shell_assignment(&target_name, value);
         true
