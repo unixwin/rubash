@@ -53,6 +53,17 @@ pub(in crate::executor) struct StageStdioContext {
     /// carrier). None when the stage's fd 0 is the live inherited
     /// descriptor — the ambient capture already names it.
     pub stdin_channel: Option<crate::fd::HANDLE>,
+    /// Carrier write ends for numbered OUTPUT dups of fds 1/2 whose
+    /// source slot a later list entry rebinds, as (dup target fd,
+    /// source fd, write-end handle). The child shares ONE capture
+    /// pipe per stdio slot, and the routing walk places that capture
+    /// whole at the source slot's FINAL target — a dup pinned onto
+    /// the wired slot would land its bytes there too, not on the
+    /// stage channel the dup copied at its position. The spawner
+    /// therefore wires such a dup onto its own carrier pipe; the
+    /// drained payload is placed at the dup's own resolved target
+    /// by route_pipeline_stage_streams.
+    pub dup_channels: Vec<(u32, u32, crate::fd::HANDLE)>,
 }
 
 /// rubash#1626: pin the shell's ambient fd-table descriptors at their
@@ -69,17 +80,22 @@ pub(in crate::executor) struct StageStdioContext {
 /// that number in the child (its exec-error channel). It is
 /// recognizable as an open FIFO at the target that is not one of the
 /// pin sources; overwriting it would corrupt spawn error reporting.
-/// One FIFO shape is NOT the error channel: a stdio pipe the spawn
+/// Two FIFO shapes are NOT the error channel: a stdio pipe the spawn
 /// machinery dup2'd onto its slot (0/1/2) and left open at its
-/// original number until exec. A pipeline stage's own stdout pipe
-/// parks exactly like that, and when its number collides with a
-/// pin's target the pin is GNU's redirection for the element
+/// original number until exec, and a carrier pipe one of the pins
+/// itself draws from — the sibling end of a pin source, parked at
+/// the target by the parent's fd allocation (a stage dup carrier's
+/// read end can sit exactly on the dup's slot while its write end
+/// is the pin source). A pipeline stage's own stdout pipe parks
+/// like the first shape, and when its number collides with a pin's
+/// target the pin is GNU's redirection for the element
 /// (execute_cmd.c:2620 execute_pipeline runs redir.c:237
 /// do_redirections in the forked child) and must win the slot
-/// (rubash#2255). The two are told apart by identity: both ends of
-/// one pipe share an inode, so a FIFO whose (dev, inode) matches a
-/// stdio descriptor is the stdio leftover, while the error channel
-/// is a pipe of its own and never matches.
+/// (rubash#2255). The shapes are told apart by identity: both ends
+/// of one pipe share an inode, so a FIFO whose (dev, inode)
+/// matches a stdio descriptor or a pin source is part of the
+/// spawn's own fd arrangement, while the error channel is a pipe
+/// of its own and never matches either.
 #[cfg(unix)]
 pub(in crate::executor) fn pin_ambient_fds_in_child(
     pins: &[(std::os::unix::io::RawFd, u32)],
@@ -107,6 +123,7 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
         if !sources.contains(&target)
             && fd_is_anonymous_pipe(target)
             && !fd_is_stdio_pipe_alias(target)
+            && !fd_is_pin_source_pipe_alias(target, &sources)
         {
             unsafe { libc::close(temp) };
             continue;
@@ -131,34 +148,57 @@ fn fd_is_anonymous_pipe(fd: std::os::unix::io::RawFd) -> bool {
     (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) == u32::from(libc::S_IFIFO)
 }
 
-/// Whether `fd` is the same anonymous pipe as one of the child's
-/// arranged stdio descriptors (0/1/2) — the spawn machinery's stdio
-/// leftover at its pre-dup2 number (see pin_ambient_fds_in_child).
-/// Both ends of a pipe share one (dev, inode) identity; std's
-/// exec-error channel is a separate pipe and never matches a stdio
-/// descriptor, so it keeps the pin guard's protection.
+/// The (dev, inode) identity of the anonymous pipe `fd` names, if
+/// it names one. Both ends of one pipe share the identity, which
+/// is what lets the pin guard tell the spawn's own fd arrangement
+/// apart from std's exec-error channel (a pipe of its own).
 #[cfg(unix)]
-fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
+fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(u64, u64)> {
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut stat) } != 0 {
+        return None;
+    }
+    // Widened through u32 like fd_is_anonymous_pipe above (bionic).
+    if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
+        return None;
+    }
     // Identity fields are widened to u64: the raw stat field types
     // and the dev_t/ino_t aliases disagree on 32-bit Android (u64
     // fields vs u32 aliases), and only equality is ever tested.
-    fn pipe_identity(fd: std::os::unix::io::RawFd) -> Option<(u64, u64)> {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(fd, &mut stat) } != 0 {
-            return None;
-        }
-        // Widened through u32 like fd_is_anonymous_pipe above (bionic).
-        if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT)) != u32::from(libc::S_IFIFO) {
-            return None;
-        }
-        Some((stat.st_dev as u64, stat.st_ino as u64))
-    }
+    Some((stat.st_dev as u64, stat.st_ino as u64))
+}
+
+/// Whether `fd` is the same anonymous pipe as one of the child's
+/// arranged stdio descriptors (0/1/2) — the spawn machinery's stdio
+/// leftover at its pre-dup2 number (see pin_ambient_fds_in_child).
+/// std's exec-error channel is a separate pipe and never matches
+/// a stdio descriptor, so it keeps the pin guard's protection.
+#[cfg(unix)]
+fn fd_is_stdio_pipe_alias(fd: std::os::unix::io::RawFd) -> bool {
     let Some(identity) = pipe_identity(fd) else {
         return false;
     };
     [0, 1, 2]
         .iter()
         .any(|&stdio_fd| pipe_identity(stdio_fd) == Some(identity))
+}
+
+/// Whether `fd` is the sibling end of a pipe one of the pin
+/// sources names — the occupant is then part of the spawn's own
+/// fd arrangement (a carrier the delivery draws from its other
+/// end, parked on the target by the parent's fd allocation), not
+/// std's exec-error channel, whose pipe matches no source.
+#[cfg(unix)]
+fn fd_is_pin_source_pipe_alias(
+    fd: std::os::unix::io::RawFd,
+    sources: &[std::os::unix::io::RawFd],
+) -> bool {
+    let Some(identity) = pipe_identity(fd) else {
+        return false;
+    };
+    sources
+        .iter()
+        .any(|&source| pipe_identity(source) == Some(identity))
 }
 
 /// The result of one route-seam attempt (see
@@ -2790,17 +2830,22 @@ impl Executor {
                 // shell's ambient descriptor — GNU binds the
                 // element's stdio to the inter-element pipes before
                 // the element's own walk runs (execute_cmd.c:2620
-                // execute_pipeline). Fds 1/2 are wired to the
-                // stage's capture pipes (the routing walk places
-                // their payloads afterwards), so the child's wired
-                // slot already holds the at-position binding and
-                // the child-local pin below is the delivery. Fd 0
-                // is wired to the later WINNER by the stdin face,
-                // so its at-position binding is the payload channel
-                // the spawner materialized as the context's
-                // stdin_channel; when the stage's fd 0 is the live
-                // inherited descriptor the channel is None and the
-                // ambient capture below already names it.
+                // execute_pipeline). Fd 0 is wired to the later
+                // WINNER by the stdin face, so its at-position
+                // binding is the payload channel the spawner
+                // materialized as the context's stdin_channel; when
+                // the stage's fd 0 is the live inherited descriptor
+                // the channel is None and the ambient capture below
+                // already names it. Fds 1/2 are wired to the stage's
+                // capture pipes, but the routing walk places a
+                // slot's captured payload WHOLE at the slot's final
+                // target — a dup sharing fd 1's capture would land
+                // in the file `1>f.txt` installs, not on the stage
+                // pipe the dup copied. When the spawner materialized
+                // a carrier for this dup (StageStdioContext::
+                // dup_channels), pinning the carrier's write end is
+                // the delivery; the child-local pin below remains
+                // for stages the spawner served without a carrier.
                 if let Some(stage) = stage_stdio {
                     if source_fd == 0 {
                         if let Some(channel) = stage.stdin_channel {
@@ -2811,6 +2856,18 @@ impl Executor {
                             numbered_dup_bindings.insert(fd, NumberedDupBinding::Handle(channel));
                             return;
                         }
+                    } else if let Some(channel) = stage
+                        .dup_channels
+                        .iter()
+                        .find(|(target_fd, source, _)| *target_fd == fd && *source == source_fd)
+                        .map(|(_, _, handle)| *handle)
+                    {
+                        #[cfg(unix)]
+                        command_fd_pins.push((channel, fd));
+                        #[cfg(not(unix))]
+                        let _ = &*command_fd_pins;
+                        numbered_dup_bindings.insert(fd, NumberedDupBinding::Handle(channel));
+                        return;
                     } else {
                         #[cfg(unix)]
                         command_fd_pins.push((source_fd as std::os::unix::io::RawFd, fd));

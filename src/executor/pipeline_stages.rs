@@ -1605,6 +1605,7 @@ impl Executor {
         };
         let mut stage_stdio = super::external_inner::StageStdioContext {
             stdin_channel: None,
+            dup_channels: Vec::new(),
         };
         let mut stage_stdin_carrier: Option<os_pipe::PipeReader> = None;
         if dup0_precedes_fd0_winner {
@@ -1631,6 +1632,98 @@ impl Executor {
                 stage_stdio.stdin_channel = Some(channel);
                 stage_stdin_carrier = Some(reader);
             }
+        }
+
+        // rubash#2293: a numbered OUTPUT dup of fd 1/2 whose source
+        // slot a LATER list entry rebinds (`3>&1 1>f.txt`) copies
+        // the stage channel at its position (execute_cmd.c:2620
+        // execute_pipeline binds the pipes before the element's own
+        // walk, redir.c:237 do_redirections). The child shares ONE
+        // capture pipe per stdio slot, and the routing walk places
+        // that capture whole at the slot's FINAL target — a dup
+        // pinned onto the wired slot lands its bytes in the file
+        // with fd 1's payload instead of on the stage pipe. Give
+        // each such dup its own carrier pipe: the delivery pins the
+        // carrier's write end at the dup's slot, a reader thread
+        // drains it while the stage runs, and the drained payload
+        // is placed at the dup's own resolved target (the stash
+        // route_pipeline_stage_streams consumes, or the merged
+        // branch below when this stage's streams are pre-wired).
+        // The predicate mirrors deliver_numbered_dup's ladder
+        // exactly, so a carrier exists precisely for the dups its
+        // step (4) serves from the stage context: an ambient File
+        // endpoint at the source is step (3)'s delivery, a closed
+        // source delivers nothing, and walk/table bindings keyed by
+        // slots >= 3 can never shadow a stdio source.
+        let mut stage_dup_readers: Vec<(u32, u32, std::thread::JoinHandle<Vec<u8>>)> = Vec::new();
+        let mut stage_dup_writers: Vec<os_pipe::PipeWriter> = Vec::new();
+        for (position, entry) in command.redirects.iter().enumerate() {
+            if entry.fd_var.is_some()
+                || !matches!(entry.kind, crate::parser::RedirectKind::DuplicateOutput)
+            {
+                continue;
+            }
+            let Some(target_fd) = entry.fd.filter(|fd| *fd >= 3) else {
+                continue;
+            };
+            let entry_target = self.expand_redirect_target(entry);
+            if !redirect_target_is_dup_spelling(&entry_target) {
+                continue;
+            }
+            let Some(source_fd) = redirect_target_fd(&entry_target) else {
+                continue;
+            };
+            if !(1..=2).contains(&source_fd) || self.fd_table.is_closed(source_fd) {
+                continue;
+            }
+            if matches!(
+                self.fd_table.write_endpoint(source_fd),
+                Some(crate::executor::fd_table::FdWriteEndpoint::File(_))
+                    | Some(crate::executor::fd_table::FdWriteEndpoint::CoprocStdin { .. })
+            ) {
+                continue;
+            }
+            let rebound_later = command.redirects.iter().enumerate().any(|(index, later)| {
+                index > position
+                    && later.fd_var.is_none()
+                    && later
+                        .fd
+                        .unwrap_or(if later.is_input_side() { 0 } else { 1 })
+                        == source_fd
+            });
+            if !rebound_later {
+                continue;
+            }
+            let Ok((reader, writer)) = os_pipe::pipe() else {
+                continue;
+            };
+            #[cfg(unix)]
+            let channel = {
+                use std::os::unix::io::AsRawFd;
+                writer.as_raw_fd() as crate::fd::HANDLE
+            };
+            #[cfg(windows)]
+            let channel = {
+                use std::os::windows::io::AsRawHandle;
+                writer.as_raw_handle() as crate::fd::HANDLE
+            };
+            #[cfg(not(any(unix, windows)))]
+            let channel = 0 as crate::fd::HANDLE;
+            stage_stdio
+                .dup_channels
+                .push((target_fd, source_fd, channel));
+            stage_dup_writers.push(writer);
+            stage_dup_readers.push((
+                target_fd,
+                source_fd,
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut reader = reader;
+                    let mut payload = Vec::new();
+                    let _ = reader.read_to_end(&mut payload);
+                    payload
+                }),
+            ));
         }
 
         // rubash#1688 + rubash#2255: this sequential stage spawner
@@ -1665,6 +1758,31 @@ impl Executor {
         // read end now that the spawn resolved, so the writer
         // thread sees EOF/EPIPE and ends.
         drop(stage_stdin_carrier);
+        // rubash#2293: same unwind for the dup carriers — the child
+        // holds its own dup2'd copy of each write end after the
+        // pin; drop the parent's writers now that the spawn
+        // resolved, so the reader threads see EOF when the child
+        // exits.
+        drop(stage_dup_writers);
+        // rubash#2293: join the dup carrier readers and fold their
+        // payloads into (target fd, source fd, text) triples. One
+        // slot carries one binding: a later dup to the same target
+        // overwrote the earlier one's pin in the child (GNU's
+        // sequential dup2, redir.c:1193), so only the LAST carrier
+        // per target holds the slot's payload.
+        let mut collect_dup_payloads = move || -> Vec<(u32, u32, String)> {
+            let mut payloads: Vec<(u32, u32, String)> = Vec::new();
+            for (target_fd, source_fd, reader) in std::mem::take(&mut stage_dup_readers) {
+                let bytes = reader.join().unwrap_or_default();
+                if bytes.is_empty() {
+                    continue;
+                }
+                let text = crate::executor::substitution_metadata::bytes_to_shell_text(&bytes);
+                payloads.retain(|(fd, _, _)| *fd != target_fd);
+                payloads.push((target_fd, source_fd, text));
+            }
+            payloads
+        };
         let mut child = spawned?;
         adopt_orphan_console(child.id());
         // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
@@ -1750,12 +1868,34 @@ impl Executor {
                         crate::fd::write_all(handle, &merged).map_err(ExecuteError::IoError)?;
                     }
                 }
+                // rubash#2293: this stage's streams are pre-wired
+                // (the driver skips routing), so a dup carrier's
+                // payload is placed here: a source-1 carrier holds
+                // stage-pipe bytes (the return's stdout), a
+                // source-2 carrier holds stderr-channel bytes.
+                let mut dup_stdout = String::new();
+                let mut dup_stderr = String::new();
+                for (_, source_fd, text) in collect_dup_payloads() {
+                    if source_fd == 1 {
+                        dup_stdout.push_str(&text);
+                    } else {
+                        dup_stderr.push_str(&text);
+                    }
+                }
                 return Ok(Some((
-                    String::new(),
-                    String::new(),
+                    dup_stdout,
+                    dup_stderr,
                     crate::executor::wait_status::process_exit_status(&status),
                 )));
             }
+            // rubash#2293: both channels merged into the pipe, but
+            // the driver still routes this stage — stash the dup
+            // carriers' payloads for route_pipeline_stage_streams.
+            self.stage_dup_channel_payloads.borrow_mut().extend(
+                collect_dup_payloads()
+                    .into_iter()
+                    .map(|(target_fd, _, text)| (target_fd, text)),
+            );
             return Ok(Some((
                 crate::executor::substitution_metadata::bytes_to_shell_text(&merged),
                 String::new(),
@@ -1775,6 +1915,17 @@ impl Executor {
         // broken-pipe write, and joining here keeps the thread's lifetime
         // inside the stage call.
         let _ = stdin_writer.map(|writer| writer.join());
+
+        // rubash#2293: stash the dup carriers' payloads for the
+        // driver's routing pass — route_pipeline_stage_streams
+        // resolves each dup's fd at its own list position and
+        // places the payload there (fd 1's own capture, routed to
+        // the file `1>f.txt` installed, must not swallow it).
+        self.stage_dup_channel_payloads.borrow_mut().extend(
+            collect_dup_payloads()
+                .into_iter()
+                .map(|(target_fd, _, text)| (target_fd, text)),
+        );
 
         let mut stdout_bytes = output.stdout;
         stdout_bytes.extend(self.finish_dev_fd_operands(dev_ops));

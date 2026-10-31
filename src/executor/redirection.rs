@@ -2542,6 +2542,11 @@ impl Executor {
         stderr: &mut String,
         status: &mut i32,
     ) -> Result<bool, ExecuteError> {
+        // rubash#2293: take the stage spawner's dup-carrier stash
+        // up front — the first routing pass after a stage owns its
+        // payloads, and a pass that declines or fails must not leak
+        // them into a later stage's routing.
+        let dup_payloads = std::mem::take(&mut *self.stage_dup_channel_payloads.borrow_mut());
         if cmd.redirect_out.is_none()
             && cmd.append.is_none()
             && cmd.redirect_err.is_none()
@@ -2613,6 +2618,29 @@ impl Executor {
                 let target = target.clone();
                 let taken = std::mem::take(stderr);
                 self.write_stage_stream_to_target(cmd, &state, 2, &target, &taken, stdout, status)?;
+            }
+        }
+        // rubash#2293: the stage's numbered output dups that copied
+        // a stdio slot before a later entry rebound it (`3>&1
+        // 1>f.txt`) wrote into their own carrier pipes — the walk
+        // above resolved each dup's fd at its own list position
+        // (fd 3 holds fd 1's at-position binding, the stage pipe,
+        // not the file fd 1 ends on), so place each drained payload
+        // at that resolved target exactly like a captured stream.
+        for (fd, payload) in dup_payloads {
+            if payload.is_empty() {
+                continue;
+            }
+            let target = state.fds.get(&fd).cloned().unwrap_or(OutputTarget::Stdout);
+            match &target {
+                OutputTarget::Stdout => stdout.push_str(&payload),
+                OutputTarget::Stderr => stderr.push_str(&payload),
+                target => {
+                    let target = target.clone();
+                    self.write_stage_stream_to_target(
+                        cmd, &state, fd, &target, &payload, stderr, status,
+                    )?;
+                }
             }
         }
         Ok(true)
