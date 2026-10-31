@@ -193,6 +193,114 @@ impl Executor {
         let mut any_succeeded = false;
         let mut any_failed = false;
         for operand in request.operands {
+            // GNU kill.def:262 + jobs.c:3961-4007 (kill_pid): a jobspec
+            // operand is delivered by WALKING the job's pipeline from
+            // its first process, not by signaling one representative
+            // pid. The walk signals live members in pipeline order and
+            // stops at the first member whose death the table has
+            // already recorded (jobs.c:3999-4000's PALIVE skip is a
+            // `continue` that never advances the cursor: a dead head
+            // ends the walk at once, and a dead later member leaves
+            // GNU spinning on that member — its delivery set is the
+            // live prefix either way, and the hang itself is a GNU
+            // defect that is not cloned). The per-member kill(2)
+            // results never fail the operand, so a retained job whose
+            // members all died unwaited reports success with no
+            // diagnostic, for real signals and for the -0 probe alike.
+            // Collapsing the spec to the job's last pid and judging
+            // that pid by raw kill(2) reported ESRCH for exactly that
+            // retained-dead job (rubash#2381). Resolve the job entry
+            // here; classification diagnostics (ambiguous / no such
+            // job) stay on the shared path below.
+            if operand.starts_with('%') {
+                if let crate::jobs::table::JobspecMatch::Job(job_id) =
+                    self.shell_state.job_table.resolve_jobspec(&operand)
+                {
+                    // The walk is GNU's `pgrp == shell_pgrp` arm. A
+                    // job-control job (own pgrp) takes the killpg arm
+                    // in GNU (jobs.c:4010-4020), whose rubash model is
+                    // the shared path below — leave those jobs to it.
+                    let members: Vec<(u32, bool)> = self
+                        .shell_state
+                        .job_table
+                        .jobs
+                        .get(&job_id)
+                        .filter(|entry| !entry.job_control)
+                        .map(|entry| {
+                            entry
+                                .pids
+                                .iter()
+                                .map(|member| {
+                                    let recorded_completed =
+                                        entry.processes.get(member).is_some_and(|process| {
+                                            process.state == crate::jobs::ProcessState::Completed
+                                        }) || self
+                                            .shell_state
+                                            .job_table
+                                            .completed_statuses
+                                            .contains_key(member);
+                                    // A procsub placeholder's status is
+                                    // recorded at registration while its
+                                    // forked zombie stays unreaped and
+                                    // signallable (rubash#1022) — it is
+                                    // not a dead member.
+                                    let dead = recorded_completed
+                                        && !self
+                                            .shell_state
+                                            .job_table
+                                            .procsub_placeholders
+                                            .contains(member);
+                                    (*member, dead)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !members.is_empty() {
+                        if request.check_only {
+                            // The walk's kill(pid, 0) results are
+                            // ignored (jobs.c:4001-4004): the retained
+                            // job's existence is the whole verdict.
+                            any_succeeded = true;
+                            continue;
+                        }
+                        let mut operand_failed = false;
+                        for (member, dead) in members {
+                            if dead {
+                                // The walk stops at the first
+                                // recorded-dead member (see above):
+                                // later members are never reached.
+                                break;
+                            }
+                            let signal_args =
+                                vec![format!("-{}", request.signal), member.to_string()];
+                            let mut signal_stderr = Vec::new();
+                            let signal_status = crate::builtins::kill::execute_with_io(
+                                &signal_args,
+                                &mut std::io::sink(),
+                                &mut signal_stderr,
+                            )?;
+                            if signal_status != 0 {
+                                if !process_exists(member) {
+                                    // Died between the snapshot and
+                                    // the delivery — the same skip as
+                                    // a recorded death.
+                                    continue;
+                                }
+                                operand_failed = true;
+                                stderr.extend(signal_stderr);
+                                continue;
+                            }
+                            self.note_kill_delivery(member, request.signal);
+                        }
+                        if operand_failed {
+                            any_failed = true;
+                        } else {
+                            any_succeeded = true;
+                        }
+                        continue;
+                    }
+                }
+            }
             let (pid, tracked_job) = match self.resolve_background_job_operand(&operand) {
                 super::job_builtins::JobOperandResolution::Pid(pid) => (pid, true),
                 super::job_builtins::JobOperandResolution::Ambiguous => {
@@ -314,62 +422,7 @@ impl Executor {
                 // signal delivery).
                 continue;
             }
-            // GNU: the shell learns that a background job stopped from
-            // waitchld's WUNTRACED report, which only exists under job
-            // control — a non-monitor shell never notices, so `jobs` keeps
-            // reporting the job as Running even after the shell's OWN kill
-            // sent SIGSTOP (nojobs.c; rubash#1247). Rubash has no WUNTRACED
-            // poller, so the kill path's marking is its only stop detector;
-            // gate it on monitor mode or a `set +m` shell would report its
-            // jobs Stopped where GNU reports Running.
-            //
-            // rubash#1494: GNU kill_pid is pure delivery — the waitchld
-            // report lands at a notification point observably ONE reader
-            // command later (an immediate `jobs` still shows the
-            // pre-signal state and +/- marks; one intervening command
-            // lets the new state appear). Defer the mark instead of
-            // applying it synchronously inside the kill.
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
-                if request.signal == 18 {
-                    self.shell_state
-                        .job_table
-                        .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
-                } else if matches!(request.signal, 19 | 20) {
-                    self.shell_state.job_table.defer_state_mark(
-                        pid,
-                        crate::jobs::table::DeferredJobState::Stopped(Some(request.signal)),
-                    );
-                }
-            }
-            // A terminating signal changes nothing in the table here:
-            // the boundary reap marks the job Completed when the process
-            // actually dies. rubash#796 used to mark + remove the entry
-            // at delivery time for the DONT_REPORT signals (TERM/INT/
-            // PIPE), conflating the suppressed reader-boundary NOTICE
-            // (report_pending_signal_notices already stays silent for
-            // background TERM deaths) with the job's lifetime — GNU
-            // keeps the job, and the next `jobs` lists it once as
-            // `Terminated` before cleaning it up (rubash#1256). The old
-            // code also lied for a process that ignores TERM: it
-            // vanished from the table while still running.
-            //
-            // rubash#1604: the one piece of bookkeeping a terminating
-            // signal DOES leave here is the delivery record itself.
-            // If the process dies at once, the post-kill refresh's
-            // incidental sweep must not apply the completion before a
-            // following `wait` can reap the job itself (a waited-for
-            // job's notice is suppressed — jobs.c wait_for); the
-            // refresh consults this record and stashes the reap for
-            // the rest of this reader command and the next one (the
-            // incidental reap lands at the next command's
-            // pre-execution sweep — see JobTable::note_reader_command).
-            // Signals whose default
-            // disposition is stop/continue/ignore (CONT, the stop
-            // family, CHLD, URG, WINCH) and the 0 probe never kill,
-            // so they leave no record.
-            if !matches!(request.signal, 0 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28) {
-                self.shell_state.job_table.note_fatal_signal(pid);
-            }
+            self.note_kill_delivery(pid, request.signal);
             continue;
         }
 
@@ -384,6 +437,68 @@ impl Executor {
             i32::from(!any_succeeded)
         };
         Ok(Some(status))
+    }
+
+    /// The job-table bookkeeping one successful signal delivery leaves
+    /// behind, shared by the single-pid path and the jobspec pipeline
+    /// walk (jobs.c:3988-4007) in `execute_tracked_background_kill`.
+    fn note_kill_delivery(&mut self, pid: u32, signal: i32) {
+        // GNU: the shell learns that a background job stopped from
+        // waitchld's WUNTRACED report, which only exists under job
+        // control — a non-monitor shell never notices, so `jobs` keeps
+        // reporting the job as Running even after the shell's OWN kill
+        // sent SIGSTOP (nojobs.c; rubash#1247). Rubash has no WUNTRACED
+        // poller, so the kill path's marking is its only stop detector;
+        // gate it on monitor mode or a `set +m` shell would report its
+        // jobs Stopped where GNU reports Running.
+        //
+        // rubash#1494: GNU kill_pid is pure delivery — the waitchld
+        // report lands at a notification point observably ONE reader
+        // command later (an immediate `jobs` still shows the
+        // pre-signal state and +/- marks; one intervening command
+        // lets the new state appear). Defer the mark instead of
+        // applying it synchronously inside the kill.
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
+            if signal == 18 {
+                self.shell_state
+                    .job_table
+                    .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
+            } else if matches!(signal, 19 | 20) {
+                self.shell_state.job_table.defer_state_mark(
+                    pid,
+                    crate::jobs::table::DeferredJobState::Stopped(Some(signal)),
+                );
+            }
+        }
+        // A terminating signal changes nothing in the table here:
+        // the boundary reap marks the job Completed when the process
+        // actually dies. rubash#796 used to mark + remove the entry
+        // at delivery time for the DONT_REPORT signals (TERM/INT/
+        // PIPE), conflating the suppressed reader-boundary NOTICE
+        // (report_pending_signal_notices already stays silent for
+        // background TERM deaths) with the job's lifetime — GNU
+        // keeps the job, and the next `jobs` lists it once as
+        // `Terminated` before cleaning it up (rubash#1256). The old
+        // code also lied for a process that ignores TERM: it
+        // vanished from the table while still running.
+        //
+        // rubash#1604: the one piece of bookkeeping a terminating
+        // signal DOES leave here is the delivery record itself.
+        // If the process dies at once, the post-kill refresh's
+        // incidental sweep must not apply the completion before a
+        // following `wait` can reap the job itself (a waited-for
+        // job's notice is suppressed — jobs.c wait_for); the
+        // refresh consults this record and stashes the reap for
+        // the rest of this reader command and the next one (the
+        // incidental reap lands at the next command's
+        // pre-execution sweep — see JobTable::note_reader_command).
+        // Signals whose default
+        // disposition is stop/continue/ignore (CONT, the stop
+        // family, CHLD, URG, WINCH) and the 0 probe never kill,
+        // so they leave no record.
+        if !matches!(signal, 0 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 28) {
+            self.shell_state.job_table.note_fatal_signal(pid);
+        }
     }
 
     pub(in crate::executor) fn execute_ulimit(

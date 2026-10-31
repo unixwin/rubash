@@ -546,6 +546,17 @@ impl Executor {
             // left alone: GNU would block, but an unkillable block here
             // could hang the shell, so they stay signallable instead.
             self.sweep_procsub_placeholders();
+            // rubash#2340: GNU wait_for_background_pids' tail
+            // (jobs.c:2863-2864): mark_dead_jobs_as_notified(1) +
+            // cleanup_dead_jobs — every dead job is discarded except,
+            // non-interactively, the $! job (jobs.c:5197), whose entry
+            // stays listed until the next notification point. Jobs this
+            // wait reaped live were already marked by their per-pid pass,
+            // so the cleanup here collects them too.
+            let force_all = self.invocation_interactive();
+            self.shell_state
+                .job_table
+                .settle_bare_wait(self.shell_state.last_background_pid, force_all);
             self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
             // Bash's no-operand wait reports success after waiting for all
             // current jobs; individual statuses require an explicit operand.
@@ -1722,7 +1733,7 @@ impl Executor {
     fn wait_for_background_pid(
         &mut self,
         pid: u32,
-        _retain_for_explicit_wait: bool,
+        retain_for_explicit_wait: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
         // GNU trap.c:604-611: a trapped signal arriving while the wait
         // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
@@ -1769,11 +1780,21 @@ impl Executor {
             // reports ESRCH like GNU's reaped procsub. The recorded status
             // stays in completed_statuses for repeat waits (bgpids parity).
             self.reap_procsub_placeholder(pid, true);
-            // Waiting consumes the jobs-table entry, but the completed status
-            // remains available for a later explicit wait of the same PID.
-            self.shell_state
-                .job_table
-                .remove_job_by_pid_preserve_status(pid);
+            // rubash#2340: waiting does NOT consume the jobs-table entry.
+            // The cleanup inside wait_for's notify_and_cleanup
+            // (jobs.c:3385 -> 3642) runs first, so a dead job that was
+            // already notified before this wait dies here; the waited job
+            // itself is then only MARKED notified for an explicit
+            // (operand) wait — wait_for_job, jobs.c:3434-3437 — and its
+            // entry leaves at the next cleanup point. A bare wait's
+            // per-pid pass marks nothing (wait_for_single_pid via
+            // wait_for_background_pids reports an already-dead job
+            // without consuming it); the bare-wait endgame
+            // (settle_bare_wait) owns the marking there.
+            self.shell_state.job_table.cleanup_dead_jobs();
+            if retain_for_explicit_wait {
+                self.shell_state.job_table.mark_job_notified_by_pid(pid);
+            }
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
         }
@@ -1831,11 +1852,16 @@ impl Executor {
         self.shell_state.job_table.mark_completed(pid, status);
         self.flush_timed_coproc_report(pid);
         self.run_sigchld_trap_for_reaped_child()?;
-        // Remove the visible job after any wait, while retaining the exit
-        // status for repeated explicit PID waits.
-        self.shell_state
-            .job_table
-            .remove_job_by_pid_preserve_status(pid);
+        // rubash#2340: this wait reaped the child itself, so it follows
+        // the wait_for cadence exactly: the notify_and_cleanup cleanup
+        // pass (jobs.c:3385) collects dead jobs notified earlier, then
+        // the waited job is marked notified — wait_for_single_pid
+        // (jobs.c:2776-2779) and wait_for_job (jobs.c:3434-3437) both end
+        // with the mark, never a deletion — and its entry leaves at the
+        // next cleanup point. The exit status stays in
+        // completed_statuses for repeated explicit PID waits.
+        self.shell_state.job_table.cleanup_dead_jobs();
+        self.shell_state.job_table.mark_job_notified_by_pid(pid);
         self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
     }
@@ -2747,6 +2773,15 @@ impl Executor {
             }
             Err(error) => Err(error),
         };
+        // fg drives a foreground wait (jobs.c start_job -> wait_for), not
+        // the wait builtin: a job fg consumed leaves the table with the
+        // wait, as it did before the background retention cadence
+        // (rubash#2340) moved deletion out of wait_for_background_pid.
+        if matches!(wait_outcome, Ok(WaitPidOutcome::Status(_))) {
+            self.shell_state
+                .job_table
+                .remove_job_by_pid_preserve_status(pid);
+        }
         match wait_outcome? {
             WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => Ok(status),
             // The job stopped again under fg's wait (reachable via
