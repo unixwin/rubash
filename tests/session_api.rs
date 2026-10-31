@@ -644,3 +644,179 @@ fn open_fds_reflect_the_session_fd_table() {
         baseline.difference(&BTreeSet::from([3])).copied().collect()
     );
 }
+
+// ---------------------------------------------------------------------------
+// rubash#2001: Session::call_function_with_env — the env channel
+// §8's mapping row covers for the call_function pair. Before this
+// face existed, a host injecting per-call variables (niubash's
+// compdef NIU_COMP_WORDS / NIU_COMP_CWORD) had to drop to the
+// tier-C seam; these tests pin the contract surface itself.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn issue2001_env_channel_binds_for_the_call_and_rolls_back() {
+    let dir = temp_dir("i2001-rollback");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = Session::builder()
+        .env("OUT", dir_text)
+        .env("CTX", "base")
+        .build()
+        .expect("session builds");
+    session
+        .run(
+            "probe() { printf '%s:%s' \"$CTX\" \"$1\" > \"$OUT/seen.txt\"; CTX=changed; SIDE=kept; return 7; }",
+            &opts(),
+        )
+        .expect("function definition run");
+
+    let status = session
+        .call_function_with_env("probe", ["alpha"], [("CTX", "temp")])
+        .expect("call succeeds");
+    assert_eq!(status, 7);
+    // The function saw the channel value (and its argument).
+    assert_eq!(read(&dir, "seen.txt"), "temp:alpha");
+    // The channel name is restored to its pre-call value even
+    // though the function reassigned it mid-call...
+    assert_eq!(
+        session.variables().resolved_value("CTX").as_deref(),
+        Some("base")
+    );
+    // ...while the function's unrelated side effect persists.
+    assert_eq!(
+        session.variables().resolved_value("SIDE").as_deref(),
+        Some("kept")
+    );
+}
+
+#[test]
+fn issue2001_env_channel_previously_unset_name_is_unset_again_after() {
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run("mark2() { SEEN_FRESH=${FRESH-unset}; }", &opts())
+        .expect("function definition run");
+    session
+        .call_function_with_env("mark2", &[] as &[&str], [("FRESH", "x")])
+        .expect("call succeeds");
+    assert_eq!(
+        session.variables().resolved_value("SEEN_FRESH").as_deref(),
+        Some("x")
+    );
+    // FRESH was unset before the call: rollback removes it, it
+    // does not linger as set-but-empty.
+    assert_eq!(session.variables().resolved_value("FRESH"), None);
+    assert!(session.run("[[ -v FRESH ]]", &opts()).expect("run").status != 0);
+}
+
+#[test]
+fn issue2001_env_channel_empty_string_is_set_but_empty() {
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run(
+            "probe() { SEEN_EMPTY=${CH_EMPTY+set}; SEEN_ABSENT=${CH_ABSENT+set}; }",
+            &opts(),
+        )
+        .expect("function definition run");
+    session
+        .call_function_with_env("probe", &[] as &[&str], [("CH_EMPTY", "")])
+        .expect("call succeeds");
+    // A channel value of "" is a set-but-empty binding for the
+    // call...
+    assert_eq!(
+        session.variables().resolved_value("SEEN_EMPTY").as_deref(),
+        Some("set")
+    );
+    // ...distinct from a name the channel never mentioned: the
+    // probe assigned the (empty) expansion, so the marker itself is
+    // set-but-empty rather than "set".
+    assert_eq!(
+        session.variables().resolved_value("SEEN_ABSENT").as_deref(),
+        Some("")
+    );
+    assert_eq!(session.variables().resolved_value("CH_EMPTY"), None);
+}
+
+#[test]
+fn issue2001_env_channel_nested_calls_compose() {
+    let mut session = Session::builder()
+        .env("X", "session")
+        .build()
+        .expect("session builds");
+    session
+        .run(
+            "inner() { SEEN_INNER=$X; }; outer() { SEEN_OUTER=$X; inner; }",
+            &opts(),
+        )
+        .expect("function definition run");
+    // The channel binding is live for the whole call tree: the
+    // outer function and the function it calls both see it,
+    // shadowing the session value.
+    session
+        .call_function_with_env("outer", &[] as &[&str], [("X", "call")])
+        .expect("call succeeds");
+    assert_eq!(
+        session.variables().resolved_value("SEEN_OUTER").as_deref(),
+        Some("call")
+    );
+    assert_eq!(
+        session.variables().resolved_value("SEEN_INNER").as_deref(),
+        Some("call")
+    );
+    // After the call the session value is back, and a plain
+    // call_function (no channel) observes exactly that.
+    assert_eq!(
+        session.variables().resolved_value("X").as_deref(),
+        Some("session")
+    );
+    session
+        .call_function("inner", &[] as &[&str])
+        .expect("plain call");
+    assert_eq!(
+        session.variables().resolved_value("SEEN_INNER").as_deref(),
+        Some("session")
+    );
+}
+
+#[test]
+fn issue2001_env_channel_compdef_shape_round_trips_through_the_views() {
+    // The consumer shape that motivated the channel: the host
+    // injects NIU_COMP_WORDS / NIU_COMP_CWORD, the function
+    // writes its result to a plain variable, and the host reads
+    // the result back through the variables view — no seam.
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run(
+            "comp() { NIU_COMP_RESULT=\"w:${NIU_COMP_WORDS}|c:${NIU_COMP_CWORD}\"; }",
+            &opts(),
+        )
+        .expect("function definition run");
+    session
+        .call_function_with_env(
+            "comp",
+            std::iter::empty::<&str>(),
+            [("NIU_COMP_WORDS", "gi st"), ("NIU_COMP_CWORD", "1")],
+        )
+        .expect("call succeeds");
+    assert_eq!(
+        session
+            .variables()
+            .resolved_value("NIU_COMP_RESULT")
+            .as_deref(),
+        Some("w:gi st|c:1")
+    );
+    // The injected names were channel-bound only: neither
+    // lingers in the session afterwards.
+    assert_eq!(session.variables().resolved_value("NIU_COMP_WORDS"), None);
+    assert_eq!(session.variables().resolved_value("NIU_COMP_CWORD"), None);
+}
+
+#[test]
+fn issue2001_env_channel_missing_function_applies_nothing() {
+    let mut session = Session::builder().build().expect("session builds");
+    let result = session.call_function_with_env(
+        "no_such_function_2001",
+        &[] as &[&str],
+        [("SHOULD_NOT_STICK", "x")],
+    );
+    assert!(result.is_err());
+    assert_eq!(session.variables().resolved_value("SHOULD_NOT_STICK"), None);
+}

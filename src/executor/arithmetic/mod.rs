@@ -779,6 +779,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         // GNU prints bind/subscript diagnostics (`a[]: bad array
         // subscript`, `` `a[]': not a valid identifier ``) while the
         // evaluation continues — they surface even when the expression
@@ -807,21 +808,31 @@ impl Executor {
     pub(in crate::executor) fn flush_arith_diags(&self, label: Option<&str>) {
         let mut printed = false;
         for diag in take_arith_eval_diags() {
+            // Diag payloads are built from parser-input text, and on the
+            // EXP_EXPANDED entries (`let`, `[[`) that input carries the
+            // subscript carrier encoding (`a[<0x1e><hex>]`) from the
+            // indexed-subscript rewrite. GNU echoes the lvalue token as
+            // written (expr.c:1526-1535), so decode the carrier spans at
+            // this single rendering point — every producer (plain and
+            // compound binds, read and bind diagnostics) is covered
+            // (rubash#2341's `let` bind line leaked the raw encoding).
             match (&diag, label) {
                 (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => eprintln!(
                     "{}{}: `{}': not a valid identifier",
                     self.diagnostic_prefix(),
                     label,
-                    display
+                    parser::de_carrier_arith_text(display)
                 ),
                 (ArithEvalDiag::InvalidIdentifier(display), None) => eprintln!(
                     "{}`{}': not a valid identifier",
                     self.diagnostic_prefix(),
-                    display
+                    parser::de_carrier_arith_text(display)
                 ),
-                (ArithEvalDiag::BadSubscript(display), _) => {
-                    eprintln!("{}{}: bad array subscript", self.error_prefix(), display)
-                }
+                (ArithEvalDiag::BadSubscript(display), _) => eprintln!(
+                    "{}{}: bad array subscript",
+                    self.error_prefix(),
+                    parser::de_carrier_arith_text(display)
+                ),
             }
             printed = true;
         }
@@ -962,6 +973,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
         if let Some(key) = memo_key {
@@ -1203,6 +1215,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
         self.flush_arith_diags(None);
@@ -1216,6 +1229,26 @@ impl Executor {
         sync_arith_writes_to_shell_state(self);
 
         value
+    }
+
+    /// GNU expr.c:350: an att_noassign bind inside arithmetic fails
+    /// the evaluation (the (( ))/let status becomes 1) with NO
+    /// diagnostic — bind_variable_internal prints only for readonly.
+    /// Drain the marker the bind paths left and latch the same
+    /// "bind failure accounted" pair the readonly reporter uses, so
+    /// the command reporters fail the command without synthesizing
+    /// an evalerror after it (rubash#2369).
+    fn report_arithmetic_noassign_error(&mut self) {
+        if self
+            .shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_NOASSIGN_ERROR")
+            .is_none()
+        {
+            return;
+        }
+        self.shell_state.arithmetic_readonly_error.set(true);
+        let _ = self.shell_state.arithmetic_expansion_error.replace(true);
     }
 
     fn report_arithmetic_readonly_error(&mut self) {

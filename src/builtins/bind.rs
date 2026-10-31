@@ -25,101 +25,1348 @@ use std::io::{self, Write};
 const EXECUTION_SUCCESS: i32 = 0;
 const EX_USAGE: i32 = 2;
 
-/// The readline function names the engine's `bind` world knows: the names
-/// the niubash reedline bridge maps (crates/niubash-runtime repl.rs
-/// `native_widget_event`) plus the classic names carried by reedline's
-/// default emacs/vi keymaps. GNU's table has 176 names (bind -l probe);
-/// niu's editor implements this subset — listing more would claim
-/// bindings no host can deliver.
+/// The readline function names, in GNU's funmap order — the order
+/// `bind -l` lists them (rl_list_funmap_names) and the dumpers iterate
+/// them. The table is readline's funmap.c `funmap[]` (153 entries) plus
+/// the defuns bash itself registers in initialize_readline
+/// (bashline.c rl_add_defun calls: shell-*, glob-*, spell-correct-word,
+/// the complete-* family, display-shell-version, ...), 176 names total,
+/// captured from the GNU 5.3.20 oracle's `bind -l` (rubash#2338: the
+/// earlier 57-name reedline subset made `bind -l` omit `complete`,
+/// `history-search-backward` and 117 more names GNU lists, and made
+/// `-q`/`-u` reject them as unknown functions).
 pub const READLINE_FUNCTIONS: &[&str] = &[
     "abort",
     "accept-line",
+    "alias-expand-line",
+    "arrow-key-prefix",
+    "backward-byte",
     "backward-char",
     "backward-delete-char",
     "backward-kill-line",
     "backward-kill-word",
     "backward-word",
-    "beginning-of-buffer-or-history",
+    "bash-vi-complete",
     "beginning-of-history",
     "beginning-of-line",
+    "bracketed-paste-begin",
     "call-last-kbd-macro",
     "capitalize-word",
+    "character-search",
+    "character-search-backward",
+    "clear-display",
     "clear-screen",
-    "complete-word",
+    "complete",
+    "complete-command",
+    "complete-filename",
+    "complete-hostname",
+    "complete-into-braces",
+    "complete-username",
+    "complete-variable",
+    "copy-backward-word",
+    "copy-forward-word",
+    "copy-region-as-kill",
+    "dabbrev-expand",
     "delete-char",
+    "delete-char-or-list",
+    "delete-horizontal-space",
+    "digit-argument",
+    "display-shell-version",
+    "do-lowercase-version",
     "downcase-word",
-    "down-line-or-history",
+    "dump-functions",
+    "dump-macros",
+    "dump-variables",
+    "dynamic-complete-history",
+    "edit-and-execute-command",
     "emacs-editing-mode",
-    "end-of-buffer-or-history",
+    "end-kbd-macro",
     "end-of-history",
     "end-of-line",
     "exchange-point-and-mark",
-    "expand-or-complete",
+    "execute-named-command",
+    "export-completions",
+    "fetch-history",
+    "forward-backward-delete-char",
+    "forward-byte",
     "forward-char",
     "forward-search-history",
     "forward-word",
-    "history-incremental-search-backward",
-    "history-incremental-search-forward",
-    "history-substring-search-down",
-    "history-substring-search-up",
+    "glob-complete-word",
+    "glob-expand-word",
+    "glob-list-expansions",
+    "history-and-alias-expand-line",
+    "history-expand-line",
+    "history-search-backward",
+    "history-search-forward",
+    "history-substring-search-backward",
+    "history-substring-search-forward",
+    "insert-comment",
+    "insert-completions",
+    "insert-last-argument",
     "kill-line",
+    "kill-region",
     "kill-whole-line",
     "kill-word",
+    "magic-space",
     "menu-complete",
-    "menu-previous",
+    "menu-complete-backward",
     "next-history",
+    "next-screen-line",
+    "non-incremental-forward-search-history",
+    "non-incremental-forward-search-history-again",
+    "non-incremental-reverse-search-history",
+    "non-incremental-reverse-search-history-again",
+    "old-menu-complete",
     "operate-and-get-next",
     "overwrite-mode",
+    "possible-command-completions",
+    "possible-completions",
+    "possible-filename-completions",
+    "possible-hostname-completions",
+    "possible-username-completions",
+    "possible-variable-completions",
     "previous-history",
+    "previous-screen-line",
+    "print-last-kbd-macro",
     "quoted-insert",
     "re-read-init-file",
-    "redisplay",
-    "redo",
+    "redraw-current-line",
     "reverse-search-history",
+    "revert-line",
     "self-insert",
+    "set-mark",
+    "shell-backward-kill-word",
+    "shell-backward-word",
+    "shell-expand-line",
+    "shell-forward-word",
+    "shell-kill-word",
+    "shell-transpose-words",
+    "skip-csi-sequence",
+    "spell-correct-word",
+    "start-kbd-macro",
+    "tab-insert",
+    "tilde-expand",
     "transpose-chars",
     "transpose-words",
+    "tty-status",
     "undo",
+    "universal-argument",
+    "unix-filename-rubout",
     "unix-line-discard",
     "unix-word-rubout",
     "upcase-word",
-    "up-line-or-history",
+    "vi-append-eol",
+    "vi-append-mode",
+    "vi-arg-digit",
+    "vi-bWord",
+    "vi-back-to-indent",
+    "vi-backward-bigword",
+    "vi-backward-word",
+    "vi-bword",
+    "vi-change-case",
+    "vi-change-char",
+    "vi-change-to",
+    "vi-char-search",
+    "vi-column",
+    "vi-complete",
+    "vi-delete",
+    "vi-delete-to",
+    "vi-eWord",
+    "vi-edit-and-execute-command",
     "vi-editing-mode",
+    "vi-end-bigword",
+    "vi-end-word",
+    "vi-eof-maybe",
+    "vi-eword",
+    "vi-fWord",
+    "vi-fetch-history",
+    "vi-first-print",
+    "vi-forward-bigword",
+    "vi-forward-word",
+    "vi-fword",
+    "vi-goto-mark",
+    "vi-insert-beg",
+    "vi-insertion-mode",
+    "vi-match",
+    "vi-movement-mode",
+    "vi-next-word",
+    "vi-overstrike",
+    "vi-overstrike-delete",
+    "vi-prev-word",
+    "vi-put",
+    "vi-redo",
+    "vi-replace",
+    "vi-rubout",
+    "vi-search",
+    "vi-search-again",
+    "vi-set-mark",
+    "vi-subst",
+    "vi-tilde-expand",
+    "vi-undo",
+    "vi-unix-word-rubout",
+    "vi-yank-arg",
+    "vi-yank-pop",
+    "vi-yank-to",
     "yank",
+    "yank-last-arg",
+    "yank-nth-arg",
     "yank-pop",
 ];
 
-/// Default function bindings niu's editor ships (reedline
-/// default_emacs_keybindings mapped to their readline function names;
-/// arrow/prefix bindings from the engine's historical default table).
-/// `bind -p`/`-P`/`-q` answers beyond this table come from the registry.
+/// The default emacs keymap's function bindings, in readline's keymap
+/// scan order (rl_invoking_keyseqs_in_map, lib/readline/bind.c: keys in
+/// byte order, submaps recursed in place — the order `bind -q` lists
+/// invoking sequences). Content: the emacs_standard_keymap array
+/// (lib/readline/emacs_keymap.c) with the emacs_meta_keymap and
+/// emacs_ctlx_keymap submaps flattened in under their `\e` / `\C-x`
+/// prefixes, plus the bindings readline's initialization adds —
+/// bind_arrow_keys_internal (lib/readline/readline.c:1400-1418: the
+/// `\e[A`..`\eOF` family and the ctrl/alt-arrow sequences) and the
+/// bracketed-paste prefix (`\e[200~`). Captured row-for-row from the
+/// GNU 5.3.20 oracle's `bind -p` dump (rubash#2338: the earlier 26-row
+/// reedline-flavored table lacked e.g. `\eOD` for backward-char and
+/// every meta/ctlx binding, and its order was not the scan order).
+/// niubash's bind surface mirrors this table (see docs/api-ledger.md).
 pub const DEFAULT_FUNCTION_BINDINGS: &[(&str, &str)] = &[
-    (r#"\e[1~"#, "beginning-of-line"),
-    (r#"\e[4~"#, "end-of-line"),
-    (r#"\e[5~"#, "beginning-of-history"),
-    (r#"\e[6~"#, "end-of-history"),
-    (r#"\e[A"#, "previous-history"),
-    (r#"\e[B"#, "next-history"),
-    (r#"\e[C"#, "forward-char"),
-    (r#"\e[D"#, "backward-char"),
-    (r#"\e[3~"#, "delete-char"),
-    (r#"\e"#, "emacs-editing-mode"),
-    (r#"\C-a"#, "beginning-of-line"),
-    (r#"\C-b"#, "backward-char"),
-    (r#"\C-e"#, "end-of-line"),
-    (r#"\C-f"#, "forward-char"),
-    (r#"\C-k"#, "kill-line"),
-    (r#"\C-l"#, "clear-screen"),
-    (r#"\C-n"#, "next-history"),
-    (r#"\C-p"#, "previous-history"),
-    (r#"\C-r"#, "reverse-search-history"),
-    (r#"\C-t"#, "transpose-chars"),
-    (r#"\C-u"#, "unix-line-discard"),
-    (r#"\C-w"#, "unix-word-rubout"),
-    (r#"\C-y"#, "yank"),
-    (r#"\C-z"#, "undo"),
-    (r#"\C-g"#, "redo"),
+    ("\\C-@", "set-mark"),
+    ("\\C-a", "beginning-of-line"),
+    ("\\C-b", "backward-char"),
+    ("\\C-d", "delete-char"),
+    ("\\C-e", "end-of-line"),
+    ("\\C-f", "forward-char"),
+    ("\\C-g", "abort"),
+    ("\\C-h", "backward-delete-char"),
+    ("\\C-i", "complete"),
+    ("\\C-j", "accept-line"),
+    ("\\C-k", "kill-line"),
+    ("\\C-l", "clear-screen"),
+    ("\\C-m", "accept-line"),
+    ("\\C-n", "next-history"),
+    ("\\C-o", "operate-and-get-next"),
+    ("\\C-p", "previous-history"),
+    ("\\C-q", "quoted-insert"),
+    ("\\C-r", "reverse-search-history"),
+    ("\\C-s", "forward-search-history"),
+    ("\\C-t", "transpose-chars"),
+    ("\\C-u", "unix-line-discard"),
+    ("\\C-v", "quoted-insert"),
+    ("\\C-w", "unix-word-rubout"),
+    ("\\C-x\\C-e", "edit-and-execute-command"),
+    ("\\C-x\\C-g", "abort"),
+    ("\\C-x\\C-r", "re-read-init-file"),
+    ("\\C-x\\C-u", "undo"),
+    ("\\C-x\\C-v", "display-shell-version"),
+    ("\\C-x\\C-x", "exchange-point-and-mark"),
+    ("\\C-x!", "possible-command-completions"),
+    ("\\C-x$", "possible-variable-completions"),
+    ("\\C-x(", "start-kbd-macro"),
+    ("\\C-x)", "end-kbd-macro"),
+    ("\\C-x*", "glob-expand-word"),
+    ("\\C-x/", "possible-filename-completions"),
+    ("\\C-x@", "possible-hostname-completions"),
+    ("\\C-xA", "do-lowercase-version"),
+    ("\\C-xB", "do-lowercase-version"),
+    ("\\C-xC", "do-lowercase-version"),
+    ("\\C-xD", "do-lowercase-version"),
+    ("\\C-xE", "do-lowercase-version"),
+    ("\\C-xF", "do-lowercase-version"),
+    ("\\C-xG", "do-lowercase-version"),
+    ("\\C-xH", "do-lowercase-version"),
+    ("\\C-xI", "do-lowercase-version"),
+    ("\\C-xJ", "do-lowercase-version"),
+    ("\\C-xK", "do-lowercase-version"),
+    ("\\C-xL", "do-lowercase-version"),
+    ("\\C-xM", "do-lowercase-version"),
+    ("\\C-xN", "do-lowercase-version"),
+    ("\\C-xO", "do-lowercase-version"),
+    ("\\C-xP", "do-lowercase-version"),
+    ("\\C-xQ", "do-lowercase-version"),
+    ("\\C-xR", "do-lowercase-version"),
+    ("\\C-xS", "do-lowercase-version"),
+    ("\\C-xT", "do-lowercase-version"),
+    ("\\C-xU", "do-lowercase-version"),
+    ("\\C-xV", "do-lowercase-version"),
+    ("\\C-xW", "do-lowercase-version"),
+    ("\\C-xX", "do-lowercase-version"),
+    ("\\C-xY", "do-lowercase-version"),
+    ("\\C-xZ", "do-lowercase-version"),
+    ("\\C-xe", "call-last-kbd-macro"),
+    ("\\C-xg", "glob-list-expansions"),
+    ("\\C-xs", "spell-correct-word"),
+    ("\\C-x~", "possible-username-completions"),
+    ("\\C-x\\C-?", "backward-kill-line"),
+    ("\\C-y", "yank"),
+    ("\\e\\C-b", "shell-backward-word"),
+    ("\\e\\C-d", "shell-kill-word"),
+    ("\\e\\C-e", "shell-expand-line"),
+    ("\\e\\C-f", "shell-forward-word"),
+    ("\\e\\C-g", "abort"),
+    ("\\e\\C-h", "backward-kill-word"),
+    ("\\e\\C-i", "dynamic-complete-history"),
+    ("\\e\\C-l", "clear-display"),
+    ("\\e\\C-r", "revert-line"),
+    ("\\e\\C-t", "shell-transpose-words"),
+    ("\\e\\C-y", "yank-nth-arg"),
+    ("\\e\\e", "complete"),
+    ("\\e\\e[C", "forward-word"),
+    ("\\e\\e[D", "backward-word"),
+    ("\\e\\C-]", "character-search-backward"),
+    ("\\e ", "set-mark"),
+    ("\\e!", "complete-command"),
+    ("\\e#", "insert-comment"),
+    ("\\e$", "complete-variable"),
+    ("\\e&", "tilde-expand"),
+    ("\\e*", "insert-completions"),
+    ("\\e-", "digit-argument"),
+    ("\\e.", "insert-last-argument"),
+    ("\\e.", "yank-last-arg"),
+    ("\\e/", "complete-filename"),
+    ("\\e0", "digit-argument"),
+    ("\\e1", "digit-argument"),
+    ("\\e2", "digit-argument"),
+    ("\\e3", "digit-argument"),
+    ("\\e4", "digit-argument"),
+    ("\\e5", "digit-argument"),
+    ("\\e6", "digit-argument"),
+    ("\\e7", "digit-argument"),
+    ("\\e8", "digit-argument"),
+    ("\\e9", "digit-argument"),
+    ("\\e<", "beginning-of-history"),
+    ("\\e=", "possible-completions"),
+    ("\\e>", "end-of-history"),
+    ("\\e?", "possible-completions"),
+    ("\\e@", "complete-hostname"),
+    ("\\eA", "do-lowercase-version"),
+    ("\\eB", "do-lowercase-version"),
+    ("\\eC", "do-lowercase-version"),
+    ("\\eD", "do-lowercase-version"),
+    ("\\eE", "do-lowercase-version"),
+    ("\\eF", "do-lowercase-version"),
+    ("\\eG", "do-lowercase-version"),
+    ("\\eH", "do-lowercase-version"),
+    ("\\eI", "do-lowercase-version"),
+    ("\\eJ", "do-lowercase-version"),
+    ("\\eK", "do-lowercase-version"),
+    ("\\eL", "do-lowercase-version"),
+    ("\\eM", "do-lowercase-version"),
+    ("\\eN", "do-lowercase-version"),
+    ("\\eOA", "previous-history"),
+    ("\\eOB", "next-history"),
+    ("\\eOC", "forward-char"),
+    ("\\eOD", "backward-char"),
+    ("\\eOF", "end-of-line"),
+    ("\\eOH", "beginning-of-line"),
+    ("\\eP", "do-lowercase-version"),
+    ("\\eQ", "do-lowercase-version"),
+    ("\\eR", "do-lowercase-version"),
+    ("\\eS", "do-lowercase-version"),
+    ("\\eT", "do-lowercase-version"),
+    ("\\eU", "do-lowercase-version"),
+    ("\\eV", "do-lowercase-version"),
+    ("\\eW", "do-lowercase-version"),
+    ("\\eX", "do-lowercase-version"),
+    ("\\eY", "do-lowercase-version"),
+    ("\\eZ", "do-lowercase-version"),
+    ("\\e[1;3C", "forward-word"),
+    ("\\e[1;3D", "backward-word"),
+    ("\\e[1;5C", "forward-word"),
+    ("\\e[1;5D", "backward-word"),
+    ("\\e[1~", "beginning-of-line"),
+    ("\\e[200~", "bracketed-paste-begin"),
+    ("\\e[2~", "quoted-insert"),
+    ("\\e[3;5~", "kill-word"),
+    ("\\e[3~", "delete-char"),
+    ("\\e[4~", "end-of-line"),
+    ("\\e[5C", "forward-word"),
+    ("\\e[5D", "backward-word"),
+    ("\\e[A", "previous-history"),
+    ("\\e[B", "next-history"),
+    ("\\e[C", "forward-char"),
+    ("\\e[D", "backward-char"),
+    ("\\e[F", "end-of-line"),
+    ("\\e[H", "beginning-of-line"),
+    ("\\e\\\\", "delete-horizontal-space"),
+    ("\\e^", "history-expand-line"),
+    ("\\e_", "insert-last-argument"),
+    ("\\e_", "yank-last-arg"),
+    ("\\eb", "backward-word"),
+    ("\\ec", "capitalize-word"),
+    ("\\ed", "kill-word"),
+    ("\\ef", "forward-word"),
+    ("\\eg", "glob-complete-word"),
+    ("\\el", "downcase-word"),
+    ("\\en", "non-incremental-forward-search-history"),
+    ("\\ep", "non-incremental-reverse-search-history"),
+    ("\\er", "revert-line"),
+    ("\\et", "transpose-words"),
+    ("\\eu", "upcase-word"),
+    ("\\ex", "execute-named-command"),
+    ("\\ey", "yank-pop"),
+    ("\\e{", "complete-into-braces"),
+    ("\\e~", "complete-username"),
+    ("\\e\\C-?", "backward-kill-word"),
+    ("\\C-]", "character-search"),
+    ("\\C-_", "undo"),
+    (" ", "self-insert"),
+    ("!", "self-insert"),
+    ("\\\"", "self-insert"),
+    ("#", "self-insert"),
+    ("$", "self-insert"),
+    ("%", "self-insert"),
+    ("&", "self-insert"),
+    ("'", "self-insert"),
+    ("(", "self-insert"),
+    (")", "self-insert"),
+    ("*", "self-insert"),
+    ("+", "self-insert"),
+    (",", "self-insert"),
+    ("-", "self-insert"),
+    (".", "self-insert"),
+    ("/", "self-insert"),
+    ("0", "self-insert"),
+    ("1", "self-insert"),
+    ("2", "self-insert"),
+    ("3", "self-insert"),
+    ("4", "self-insert"),
+    ("5", "self-insert"),
+    ("6", "self-insert"),
+    ("7", "self-insert"),
+    ("8", "self-insert"),
+    ("9", "self-insert"),
+    (":", "self-insert"),
+    (";", "self-insert"),
+    ("<", "self-insert"),
+    ("=", "self-insert"),
+    (">", "self-insert"),
+    ("?", "self-insert"),
+    ("@", "self-insert"),
+    ("A", "self-insert"),
+    ("B", "self-insert"),
+    ("C", "self-insert"),
+    ("D", "self-insert"),
+    ("E", "self-insert"),
+    ("F", "self-insert"),
+    ("G", "self-insert"),
+    ("H", "self-insert"),
+    ("I", "self-insert"),
+    ("J", "self-insert"),
+    ("K", "self-insert"),
+    ("L", "self-insert"),
+    ("M", "self-insert"),
+    ("N", "self-insert"),
+    ("O", "self-insert"),
+    ("P", "self-insert"),
+    ("Q", "self-insert"),
+    ("R", "self-insert"),
+    ("S", "self-insert"),
+    ("T", "self-insert"),
+    ("U", "self-insert"),
+    ("V", "self-insert"),
+    ("W", "self-insert"),
+    ("X", "self-insert"),
+    ("Y", "self-insert"),
+    ("Z", "self-insert"),
+    ("[", "self-insert"),
+    ("\\\\", "self-insert"),
+    ("]", "self-insert"),
+    ("^", "self-insert"),
+    ("_", "self-insert"),
+    ("`", "self-insert"),
+    ("a", "self-insert"),
+    ("b", "self-insert"),
+    ("c", "self-insert"),
+    ("d", "self-insert"),
+    ("e", "self-insert"),
+    ("f", "self-insert"),
+    ("g", "self-insert"),
+    ("h", "self-insert"),
+    ("i", "self-insert"),
+    ("j", "self-insert"),
+    ("k", "self-insert"),
+    ("l", "self-insert"),
+    ("m", "self-insert"),
+    ("n", "self-insert"),
+    ("o", "self-insert"),
+    ("p", "self-insert"),
+    ("q", "self-insert"),
+    ("r", "self-insert"),
+    ("s", "self-insert"),
+    ("t", "self-insert"),
+    ("u", "self-insert"),
+    ("v", "self-insert"),
+    ("w", "self-insert"),
+    ("x", "self-insert"),
+    ("y", "self-insert"),
+    ("z", "self-insert"),
+    ("{", "self-insert"),
+    ("|", "self-insert"),
+    ("}", "self-insert"),
+    ("~", "self-insert"),
+    ("\\C-?", "backward-delete-char"),
+    ("\\200", "self-insert"),
+    ("\\201", "self-insert"),
+    ("\\202", "self-insert"),
+    ("\\203", "self-insert"),
+    ("\\204", "self-insert"),
+    ("\\205", "self-insert"),
+    ("\\206", "self-insert"),
+    ("\\207", "self-insert"),
+    ("\\210", "self-insert"),
+    ("\\211", "self-insert"),
+    ("\\212", "self-insert"),
+    ("\\213", "self-insert"),
+    ("\\214", "self-insert"),
+    ("\\215", "self-insert"),
+    ("\\216", "self-insert"),
+    ("\\217", "self-insert"),
+    ("\\220", "self-insert"),
+    ("\\221", "self-insert"),
+    ("\\222", "self-insert"),
+    ("\\223", "self-insert"),
+    ("\\224", "self-insert"),
+    ("\\225", "self-insert"),
+    ("\\226", "self-insert"),
+    ("\\227", "self-insert"),
+    ("\\230", "self-insert"),
+    ("\\231", "self-insert"),
+    ("\\232", "self-insert"),
+    ("\\233", "self-insert"),
+    ("\\234", "self-insert"),
+    ("\\235", "self-insert"),
+    ("\\236", "self-insert"),
+    ("\\237", "self-insert"),
+    ("\\240", "self-insert"),
+    ("\\241", "self-insert"),
+    ("\\242", "self-insert"),
+    ("\\243", "self-insert"),
+    ("\\244", "self-insert"),
+    ("\\245", "self-insert"),
+    ("\\246", "self-insert"),
+    ("\\247", "self-insert"),
+    ("\\250", "self-insert"),
+    ("\\251", "self-insert"),
+    ("\\252", "self-insert"),
+    ("\\253", "self-insert"),
+    ("\\254", "self-insert"),
+    ("\\255", "self-insert"),
+    ("\\256", "self-insert"),
+    ("\\257", "self-insert"),
+    ("\\260", "self-insert"),
+    ("\\261", "self-insert"),
+    ("\\262", "self-insert"),
+    ("\\263", "self-insert"),
+    ("\\264", "self-insert"),
+    ("\\265", "self-insert"),
+    ("\\266", "self-insert"),
+    ("\\267", "self-insert"),
+    ("\\270", "self-insert"),
+    ("\\271", "self-insert"),
+    ("\\272", "self-insert"),
+    ("\\273", "self-insert"),
+    ("\\274", "self-insert"),
+    ("\\275", "self-insert"),
+    ("\\276", "self-insert"),
+    ("\\277", "self-insert"),
+    ("\\300", "self-insert"),
+    ("\\301", "self-insert"),
+    ("\\302", "self-insert"),
+    ("\\303", "self-insert"),
+    ("\\304", "self-insert"),
+    ("\\305", "self-insert"),
+    ("\\306", "self-insert"),
+    ("\\307", "self-insert"),
+    ("\\310", "self-insert"),
+    ("\\311", "self-insert"),
+    ("\\312", "self-insert"),
+    ("\\313", "self-insert"),
+    ("\\314", "self-insert"),
+    ("\\315", "self-insert"),
+    ("\\316", "self-insert"),
+    ("\\317", "self-insert"),
+    ("\\320", "self-insert"),
+    ("\\321", "self-insert"),
+    ("\\322", "self-insert"),
+    ("\\323", "self-insert"),
+    ("\\324", "self-insert"),
+    ("\\325", "self-insert"),
+    ("\\326", "self-insert"),
+    ("\\327", "self-insert"),
+    ("\\330", "self-insert"),
+    ("\\331", "self-insert"),
+    ("\\332", "self-insert"),
+    ("\\333", "self-insert"),
+    ("\\334", "self-insert"),
+    ("\\335", "self-insert"),
+    ("\\336", "self-insert"),
+    ("\\337", "self-insert"),
+    ("\\340", "self-insert"),
+    ("\\341", "self-insert"),
+    ("\\342", "self-insert"),
+    ("\\343", "self-insert"),
+    ("\\344", "self-insert"),
+    ("\\345", "self-insert"),
+    ("\\346", "self-insert"),
+    ("\\347", "self-insert"),
+    ("\\350", "self-insert"),
+    ("\\351", "self-insert"),
+    ("\\352", "self-insert"),
+    ("\\353", "self-insert"),
+    ("\\354", "self-insert"),
+    ("\\355", "self-insert"),
+    ("\\356", "self-insert"),
+    ("\\357", "self-insert"),
+    ("\\360", "self-insert"),
+    ("\\361", "self-insert"),
+    ("\\362", "self-insert"),
+    ("\\363", "self-insert"),
+    ("\\364", "self-insert"),
+    ("\\365", "self-insert"),
+    ("\\366", "self-insert"),
+    ("\\367", "self-insert"),
+    ("\\370", "self-insert"),
+    ("\\371", "self-insert"),
+    ("\\372", "self-insert"),
+    ("\\373", "self-insert"),
+    ("\\374", "self-insert"),
+    ("\\375", "self-insert"),
+    ("\\376", "self-insert"),
+    ("\\377", "self-insert"),
 ];
+
+/// The standalone emacs-meta keymap (the map `bind -m emacs-meta`
+/// queries on its own: sequences WITHOUT the `\e` prefix the full
+/// emacs table carries). emacs_meta_keymap (lib/readline/emacs_keymap.c)
+/// plus readline's initialization, captured from the GNU 5.3.20
+/// oracle's `bind -m emacs-meta -p` (rubash#2338), scan order.
+pub const DEFAULT_BINDINGS_EMACS_META: &[(&str, &str)] = &[
+    ("\\C-b", "shell-backward-word"),
+    ("\\C-d", "shell-kill-word"),
+    ("\\C-e", "shell-expand-line"),
+    ("\\C-f", "shell-forward-word"),
+    ("\\C-g", "abort"),
+    ("\\C-h", "backward-kill-word"),
+    ("\\C-i", "dynamic-complete-history"),
+    ("\\C-l", "clear-display"),
+    ("\\C-r", "revert-line"),
+    ("\\C-t", "shell-transpose-words"),
+    ("\\C-y", "yank-nth-arg"),
+    ("\\e", "complete"),
+    ("\\e[C", "forward-word"),
+    ("\\e[D", "backward-word"),
+    ("\\C-]", "character-search-backward"),
+    (" ", "set-mark"),
+    ("!", "complete-command"),
+    ("#", "insert-comment"),
+    ("$", "complete-variable"),
+    ("&", "tilde-expand"),
+    ("*", "insert-completions"),
+    ("-", "digit-argument"),
+    (".", "insert-last-argument"),
+    (".", "yank-last-arg"),
+    ("/", "complete-filename"),
+    ("0", "digit-argument"),
+    ("1", "digit-argument"),
+    ("2", "digit-argument"),
+    ("3", "digit-argument"),
+    ("4", "digit-argument"),
+    ("5", "digit-argument"),
+    ("6", "digit-argument"),
+    ("7", "digit-argument"),
+    ("8", "digit-argument"),
+    ("9", "digit-argument"),
+    ("<", "beginning-of-history"),
+    ("=", "possible-completions"),
+    (">", "end-of-history"),
+    ("?", "possible-completions"),
+    ("@", "complete-hostname"),
+    ("A", "do-lowercase-version"),
+    ("B", "do-lowercase-version"),
+    ("C", "do-lowercase-version"),
+    ("D", "do-lowercase-version"),
+    ("E", "do-lowercase-version"),
+    ("F", "do-lowercase-version"),
+    ("G", "do-lowercase-version"),
+    ("H", "do-lowercase-version"),
+    ("I", "do-lowercase-version"),
+    ("J", "do-lowercase-version"),
+    ("K", "do-lowercase-version"),
+    ("L", "do-lowercase-version"),
+    ("M", "do-lowercase-version"),
+    ("N", "do-lowercase-version"),
+    ("OA", "previous-history"),
+    ("OB", "next-history"),
+    ("OC", "forward-char"),
+    ("OD", "backward-char"),
+    ("OF", "end-of-line"),
+    ("OH", "beginning-of-line"),
+    ("P", "do-lowercase-version"),
+    ("Q", "do-lowercase-version"),
+    ("R", "do-lowercase-version"),
+    ("S", "do-lowercase-version"),
+    ("T", "do-lowercase-version"),
+    ("U", "do-lowercase-version"),
+    ("V", "do-lowercase-version"),
+    ("W", "do-lowercase-version"),
+    ("X", "do-lowercase-version"),
+    ("Y", "do-lowercase-version"),
+    ("Z", "do-lowercase-version"),
+    ("[1;3C", "forward-word"),
+    ("[1;3D", "backward-word"),
+    ("[1;5C", "forward-word"),
+    ("[1;5D", "backward-word"),
+    ("[1~", "beginning-of-line"),
+    ("[200~", "bracketed-paste-begin"),
+    ("[2~", "quoted-insert"),
+    ("[3;5~", "kill-word"),
+    ("[3~", "delete-char"),
+    ("[4~", "end-of-line"),
+    ("[5C", "forward-word"),
+    ("[5D", "backward-word"),
+    ("[A", "previous-history"),
+    ("[B", "next-history"),
+    ("[C", "forward-char"),
+    ("[D", "backward-char"),
+    ("[F", "end-of-line"),
+    ("[H", "beginning-of-line"),
+    ("\\\\", "delete-horizontal-space"),
+    ("^", "history-expand-line"),
+    ("_", "insert-last-argument"),
+    ("_", "yank-last-arg"),
+    ("b", "backward-word"),
+    ("c", "capitalize-word"),
+    ("d", "kill-word"),
+    ("f", "forward-word"),
+    ("g", "glob-complete-word"),
+    ("l", "downcase-word"),
+    ("n", "non-incremental-forward-search-history"),
+    ("p", "non-incremental-reverse-search-history"),
+    ("r", "revert-line"),
+    ("t", "transpose-words"),
+    ("u", "upcase-word"),
+    ("x", "execute-named-command"),
+    ("y", "yank-pop"),
+    ("{", "complete-into-braces"),
+    ("~", "complete-username"),
+    ("\\C-?", "backward-kill-word"),
+];
+
+/// The standalone emacs-ctlx keymap (`bind -m emacs-ctlx`: sequences
+/// without the `\C-x` prefix). emacs_ctlx_keymap
+/// (lib/readline/emacs_keymap.c), captured from the GNU 5.3.20
+/// oracle's `bind -m emacs-ctlx -p` (rubash#2338), scan order.
+pub const DEFAULT_BINDINGS_EMACS_CTLX: &[(&str, &str)] = &[
+    ("\\C-e", "edit-and-execute-command"),
+    ("\\C-g", "abort"),
+    ("\\C-r", "re-read-init-file"),
+    ("\\C-u", "undo"),
+    ("\\C-v", "display-shell-version"),
+    ("\\C-x", "exchange-point-and-mark"),
+    ("!", "possible-command-completions"),
+    ("$", "possible-variable-completions"),
+    ("(", "start-kbd-macro"),
+    (")", "end-kbd-macro"),
+    ("*", "glob-expand-word"),
+    ("/", "possible-filename-completions"),
+    ("@", "possible-hostname-completions"),
+    ("A", "do-lowercase-version"),
+    ("B", "do-lowercase-version"),
+    ("C", "do-lowercase-version"),
+    ("D", "do-lowercase-version"),
+    ("E", "do-lowercase-version"),
+    ("F", "do-lowercase-version"),
+    ("G", "do-lowercase-version"),
+    ("H", "do-lowercase-version"),
+    ("I", "do-lowercase-version"),
+    ("J", "do-lowercase-version"),
+    ("K", "do-lowercase-version"),
+    ("L", "do-lowercase-version"),
+    ("M", "do-lowercase-version"),
+    ("N", "do-lowercase-version"),
+    ("O", "do-lowercase-version"),
+    ("P", "do-lowercase-version"),
+    ("Q", "do-lowercase-version"),
+    ("R", "do-lowercase-version"),
+    ("S", "do-lowercase-version"),
+    ("T", "do-lowercase-version"),
+    ("U", "do-lowercase-version"),
+    ("V", "do-lowercase-version"),
+    ("W", "do-lowercase-version"),
+    ("X", "do-lowercase-version"),
+    ("Y", "do-lowercase-version"),
+    ("Z", "do-lowercase-version"),
+    ("e", "call-last-kbd-macro"),
+    ("g", "glob-list-expansions"),
+    ("s", "spell-correct-word"),
+    ("~", "possible-username-completions"),
+    ("\\C-?", "backward-kill-line"),
+];
+
+/// The vi-insert keymap's default function bindings
+/// (vi_insertion_keymap, lib/readline/vi_keymap.c, plus the arrow
+/// keys bind_arrow_keys_internal adds to it), captured from the GNU
+/// 5.3.20 oracle's `bind -m vi-insert -p` (rubash#2338), scan order.
+/// The bare `\e` row is vi-movement-mode: in the C map ESC is both
+/// that function (the submap's ANYOTHERKEY slot) and the arrow-key
+/// prefix; the flattened dump form keeps both rows.
+pub const DEFAULT_BINDINGS_VI_INSERT: &[(&str, &str)] = &[
+    ("\\C-a", "self-insert"),
+    ("\\C-b", "self-insert"),
+    ("\\C-c", "self-insert"),
+    ("\\C-d", "vi-eof-maybe"),
+    ("\\C-e", "self-insert"),
+    ("\\C-f", "self-insert"),
+    ("\\C-g", "self-insert"),
+    ("\\C-h", "backward-delete-char"),
+    ("\\C-i", "complete"),
+    ("\\C-j", "accept-line"),
+    ("\\C-k", "self-insert"),
+    ("\\C-l", "self-insert"),
+    ("\\C-m", "accept-line"),
+    ("\\C-n", "menu-complete"),
+    ("\\C-o", "self-insert"),
+    ("\\C-p", "menu-complete-backward"),
+    ("\\C-q", "self-insert"),
+    ("\\C-r", "reverse-search-history"),
+    ("\\C-s", "forward-search-history"),
+    ("\\C-t", "transpose-chars"),
+    ("\\C-u", "unix-line-discard"),
+    ("\\C-v", "quoted-insert"),
+    ("\\C-w", "vi-unix-word-rubout"),
+    ("\\C-x", "self-insert"),
+    ("\\C-y", "yank"),
+    ("\\C-z", "self-insert"),
+    ("\\e", "vi-movement-mode"),
+    ("\\eOA", "previous-history"),
+    ("\\eOB", "next-history"),
+    ("\\eOC", "forward-char"),
+    ("\\eOD", "backward-char"),
+    ("\\eOF", "end-of-line"),
+    ("\\eOH", "beginning-of-line"),
+    ("\\e[1;3C", "forward-word"),
+    ("\\e[1;3D", "backward-word"),
+    ("\\e[1;5C", "forward-word"),
+    ("\\e[1;5D", "backward-word"),
+    ("\\e[200~", "bracketed-paste-begin"),
+    ("\\e[3;5~", "kill-word"),
+    ("\\e[A", "previous-history"),
+    ("\\e[B", "next-history"),
+    ("\\e[C", "forward-char"),
+    ("\\e[D", "backward-char"),
+    ("\\e[F", "end-of-line"),
+    ("\\e[H", "beginning-of-line"),
+    ("\\C-\\\\", "self-insert"),
+    ("\\C-]", "self-insert"),
+    ("\\C-^", "self-insert"),
+    ("\\C-_", "vi-undo"),
+    (" ", "self-insert"),
+    ("!", "self-insert"),
+    ("\\\"", "self-insert"),
+    ("#", "self-insert"),
+    ("$", "self-insert"),
+    ("%", "self-insert"),
+    ("&", "self-insert"),
+    ("'", "self-insert"),
+    ("(", "self-insert"),
+    (")", "self-insert"),
+    ("*", "self-insert"),
+    ("+", "self-insert"),
+    (",", "self-insert"),
+    ("-", "self-insert"),
+    (".", "self-insert"),
+    ("/", "self-insert"),
+    ("0", "self-insert"),
+    ("1", "self-insert"),
+    ("2", "self-insert"),
+    ("3", "self-insert"),
+    ("4", "self-insert"),
+    ("5", "self-insert"),
+    ("6", "self-insert"),
+    ("7", "self-insert"),
+    ("8", "self-insert"),
+    ("9", "self-insert"),
+    (":", "self-insert"),
+    (";", "self-insert"),
+    ("<", "self-insert"),
+    ("=", "self-insert"),
+    (">", "self-insert"),
+    ("?", "self-insert"),
+    ("@", "self-insert"),
+    ("A", "self-insert"),
+    ("B", "self-insert"),
+    ("C", "self-insert"),
+    ("D", "self-insert"),
+    ("E", "self-insert"),
+    ("F", "self-insert"),
+    ("G", "self-insert"),
+    ("H", "self-insert"),
+    ("I", "self-insert"),
+    ("J", "self-insert"),
+    ("K", "self-insert"),
+    ("L", "self-insert"),
+    ("M", "self-insert"),
+    ("N", "self-insert"),
+    ("O", "self-insert"),
+    ("P", "self-insert"),
+    ("Q", "self-insert"),
+    ("R", "self-insert"),
+    ("S", "self-insert"),
+    ("T", "self-insert"),
+    ("U", "self-insert"),
+    ("V", "self-insert"),
+    ("W", "self-insert"),
+    ("X", "self-insert"),
+    ("Y", "self-insert"),
+    ("Z", "self-insert"),
+    ("[", "self-insert"),
+    ("\\\\", "self-insert"),
+    ("]", "self-insert"),
+    ("^", "self-insert"),
+    ("_", "self-insert"),
+    ("`", "self-insert"),
+    ("a", "self-insert"),
+    ("b", "self-insert"),
+    ("c", "self-insert"),
+    ("d", "self-insert"),
+    ("e", "self-insert"),
+    ("f", "self-insert"),
+    ("g", "self-insert"),
+    ("h", "self-insert"),
+    ("i", "self-insert"),
+    ("j", "self-insert"),
+    ("k", "self-insert"),
+    ("l", "self-insert"),
+    ("m", "self-insert"),
+    ("n", "self-insert"),
+    ("o", "self-insert"),
+    ("p", "self-insert"),
+    ("q", "self-insert"),
+    ("r", "self-insert"),
+    ("s", "self-insert"),
+    ("t", "self-insert"),
+    ("u", "self-insert"),
+    ("v", "self-insert"),
+    ("w", "self-insert"),
+    ("x", "self-insert"),
+    ("y", "self-insert"),
+    ("z", "self-insert"),
+    ("{", "self-insert"),
+    ("|", "self-insert"),
+    ("}", "self-insert"),
+    ("~", "self-insert"),
+    ("\\C-?", "backward-delete-char"),
+    ("\\200", "self-insert"),
+    ("\\201", "self-insert"),
+    ("\\202", "self-insert"),
+    ("\\203", "self-insert"),
+    ("\\204", "self-insert"),
+    ("\\205", "self-insert"),
+    ("\\206", "self-insert"),
+    ("\\207", "self-insert"),
+    ("\\210", "self-insert"),
+    ("\\211", "self-insert"),
+    ("\\212", "self-insert"),
+    ("\\213", "self-insert"),
+    ("\\214", "self-insert"),
+    ("\\215", "self-insert"),
+    ("\\216", "self-insert"),
+    ("\\217", "self-insert"),
+    ("\\220", "self-insert"),
+    ("\\221", "self-insert"),
+    ("\\222", "self-insert"),
+    ("\\223", "self-insert"),
+    ("\\224", "self-insert"),
+    ("\\225", "self-insert"),
+    ("\\226", "self-insert"),
+    ("\\227", "self-insert"),
+    ("\\230", "self-insert"),
+    ("\\231", "self-insert"),
+    ("\\232", "self-insert"),
+    ("\\233", "self-insert"),
+    ("\\234", "self-insert"),
+    ("\\235", "self-insert"),
+    ("\\236", "self-insert"),
+    ("\\237", "self-insert"),
+    ("\\240", "self-insert"),
+    ("\\241", "self-insert"),
+    ("\\242", "self-insert"),
+    ("\\243", "self-insert"),
+    ("\\244", "self-insert"),
+    ("\\245", "self-insert"),
+    ("\\246", "self-insert"),
+    ("\\247", "self-insert"),
+    ("\\250", "self-insert"),
+    ("\\251", "self-insert"),
+    ("\\252", "self-insert"),
+    ("\\253", "self-insert"),
+    ("\\254", "self-insert"),
+    ("\\255", "self-insert"),
+    ("\\256", "self-insert"),
+    ("\\257", "self-insert"),
+    ("\\260", "self-insert"),
+    ("\\261", "self-insert"),
+    ("\\262", "self-insert"),
+    ("\\263", "self-insert"),
+    ("\\264", "self-insert"),
+    ("\\265", "self-insert"),
+    ("\\266", "self-insert"),
+    ("\\267", "self-insert"),
+    ("\\270", "self-insert"),
+    ("\\271", "self-insert"),
+    ("\\272", "self-insert"),
+    ("\\273", "self-insert"),
+    ("\\274", "self-insert"),
+    ("\\275", "self-insert"),
+    ("\\276", "self-insert"),
+    ("\\277", "self-insert"),
+    ("\\300", "self-insert"),
+    ("\\301", "self-insert"),
+    ("\\302", "self-insert"),
+    ("\\303", "self-insert"),
+    ("\\304", "self-insert"),
+    ("\\305", "self-insert"),
+    ("\\306", "self-insert"),
+    ("\\307", "self-insert"),
+    ("\\310", "self-insert"),
+    ("\\311", "self-insert"),
+    ("\\312", "self-insert"),
+    ("\\313", "self-insert"),
+    ("\\314", "self-insert"),
+    ("\\315", "self-insert"),
+    ("\\316", "self-insert"),
+    ("\\317", "self-insert"),
+    ("\\320", "self-insert"),
+    ("\\321", "self-insert"),
+    ("\\322", "self-insert"),
+    ("\\323", "self-insert"),
+    ("\\324", "self-insert"),
+    ("\\325", "self-insert"),
+    ("\\326", "self-insert"),
+    ("\\327", "self-insert"),
+    ("\\330", "self-insert"),
+    ("\\331", "self-insert"),
+    ("\\332", "self-insert"),
+    ("\\333", "self-insert"),
+    ("\\334", "self-insert"),
+    ("\\335", "self-insert"),
+    ("\\336", "self-insert"),
+    ("\\337", "self-insert"),
+    ("\\340", "self-insert"),
+    ("\\341", "self-insert"),
+    ("\\342", "self-insert"),
+    ("\\343", "self-insert"),
+    ("\\344", "self-insert"),
+    ("\\345", "self-insert"),
+    ("\\346", "self-insert"),
+    ("\\347", "self-insert"),
+    ("\\350", "self-insert"),
+    ("\\351", "self-insert"),
+    ("\\352", "self-insert"),
+    ("\\353", "self-insert"),
+    ("\\354", "self-insert"),
+    ("\\355", "self-insert"),
+    ("\\356", "self-insert"),
+    ("\\357", "self-insert"),
+    ("\\360", "self-insert"),
+    ("\\361", "self-insert"),
+    ("\\362", "self-insert"),
+    ("\\363", "self-insert"),
+    ("\\364", "self-insert"),
+    ("\\365", "self-insert"),
+    ("\\366", "self-insert"),
+    ("\\367", "self-insert"),
+    ("\\370", "self-insert"),
+    ("\\371", "self-insert"),
+    ("\\372", "self-insert"),
+    ("\\373", "self-insert"),
+    ("\\374", "self-insert"),
+    ("\\375", "self-insert"),
+    ("\\376", "self-insert"),
+    ("\\377", "self-insert"),
+];
+
+/// The vi movement (command) keymap's default function bindings
+/// (vi_movement_keymap, lib/readline/vi_keymap.c, plus arrow keys) —
+/// the map `-m vi`, `-m vi-move` and `-m vi-command` all name.
+/// Captured from the GNU 5.3.20 oracle's `bind -m vi-command -p`
+/// (rubash#2338), scan order.
+pub const DEFAULT_BINDINGS_VI_MOVEMENT: &[(&str, &str)] = &[
+    ("\\C-d", "vi-eof-maybe"),
+    ("\\C-g", "abort"),
+    ("\\C-h", "backward-char"),
+    ("\\C-j", "accept-line"),
+    ("\\C-k", "kill-line"),
+    ("\\C-l", "clear-screen"),
+    ("\\C-m", "accept-line"),
+    ("\\C-n", "next-history"),
+    ("\\C-p", "previous-history"),
+    ("\\C-q", "quoted-insert"),
+    ("\\C-r", "reverse-search-history"),
+    ("\\C-s", "forward-search-history"),
+    ("\\C-t", "transpose-chars"),
+    ("\\C-u", "unix-line-discard"),
+    ("\\C-v", "quoted-insert"),
+    ("\\C-w", "vi-unix-word-rubout"),
+    ("\\C-y", "yank"),
+    ("\\eOA", "previous-history"),
+    ("\\eOB", "next-history"),
+    ("\\eOC", "forward-char"),
+    ("\\eOD", "backward-char"),
+    ("\\eOF", "end-of-line"),
+    ("\\eOH", "beginning-of-line"),
+    ("\\e[1;3C", "forward-word"),
+    ("\\e[1;3D", "backward-word"),
+    ("\\e[1;5C", "forward-word"),
+    ("\\e[1;5D", "backward-word"),
+    ("\\e[3;5~", "kill-word"),
+    ("\\e[A", "previous-history"),
+    ("\\e[B", "next-history"),
+    ("\\e[C", "forward-char"),
+    ("\\e[D", "backward-char"),
+    ("\\e[F", "end-of-line"),
+    ("\\e[H", "beginning-of-line"),
+    ("\\C-_", "vi-undo"),
+    (" ", "forward-char"),
+    ("#", "insert-comment"),
+    ("$", "end-of-line"),
+    ("%", "vi-match"),
+    ("&", "vi-tilde-expand"),
+    ("*", "bash-vi-complete"),
+    ("+", "next-history"),
+    (",", "vi-char-search"),
+    ("-", "previous-history"),
+    (".", "vi-redo"),
+    ("/", "vi-search"),
+    ("0", "beginning-of-line"),
+    ("1", "vi-arg-digit"),
+    ("2", "vi-arg-digit"),
+    ("3", "vi-arg-digit"),
+    ("4", "vi-arg-digit"),
+    ("5", "vi-arg-digit"),
+    ("6", "vi-arg-digit"),
+    ("7", "vi-arg-digit"),
+    ("8", "vi-arg-digit"),
+    ("9", "vi-arg-digit"),
+    (";", "vi-char-search"),
+    ("=", "bash-vi-complete"),
+    ("?", "vi-search"),
+    ("A", "vi-append-eol"),
+    ("B", "vi-prev-word"),
+    ("C", "vi-change-to"),
+    ("D", "vi-delete-to"),
+    ("E", "vi-end-word"),
+    ("F", "vi-char-search"),
+    ("G", "vi-fetch-history"),
+    ("I", "vi-insert-beg"),
+    ("N", "vi-search-again"),
+    ("P", "vi-put"),
+    ("R", "vi-replace"),
+    ("S", "vi-subst"),
+    ("T", "vi-char-search"),
+    ("U", "revert-line"),
+    ("W", "vi-next-word"),
+    ("X", "vi-rubout"),
+    ("Y", "vi-yank-to"),
+    ("\\\\", "bash-vi-complete"),
+    ("^", "vi-first-print"),
+    ("_", "vi-yank-arg"),
+    ("`", "vi-goto-mark"),
+    ("a", "vi-append-mode"),
+    ("b", "vi-prev-word"),
+    ("c", "vi-change-to"),
+    ("d", "vi-delete-to"),
+    ("e", "vi-end-word"),
+    ("f", "vi-char-search"),
+    ("h", "backward-char"),
+    ("i", "vi-insertion-mode"),
+    ("j", "next-history"),
+    ("k", "previous-history"),
+    ("l", "forward-char"),
+    ("m", "vi-set-mark"),
+    ("n", "vi-search-again"),
+    ("p", "vi-put"),
+    ("r", "vi-change-char"),
+    ("s", "vi-subst"),
+    ("t", "vi-char-search"),
+    ("u", "vi-undo"),
+    ("v", "vi-edit-and-execute-command"),
+    ("w", "vi-next-word"),
+    ("x", "vi-delete"),
+    ("y", "vi-yank-to"),
+    ("|", "vi-column"),
+    ("~", "vi-change-case"),
+];
+
+/// The default function-binding table for one keymap name (the `-m`
+/// names of bind.def:37-40, aliases folded by
+/// [`crate::shell::bind_registry::normalize_keymap_name`]). `None` (no
+/// `-m`) is the current keymap, emacs-standard in the default editing
+/// mode. Every name in
+/// [`crate::shell::bind_registry::KEYMAP_NAMES`] resolves here.
+pub fn default_bindings_for_keymap(
+    keymap: Option<&str>,
+) -> &'static [(&'static str, &'static str)] {
+    match crate::shell::bind_registry::normalize_keymap_name(keymap.unwrap_or("emacs-standard")) {
+        "emacs-meta" => DEFAULT_BINDINGS_EMACS_META,
+        "emacs-ctlx" => DEFAULT_BINDINGS_EMACS_CTLX,
+        "vi-insert" => DEFAULT_BINDINGS_VI_INSERT,
+        "vi-movement" => DEFAULT_BINDINGS_VI_MOVEMENT,
+        _ => DEFAULT_FUNCTION_BINDINGS,
+    }
+}
+
+/// Translate a written key sequence (`\C-b`, `\eOD`, `\e[D`, plain
+/// characters) to the raw bytes it dispatches on — the inverse of
+/// readline's `_rl_get_keyname` rendering, used to order sequences the
+/// way rl_invoking_keyseqs_in_map's byte scan does (lib/readline/bind.c:
+/// keys 0..255, submaps recursed in place, so plain byte order of the
+/// translated sequence IS the listing order). Inputrc spellings the
+/// dumpers never print are accepted too (`\d` for DEL, `\M-x` for the
+/// ESC-prefixed meta form, the C-style letter escapes, `\xHH`), since
+/// user-registered sequences arrive in the user's own spelling.
+pub fn keyseq_bytes(written: &str) -> Vec<u8> {
+    let chars: Vec<char> = written.chars().collect();
+    let mut out = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    // The base byte of a \C- or \M- argument: one character, or an
+    // escape pair when the base is itself backslash/quote (\C-\\).
+    let read_base = |chars: &[char], i: &mut usize| -> u32 {
+        match chars.get(*i) {
+            Some('\\') => {
+                let base = match chars.get(*i + 1) {
+                    Some('\\') => 0x5c,
+                    Some('"') => 0x22,
+                    _ => 0x5c,
+                };
+                *i += 2;
+                base
+            }
+            Some(&c) => {
+                *i += 1;
+                c as u32
+            }
+            None => 0,
+        }
+    };
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '\\' {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            i += 1;
+            continue;
+        }
+        match chars.get(i + 1) {
+            Some('C') if chars.get(i + 2) == Some(&'-') => {
+                i += 3;
+                let base = read_base(&chars, &mut i);
+                out.push(if base == '?' as u32 {
+                    0x7f
+                } else {
+                    (base & 0x1f) as u8
+                });
+            }
+            Some('M') if chars.get(i + 2) == Some(&'-') => {
+                i += 3;
+                let base = read_base(&chars, &mut i);
+                out.push(0x1b);
+                out.push(base as u8);
+            }
+            Some('e') => {
+                out.push(0x1b);
+                i += 2;
+            }
+            Some('d') => {
+                out.push(0x7f);
+                i += 2;
+            }
+            Some('\\') => {
+                out.push(0x5c);
+                i += 2;
+            }
+            Some('a') => {
+                out.push(0x07);
+                i += 2;
+            }
+            Some('b') => {
+                out.push(0x08);
+                i += 2;
+            }
+            Some('f') => {
+                out.push(0x0c);
+                i += 2;
+            }
+            Some('n') => {
+                out.push(0x0a);
+                i += 2;
+            }
+            Some('r') => {
+                out.push(0x0d);
+                i += 2;
+            }
+            Some('t') => {
+                out.push(0x09);
+                i += 2;
+            }
+            Some('v') => {
+                out.push(0x0b);
+                i += 2;
+            }
+            Some('x') => {
+                let hex: String = chars[i + 2..].iter().take(2).collect();
+                match u8::from_str_radix(&hex, 16) {
+                    Ok(byte) if !hex.is_empty() => {
+                        out.push(byte);
+                        i += 2 + hex.len();
+                    }
+                    _ => {
+                        out.push(b'x');
+                        i += 2;
+                    }
+                }
+            }
+            Some(d) if d.is_ascii_digit() => {
+                let digits: String = chars[i + 1..]
+                    .iter()
+                    .take(3)
+                    .take_while(|d| d.is_ascii_digit())
+                    .collect();
+                match u32::from_str_radix(&digits, 8) {
+                    Ok(value) => {
+                        out.push(value as u8);
+                        i += 1 + digits.len();
+                    }
+                    Err(_) => {
+                        out.push(*d as u8);
+                        i += 2;
+                    }
+                }
+            }
+            Some(&other) => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(other.encode_utf8(&mut buf).as_bytes());
+                i += 2;
+            }
+            None => {
+                out.push(0x5c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The errno text GNU's `bind -f` failure prints: `strerror(errno)`
+/// (bind.def:274-276). std's io::Error Display appends ` (os error N)`
+/// to that same text; strip the suffix so the diagnostic is GNU's
+/// (rubash#2338 item 4).
+pub fn cannot_read_reason(err: &std::io::Error) -> String {
+    let text = err.to_string();
+    match text.rfind(" (os error ") {
+        Some(pos) if text.ends_with(')') => text[..pos].to_string(),
+        _ => text,
+    }
+}
 
 /// GNU 5.3's readline variable table in `bind -v` output order, with each
 /// variable's default value (WT probe: WSL GNU bash 5.3.0 `bind -v`,
@@ -794,10 +2041,33 @@ pub fn format_variable_plain(name: &str, value: &str) -> String {
     format!("{name} is set to `{value}'")
 }
 
-/// `bind -P` line: `abort can be found on "\C-g", "\C-x\C-g".`
+/// `bind -P` line (rl_print_keybinding, print_readably = 0): at most
+/// five sequences, `, ...` when truncated, `.` only when the list is
+/// complete: `abort can be found on "\C-g", "\C-x\C-g".`
 pub fn format_function_plain(name: &str, keyseqs: &[String]) -> String {
-    let quoted: Vec<String> = keyseqs.iter().map(|seq| format!("\"{seq}\"")).collect();
-    format!("{name} can be found on {}.", quoted.join(", "))
+    let quoted: Vec<String> = keyseqs
+        .iter()
+        .take(5)
+        .map(|seq| format!("\"{seq}\""))
+        .collect();
+    if keyseqs.len() > 5 {
+        format!("{name} can be found on {}, ...", quoted.join(", "))
+    } else {
+        format!("{name} can be found on {}.", quoted.join(", "))
+    }
+}
+
+/// `bind -P` line for a function with no bindings in the dumped keymap
+/// (rl_print_keybinding, print_readably = 0, no invokers): NO trailing
+/// period, unlike the `-q` form.
+pub fn format_function_plain_unbound(name: &str) -> String {
+    format!("{name} is not bound to any keys")
+}
+
+/// `bind -p` comment line for a function with no bindings in the dumped
+/// keymap (rl_print_keybinding, print_readably = 1, no invokers).
+pub fn format_function_readable_unbound(name: &str) -> String {
+    format!("# {name} (not bound)")
 }
 
 /// `bind -q` positive answer (query_bindings, bind.def:344-367): at most
@@ -1102,6 +2372,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyseq_bytes_orders_like_the_readline_scan() {
+        // rubash#2338: byte order of the translated sequence is the
+        // rl_invoking_keyseqs_in_map listing order.
+        assert_eq!(keyseq_bytes(r"\C-b"), vec![0x02]);
+        assert_eq!(keyseq_bytes(r"\eOD"), vec![0x1b, b'O', b'D']);
+        assert_eq!(keyseq_bytes(r"\e[D"), vec![0x1b, b'[', b'D']);
+        assert!(keyseq_bytes(r"\C-b") < keyseq_bytes(r"\eOD"));
+        assert!(keyseq_bytes(r"\eOD") < keyseq_bytes(r"\e[D"));
+        assert_eq!(keyseq_bytes(r"\C-@"), vec![0x00]);
+        assert_eq!(keyseq_bytes(r"\C-?"), vec![0x7f]);
+        assert_eq!(keyseq_bytes(r"\C-\\"), vec![0x1c]);
+        assert_eq!(keyseq_bytes(r"\e "), vec![0x1b, b' ']);
+        assert_eq!(keyseq_bytes("\\\\"), vec![0x5c]);
+        assert_eq!(keyseq_bytes("\\\""), vec![0x22]);
+        assert_eq!(keyseq_bytes(r"\200"), vec![0x80]);
+        assert_eq!(keyseq_bytes("h"), vec![b'h']);
+    }
+
+    #[test]
+    fn function_tables_match_gnu_counts() {
+        // GNU 5.3.20 oracle: `bind -l` = 176 names; the per-keymap
+        // dumps carry 403/109/44/273/104 bound rows (rubash#2338).
+        assert_eq!(READLINE_FUNCTIONS.len(), 176);
+        assert_eq!(DEFAULT_FUNCTION_BINDINGS.len(), 403);
+        assert_eq!(DEFAULT_BINDINGS_EMACS_META.len(), 109);
+        assert_eq!(DEFAULT_BINDINGS_EMACS_CTLX.len(), 44);
+        assert_eq!(DEFAULT_BINDINGS_VI_INSERT.len(), 273);
+        assert_eq!(DEFAULT_BINDINGS_VI_MOVEMENT.len(), 104);
+        assert!(is_known_function("complete"));
+        assert!(is_known_function("history-search-backward"));
+    }
+
+    #[test]
+    fn plain_dump_formats_match_rl_print_keybinding() {
+        let seqs: Vec<String> = ["a", "b", "c", "d", "e", "f"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            format_function_plain("fn", &seqs),
+            "fn can be found on \"a\", \"b\", \"c\", \"d\", \"e\", ..."
+        );
+        assert_eq!(
+            format_function_plain("fn", &seqs[..2]),
+            "fn can be found on \"a\", \"b\"."
+        );
+        // The unbound plain form has NO trailing period (unlike -q's).
+        assert_eq!(
+            format_function_plain_unbound("fn"),
+            "fn is not bound to any keys"
+        );
+        assert_eq!(format_function_readable_unbound("fn"), "# fn (not bound)");
+    }
+
+    #[test]
     fn parse_unix_command_spec_colon_form() {
         let (keyseq, command) =
             parse_unix_command_spec(r#""\C-g": echo bound-c-g"#).expect("parses");
@@ -1397,10 +2722,21 @@ mod tests {
             "self-insert",
             "accept-line",
             "beginning-of-line",
-            "history-incremental-search-backward",
+            // GNU's incremental search (C-r): funmap.c:131 registers
+            // it as reverse-search-history.
+            "reverse-search-history",
         ] {
             assert!(is_known_function(name), "{name} should be known");
         }
         assert!(!is_known_function("no-such-fn"));
+        // `history-incremental-search-backward` is a zsh/zle widget
+        // name, not a readline function: funmap.c carries only the
+        // non-incremental-* family (funmap.c:114-117), the name
+        // appears nowhere in the GNU tree, and the 5.3.20 oracle's
+        // own `bind -q history-incremental-search-backward` answers
+        // "unknown function name" (rc 1). Do not re-add it by
+        // symmetry with history-search-backward /
+        // history-substring-search-backward.
+        assert!(!is_known_function("history-incremental-search-backward"));
     }
 }

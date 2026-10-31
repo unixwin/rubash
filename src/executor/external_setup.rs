@@ -3100,10 +3100,19 @@ impl Executor {
                 ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
             }
         }
+        // rubash#2356: same state-channel spill as the `&` respawn —
+        // the composed environment can carry a single entry past
+        // MAX_ARG_STRLEN (the fork-context stamp scales with the
+        // function table); oversized entries ride the state file and
+        // the child's import splices them back.
+        let argv_bytes =
+            exe.as_os_str().len() + spawn_args.iter().map(|arg| arg.len() + 1).sum::<usize>();
+        let (env_entries, state_temp) =
+            self.spill_respawn_env_entries(env_map.into_iter().collect(), argv_bytes);
         let mut process = std::process::Command::new(&exe);
         process
             .args(&spawn_args)
-            .envs(&env_map)
+            .envs(env_entries)
             // rubash#2195: fds 1-2 follow the spawn plan (the
             // prefix state at the substitution's own redirect);
             // fd 0 stays the payload pipe — GNU's
@@ -3118,7 +3127,15 @@ impl Executor {
         for dup in parent_side_dups {
             crate::fd::close_handle(dup);
         }
-        let mut child = spawn_result?;
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = &state_temp {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error.into());
+            }
+        };
         let pid = child.id();
         adopt_orphan_console(pid);
         if let Some(mut stdin) = child.stdin.take() {
@@ -3346,6 +3363,119 @@ impl Executor {
     /// reading it (rubash::invocation::materialize_command_file).
     pub(in crate::executor) fn respawn_command_temp_path(&self) -> Result<PathBuf, ExecuteError> {
         self.shell_temp_path("rubash-respawn-cmd", ".sh")
+    }
+
+    pub(in crate::executor) fn respawn_state_temp_path(&self) -> Result<PathBuf, ExecuteError> {
+        self.shell_temp_path("rubash-respawn-state", ".bin")
+    }
+
+    /// rubash#2356: move oversized respawn-environment entries out of
+    /// the execve-bound environment into the state-file transport
+    /// (`crate::invocation::RESPAWN_STATE_FILE_ENV_KEY`). Applied by
+    /// every fork-shaped respawn builder (background `&`, coproc,
+    /// both process-substitution forms) to its fully composed entry
+    /// list, so NO state payload — function spans, positional
+    /// windows, attribute lists, exported values — rides a single
+    /// argv/env string past the OS per-string cap, and the aggregate
+    /// stays inside a conservative share of ARG_MAX. Two spill rules,
+    /// both by size class, never by key:
+    ///
+    /// * an entry whose `key=value` rendering exceeds
+    ///   [`RESPAWN_ENV_ENTRY_LIMIT`] bytes spills (MAX_ARG_STRLEN is
+    ///   128 KiB on Linux and CreateProcessW caps the whole
+    ///   environment block at 32767 units on Windows, so 8 KiB keeps
+    ///   every inline entry far from either cap);
+    /// * while the remaining inline total (plus `argv_bytes`)
+    ///   exceeds [`RESPAWN_ENV_TOTAL_LIMIT`], the largest remaining
+    ///   entry spills — many medium entries must not reassemble the
+    ///   same wall in aggregate.
+    ///
+    /// Returns the entries to spawn with (the state-file pointer
+    /// appended last, so it wins over any ambient copy) and the temp
+    /// file path when a file was written. The child removes the file
+    /// after reading it (Executor::new import); on spawn failure the
+    /// CALLER removes it, exactly the `__RUBASH_CMD_FILE` contract.
+    /// If the temp file cannot be written the entries go inline
+    /// unchanged — the pre-transport behavior — rather than failing a
+    /// spawn that might still fit.
+    ///
+    /// Ordering: spilled entries are spliced into the child's table
+    /// after the inline ones at import, in their original relative
+    /// order. Duplicate-key adjudication therefore still resolves to
+    /// the last writer for every pattern the builders produce: a
+    /// key's instances are either all inline (stamps and overrides
+    /// are small) or the oversized tail instance rides the file.
+    pub(in crate::executor) fn spill_respawn_env_entries(
+        &self,
+        entries: Vec<(String, String)>,
+        argv_bytes: usize,
+    ) -> (Vec<(String, String)>, Option<PathBuf>) {
+        const RESPAWN_ENV_ENTRY_LIMIT: usize = 8192;
+        const RESPAWN_ENV_TOTAL_LIMIT: usize = 1 << 20;
+        fn entry_size(entry: &(String, String)) -> usize {
+            // key + '=' + value + NUL, as execve accounts it.
+            entry.0.len() + entry.1.len() + 2
+        }
+        // A stale pointer never rides: the only legitimate value is
+        // the one this call is about to mint.
+        let entries: Vec<(String, String)> = entries
+            .into_iter()
+            .filter(|entry| entry.0 != crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+            .collect();
+        let mut spilled_indexes: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry_size(entry) > RESPAWN_ENV_ENTRY_LIMIT)
+            .map(|(index, _)| index)
+            .collect();
+        let spilled_bytes: usize = spilled_indexes
+            .iter()
+            .map(|&index| entry_size(&entries[index]))
+            .sum();
+        let mut inline_total =
+            argv_bytes + entries.iter().map(entry_size).sum::<usize>() - spilled_bytes;
+        while inline_total > RESPAWN_ENV_TOTAL_LIMIT {
+            let Some((index, _)) = entries
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !spilled_indexes.contains(index))
+                .max_by_key(|(_, entry)| entry_size(entry))
+            else {
+                break;
+            };
+            inline_total -= entry_size(&entries[index]);
+            spilled_indexes.push(index);
+        }
+        if spilled_indexes.is_empty() {
+            return (entries, None);
+        }
+        spilled_indexes.sort_unstable();
+        let spilled: Vec<(String, String)> = spilled_indexes
+            .iter()
+            .map(|&index| entries[index].clone())
+            .collect();
+        let file = self.respawn_state_temp_path().ok().and_then(|path| {
+            fs::write(
+                &path,
+                crate::invocation::encode_respawn_state_entries(&spilled),
+            )
+            .ok()
+            .map(|()| path)
+        });
+        let Some(path) = file else {
+            return (entries, None);
+        };
+        let mut kept: Vec<(String, String)> = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !spilled_indexes.contains(index))
+            .map(|(_, entry)| entry)
+            .collect();
+        kept.push((
+            crate::invocation::RESPAWN_STATE_FILE_ENV_KEY.to_string(),
+            path.to_string_lossy().into_owned(),
+        ));
+        (kept, Some(path))
     }
 
     /// Resolve `$TMPDIR` (or the platform default) into a unique,
@@ -3673,6 +3803,81 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
 // verbatim copy of the same DFA.
 
 /// The file behind [`closed_stdin`], for the route seam: a
+#[cfg(test)]
+mod respawn_state_spill_tests {
+    use super::Executor;
+
+    fn entry(key: &str, value_len: usize) -> (String, String) {
+        (key.to_string(), "v".repeat(value_len))
+    }
+
+    #[test]
+    fn small_entries_stay_inline() {
+        let executor = Executor::new();
+        let entries = vec![entry("A", 10), entry("B", 100)];
+        let (kept, file) = executor.spill_respawn_env_entries(entries.clone(), 100);
+        assert_eq!(kept, entries);
+        assert!(file.is_none());
+    }
+
+    #[test]
+    fn oversized_entry_rides_the_state_file() {
+        let executor = Executor::new();
+        let entries = vec![entry("SMALL", 10), entry("HUGE", 200_000)];
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 100);
+        let path = file.expect("a state file must be written");
+        assert_eq!(kept.len(), 2, "small entry + pointer: {kept:?}");
+        assert_eq!(kept[0].0, "SMALL");
+        assert_eq!(
+            kept[1].0,
+            crate::invocation::RESPAWN_STATE_FILE_ENV_KEY,
+            "the pointer is appended last"
+        );
+        let bytes = std::fs::read(&path).expect("state file readable");
+        let _ = std::fs::remove_file(&path);
+        let decoded =
+            crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
+        assert_eq!(decoded, vec![entry("HUGE", 200_000)]);
+    }
+
+    #[test]
+    fn aggregate_budget_spills_largest_first() {
+        let executor = Executor::new();
+        // 300 entries of ~7 KiB each: none crosses the per-entry
+        // limit, but together they cross the aggregate budget.
+        let entries: Vec<(String, String)> = (0..300)
+            .map(|i| (format!("K{i:03}"), "v".repeat(7000)))
+            .collect();
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 0);
+        let path = file.expect("a state file must be written");
+        let inline: usize = kept.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
+        assert!(
+            inline <= (1 << 20),
+            "inline env stays within the aggregate budget: {inline}"
+        );
+        let bytes = std::fs::read(&path).expect("state file readable");
+        let _ = std::fs::remove_file(&path);
+        let decoded =
+            crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
+        assert_eq!(kept.len() - 1 + decoded.len(), 300, "no entry is lost");
+    }
+
+    #[test]
+    fn stale_pointer_is_dropped_not_carried() {
+        let executor = Executor::new();
+        let entries = vec![
+            (
+                crate::invocation::RESPAWN_STATE_FILE_ENV_KEY.to_string(),
+                "/planted/path".to_string(),
+            ),
+            entry("A", 10),
+        ];
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 0);
+        assert!(file.is_none());
+        assert_eq!(kept, vec![entry("A", 10)]);
+    }
+}
+
 /// write-only null device on unix (reads fail EBADF, exactly the
 /// closed-fd child contract), the plain null device elsewhere.
 pub(in crate::executor) fn route_closed_stdin_file() -> Option<File> {

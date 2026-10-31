@@ -308,6 +308,38 @@ impl Executor {
         } else {
             crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
         };
+        // rubash#2356: out-of-band respawn state transport — the
+        // spawn side moved every oversized environment entry into a
+        // temp file and left only its path under
+        // RESPAWN_STATE_FILE_ENV_KEY (see
+        // Executor::spill_respawn_env_entries), because execve caps
+        // each single env string (MAX_ARG_STRLEN) and a state payload
+        // that scales with the parent's function table crossed it.
+        // Splice the entries back into the table HERE, at import,
+        // before the PATH normalization, trap seeding, provenance
+        // validation and every transport consumer below, so a spliced
+        // entry is indistinguishable from one that rode the process
+        // environment directly. The key is consumed unconditionally
+        // (and the file removed after a successful read) so neither
+        // can leak into a grandchild or surface as a shell variable,
+        // exactly the __RUBASH_CMD_FILE contract; a malformed file
+        // applies nothing (decode is all-or-nothing).
+        if let Some(state_path) = env_vars
+            .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+            .cloned()
+        {
+            env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+            mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+            if let Ok(bytes) = std::fs::read(&state_path) {
+                let _ = std::fs::remove_file(&state_path);
+                if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
+                    for (key, value) in entries {
+                        env_vars.insert(key.clone(), value.clone());
+                        mirror_env_set(&key, &value);
+                    }
+                }
+            }
+        }
         // On Windows, std::env::vars() returns PATH as "Path" (capital P).
         // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
         // which is a case-sensitive HashMap lookup — it misses on Windows.
@@ -729,6 +761,11 @@ impl Executor {
             String,
             Vec<crate::parser::CommandLineSpan>,
         > = std::collections::HashMap::new();
+        // rubash#2332: (prelude definition count, root-body spans)
+        // from the __RUBASH_FORK_ROOT_SPANS stamp; lands in the
+        // ShellState literal below for the -c driver's re-seed.
+        let mut respawn_root_line_spans: Option<(usize, Vec<crate::parser::CommandLineSpan>)> =
+            None;
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
@@ -769,6 +806,13 @@ impl Executor {
             if let Some(value) = env_vars.get(super::compound_exec::FORK_FN_SPANS_TRANSPORT) {
                 respawn_function_line_spans =
                     super::compound_exec::decode_function_line_spans(value);
+            }
+            // rubash#2332: root-body source-line spans (see
+            // FORK_ROOT_SPANS_TRANSPORT); the -c driver's reader units
+            // re-seed the re-parsed body's node lines from these
+            // (script_driver::run_source_impl).
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_ROOT_SPANS_TRANSPORT) {
+                respawn_root_line_spans = super::compound_exec::decode_root_line_spans(value);
             }
         }
         // rubash#2202: function bodies that crossed as BASH_FUNC
@@ -927,6 +971,14 @@ impl Executor {
                 bash_source_stack: Vec::new(),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
+                respawn_root_line_spans: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(_, spans)| spans.clone()),
+                respawn_root_span_skip: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(skip, _)| *skip)
+                    .unwrap_or(0),
+                respawn_root_span_cursor: 0,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
@@ -983,6 +1035,7 @@ impl Executor {
             parse_error_occurred: false,
             signal_discard_pending: false,
             termsig_death_pending: None,
+            termsig_death_trap_status: None,
             bash_logout_sourced: false,
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
@@ -1092,6 +1145,8 @@ impl Executor {
             command_string_final_pending: Cell::new(false),
             exec_replace_final_frame: Cell::new(false),
             exec_replace_dispatch_stamp: Cell::new(0),
+            root_line_span_run_armed: Cell::new(false),
+            source_run_active: Cell::new(false),
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),
@@ -1146,6 +1201,9 @@ impl Executor {
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
             read_process_stdin_eof: false,
+            read_edit_armed: false,
+            read_edit_initial_text: None,
+            read_edit_prompt: None,
             timed_stdin: None,
             stdout_capture: None,
             stderr_capture: None,

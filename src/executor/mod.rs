@@ -572,6 +572,20 @@ pub struct Executor {
     /// and USR1 took the plain-exit path instead — same funnel, so the
     /// mark now carries the signal number.)
     termsig_death_pending: Option<i32>,
+    /// rubash#2352: the exit status the EXIT trap must observe when
+    /// the termsig-death mark above is consumed — GNU trap.c:1036
+    /// run_exit_trap: `trap_saved_exit_value = last_command_exit_value`,
+    /// and nothing on the sig.c:590 termsig path overwrites that
+    /// value with 128+sig before the trap runs. Captured at every
+    /// site that sets the mark, from the pre-overwrite exit_code (at
+    /// a boundary or blocked-wait drain that IS the last completed
+    /// command's status; for an ancestor-lane delivery the dispatch
+    /// replaces it with the entry's sender-status snapshot, the
+    /// pre-carrier value GNU's preempted wait never overwrites).
+    /// Taken alongside the mark by script_driver::finish_shell, its
+    /// sole consumer; parked with the mark across contained-child
+    /// spans (executor/external_finish.rs).
+    termsig_death_trap_status: Option<i32>,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,
@@ -1288,6 +1302,17 @@ pub struct Executor {
     /// units, compound bodies), so the spawn-site exec gate can only
     /// ever fire for the tail command's own dispatch.
     pub(crate) exec_replace_dispatch_stamp: Cell<u64>,
+    /// rubash#2332: armed by main.rs around the `-c` root driver call
+    /// of a respawned child carrying root-body line spans
+    /// (ShellState::respawn_root_line_spans); while armed,
+    /// run_source_impl re-seeds each root reader unit's node lines
+    /// from the transport (see script_driver::run_source_impl).
+    pub(crate) root_line_span_run_armed: Cell<bool>,
+    /// rubash#2332: set for the duration of a run_source_impl call;
+    /// the root-span re-seed fires only on the outermost reader unit,
+    /// so nested source/eval/diagnostic-prefix runs inside a unit's
+    /// execution never consume the root transport.
+    pub(crate) source_run_active: Cell<bool>,
     /// rubash#1497: monotonic source for exec_replace_dispatch_stamp.
     pub(crate) exec_replace_stamp_counter: Cell<u64>,
     /// rubash#1497: one-shot pass letting an and_or_list's last element
@@ -1740,6 +1765,25 @@ pub struct Executor {
     /// set only by read_inherited_process_stdin's EOF-with-nothing
     /// return, never by a timeout/interrupt break.
     pub(crate) read_process_stdin_eof: bool,
+    /// rubash#2339: `read -e`/`-E` was given (builtins/read.def:321-328:
+    /// both set `edit`; -E adds bash's completion flavor). Derived from
+    /// the option words in execute_read beside the `silent` derivation
+    /// and consulted by the editor hook in read_input_for_command_inner:
+    /// the editor engages only when the read descriptor is a real
+    /// terminal, mirroring read.def:489-497 (on a non-terminal, edit is
+    /// cleared and the plain scanner runs).
+    pub(crate) read_edit_armed: bool,
+    /// The `-i` text for the armed editor (read.def:334 itext, inserted
+    /// by edit_line's startup hook). Captured in execute_read BEFORE
+    /// the legacy `initial_text = None` discipline, which the plain
+    /// scanner paths must keep: without an editor the text never
+    /// reaches the variable (rubash#270).
+    pub(crate) read_edit_initial_text: Option<String>,
+    /// The expanded `-p` prompt for the armed editor's repaints
+    /// (edit_line receives the prompt, read.def:697; when editing, the
+    /// prompt is the editor's to show — read.def:670 prints it directly
+    /// only when edit == 0).
+    pub(crate) read_edit_prompt: Option<String>,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's
