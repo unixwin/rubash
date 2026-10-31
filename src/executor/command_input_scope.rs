@@ -56,6 +56,135 @@ pub(in crate::executor) struct SavedOutputFd {
     fd_closed: Option<String>,
 }
 
+/// rubash#2309: the first construct in an unquoted heredoc body whose
+/// expansion GNU's expansion layer cannot complete, classified by the
+/// layer GNU assigns the failure to. A heredoc body is collected by the
+/// delimiter scan and only then expanded as a word, so a pending
+/// construct in the body is diagnosed by the EXPANSION layer: a
+/// backquote that never closes fails its extraction in
+/// expand_word_internal (subst.c:11587), and anything unterminated
+/// inside a `$(` — its closer, or a quote within — fails the parse of
+/// the extracted body (subst.c:1262 extract_command_subst hands the
+/// body to parse_comsub). Constructs the expansion completes, and `$'`
+/// text (literal in a heredoc body — quote processing does not run
+/// there), are not failures.
+enum HeredocBodyFailure {
+    /// Unterminated backquote: `bad substitution: no closing "`" in …`
+    /// carrying the text from the opening backquote to the end of the
+    /// body (subst.c:11587 reports string+t_index, the rest of the word).
+    Backquote { text: String },
+    /// Unterminated `$(`: parse_comsub EOF naming the innermost pending
+    /// construct's closer at the given line.
+    Comsub { close: char, line: usize },
+}
+
+/// End (byte length) of the backquote span opening at the start of
+/// `text`, or None if it never closes. GNU delimits a backquote body
+/// atomically (subst.c string_extract, SX_REQMATCH): a backslash quotes
+/// the following character, so \` and \\ never close the span.
+fn heredoc_backquote_span_end(text: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (index, ch) in text.char_indices().skip(1) {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '`' => return Some(index + 1),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// End (byte length) of the `$(` span opening at the start of `text`,
+/// by the comsub collector's own discipline, or None if it never
+/// closes.
+fn heredoc_comsub_span_end(
+    text: &str,
+    aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
+) -> Option<usize> {
+    let mut iter = text[2..].chars().peekable();
+    let (_, closed) =
+        super::embedded_mutations::collect_command_substitution_source_ex(&mut iter, aliases);
+    if closed {
+        Some(2 + (text[2..].len() - iter.clone().map(|c| c.len_utf8()).sum::<usize>()))
+    } else {
+        None
+    }
+}
+
+/// End (byte length) of the double-quoted span opening at the start of
+/// `text` (inside a `${...}` body, where quotes are real), or None if
+/// it never closes. Nested substitutions are skipped as spans; a `}`
+/// inside the quotes is literal text and cannot close the parameter.
+fn heredoc_double_quote_span_end(
+    text: &str,
+    aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
+) -> Option<usize> {
+    let mut pos = 1usize;
+    while pos < text.len() {
+        let rest = &text[pos..];
+        let ch = rest.chars().next().expect("pos stays on a char boundary");
+        match ch {
+            '\\' => {
+                pos += 1 + rest[1..].chars().next().map_or(0, |next| next.len_utf8());
+            }
+            '"' => return Some(pos + 1),
+            '`' => pos += heredoc_backquote_span_end(rest)?,
+            '$' if rest[1..].starts_with('(') => pos += heredoc_comsub_span_end(rest, aliases)?,
+            '$' if rest[1..].starts_with('{') => pos += heredoc_parameter_span_end(rest, aliases)?,
+            _ => pos += ch.len_utf8(),
+        }
+    }
+    None
+}
+
+/// End (byte length) of the `${` span opening at the start of `text`,
+/// or None if it never closes. Quotes and nested substitutions inside
+/// the parameter text are skipped as spans so their bytes cannot close
+/// the brace early (subst.c string_extract / parse_matched_pair walk
+/// the same units).
+fn heredoc_parameter_span_end(
+    text: &str,
+    aliases: &std::collections::HashMap<String, crate::builtins::alias::Alias>,
+) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut pos = 2usize;
+    while pos < text.len() {
+        let rest = &text[pos..];
+        let ch = rest.chars().next().expect("pos stays on a char boundary");
+        match ch {
+            '\\' => {
+                pos += 1 + rest[1..].chars().next().map_or(0, |next| next.len_utf8());
+            }
+            // Inside `${...}` a single quote is a real quote whose
+            // content is literal (a backslash inside it quotes nothing).
+            '\'' => match rest[1..].find('\'') {
+                Some(offset) => pos += 1 + offset + 1,
+                None => return None,
+            },
+            '"' => pos += heredoc_double_quote_span_end(rest, aliases)?,
+            '`' => pos += heredoc_backquote_span_end(rest)?,
+            '$' if rest[1..].starts_with('(') => pos += heredoc_comsub_span_end(rest, aliases)?,
+            '$' if rest[1..].starts_with('{') => {
+                depth += 1;
+                pos += 2;
+            }
+            '}' => {
+                depth -= 1;
+                pos += 1;
+                if depth == 0 {
+                    return Some(pos);
+                }
+            }
+            _ => pos += ch.len_utf8(),
+        }
+    }
+    None
+}
+
 impl Executor {
     pub(crate) fn with_command_input_redirects<T: Default>(
         &mut self,
@@ -1365,6 +1494,142 @@ impl Executor {
         }
     }
 
+    /// rubash#2309: classifies `body` (an unquoted heredoc body about to
+    /// be expanded) for the first expansion failure in scan order,
+    /// mirroring GNU's left-to-right expansion scan of the body word.
+    /// On a failure this prints the owning layer's diagnostic, latches
+    /// the expansion failure (the redirect is abandoned and the command
+    /// fails with status 1 — GNU's expand_word error return propagating
+    /// through do_redirections), and returns true; the caller then
+    /// substitutes the empty body.
+    fn report_heredoc_body_failure(&self, body: &str) -> bool {
+        let Some(failure) = self.heredoc_body_first_failure(body) else {
+            return false;
+        };
+        match &failure {
+            HeredocBodyFailure::Backquote { text } => {
+                // GNU report_error (error.c) line: the line of the
+                // command being executed — the heredoc's command line,
+                // regardless of which body line the backquote sits on.
+                let line = self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_LINE")
+                    .and_then(|line| line.parse::<usize>().ok())
+                    .unwrap_or(1);
+                eprintln!(
+                    "{}bad substitution: no closing \"`\" in {}",
+                    self.error_prefix_for_line(line),
+                    text
+                );
+            }
+            HeredocBodyFailure::Comsub { close, line } => {
+                eprintln!(
+                    "{}unexpected EOF while looking for matching `{close}'",
+                    self.comsub_eof_error_diagnostic(*line)
+                );
+            }
+        }
+        self.shell_state.arithmetic_fatal_error.set(true);
+        self.shell_state.arithmetic_expansion_error.set(true);
+        true
+    }
+
+    /// The first construct in a heredoc body whose expansion cannot
+    /// complete, in the body's own scan order. Only the constructs the
+    /// expansion scan itself delimits are judged: a backquote span
+    /// (delimited atomically), a `$(` span (delimited by the comsub
+    /// collector, then judged by the close-char verdict scan — the
+    /// parse_comsub stand-in), and a `${` span (skipped when closed;
+    /// when unterminated it is the parameter layer's own failure and is
+    /// NOT claimed here). `$'` opens nothing in a heredoc body — quote
+    /// processing does not run there — so it stays literal text, as do
+    /// bare quotes.
+    fn heredoc_body_first_failure(&self, body: &str) -> Option<HeredocBodyFailure> {
+        let current_line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|line| line.parse::<usize>().ok())
+            .unwrap_or(1);
+        // GNU seeds the command-substitution stream of a heredoc body at
+        // the body's first line: EOF inside a `$(` reports that base
+        // plus the lines consumed WITHIN the extracted substitution
+        // text — not the opener's own body line, not the delimiter line
+        // (oracle probes: a `$(` on body line 3 of 3 reports the same
+        // line as one on body line 1 whose text spans all three).
+        let body_first_line = current_line + 1;
+        let posix = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_POSIX_MODE")
+            .map(|mode| mode == "1")
+            .unwrap_or(false);
+        let mut pos = 0usize;
+        while pos < body.len() {
+            let rest = &body[pos..];
+            let ch = rest.chars().next().expect("pos stays on a char boundary");
+            match ch {
+                // A backslash quotes the next character in expansion
+                // text: it cannot open a construct.
+                '\\' => {
+                    pos += 1 + rest[1..].chars().next().map_or(0, |next| next.len_utf8());
+                }
+                '`' => match heredoc_backquote_span_end(rest) {
+                    Some(len) => pos += len,
+                    None => {
+                        return Some(HeredocBodyFailure::Backquote {
+                            text: rest.to_string(),
+                        });
+                    }
+                },
+                '$' if rest[1..].starts_with('(') => {
+                    let mut iter = rest[2..].chars().peekable();
+                    let (source, closed) =
+                        super::embedded_mutations::collect_command_substitution_source_ex(
+                            &mut iter,
+                            &self.shell_state.aliases,
+                        );
+                    if closed {
+                        pos += 2
+                            + (rest[2..].len() - iter.clone().map(|c| c.len_utf8()).sum::<usize>());
+                        continue;
+                    }
+                    // The extracted body runs out: parse_comsub owns the
+                    // verdict — the innermost pending construct in the
+                    // extracted text names the missing delimiter, at its
+                    // own line within that text (the verdict scan's
+                    // report_open) or at the text's EOF line.
+                    let (close, line) =
+                        match crate::lexer::unclosed_input_close_char_posix(&source, posix) {
+                            Some(verdict) => {
+                                let verdict_line = if verdict.report_open {
+                                    verdict.open_line
+                                } else {
+                                    verdict.eof_line
+                                };
+                                (verdict.close, body_first_line + verdict_line - 1)
+                            }
+                            None => (')', body_first_line + source.matches('\n').count()),
+                        };
+                    return Some(HeredocBodyFailure::Comsub { close, line });
+                }
+                '$' if rest[1..].starts_with('{') => {
+                    match heredoc_parameter_span_end(rest, &self.shell_state.aliases) {
+                        Some(len) => pos += len,
+                        // An unterminated `${` fails in the parameter
+                        // layer (subst.c string_extract, bad
+                        // substitution), which diagnoses it downstream;
+                        // this scan does not claim it.
+                        None => return None,
+                    }
+                }
+                _ => pos += ch.len_utf8(),
+            }
+        }
+        None
+    }
+
     /// Expands an unquoted heredoc body like Bash: parameter, command and
     /// arithmetic expansions run in the context of the receiving command.
     /// A dedicated quoted-heredoc marker keeps the body literal without sharing
@@ -1378,45 +1643,14 @@ impl Executor {
         if quoted {
             return decode_stdin_body_enq(body);
         }
-        // comsub-eof6: `read foo <<EOF` with body `$(seq 10` (missing `)`)
-        // must not expand to `1`; GNU reports `command substitution:
-        // unexpected EOF while looking for matching `)'` and leaves foo empty.
-        // Detect unclosed `$(` in the raw body before expansion.
-        //
-        // rubash#1184 f6, layer 2: has_unclosed_command_substitution's
-        // residual DFA also counts quote state INSIDE a delimited
-        // backquote span, so a body like `x=`echo 'a`` reads "unclosed"
-        // there even though the span itself is delimited. GNU delimits
-        // a backquote body atomically (parse.y:4039-4042, 4159) and
-        // hands the extracted body to the body-parse layer, whose
-        // diagnostic is the one that must surface. Gate this early
-        // return on the reader-level verdict scan also finding a
-        // pending construct: the genuine eof6 shape (`$(seq 10`) has
-        // one and keeps this branch byte-for-byte; a residuals-only
-        // verdict means the pending construct lives inside a delimited
-        // body, so expansion runs and the executor's body-parse
-        // diagnostic fires instead.
-        if crate::lexer::has_unclosed_command_substitution(body)
-            && crate::lexer::unclosed_input_close_char_posix(body, self.posix_mode_enabled())
-                .is_some()
-        {
-            // GNU error.c:300 parser_error with yy_input_name()=="command
-            // substitution": `script: command substitution: line N:` — N is
-            // the inherited script line when the comsub string runs out
-            // (evalstring.c push_stream(0) keeps line_number), i.e. the
-            // delimiter line: command line + body lines + 1.
-            let eof_line = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_CURRENT_LINE")
-                .and_then(|line| line.parse::<usize>().ok())
-                .unwrap_or(1)
-                + body.lines().count()
-                + 1;
-            eprintln!(
-                "{}unexpected EOF while looking for matching `)'",
-                self.comsub_eof_error_diagnostic(eof_line)
-            );
+        // comsub-eof6 + rubash#2309: a heredoc body is expanded as a word,
+        // so a construct the expansion cannot complete fails HERE, in the
+        // expansion layer, with that layer's diagnostic — classified by
+        // report_heredoc_body_failure in scan order. (The genuine eof6
+        // shape: body `$(seq 10` must not expand to `1`; GNU reports
+        // `command substitution: … matching `)'`, leaves foo empty, and
+        // the command fails.)
+        if self.report_heredoc_body_failure(body) {
             return String::new();
         }
         let prepared = prepare_unquoted_heredoc_expansion(body);
@@ -1499,23 +1733,8 @@ impl Executor {
         if quoted {
             return decode_stdin_body_enq(body);
         }
-        if crate::lexer::has_unclosed_command_substitution(body) {
-            // Same GNU parser_error shape as the mut variant above: the
-            // reported line is the heredoc delimiter line (command line +
-            // body lines + 1), since the comsub inherits the outer
-            // line_number (evalstring.c push_stream(0)).
-            let eof_line = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_CURRENT_LINE")
-                .and_then(|line| line.parse::<usize>().ok())
-                .unwrap_or(1)
-                + body.lines().count()
-                + 1;
-            eprintln!(
-                "{}unexpected EOF while looking for matching `)'",
-                self.comsub_eof_error_diagnostic(eof_line)
-            );
+        // Same classification as the mut variant above (rubash#2309).
+        if self.report_heredoc_body_failure(body) {
             return String::new();
         }
         let expanded =
