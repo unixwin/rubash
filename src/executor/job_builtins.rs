@@ -2694,8 +2694,8 @@ impl Executor {
                 .job_table
                 .jobs
                 .get(&job_id)
-                .map(|entry| entry.pgrp)
-                .unwrap_or(pid);
+                .map(|entry| entry.pgrp as i32)
+                .unwrap_or(pid as i32);
             let tty = super::job_control_wait::controlling_tty();
             if let Some(tty) = &tty {
                 super::job_control_wait::give_terminal_to(tty, pgrp);
