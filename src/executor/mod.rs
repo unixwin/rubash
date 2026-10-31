@@ -1612,13 +1612,26 @@ pub struct Executor {
     /// do_redirections in the child — the `{var}` bind never reaches the
     /// parent environment. The generic fd_var application in
     /// execute_command records (resolved name, prior env_vars entry, prior
-    /// typed-store entry) here so execute_external can undo the binding and
-    /// release the descriptor after the child finishes.
+    /// typed-store entry, applier-bound descriptor) here so
+    /// execute_external can undo the binding and release the descriptor
+    /// after the child finishes. The descriptor element is the one the
+    /// applier itself installed for the variable — None for a pure
+    /// close record (`{var}<&-`), whose variable still names the
+    /// CALLER's descriptor: undo must close the former, never the
+    /// latter (rubash#2281).
     fd_var_external_undo: Vec<(
         String,
         Option<String>,
         Option<crate::shell::variables::Variable>,
+        Option<u32>,
     )>,
+    /// rubash#2281: `{var}` close records deferred by the function
+    /// fast path (see trap_exec::defer_fd_var_closes_for_function_call):
+    /// (list position, descriptor) pairs the next execute_function on
+    /// this executor applies once the call's own redirect binds are
+    /// installed, so a bind-then-close list (`f 3<f {v}<&-`, v=3)
+    /// observes GNU's single-walk order. Empty outside that window.
+    fd_var_deferred_closes: Vec<(usize, u32)>,
     /// rubash#2272: descriptors a `{var}` redirection asks to close
     /// for the duration of one command — the targets of `{var}<&-` /
     /// `{var}>&-` and the sources of move-form dups (`{var}<&N-`).
@@ -1632,7 +1645,27 @@ pub struct Executor {
     /// undo_child_fd_var_redirects drops whatever no delivery
     /// consumed. (The exec face and the compound scope path keep
     /// their persistent closes — they do not record here.)
-    fd_var_pending_closes: Vec<u32>,
+    ///
+    /// rubash#2281: each record carries the position of its redirect
+    /// entry in the owning command's `redirects` list. GNU's walk is
+    /// ordered (redir.c:237), so a close takes effect AT its position:
+    /// it revokes bindings earlier entries made (`cmd 3<file {v}<&-`,
+    /// v=3 — the child sees 3 closed) and poisons dup sources for
+    /// later entries (`cmd {v}<&- {w}<&9`, v=9 — the dup fails EBADF
+    /// and the command does not run). Consumers (the redirect gate's
+    /// overlay scan, the spawn delivery, the in-process application)
+    /// apply the records positionally.
+    fd_var_pending_closes: Vec<(usize, u32)>,
+    /// rubash#2281: bumped by every apply_dynamic_fd_var_redirects
+    /// run. A gate may fold fd_var_pending_closes into its scan only
+    /// when the records carry the current generation (see
+    /// fd_var_pending_close_generation): they then belong to the
+    /// command the gate is validating, not to an enclosing command
+    /// whose applier ran earlier.
+    fd_var_close_generation: u64,
+    /// rubash#2281: the fd_var_close_generation value whose applier
+    /// run recorded the current fd_var_pending_closes contents.
+    fd_var_pending_close_generation: u64,
     /// rubash#2272: snapshots of the fd-table entries (and prior
     /// fd-closed markers) that apply_external_fd_delivery closed for
     /// a spawn from fd_var_pending_closes, so

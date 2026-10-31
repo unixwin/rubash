@@ -196,6 +196,7 @@ fn errno_message(code: i32) -> &'static str {
         2 => "No such file or directory",          // ENOENT
         4 => "Interrupted system call",            // EINTR
         5 => "Input/output error",                 // EIO
+        6 => "No such device or address",          // ENXIO
         9 => "Bad file descriptor",                // EBADF
         11 => "Resource temporarily unavailable",  // EAGAIN
         12 => "Cannot allocate memory",            // ENOMEM

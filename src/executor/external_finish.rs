@@ -249,6 +249,24 @@ impl Executor {
             return Ok(());
         };
         let script = self.expand_word(command_name);
+        // rubash#2302: for a slash-less word the invoked spelling is
+        // NOT what GNU's reader sees. execute_disk_command resolves
+        // the word through find_user_command (findcmd.c:247;
+        // find_user_command_in_path returns the PATH-joined full_path,
+        // findcmd.c:623) and shell_execve's ENOEXEC re-exec replaces
+        // the typed word with that resolved name outright
+        // (execute_cmd.c:6237-6260: args[1] = command overwrites the
+        // shifted args[0]), so the fresh shell's script_name — $0
+        // (shell.c:1613), the BASH_SOURCE push (variables.c:5718
+        // push_source via shell.c:1640) and the in-script diagnostic
+        // prefix alike — is the resolved path. `program` here IS that
+        // find_user_command result. A word carrying a slash is never
+        // PATH-searched (findcmd.c:385), so its typed spelling stands.
+        let script = if script.contains('/') {
+            script
+        } else {
+            shell_display_path(&program.to_string_lossy())
+        };
         self.execute_direct_shell_script(cmd, &script, program, true, false)
     }
 

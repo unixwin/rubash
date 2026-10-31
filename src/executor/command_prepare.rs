@@ -3807,6 +3807,18 @@ impl Executor {
                 self.xtrace_write(&xtrace_output);
             }
         }
+        // rubash#2280: this fast path bypasses
+        // execute_materialized_command, so the call's recorded
+        // {var} closes are this hook's charge (the funnel hook's
+        // twin). rubash#2281: they are DEFERRED, not performed here —
+        // execute_function installs the call's own redirect binds
+        // inside its wraps, and a close recorded after a bind of
+        // the same descriptor (`f 3<f {v}<&-`) must land on that
+        // bind, which does not exist yet at this point. The records
+        // move to fd_var_deferred_closes; execute_function drains
+        // them at entry, performs them inside the wraps, and
+        // replays their snapshots before the wraps unwind.
+        self.defer_fd_var_closes_for_function_call();
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],

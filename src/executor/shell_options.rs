@@ -36,6 +36,21 @@ fn services_db_path() -> std::path::PathBuf {
 /// retry those with FILE_FLAG_BACKUP_SEMANTICS, the flag the identity
 /// probes (src/executor/path.rs) already use to open directory
 /// handles. Unix opens directories natively.
+/// rubash#2276: the ENXIO error a socket's fd-alias spelling-open
+/// fails with. On Unix the errno is real (the kernel raises it for
+/// the magic link itself); elsewhere the GNU strerror text is the
+/// payload, and posix_errors::message renders it unchanged.
+pub(in crate::executor) fn enxio_error() -> io::Error {
+    #[cfg(unix)]
+    {
+        io::Error::from_raw_os_error(libc::ENXIO)
+    }
+    #[cfg(not(unix))]
+    {
+        io::Error::new(io::ErrorKind::Other, "No such device or address")
+    }
+}
+
 fn open_redirect_input_file(path: &std::path::Path) -> io::Result<File> {
     let opened = File::open(path);
     #[cfg(windows)]
@@ -659,6 +674,31 @@ impl Executor {
         None
     }
 
+    /// rubash#2276: the error a spelling-open of fd `fd`'s alias
+    /// (`/dev/fd/N`, `/dev/stdin`, ...) must fail with when the fd's
+    /// endpoint is a connected socket — ENXIO — or None when the
+    /// endpoint takes the ordinary alias rules. On a HAVE_DEV_FD
+    /// build GNU performs no descriptor resolution at all: the
+    /// spelling is a plain open() of the fd magic link
+    /// (do_redirections' r_input/r_output arms via redir_open), and
+    /// the kernel refuses to open a socket's magic link with ENXIO
+    /// (`cat /dev/fd/3` on a /dev/tcp-connected fd 3 reports
+    /// `No such device or address`, GNU 5.3.20 oracle). A pipe's
+    /// magic link attaches and a regular file's re-opens, so only
+    /// the socket kind fails. Descriptor faces are NOT spelling
+    /// opens and never consult this: `<&N` still dups a socket and
+    /// `read -u N` still reads it.
+    pub(in crate::executor) fn fd_alias_spelling_open_error(&self, fd: u32) -> Option<io::Error> {
+        let socket = match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::File(file)) => crate::fd::is_socket_handle(file.handle),
+            _ => false,
+        } || match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file)) => crate::fd::is_socket_handle(file.handle),
+            _ => false,
+        };
+        socket.then(enxio_error)
+    }
+
     /// rubash#2256: bind fd 0 to a fresh open of fd `source_fd`'s
     /// alias target when that endpoint re-opens fresh (the function
     /// call face, whose save/restore bookkeeping the caller owns);
@@ -690,6 +730,15 @@ impl Executor {
         fd: u32,
         target: &str,
     ) -> io::Result<File> {
+        // rubash#2276: a socket endpoint's spelling-open fails ENXIO
+        // before any serve — the dup/stream fallback below is the
+        // pipe rule, not the socket rule. (The `<&N` dup face in
+        // apply_external_stdin_redirect only reaches this function
+        // with non-File endpoints, so descriptor dups of a socket —
+        // a File endpoint — never pass through here.)
+        if let Some(error) = self.fd_alias_spelling_open_error(fd) {
+            return Err(error);
+        }
         if let Some(path) = self.fd_alias_reopen_path(fd) {
             if let Ok(file) = File::open(&path) {
                 return Ok(file);
@@ -3188,6 +3237,17 @@ impl Executor {
             // without moving fd N.
             if let Some(source_fd) = redirect_target_fd(&target) {
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    // rubash#2276: a socket endpoint's spelling-open
+                    // fails ENXIO (see fd_alias_spelling_open_error) —
+                    // decline the text serve instead of falling
+                    // through to the stream serve below, which is the
+                    // `<&N` dup model. The reject gate reports the
+                    // failure for gated commands; an ungated
+                    // synthesized command must not stream the socket
+                    // either.
+                    if self.fd_alias_spelling_open_error(source_fd).is_some() {
+                        return None;
+                    }
                     if let Some(path) = self.fd_alias_reopen_path(source_fd) {
                         if let Ok(bytes) = std::fs::read(&path) {
                             return Some(
