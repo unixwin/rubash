@@ -725,8 +725,13 @@ fn issue2001_env_channel_empty_string_is_set_but_empty() {
         session.variables().resolved_value("SEEN_EMPTY").as_deref(),
         Some("set")
     );
-    // ...distinct from a name the channel never mentioned.
-    assert_eq!(session.variables().resolved_value("SEEN_ABSENT"), None);
+    // ...distinct from a name the channel never mentioned: the
+    // probe assigned the (empty) expansion, so the marker itself is
+    // set-but-empty rather than "set".
+    assert_eq!(
+        session.variables().resolved_value("SEEN_ABSENT").as_deref(),
+        Some("")
+    );
     assert_eq!(session.variables().resolved_value("CH_EMPTY"), None);
 }
 
