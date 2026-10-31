@@ -50,6 +50,25 @@ impl Executor {
             if crate::executor::execution_misc::is_closed_redirect_target(&target) {
                 return Err(cat_closed_stdout_error());
             }
+            // rubash#2329: an fd-alias PATH spelling resolves against
+            // the descriptor bound at the entry's own list position
+            // (redir.c:237 do_redirections) — when this command's list
+            // bound the aliased fd to a plain file, the serve is a
+            // fresh open of THAT file, exactly like the mirror
+            // appliers' positional arm; the ambient resolver below
+            // cannot see an in-list binding and fell through to a
+            // literal open of the spelling (ENOENT).
+            if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                cmd,
+                self.output_entry_position(cmd, 1, &target),
+                &target,
+                false,
+                redirect.clobber,
+            ) {
+                let file = opened?;
+                crate::fd::write_file_all(&file, output)?;
+                return Ok(());
+            }
             // /dev/std*, /dev/fd/N: resolve as a dup of the aliased fd's
             // current binding (implicit std fds write their default stream)
             // instead of reopening the alias as a literal Windows path
@@ -63,6 +82,18 @@ impl Executor {
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
+            // rubash#2329: append twin of the positional arm above.
+            if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                cmd,
+                self.output_entry_position(cmd, 1, &target),
+                &target,
+                true,
+                true,
+            ) {
+                let file = opened?;
+                crate::fd::write_file_all(&file, output)?;
+                return Ok(());
+            }
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output, true, true)
             {
                 return result;
