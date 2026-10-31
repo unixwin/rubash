@@ -308,6 +308,38 @@ impl Executor {
         } else {
             crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
         };
+        // rubash#2356: out-of-band respawn state transport — the
+        // spawn side moved every oversized environment entry into a
+        // temp file and left only its path under
+        // RESPAWN_STATE_FILE_ENV_KEY (see
+        // Executor::spill_respawn_env_entries), because execve caps
+        // each single env string (MAX_ARG_STRLEN) and a state payload
+        // that scales with the parent's function table crossed it.
+        // Splice the entries back into the table HERE, at import,
+        // before the PATH normalization, trap seeding, provenance
+        // validation and every transport consumer below, so a spliced
+        // entry is indistinguishable from one that rode the process
+        // environment directly. The key is consumed unconditionally
+        // (and the file removed after a successful read) so neither
+        // can leak into a grandchild or surface as a shell variable,
+        // exactly the __RUBASH_CMD_FILE contract; a malformed file
+        // applies nothing (decode is all-or-nothing).
+        if let Some(state_path) = env_vars
+            .get(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+            .cloned()
+        {
+            env_vars.remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+            mirror_env_remove(crate::invocation::RESPAWN_STATE_FILE_ENV_KEY);
+            if let Ok(bytes) = std::fs::read(&state_path) {
+                let _ = std::fs::remove_file(&state_path);
+                if let Some(entries) = crate::invocation::decode_respawn_state_entries(&bytes) {
+                    for (key, value) in entries {
+                        env_vars.insert(key.clone(), value.clone());
+                        mirror_env_set(&key, &value);
+                    }
+                }
+            }
+        }
         // On Windows, std::env::vars() returns PATH as "Path" (capital P).
         // Every rubash command-lookup site reads env_vars.get("PATH") (all caps),
         // which is a case-sensitive HashMap lookup — it misses on Windows.
@@ -983,6 +1015,7 @@ impl Executor {
             parse_error_occurred: false,
             signal_discard_pending: false,
             termsig_death_pending: None,
+            termsig_death_trap_status: None,
             bash_logout_sourced: false,
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
@@ -1146,6 +1179,9 @@ impl Executor {
             read_sigint_guard_armed: false,
             read_eof_no_delimiter: false,
             read_process_stdin_eof: false,
+            read_edit_armed: false,
+            read_edit_initial_text: None,
+            read_edit_prompt: None,
             timed_stdin: None,
             stdout_capture: None,
             stderr_capture: None,

@@ -1154,8 +1154,8 @@ impl Executor {
                 continue;
             }
             let trapped = super::trap_exec::signal_trap_name(signal).is_some_and(|name| {
-                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &name)
-                    .is_some_and(|action| !action.is_empty())
+                crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, &name)
+                    .is_some()
             });
             let description = crate::builtins::kill::signal_death_description(signal);
             let padding = 27usize.saturating_sub(description.chars().count());

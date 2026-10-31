@@ -424,13 +424,28 @@ impl Executor {
                             .unwrap_or_else(|| name.to_string())
                     });
                 let readonly = is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &target);
-                if (is_positional || readonly)
+                // GNU subst.c:8153 (parameter_brace_expand_rhs): the
+                // `=`/`:=` bind tests ASSIGN_DISALLOWED — an att_noassign
+                // target (variables.h:243) fails exactly like a readonly
+                // one (EX_BADUSAGE pre-set, expand_wdesc_error DISCARD)
+                // except that bind_variable_internal prints nothing for
+                // noassign (variables.c:3130/3152 diagnose only
+                // readonly). The empty message encodes that silent
+                // class: consumers skip the diagnostic line and keep
+                // the class-2 status (rubash#2369). Readonly is tested
+                // first — a user-marked readonly carrier reports
+                // err_readonly in GNU too.
+                let noassign = !readonly && is_noassign_bash_array(&target);
+                if (is_positional || readonly || noassign)
                     && self.parameter_assignment_required(name, require_non_empty)
                 {
                     if is_positional {
                         return Some((format!("${name}"), "cannot assign in this way"));
                     }
-                    return Some((target, "readonly variable"));
+                    if readonly {
+                        return Some((target, "readonly variable"));
+                    }
+                    return Some((target, ""));
                 }
             } else if let Some((name, require_non_empty)) = parse_special_assignment_operator(inner)
             {
@@ -1438,10 +1453,11 @@ impl Executor {
                 .contains_key("__RUBASH_COMSUB_BODY")
     }
 
-    /// rubash#1563: enter a parse_and_execute body (an eval string or a
-    /// sourced file). Pushes the frame — GNU evalstring.c
-    /// parse_and_execute, reached from eval_builtin and from
-    /// evalfile.c source_file — and, when the invoking builtin was
+    /// rubash#1563: enter a parse_and_execute body (an eval string, a
+    /// sourced file, or the -c string — shell.c run_one_command runs
+    /// it through parse_and_execute too). Pushes the frame — GNU
+    /// evalstring.c parse_and_execute, reached from eval_builtin and
+    /// from evalfile.c source_file — and, when the invoking builtin was
     /// itself dispatched under CMD_IGNORE_RETURN (rubash's
     /// suppress_errexit raised at entry) outside a subshell environment,
     /// raises the errexit ignore frame for the body's duration
@@ -1450,7 +1466,7 @@ impl Executor {
     /// CMD_IGNORE_RETURN / CMD_COMMAND_BUILTIN). Returns the saved
     /// counters for exit_parse_and_execute_frame; every exit path of the
     /// body must restore them.
-    pub(crate) fn enter_parse_and_execute_frame(&mut self) -> (usize, usize) {
+    pub fn enter_parse_and_execute_frame(&mut self) -> (usize, usize) {
         let saved = (
             self.parse_and_execute_frames.len(),
             self.errexit_ignore_frame,
@@ -1463,7 +1479,7 @@ impl Executor {
         saved
     }
 
-    pub(crate) fn exit_parse_and_execute_frame(&mut self, saved: (usize, usize)) {
+    pub fn exit_parse_and_execute_frame(&mut self, saved: (usize, usize)) {
         self.parse_and_execute_frames.truncate(saved.0);
         self.errexit_ignore_frame = saved.1;
     }
