@@ -4053,6 +4053,7 @@ impl Executor {
                     false,
                     false,
                     &occupied_slots,
+                    &std::collections::HashSet::new(),
                     0,
                 ) {
                     Ok(_) => {}
@@ -5292,11 +5293,56 @@ impl Executor {
         // not fd-table entries on this path, so carry the running set
         // of slots bound so far in the walk and count them as occupied.
         let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#2322: descriptors an earlier entry of THIS list has
+        // closed at the current walk position. GNU's do_redirections
+        // is one ordered walk (redir.c:246): a close at position p
+        // poisons its descriptor for every later entry, and a bind
+        // after the close revives it. The deferred-close design only
+        // RECORDS `{var}` closes (fd_var_pending_closes), so without
+        // this overlay a later `{w}<&N` dup resolved its source
+        // against the still-open ambient table, bound `w`, and left
+        // the assignment (and a copied descriptor) behind when the
+        // redirect gate rejected the command — GNU never binds the
+        // variable of a dup whose own entry fails (redir.c
+        // do_redirection_internal dup arm assigns only after the
+        // dup succeeds), while an EARLIER entry's successful bind
+        // survives the rejection. Folded incrementally below from
+        // the pending-close records plus the list's fixed entries.
+        let mut list_closed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut folded_closes = 0usize;
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
             let Some(name) = redirect.fd_var.as_deref() else {
+                // A fixed entry still moves the walk state: a close
+                // poisons its descriptor, any other bind revives it.
+                let effective_fd =
+                    redirect
+                        .fd
+                        .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::CloseOutput
+                ) {
+                    list_closed.insert(effective_fd);
+                } else if redirect.fd.is_some()
+                    || matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Input
+                            | crate::parser::RedirectKind::Output
+                            | crate::parser::RedirectKind::Append
+                            | crate::parser::RedirectKind::ClobberOutput
+                            | crate::parser::RedirectKind::ReadWrite
+                            | crate::parser::RedirectKind::DuplicateInput
+                            | crate::parser::RedirectKind::DuplicateOutput
+                            | crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                    )
+                {
+                    list_closed.remove(&effective_fd);
+                }
                 continue;
             };
             // Record the variable's prior value so commands that fork
@@ -5315,8 +5361,19 @@ impl Executor {
                 auto_close,
                 true,
                 &occupied_slots,
+                &list_closed,
                 position,
             );
+            // rubash#2322: fold the closes THIS entry recorded
+            // (close forms and move-form dup sources, stamped with
+            // their positions) into the walk overlay, and let a
+            // descriptor this entry bound revive its slot.
+            while folded_closes < self.fd_var_pending_closes.len()
+                && self.fd_var_pending_closes[folded_closes].0 <= position
+            {
+                list_closed.insert(self.fd_var_pending_closes[folded_closes].1);
+                folded_closes += 1;
+            }
             // rubash#2281: remember the descriptor THIS entry bound
             // (read back from the variable after a successful apply)
             // so the undo closes exactly that one. A pure close entry
@@ -5336,6 +5393,12 @@ impl Executor {
                 }
                 _ => None,
             };
+            // rubash#2322: a descriptor this entry bound is open
+            // again for later entries (a same-list rebind after a
+            // close revives the slot, redir.c:246 ordered walk).
+            if let Some(fd) = bound_fd {
+                list_closed.remove(&fd);
+            }
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed, bound_fd));
             match outcome {
@@ -5538,13 +5601,21 @@ impl Executor {
     /// applies that entry's child-visible effect
     /// (apply_script_fd_var_entry) at its list position, so at each
     /// such entry the fd table holds exactly the bindings GNU's
-    /// walk would have produced by then. The numbered output binds
-    /// keep their own pass afterwards, as before.
+    /// walk would have produced by then. rubash#2322: the numbered
+    /// output binds ride the same segments (see the saved_outputs
+    /// accumulator in the body); before, they landed in a later
+    /// pass and the output side of the walk was never at-position.
     pub(in crate::executor) fn bind_script_numbered_inputs_and_fd_vars(
         &mut self,
         cmd: &CommandNode,
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
-    ) -> Result<Vec<super::command_input_scope::SavedNumberedFd>, ExecuteError> {
+    ) -> Result<
+        (
+            Vec<super::command_input_scope::SavedNumberedFd>,
+            Vec<super::command_input_scope::SavedOutputFd>,
+        ),
+        ExecuteError,
+    > {
         // The applier's deferred-close records belong to THIS
         // command; the script face consumes them here (performed at
         // their positions below). The spawn delivery prologue is the
@@ -5555,18 +5626,31 @@ impl Executor {
         let mut pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let mut performed_closes: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut saved: Vec<super::command_input_scope::SavedNumberedFd> = Vec::new();
+        // rubash#2322: the numbered OUTPUT binds join the same
+        // segmented walk (they used to land in one later pass,
+        // open_compound_output_redirects, after every `{var}` entry
+        // was already serviced — so an output-side `{var}` dup kept
+        // the applier's ambient copy and an output-side close was
+        // silently overwritten by the later output bind:
+        // `obs.sh 9>o1 {w}>&9 {v}>&-` gave the child fd 10 = the
+        // ambient binding and fd 9 still open). Within one segment
+        // inputs bind before outputs, as the passes were ordered
+        // before; across segments the walk is exact.
+        let mut saved_outputs: Vec<super::command_input_scope::SavedOutputFd> = Vec::new();
         let mut start = 0usize;
         for position in 0..cmd.redirects.len() {
             if cmd.redirects[position].fd_var.is_none() {
                 continue;
             }
             self.open_compound_numbered_input_redirects_in(cmd, start, position, &mut saved)?;
+            self.open_compound_output_redirects_in(cmd, start, position, &mut saved_outputs)?;
             self.apply_script_fd_var_entry(
                 cmd,
                 position,
                 &mut pending_closes,
                 &mut performed_closes,
                 &saved,
+                &saved_outputs,
                 heredoc_saved,
             )?;
             start = position + 1;
@@ -5577,18 +5661,33 @@ impl Executor {
             cmd.redirects.len(),
             &mut saved,
         )?;
-        Ok(saved)
+        self.open_compound_output_redirects_in(
+            cmd,
+            start,
+            cmd.redirects.len(),
+            &mut saved_outputs,
+        )?;
+        Ok((saved, saved_outputs))
     }
 
     /// rubash#2310: whether an entry of the command's OWN list
-    /// before `position` binds `fd` on the input side (a numbered
-    /// input/read-write/dup/close entry, or a numbered heredoc) —
-    /// i.e. whether the fd table's state for `fd` at that walk
-    /// position is governed by the list rather than the ambient
-    /// table. `{var}` entries do not count: the applier binds them
-    /// into the same table in list order, so its own resolution
-    /// already sees them at their positions.
-    fn script_own_input_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
+    /// before `position` binds `fd` (a numbered input, output,
+    /// append, read-write or dup entry in either spelling, or a
+    /// numbered heredoc) — i.e. whether the fd table's state for
+    /// `fd` at that walk position is governed by the list rather
+    /// than the ambient table. The test is direction-agnostic:
+    /// GNU's walk holds one table entry per descriptor, so an
+    /// input bind governs a later output-spelled dup and vice
+    /// versa (`{v}<&- 9<f9 {w}>&9` reads the f9 binding through
+    /// the `>&` dup). `{var}` entries do not count: the applier
+    /// binds them into the same table in list order, so its own
+    /// resolution already sees them at their positions. A CLOSE
+    /// entry does not count either: it is not a bind — the close
+    /// machinery (performed / pending closes) governs that state.
+    /// Note the entry test uses `fd.unwrap_or(0)`: a bare `>file`
+    /// entry defaults to fd 1, so it never governs a dup source
+    /// >= 3 either way.
+    fn script_own_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
         if cmd
             .heredoc_redirects
             .iter()
@@ -5602,9 +5701,12 @@ impl Executor {
                 && matches!(
                     entry.kind,
                     crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
                         | crate::parser::RedirectKind::ReadWrite
                         | crate::parser::RedirectKind::DuplicateInput
-                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::DuplicateOutput
                 )
         })
     }
@@ -5632,11 +5734,17 @@ impl Executor {
         fd: u32,
         performed: &mut std::collections::HashSet<u32>,
         saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        saved_outputs: &[super::command_input_scope::SavedOutputFd],
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
     ) {
         if !performed.insert(fd) {
             return;
         }
+        // rubash#2322: a slot bound by an earlier output segment
+        // (saved_outputs) holds its pre-command state there, like
+        // an input-bound slot in saved_inputs — the current entry
+        // is the child's own output binding, not the parent's.
+        let output_saved = saved_outputs.iter().find(|saved| saved.fd() == fd);
         let (entry, marker) = match saved_inputs.iter().find(|saved| saved.fd() == fd) {
             Some(saved) => (
                 saved.saved_entry().cloned(),
@@ -5647,10 +5755,16 @@ impl Executor {
                     saved_entry.clone(),
                     self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
                 ),
-                None => (
-                    self.fd_table.entries.get(&fd).cloned(),
-                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
-                ),
+                None => match output_saved {
+                    Some(saved) => (
+                        saved.saved_entry().cloned(),
+                        saved.saved_fd_closed().cloned(),
+                    ),
+                    None => (
+                        self.fd_table.entries.get(&fd).cloned(),
+                        self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                    ),
+                },
             },
         };
         self.fd_var_close_restore.push((fd, entry, marker));
@@ -5688,6 +5802,7 @@ impl Executor {
         pending_closes: &mut Vec<(usize, u32)>,
         performed_closes: &mut std::collections::HashSet<u32>,
         saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        saved_outputs: &[super::command_input_scope::SavedOutputFd],
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
     ) -> Result<(), ExecuteError> {
         let redirect = &cmd.redirects[position];
@@ -5704,6 +5819,7 @@ impl Executor {
                         fd,
                         performed_closes,
                         saved_inputs,
+                        saved_outputs,
                         heredoc_saved,
                     );
                     if let Some(index) = pending_closes.iter().position(|pending| pending.1 == fd) {
@@ -5719,7 +5835,7 @@ impl Executor {
                     return Ok(());
                 };
                 let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
-                if self.script_own_input_binding_before(cmd, position, source_fd) {
+                if self.script_own_binding_before(cmd, position, source_fd) {
                     match self.dynamic_fd_variable_value(name) {
                         Some(var_fd) => {
                             // Replace the applier's ambient copy
@@ -5783,6 +5899,7 @@ impl Executor {
                             source_fd,
                             performed_closes,
                             saved_inputs,
+                            saved_outputs,
                             heredoc_saved,
                         );
                     }
@@ -5813,6 +5930,14 @@ impl Executor {
         // already bound, counted as occupied by every allocation
         // below (see apply_dynamic_fd_var_redirects).
         occupied_slots: &std::collections::HashSet<u32>,
+        // rubash#2322: descriptors an earlier entry of the owning
+        // list has closed at this walk position (see
+        // apply_dynamic_fd_var_redirects). A dup whose source is in
+        // this set fails at its own position, exactly like a source
+        // the ambient table never had open — the variable stays
+        // unbound. The immediate faces (defer_closes=false) perform
+        // their closes in the table, so they pass an empty set.
+        list_closed: &std::collections::HashSet<u32>,
         // rubash#2281: this entry's index in the owning command's
         // redirects list, stamped on every close record the entry
         // produces so consumers can apply the close at its walk
@@ -5923,8 +6048,12 @@ impl Executor {
                     // GNU redir.c do_redirection_internal dup/move case:
                     // the descriptor is copied wholesale — the </> letter
                     // never gates on the source's direction, only on it
-                    // being open at all (rubash#1591).
-                    if !self.fd_table.is_open(source_fd) {
+                    // being open at all (rubash#1591). rubash#2322:
+                    // "open" is judged at this entry's walk position —
+                    // a same-list close recorded earlier poisons the
+                    // source even though the deferred close has not
+                    // touched the table.
+                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
@@ -5959,7 +6088,9 @@ impl Executor {
             }
             crate::parser::RedirectKind::DuplicateOutput => {
                 if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                    if !self.fd_table.is_open(source_fd) {
+                    // rubash#2322: at-position judgment, as in the
+                    // DuplicateInput arm above.
+                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
