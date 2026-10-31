@@ -115,6 +115,7 @@ impl ConditionalArithParser<'_> {
             _ => {
                 let index = self.eval_subscript_index(&subscript)?;
                 Some(ArithLValue::Indexed {
+                    bind_display: format!("{resolved_name}[{subscript}]"),
                     name: resolved_name,
                     index,
                 })
