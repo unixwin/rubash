@@ -255,6 +255,13 @@ fn run_main() -> i32 {
 
 fn print_usage() {
     println!("Usage: rubash [-c command] [script]");
+    println!("       rubash --debug [--dap] [script] [args]");
+    println!();
+    println!("Debugger:");
+    println!("  --debug                Debug a script in the interactive CLI");
+    println!("                         (reads commands from the controlling terminal)");
+    println!("  --dap                  Serve the Debug Adapter Protocol on stdio");
+    println!("                         (`--debug --dap` is the editor launch form)");
     print_identity_disclosure();
 }
 

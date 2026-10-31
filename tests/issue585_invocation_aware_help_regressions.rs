@@ -142,7 +142,17 @@ fn product_help_is_unchanged_under_non_shell_names() {
     } else {
         "\n\nIdentity:\n  persona: native (honest-native; non-Windows builds are always native)\n  switch:  n/a (RUBASH_IDENTITY only selects personas on Windows)\n  query:   rubash --identity prints the persona and effective values\n"
     };
-    let expected = format!("Usage: rubash [-c command] [script]{expected_tail}");
+    let usage = concat!(
+        "Usage: rubash [-c command] [script]\n",
+        "       rubash --debug [--dap] [script] [args]\n",
+        "\n",
+        "Debugger:\n",
+        "  --debug                Debug a script in the interactive CLI\n",
+        "                         (reads commands from the controlling terminal)\n",
+        "  --dap                  Serve the Debug Adapter Protocol on stdio\n",
+        "                         (`--debug --dap` is the editor launch form)",
+    );
+    let expected = format!("{usage}{expected_tail}");
 
     let name = if cfg!(windows) { "niu.exe" } else { "niu" };
     let mut runs = Vec::new();
