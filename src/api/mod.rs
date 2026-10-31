@@ -19,7 +19,8 @@
 //!   (configuration plus capability injection), then drive it:
 //!   `run`, `run_line`, `run_stdin`, `run_interactive_stdin`,
 //!   `parse`, `prepare_line`, `complete`, `expand_prompt`,
-//!   `call_function`, `interrupt` / `inject_signal`,
+//!   `call_function` / `call_function_with_env`,
+//!   `interrupt` / `inject_signal`,
 //!   `source_startup_files`, and the `close` finish contract.
 //! - [`RunOutcome`] / [`Flow`] — how a run ended, as values the
 //!   host acts on (`exit` is a flow, not a process exit).
