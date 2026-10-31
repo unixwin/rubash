@@ -2062,6 +2062,67 @@ impl Executor {
                     continue;
                 }
             }
+            // rubash#2295: a numbered OUTPUT entry whose target is
+            // an fd-alias PATH spelling (`3>/dev/fd/6`) — GNU
+            // services the alias with an open over the alias layer
+            // (redir.c:725 redir_open via do_redirections,
+            // redir.c:237), which for a regular-file endpoint is a
+            // FRESH open of that file (rubash#2256; the stdio faces
+            // gained the same resolver in rubash#2285). The generic
+            // skip below would leave the slot unbound — the child
+            // gets EBADF while the parent-side routing probe has
+            // already truncated the target. Serve the fresh open
+            // through the same stamp/pin channels as the ordinary
+            // file arm below; an open failure skips the same way
+            // that arm's does (the redirect preflights already
+            // reported it). A resolver miss (non-regular endpoint)
+            // falls through to the skip, as before.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+            ) && !redirect_target_is_dup_spelling(&target)
+                && (target.starts_with("/dev/fd/") || target.starts_with("/proc/self/fd/"))
+            {
+                let alias_path = redirect_target_fd(&target)
+                    .and_then(|alias_fd| self.fd_alias_reopen_path(alias_fd));
+                if let Some(path) = alias_path {
+                    if let Ok(file) = self.open_fresh_alias_file(
+                        &path,
+                        &target,
+                        redirect.append,
+                        redirect.clobber,
+                    ) {
+                        #[cfg(windows)]
+                        let raw = {
+                            use std::os::windows::io::AsRawHandle;
+                            file.as_raw_handle() as crate::fd::HANDLE
+                        };
+                        #[cfg(unix)]
+                        let raw = {
+                            use std::os::unix::io::AsRawFd;
+                            file.as_raw_fd()
+                        };
+                        self.stamp_child_fd_handle(
+                            &mut process,
+                            &mut command_fd_pins,
+                            &mut parent_side_dups,
+                            fd,
+                            true,
+                            raw,
+                            path.to_string_lossy().into_owned(),
+                        );
+                        if let Ok(clone) = file.try_clone() {
+                            walk_opened.insert(
+                                fd,
+                                crate::executor::fd_table::FileFd::from_file(clone, path),
+                            );
+                        }
+                    }
+                    continue;
+                }
+            }
             if redirect_target_fd(&target).is_some()
                 || is_closed_redirect_target(&target)
                 || is_null_device(&target)
