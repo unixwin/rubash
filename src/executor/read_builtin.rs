@@ -2261,7 +2261,11 @@ impl Executor {
                 // readable (write-only) passes that check and fails in
                 // the read itself — read.def:911 "read error"
                 // (rubash#1592).
-                let wording = if self.fd_table.is_open(fd) {
+                let wording = if self.fd_table.is_open(fd)
+                    && !matches!(
+                        self.own_input_binding(cmd, fd),
+                        Some(super::read_redirected_fd::OwnInputBinding::Close)
+                    ) {
                     "read error"
                 } else {
                     "invalid file descriptor"
@@ -2969,6 +2973,15 @@ impl Executor {
         // be a perfectly valid read target on the transports below.
         if fd == 0 {
             return !self.fd_table.is_closed(0);
+        }
+        // rubash#2305: the command's own list redefines the
+        // descriptor before the builtin runs (redir.c:237
+        // do_redirections), so availability is judged on the
+        // REDIRECTED state: an own close makes the fd invalid even
+        // over an ambient entry, and an own dup defers to its
+        // source's availability.
+        if let Some(available) = self.own_input_binding_availability(cmd, fd) {
+            return available;
         }
         if self.fd_table.is_open_for_read(fd) {
             return true;
