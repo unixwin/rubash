@@ -365,7 +365,14 @@ impl Executor {
         // before dispatch, but GNU's one ordered walk
         // (redir.c:237) services them against the command's own
         // earlier binds.
-        let saved_numbered_inputs =
+        // rubash#2322: the segmented walk now binds the numbered
+        // outputs inside its segments as well (an output-side
+        // `{var}` entry must observe the command's own earlier
+        // output binds at its position), so its saves ARE the
+        // bound_output_fds the old separate
+        // open_compound_output_redirects pass produced — that pass
+        // no longer runs here.
+        let (saved_numbered_inputs, bound_output_fds) =
             match self.bind_script_numbered_inputs_and_fd_vars(cmd, &saved_numbered_heredocs) {
                 Ok(saved) => saved,
                 Err(error) => {
@@ -373,14 +380,6 @@ impl Executor {
                     return Err(error);
                 }
             };
-        let bound_output_fds = match self.open_compound_output_redirects(cmd) {
-            Ok(fds) => fds,
-            Err(error) => {
-                self.restore_compound_numbered_input_redirects(saved_numbered_inputs);
-                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
-                return Err(error);
-            }
-        };
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
