@@ -1251,6 +1251,14 @@ impl Executor {
         crate::builtins::set::is_shell_option(name)
     }
 
+    /// The current on/off state of a `set -o` option (the state twin
+    /// of [`Executor::set_shell_option`]): startup-mode decisions
+    /// (shell.c run_startup_files' posixly_correct test) read the
+    /// mode the invocation layer armed through this face.
+    pub fn shell_option_enabled(&self, name: &str) -> bool {
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name)
+    }
+
     pub fn set_shopt_option(&mut self, name: &str, enabled: bool) -> bool {
         if !crate::builtins::shopt::is_supported_option(name) {
             return false;

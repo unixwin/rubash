@@ -601,7 +601,24 @@ pub fn nonlogin_interactive_files(
 /// name to source, or None (rubash#1479: the standalone binary never
 /// sourced it at all; only the niubash host compensated).
 pub fn bash_env_file(executor: &Executor) -> Option<String> {
-    let value = executor.get_env("BASH_ENV")?;
+    expanded_env_file(executor, "BASH_ENV")
+}
+
+/// GNU shell.c:1238-1239 / 1244-1245 (run_startup_files): an
+/// interactive shell invoked as `sh`, or any interactive posix-mode
+/// shell, sources the file named by $ENV — the interactive twin of
+/// [`bash_env_file`], through the same execute_env_file expansion
+/// (shell.c:1103).
+pub fn env_file(executor: &Executor) -> Option<String> {
+    expanded_env_file(executor, "ENV")
+}
+
+/// GNU shell.c:1103 execute_env_file: expand the env variable's value
+/// (expand_string_unsplit_to_string) and maybe_execute_file the
+/// result; an unset/empty value, an empty expansion, or a name that
+/// does not resolve to an existing regular file sources nothing.
+fn expanded_env_file(executor: &Executor, name: &str) -> Option<String> {
+    let value = executor.get_env(name)?;
     if value.is_empty() {
         return None;
     }
@@ -613,6 +630,42 @@ pub fn bash_env_file(executor: &Executor) -> Option<String> {
     std::fs::metadata(&path)
         .is_ok_and(|meta| meta.is_file())
         .then_some(expanded)
+}
+
+/// GNU shell.c run_startup_files (shell.c:1214-1245): the env-file
+/// step of startup, selected by the shell's OWN invocation mode —
+/// the one decision every fresh-shell entry (the standalone binary's
+/// drivers, an in-process fresh child) must agree on:
+///
+/// - a NON-interactive shell sources $BASH_ENV, but only when it is
+///   neither in posix mode nor invoked as `sh` (shell.c:1216-1218:
+///   `posixly_correct == 0 && act_like_sh == 0`); no other
+///   non-interactive shell reads any env file;
+/// - an interactive shell invoked as `sh` (shell.c:1238-1239) or in
+///   posix mode (shell.c:1244-1245) sources $ENV instead of the rc
+///   chain; a plain interactive bash sources neither env file.
+///
+/// `act_like_sh` is GNU's act_like_sh (shell.c set_shell_name: the
+/// invocation name is exactly `sh`); `posix` is the shell's posix
+/// mode at startup (POSIXLY_CORRECT import / --posix / the sh
+/// binding). Returns the file to source, or None.
+pub fn startup_env_file(
+    executor: &Executor,
+    interactive: bool,
+    act_like_sh: bool,
+    posix: bool,
+) -> Option<String> {
+    if interactive {
+        if act_like_sh || posix {
+            env_file(executor)
+        } else {
+            None
+        }
+    } else if act_like_sh || posix {
+        None
+    } else {
+        bash_env_file(executor)
+    }
 }
 
 fn parse_post_c_option(
