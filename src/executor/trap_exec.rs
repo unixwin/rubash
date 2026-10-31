@@ -4028,8 +4028,13 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
-                match self.execute_dynamic_fd_var_redirect(redirect, false, false, &occupied_slots)
-                {
+                match self.execute_dynamic_fd_var_redirect(
+                    redirect,
+                    false,
+                    false,
+                    &occupied_slots,
+                    0,
+                ) {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
                         let mut stderr = Vec::new();
@@ -5247,6 +5252,12 @@ impl Executor {
             return Ok(true);
         }
         let mut redirect_failed = false;
+        // rubash#2281: stamp this run's generation on the close records
+        // it is about to produce, so a later gate can tell this
+        // command's records from an enclosing command's (see the
+        // fd_var_close_generation field doc).
+        self.fd_var_close_generation += 1;
+        self.fd_var_pending_close_generation = self.fd_var_close_generation;
         self.fd_var_external_undo.clear();
         self.fd_var_pending_closes.clear();
         self.fd_var_close_restore.clear();
@@ -5261,7 +5272,7 @@ impl Executor {
         // not fd-table entries on this path, so carry the running set
         // of slots bound so far in the walk and count them as occupied.
         let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for redirect in &cmd.redirects {
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
@@ -5281,8 +5292,13 @@ impl Executor {
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_redirect(redirect, auto_close, true, &occupied_slots)
-            {
+            match self.execute_dynamic_fd_var_redirect(
+                redirect,
+                auto_close,
+                true,
+                &occupied_slots,
+                position,
+            ) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5479,6 +5495,12 @@ impl Executor {
         // already bound, counted as occupied by every allocation
         // below (see apply_dynamic_fd_var_redirects).
         occupied_slots: &std::collections::HashSet<u32>,
+        // rubash#2281: this entry's index in the owning command's
+        // redirects list, stamped on every close record the entry
+        // produces so consumers can apply the close at its walk
+        // position. Meaningful only when defer_closes is set; the
+        // immediate faces pass 0.
+        position: usize,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -5558,7 +5580,7 @@ impl Executor {
                 // closes the descriptor in the command's own context,
                 // and the parent's binding must survive the command.
                 if defer_closes {
-                    self.record_fd_var_pending_close(name);
+                    self.record_fd_var_pending_close(name, position);
                 } else {
                     self.close_dynamic_input_fd(name);
                 }
@@ -5572,7 +5594,7 @@ impl Executor {
                     )));
                 }
                 if defer_closes {
-                    self.record_fd_var_pending_close(name);
+                    self.record_fd_var_pending_close(name, position);
                 } else {
                     self.close_dynamic_output_fd(name)?;
                 }
@@ -5608,7 +5630,7 @@ impl Executor {
                         // the command like every other close on the
                         // funnel path (see defer_closes).
                         if defer_closes {
-                            self.fd_var_pending_closes.push(source_fd);
+                            self.fd_var_pending_closes.push((position, source_fd));
                         } else {
                             self.close_persistent_fd(source_fd)?;
                         }
@@ -5638,7 +5660,7 @@ impl Executor {
                     }
                     if move_source {
                         if defer_closes {
-                            self.fd_var_pending_closes.push(source_fd);
+                            self.fd_var_pending_closes.push((position, source_fd));
                         } else {
                             self.close_persistent_fd(source_fd)?;
                         }
@@ -6036,11 +6058,34 @@ impl Executor {
     /// entry closes — the number the var currently holds — in
     /// fd_var_pending_closes instead of closing it in this table
     /// (see the defer_closes parameter of
-    /// execute_dynamic_fd_var_redirect).
-    fn record_fd_var_pending_close(&mut self, name: &str) {
+    /// execute_dynamic_fd_var_redirect). rubash#2281: the record
+    /// carries the entry's position in the redirects list.
+    fn record_fd_var_pending_close(&mut self, name: &str, position: usize) {
         if let Some(fd) = self.dynamic_fd_variable_value(name) {
-            self.fd_var_pending_closes.push(fd);
+            self.fd_var_pending_closes.push((position, fd));
         }
+    }
+
+    /// rubash#2281: perform one recorded pending close in the table —
+    /// snapshot the entry and its fd-closed marker into
+    /// fd_var_close_restore (undo_child_fd_var_redirects replays them
+    /// at command completion), mark the entry closed, and set the
+    /// marker. Only the closed flag changes: the endpoints stay in
+    /// place so a {var} dup resolution can still read a source
+    /// description from the slot. Shared by the spawn delivery (which
+    /// applies the records at their walk positions) and the
+    /// in-process application for builtin/function commands
+    /// (rubash#2280).
+    pub(in crate::executor) fn apply_fd_var_pending_close(&mut self, fd: u32) {
+        let entry = self.fd_table.entries.get(&fd).cloned();
+        let marker = self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned();
+        self.fd_var_close_restore.push((fd, entry, marker));
+        if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
+            entry.closed = true;
+        }
+        self.shell_state
+            .env_vars
+            .insert(fd_closed_key(fd), "1".to_string());
     }
 
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {

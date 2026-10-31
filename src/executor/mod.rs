@@ -1632,7 +1632,27 @@ pub struct Executor {
     /// undo_child_fd_var_redirects drops whatever no delivery
     /// consumed. (The exec face and the compound scope path keep
     /// their persistent closes — they do not record here.)
-    fd_var_pending_closes: Vec<u32>,
+    ///
+    /// rubash#2281: each record carries the position of its redirect
+    /// entry in the owning command's `redirects` list. GNU's walk is
+    /// ordered (redir.c:237), so a close takes effect AT its position:
+    /// it revokes bindings earlier entries made (`cmd 3<file {v}<&-`,
+    /// v=3 — the child sees 3 closed) and poisons dup sources for
+    /// later entries (`cmd {v}<&- {w}<&9`, v=9 — the dup fails EBADF
+    /// and the command does not run). Consumers (the redirect gate's
+    /// overlay scan, the spawn delivery, the in-process application)
+    /// apply the records positionally.
+    fd_var_pending_closes: Vec<(usize, u32)>,
+    /// rubash#2281: bumped by every apply_dynamic_fd_var_redirects
+    /// run. A gate may fold fd_var_pending_closes into its scan only
+    /// when the records carry the current generation (see
+    /// fd_var_pending_close_generation): they then belong to the
+    /// command the gate is validating, not to an enclosing command
+    /// whose applier ran earlier.
+    fd_var_close_generation: u64,
+    /// rubash#2281: the fd_var_close_generation value whose applier
+    /// run recorded the current fd_var_pending_closes contents.
+    fd_var_pending_close_generation: u64,
     /// rubash#2272: snapshots of the fd-table entries (and prior
     /// fd-closed markers) that apply_external_fd_delivery closed for
     /// a spawn from fd_var_pending_closes, so

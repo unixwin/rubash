@@ -94,8 +94,13 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             if redirect.fd_var.is_some() {
-                let _ =
-                    self.execute_dynamic_fd_var_redirect(redirect, false, false, &occupied_slots)?;
+                let _ = self.execute_dynamic_fd_var_redirect(
+                    redirect,
+                    false,
+                    false,
+                    &occupied_slots,
+                    0,
+                )?;
             }
         }
         // The dup preflight runs before ANY bind so the abandonment it

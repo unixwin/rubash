@@ -643,6 +643,10 @@ impl Executor {
         // carries the ambient state; `opened` overlays the fds this
         // command's earlier redirects opened/closed/duped for the scan.
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        // rubash#2281: how many of fd_var_pending_closes the scan has
+        // folded into `opened` so far (the records are stored in walk
+        // order; see the fold at the top of the candidate loop).
+        let mut folded_closes = 0usize;
 
         // rubash#2098: for each candidate, whether a LATER candidate
         // also supplies fd 0 (the fd0_stdin_redirect_winner predicate:
@@ -713,6 +717,29 @@ impl Executor {
             later_binds.iter().map(|binds| binds.contains(&0)).collect();
 
         for (index, redirect) in candidates.iter().enumerate() {
+            // rubash#2281: fold this command's recorded {var} closes
+            // into the scan at their walk positions. The applier only
+            // RECORDED a `{v}<&-` close (rubash#2272); without the
+            // fold the entry is invisible here (the fd_var non-dup arm
+            // below skips it), so a later dup of the closed descriptor
+            // validated against the still-open ambient table entry —
+            // `cmd {v}<&- {w}<&9` (v=9) delivered a dup GNU rejects
+            // with EBADF (redir.c:237: the walk's close at position p
+            // poisons every source check after p). Each record folds
+            // exactly once, at the first candidate past its position,
+            // so a same-list rebind of the descriptor after the close
+            // still wins for later entries. The generation stamp
+            // confines the fold to the records of THIS command's
+            // applier run.
+            if self.fd_var_pending_close_generation == self.fd_var_close_generation {
+                while folded_closes < self.fd_var_pending_closes.len()
+                    && self.fd_var_pending_closes[folded_closes].0 < index
+                {
+                    let closed_fd = self.fd_var_pending_closes[folded_closes].1;
+                    opened.insert(closed_fd, false);
+                    folded_closes += 1;
+                }
+            }
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 // rubash#2292: a here-string DOES bind its redirector
                 // for the ordered-effects scan — GNU stages the body
