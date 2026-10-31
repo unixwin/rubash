@@ -2290,10 +2290,32 @@ impl Executor {
                 && (target.starts_with("/dev/fd/") || target.starts_with("/proc/self/fd/"))
             {
                 if let Some(alias_fd) = redirect_target_fd(&target) {
-                    if let Some(crate::executor::fd_table::FdReadEndpoint::File(file)) =
-                        self.fd_table.read_endpoint(alias_fd)
-                    {
-                        let file = file.clone();
+                    // rubash#2329: the endpoint GNU's open resolves
+                    // is the one bound AT THIS POSITION (redir.c:237
+                    // do_redirections) — when this command's own
+                    // earlier entries bound the alias fd, the
+                    // in-list binding decides (a plain file opens
+                    // FRESH); the ambient table serves only unbound
+                    // or ambient-chained aliases.
+                    let endpoint_file = {
+                        use crate::executor::external_setup::InListBinding;
+                        let ambient_file =
+                            |source_fd: u32| match self.fd_table.read_endpoint(source_fd) {
+                                Some(crate::executor::fd_table::FdReadEndpoint::File(file)) => {
+                                    Some(file.clone())
+                                }
+                                _ => None,
+                            };
+                        match self.in_list_binding(cmd, position, alias_fd) {
+                            InListBinding::File(path) => {
+                                crate::executor::fd_table::FileFd::open_read(path).ok()
+                            }
+                            InListBinding::AmbientOf(source_fd) => ambient_file(source_fd),
+                            InListBinding::NotBound => ambient_file(alias_fd),
+                            InListBinding::Other | InListBinding::Closed => None,
+                        }
+                    };
+                    if let Some(file) = endpoint_file {
                         walk_opened.insert(fd, file.clone());
                         if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
                             #[cfg(unix)]
@@ -2365,8 +2387,19 @@ impl Executor {
             ) && !redirect_target_is_dup_spelling(&target)
                 && (target.starts_with("/dev/fd/") || target.starts_with("/proc/self/fd/"))
             {
-                let alias_path = redirect_target_fd(&target)
-                    .and_then(|alias_fd| self.fd_alias_reopen_path(alias_fd));
+                let alias_path = redirect_target_fd(&target).and_then(|alias_fd| {
+                    // rubash#2329: an in-list file binding at this
+                    // position (redir.c:237) is what the spelling
+                    // opens; the ambient resolver serves only
+                    // unbound / ambient-chained aliases.
+                    use crate::executor::external_setup::InListBinding;
+                    match self.in_list_binding(cmd, position, alias_fd) {
+                        InListBinding::File(path) => Some(path),
+                        InListBinding::AmbientOf(source_fd) => self.fd_alias_reopen_path(source_fd),
+                        InListBinding::NotBound => self.fd_alias_reopen_path(alias_fd),
+                        InListBinding::Other | InListBinding::Closed => None,
+                    }
+                });
                 if let Some(path) = alias_path {
                     if let Ok(file) = self.open_fresh_alias_file(
                         &path,
