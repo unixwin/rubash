@@ -911,11 +911,18 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    let expanded = substitution_result_visible_text(
-                        &self
-                            .expand_command_substitution_mut_typed_with_context(&source, context)
-                            .text_lossy(),
-                    );
+                    // rubash#1184 f6, layer 2: same ambient backtick window
+                    // as the whole-word entries (issue #515) — this arm
+                    // cuts and dispatches the backquote body itself, so it
+                    // opens the window here. The heredoc route reaches the
+                    // typed funnel's unclosed-body pre-check through this
+                    // dispatch (context HereDocument).
+                    let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+                    let substitution_output =
+                        self.expand_command_substitution_mut_typed_with_context(&source, context);
+                    self.backtick_body_diagnostic.set(saved_backtick_context);
+                    let expanded =
+                        substitution_result_visible_text(&substitution_output.text_lossy());
                     let protected = protect_command_substitution_output(&expanded);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         let value = mark_expansion_whitespace(&protected, preserve_quotes);
@@ -1780,10 +1787,17 @@ impl Executor {
         // so a 1-line unterminated `case x in` body reports its EOF on the
         // NEXT line (`command substitution: line 2: ... on line 1`, issue
         // #515). A `$(` body keeps the verbatim text (the outer parse owns
-        // its EOF shape).
+        // its EOF shape). The terminator is withheld when the body ends
+        // with an active backslash: it would be quoted into a line
+        // continuation instead of terminating (see
+        // backtick_body_ends_with_active_backslash in
+        // command_substitution.rs).
         let newline_terminated;
-        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
-        {
+        let source: &str = if self.backtick_body_diagnostic.get()
+            && !alias_spliced.ends_with('\n')
+            && !super::command_substitution::backtick_body_ends_with_active_backslash(
+                &alias_spliced,
+            ) {
             newline_terminated = format!("{alias_spliced}\n");
             &newline_terminated
         } else {
@@ -2154,10 +2168,17 @@ impl Executor {
         // so a 1-line unterminated `case x in` body reports its EOF on the
         // NEXT line (`command substitution: line 2: ... on line 1`, issue
         // #515). A `$(` body keeps the verbatim text (the outer parse owns
-        // its EOF shape).
+        // its EOF shape). The terminator is withheld when the body ends
+        // with an active backslash: it would be quoted into a line
+        // continuation instead of terminating (see
+        // backtick_body_ends_with_active_backslash in
+        // command_substitution.rs).
         let newline_terminated;
-        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
-        {
+        let source: &str = if self.backtick_body_diagnostic.get()
+            && !alias_spliced.ends_with('\n')
+            && !super::command_substitution::backtick_body_ends_with_active_backslash(
+                &alias_spliced,
+            ) {
             newline_terminated = format!("{alias_spliced}\n");
             &newline_terminated
         } else {
