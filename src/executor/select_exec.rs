@@ -258,6 +258,16 @@ impl Executor {
             }
 
             let selected = select_reply_selection(&reply, values).unwrap_or_default();
+            // GNU execute_cmd.c:3585-3600: an att_noassign select
+            // variable fails the bind check (ASSIGN_DISALLOWED) after
+            // the selection is read — EXECUTION_FAILURE, body never
+            // runs, no diagnostic, and no POSIX FORCE_EOF (gated on
+            // readonly_p). The funnel swallows the same bind silently,
+            // so the verdict is taken here (rubash#2369).
+            if self.assignment_target_is_noassign(&select_command.variable) {
+                self.exit_code = 1;
+                return Ok(());
+            }
             // GNU execute_cmd.c execute_select_command binds the reply
             // through bind_variable: nameref select variables follow full
             // assignment semantics (empty-cell nameref stores the cell,

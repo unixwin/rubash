@@ -3831,8 +3831,18 @@ fn run_source_impl(
             code
         }
         // ExpansionFailure is GNU's DISCARD: the command list aborted but
-        // the reader continues with the next complete command.
-        Err(ExecuteError::ExpansionFailure(code)) => code,
+        // the reader continues with the next complete command. When the
+        // text is a -c string, this catch is shell.c run_one_command's:
+        // its DISCARD arm returns last_command_exit_value = 1
+        // (shell.c:1478-1479) regardless of the pre-set status, where
+        // the script reader_loop preserves it (eval.c:111-118).
+        Err(ExecuteError::ExpansionFailure(code)) => {
+            if executor.command_string_mode() {
+                1
+            } else {
+                code
+            }
+        }
         // SigintUnwind is the same DISCARD shape with a fixed verdict
         // (rubash#1639): GNU threw to the top-level reader on the
         // foreground job's SIGINT death — no diagnostic, the reader
