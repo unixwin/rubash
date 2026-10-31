@@ -729,6 +729,16 @@ impl ConditionalArithParser<'_> {
                 .insert("__RUBASH_ARITH_READONLY_ERROR".to_string(), name.clone());
             return false;
         }
+        // GNU expr.c:350 (expr_bind_variable -> bind_variable): an
+        // att_noassign lvalue fails the evaluation the same way
+        // (sh_longjmp out of evalexp) but with NO diagnostic — the
+        // drain in arithmetic/mod.rs latches the failure silently
+        // (rubash#2369).
+        if is_noassign_bash_array(name) {
+            self.env_vars
+                .insert("__RUBASH_ARITH_NOASSIGN_ERROR".to_string(), name.clone());
+            return false;
+        }
         true
     }
 
@@ -886,6 +896,15 @@ impl ConditionalArithParser<'_> {
             if is_marked_var(self.env_vars, READONLY_VARS, base_target) {
                 self.env_vars.insert(
                     "__RUBASH_ARITH_READONLY_ERROR".to_string(),
+                    base_target.to_string(),
+                );
+                return;
+            }
+            // GNU expr.c:350: a nameref chain ending at an att_noassign
+            // variable fails the bind silently (rubash#2369).
+            if is_noassign_bash_array(base_target) {
+                self.env_vars.insert(
+                    "__RUBASH_ARITH_NOASSIGN_ERROR".to_string(),
                     base_target.to_string(),
                 );
                 return;
