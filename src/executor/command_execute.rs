@@ -619,12 +619,7 @@ impl Executor {
     ) -> bool {
         self.posix_mode_enabled()
             && self.command_builtin_depth == 0
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                != Some("1")
+            && !self.invocation_interactive()
             && cmd.words.first().is_some_and(|word| {
                 is_posix_special_builtin(word)
                     && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word)
@@ -648,12 +643,7 @@ impl Executor {
     pub(crate) fn evalstring_syntax_error_exits(&self) -> bool {
         self.posix_mode_enabled()
             && self.command_builtin_depth == 0
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                != Some("1")
+            && !self.invocation_interactive()
             && self.shell_state.last_dispatch_was_eval_or_source
     }
 
@@ -1573,14 +1563,7 @@ impl Executor {
             // child re-arms top_level (execute_cmd.c:1811) and contains the
             // jump to 1 (niubash#163), so the status is owned by
             // expansion_fatal_status.
-            if self.posix_mode_enabled()
-                && self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    != Some("1")
-            {
+            if self.posix_mode_enabled() && !self.invocation_interactive() {
                 let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));
@@ -1616,14 +1599,7 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
-            if self.posix_mode_enabled()
-                && self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    != Some("1")
-            {
+            if self.posix_mode_enabled() && !self.invocation_interactive() {
                 let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));

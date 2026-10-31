@@ -680,13 +680,7 @@ impl Executor {
     /// just special builtins (`ro=2 ls`, `ro=2 :`, `ro=2 true` all exit —
     /// oracle probes B/B2/B3; the command itself never runs).
     pub(in crate::executor) fn posix_assignment_failure_is_fatal(&self) -> bool {
-        self.posix_mode_enabled()
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                != Some("1")
+        self.posix_mode_enabled() && !self.invocation_interactive()
     }
 
     /// GNU bind_variable with a nameref cell naming an array element: the

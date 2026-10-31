@@ -71,9 +71,7 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let prefix = self.diagnostic_prefix();
-        let line_editing_enabled = self
-            .get_env("__RUBASH_INTERACTIVE")
-            .is_some_and(|value| value == "1");
+        let line_editing_enabled = self.invocation_interactive();
         let status = self.bind_dispatch(
             &args,
             line_editing_enabled,

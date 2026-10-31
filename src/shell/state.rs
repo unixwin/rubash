@@ -99,6 +99,24 @@ pub struct ShellState {
     /// parses as cheap as before. A scheduling hint only: a stale budget moves
     /// the compaction, never the resulting value.
     pub(crate) array_compact_budget: HashMap<String, u32>,
+    /// rubash#2130: the session's invocation shape as typed state —
+    /// GNU keeps exactly this in process-local globals
+    /// (shell.c:497-503 `login_shell`, shell.c:540-549
+    /// `interactive_shell`), never in the environment. The
+    /// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` entries in
+    /// `env_vars` are a write-through projection of these fields
+    /// (every host funnel that writes the entry also writes the
+    /// field — `Executor::set_env` / `remove_env` /
+    /// `mark_login_shell` / whole-table restore), kept for the
+    /// faces that render the carrier; engine DECISIONS read these
+    /// fields, so an in-session script assignment to the carrier
+    /// can no longer flip the session's shape (the forgery surface
+    /// #2130 closes; the cross-process half was #2259, the
+    /// inheritance half #2129). Like `cwd` above, the fields ride
+    /// the ShellState Clone fork boundary: a forked child has its
+    /// parent's shape.
+    pub(crate) invocation_interactive: bool,
+    pub(crate) invocation_login: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -160,6 +178,15 @@ pub struct ShellState {
     /// shells; the dynamic views read the child's own frames above
     /// these, exactly like GNU's fork copying the parent's stacks.
     pub(crate) inherited_fork_frames: Option<InheritedForkFrames>,
+    /// rubash#2202: per-function source-line spans a respawned child
+    /// was born with (the __RUBASH_FORK_FN_SPANS stamp; see
+    /// parser::CommandLineSpan). When the definition of a named
+    /// function executes in the child, the re-parsed body's node
+    /// lines are re-seeded from the recorded span and the entry is
+    /// consumed — a later redefinition keeps its own lines. Empty
+    /// for ordinary shells.
+    pub(crate) respawn_function_line_spans:
+        std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>>,
     /// variables.c variable_context — local scope stacks.
     pub(crate) local_var_scopes: Vec<HashMap<String, Option<String>>>,
     pub(crate) local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -651,6 +678,8 @@ impl Clone for ShellState {
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
             array_compact_budget: self.array_compact_budget.clone(),
+            invocation_interactive: self.invocation_interactive,
+            invocation_login: self.invocation_login,
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
@@ -667,6 +696,7 @@ impl Clone for ShellState {
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
+            respawn_function_line_spans: self.respawn_function_line_spans.clone(),
             local_var_scopes: self.local_var_scopes.clone(),
             local_attr_scopes: self.local_attr_scopes.clone(),
             local_typed_scopes: self.local_typed_scopes.clone(),

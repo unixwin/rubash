@@ -643,6 +643,19 @@ impl Executor {
         // carries the ambient state; `opened` overlays the fds this
         // command's earlier redirects opened/closed/duped for the scan.
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        // rubash#2316: the endpoint class each fd is bound to by the
+        // entries BEFORE the current one in this list — true when that
+        // binding is a connected socket. It overlays `opened` the same
+        // way `opened` overlays the ambient table: every entry that
+        // binds an fd records the class of what it bound (a net open
+        // records socket; a file/text/heredoc bind records non-socket;
+        // a dup records its source's class as resolved at the dup's
+        // own position). The /dev/fd spelling judgment below reads
+        // the endpoint the ordered walk would open AT the spelling's
+        // position — GNU's single walk (redir.c:237) opens the
+        // at-position binding, so a source rebound earlier in the
+        // list is judged by its list binding, not the ambient table.
+        let mut opened_socket: HashMap<u32, bool> = HashMap::new();
         // rubash#2281: how many of fd_var_pending_closes the scan has
         // folded into `opened` so far (the records are stored in walk
         // order; see the fold at the top of the candidate loop).
@@ -737,6 +750,7 @@ impl Executor {
                 {
                     let closed_fd = self.fd_var_pending_closes[folded_closes].1;
                     opened.insert(closed_fd, false);
+                    opened_socket.insert(closed_fd, false);
                     folded_closes += 1;
                 }
             }
@@ -749,6 +763,7 @@ impl Executor {
                 // `<&N` dup in the same list copies it. The entry
                 // otherwise needs no gate checks and keeps its skip.
                 opened.insert(redirect.fd.unwrap_or(0), true);
+                opened_socket.insert(redirect.fd.unwrap_or(0), false);
                 continue;
             }
             // GNU redir.c:298 redirection_expand -> expand_words_no_vars:
@@ -879,6 +894,7 @@ impl Executor {
                 crate::parser::RedirectKind::CloseOutput | crate::parser::RedirectKind::CloseInput
             ) {
                 opened.insert(redirector, false);
+                opened_socket.insert(redirector, false);
                 continue;
             }
             if !(file_open_kind || is_dup_kind) {
@@ -894,6 +910,7 @@ impl Executor {
                 // the scan.
                 if matches!(redirect.kind, crate::parser::RedirectKind::HereDoc) {
                     opened.insert(redirect.fd.unwrap_or(0), true);
+                    opened_socket.insert(redirect.fd.unwrap_or(0), false);
                 }
                 continue;
             }
@@ -902,6 +919,7 @@ impl Executor {
             if is_dup_kind {
                 if is_closed_redirect_target(&target) {
                     opened.insert(redirector, false);
+                    opened_socket.insert(redirector, false);
                     continue;
                 }
                 // {var}>&word: the varassign word rules (redir.c:784-843
@@ -966,6 +984,7 @@ impl Executor {
                 // GNU never sees such an operand; skip the word rules.
                 if !target.starts_with('&') {
                     opened.insert(redirector, true);
+                    opened_socket.insert(redirector, false);
                     continue;
                 }
                 // Digit forms `&N` / `&N-` (possibly via expansion).
@@ -990,8 +1009,13 @@ impl Executor {
                     // the command-scoped application sites own the binding
                     // and the move's close.
                     opened.insert(redirector, true);
+                    opened_socket.insert(
+                        redirector,
+                        scan_endpoint_is_socket(self, fd, &opened_socket),
+                    );
                     if move_fd {
                         opened.insert(fd, false);
+                        opened_socket.insert(fd, false);
                     }
                     continue;
                 }
@@ -1031,6 +1055,10 @@ impl Executor {
                                     .map(|_| Some(RedirectRejection::Command));
                             }
                             opened.insert(redirector, true);
+                            opened_socket.insert(
+                                redirector,
+                                scan_endpoint_is_socket(self, fd, &opened_socket),
+                            );
                         }
                         None => {
                             // dest -1: EBADF text per redir.c:149-176 — the
@@ -1197,19 +1225,19 @@ impl Executor {
                     // judgment models are not this face, and the
                     // serve ladders that resolve the spelling per
                     // face (the text stdin channel, the stdio plan)
-                    // cannot be relied on to refuse it. The endpoint
-                    // judged is the one the ordered walk would open
-                    // at this entry: the ambient table entry, or a
-                    // socket an earlier entry of THIS list bound
-                    // from a net target (the walk's connect precedes
-                    // the spelling's open in GNU's walk too).
-                    let socket = self.fd_alias_spelling_open_error(fd).is_some()
-                        || cmd.redirects[..index].iter().any(|earlier| {
-                            earlier.fd == Some(fd)
-                                && crate::special_paths::is_net_redirect_target(
-                                    &self.expand_redirect_target(earlier),
-                                )
-                        });
+                    // cannot be relied on to refuse it.
+                    // rubash#2316: the endpoint judged is the one
+                    // the ordered walk would open AT THIS ENTRY —
+                    // the binding the source fd carries at this list
+                    // position. `opened_socket` records that binding
+                    // (the last earlier entry to bind the fd wins: a
+                    // net open or a dup of a socket records socket,
+                    // a file/text/heredoc bind or a dup of one
+                    // records non-socket, and a dup resolves its
+                    // source's class at its own position, so chains
+                    // compose). Only with no earlier binding does
+                    // the ambient table entry judge.
+                    let socket = scan_endpoint_is_socket(self, fd, &opened_socket);
                     if socket {
                         let message = crate::posix_errors::path_error(
                             &target,
@@ -1416,14 +1444,26 @@ impl Executor {
             // Checks passed — record this entry's ordered fd effect for
             // later dups in the same list: a plain file open binds its
             // redirector, an fd-alias name (redir.c /dev/fd resolution)
-            // dups the aliased fd's state.
+            // dups the aliased fd's state. The endpoint class follows
+            // the same record (rubash#2316): a net open binds a
+            // socket, an alias target binds its source's class at
+            // this position, any other open binds a non-socket.
             if is_closed_redirect_target(&target) {
                 opened.insert(redirector, false);
+                opened_socket.insert(redirector, false);
             } else if let Some(source) = dev_stdio_redirect_fd(&target) {
                 let open = dup_source_fd_open(&self.fd_table, source, &opened);
                 opened.insert(redirector, open);
+                opened_socket.insert(
+                    redirector,
+                    scan_endpoint_is_socket(self, source, &opened_socket),
+                );
             } else {
                 opened.insert(redirector, true);
+                opened_socket.insert(
+                    redirector,
+                    crate::special_paths::is_net_redirect_target(&target),
+                );
             }
         }
 
@@ -3242,6 +3282,23 @@ fn is_closed_output_error(error: &ExecuteError) -> bool {
 /// closed), then the fd table; an absent entry for fds 0-2 is the
 /// process's implicit stdio — always open, exactly the fallback
 /// open_compound_output_redirects documents for its own dups.
+/// rubash#2316: whether the endpoint fd `fd` is bound to, in the
+/// state the gate scan has reached, is a connected socket. The
+/// scan's positional overlay (the binding the last earlier entry of
+/// the same list recorded for the fd) decides first; with no
+/// earlier binding the ambient table judges, through the #2276
+/// spelling-open error (Some exactly for socket endpoints).
+pub(in crate::executor) fn scan_endpoint_is_socket(
+    executor: &Executor,
+    fd: u32,
+    opened_socket: &HashMap<u32, bool>,
+) -> bool {
+    match opened_socket.get(&fd) {
+        Some(is_socket) => *is_socket,
+        None => executor.fd_alias_spelling_open_error(fd).is_some(),
+    }
+}
+
 pub(in crate::executor) fn dup_source_fd_open(
     table: &FdTable,
     fd: u32,

@@ -17,7 +17,9 @@ use std::cell::RefCell;
 use std::io::{BufReader, Cursor, Write};
 use std::rc::Rc;
 
-use super::cli::{run_debug_cli_with_stream, DebugCliPreset};
+use super::cli::{
+    host_name_from, run_debug_cli_with_stream, run_debug_cli_with_stream_as, DebugCliPreset,
+};
 use super::gate::SESSION_ACTIVE;
 
 /// Holds the gate test lock for the whole armed span and disarms
@@ -951,6 +953,63 @@ fn startup_file_missing_does_not_abort_the_session() {
     assert!(
         transcript.contains("Stopped (breakpoint 1) at <PROG>:1: echo reached"),
         "the program breakpoint must still stop: {transcript}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The host product word is part of the frontend's presentation:
+/// niubash passes `niu`, so the prompt and every refusal carry
+/// `niu`, never the engine's `rubash` (owner report 2026-10-31:
+/// "the REPL still says rubash").
+#[test]
+fn host_name_drives_the_prompt_and_diagnostics() {
+    // The derivation: the niubash executable presents `niu`,
+    // the engine's own binary `rubash`, the GNU faces their
+    // invocation name; test binaries and unknown stems fall
+    // back to the engine word so transcripts stay stable.
+    assert_eq!(host_name_from(Some("niu")), "niu");
+    assert_eq!(host_name_from(Some("-niu")), "niu");
+    assert_eq!(host_name_from(Some("Niubash")), "niubash");
+    assert_eq!(host_name_from(Some("rubash")), "rubash");
+    assert_eq!(host_name_from(Some("bash")), "bash");
+    assert_eq!(host_name_from(Some("-sh")), "sh");
+    assert_eq!(host_name_from(None), "rubash");
+    assert_eq!(host_name_from(Some("cargo-test-abcd")), "rubash");
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("hostname", "echo hi\n");
+    let out = SharedOut(Rc::new(RefCell::new(Vec::new())));
+    let status = run_debug_cli_with_stream_as(
+        DebugCliPreset {
+            program: Some(program),
+            ..Default::default()
+        },
+        Box::new(BufReader::new(Cursor::new(b"quit\n".to_vec()))),
+        Box::new(out.clone()),
+        "niu",
+    );
+    assert_eq!(status, 0);
+    let transcript = String::from_utf8_lossy(&out.0.borrow()).into_owned();
+    assert!(
+        transcript.contains("(niu-dbg) "),
+        "prompt must carry the host word: {transcript}"
+    );
+    assert!(
+        !transcript.contains("rubash-dbg"),
+        "the engine word must not leak into the host prompt: {transcript}"
+    );
+
+    let out = SharedOut(Rc::new(RefCell::new(Vec::new())));
+    let status = run_debug_cli_with_stream_as(
+        DebugCliPreset::default(),
+        Box::new(BufReader::new(Cursor::new(Vec::new()))),
+        Box::new(out.clone()),
+        "niu",
+    );
+    assert_eq!(status, 2);
+    let text = String::from_utf8_lossy(&out.0.borrow()).into_owned();
+    assert!(
+        text.contains("niu: --debug: a script operand is required"),
+        "diagnostic must carry the host word: {text}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

@@ -557,17 +557,21 @@ pub struct Executor {
     /// $? = 128+sig), not as a jump_to_top_level exit; run_source_impl
     /// consumes the mark instead of recording an exit jump.
     signal_discard_pending: bool,
-    /// rubash#2233: set by the signal dispatch when an untrapped SIGHUP
-    /// is delivered to an interactive shell. GNU's termsig path
-    /// (sig.c:590 termsig_handler) does not discard and does not exit
-    /// with a plain status: it saves history, hangs up every job
+    /// rubash#2233, generalized by rubash#2346: set by the signal
+    /// dispatch when an untrapped terminating signal is delivered on a
+    /// path GNU settles through termsig_handler (sig.c:590): the termsig
+    /// path does not discard and does not exit with a plain status — it
+    /// saves history, hangs up every job for an interactive SIGHUP
     /// (jobs.c:1783 hangup_all_jobs), runs the EXIT trap, and dies BY
-    /// SIGHUP (sig.c kill_shell: restore SIG_DFL, re-raise). The
-    /// dispatch cannot run that funnel mid-unwind, so it records the
-    /// mark and unwinds exit-class with 128+SIGHUP;
+    /// the signal (sig.c:649-667 kill_shell: restore SIG_DFL, re-raise).
+    /// The dispatch cannot run that funnel mid-unwind, so it records
+    /// the signal here and unwinds exit-class with 128+sig;
     /// script_driver::finish_shell consumes the mark, runs the funnel
     /// in GNU's order, and performs the signal death at the end.
-    hangup_death_pending: bool,
+    /// (Originally SIGHUP-only under #2233; the audit showed TERM, INT
+    /// and USR1 took the plain-exit path instead — same funnel, so the
+    /// mark now carries the signal number.)
+    termsig_death_pending: Option<i32>,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,
@@ -582,6 +586,18 @@ pub struct Executor {
     /// with origin = 0 for ordinary shells.
     bashpid_origin_depth: usize,
     owns_signal_mailbox: bool,
+    /// rubash#2084: root executors (every `Executor::new` that is not
+    /// the process-exit form) hold a share of the process signal
+    /// policy from birth: the first share of an era snapshots the
+    /// host's kernel dispositions, and the last share's Drop restores
+    /// them. The process umask is restored conditionally alongside
+    /// (see the Drop impl): `birth_process_umask` is the process
+    /// value at this executor's birth, `session_set_umask` the last
+    /// value this executor's `umask` builtin set, if any. Fork copies
+    /// and process-exit executors hold no share and carry `None`s.
+    owns_session_process_state: bool,
+    birth_process_umask: Option<u32>,
+    session_set_umask: Option<u32>,
     /// startup21: true when this Executor is the process's outermost one
     /// AND the process exits immediately after it drops (main.rs sets it
     /// for the run_main executor). The Drop-time process-environment

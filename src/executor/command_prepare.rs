@@ -619,14 +619,7 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if self.shell_state.parameter_bad_substitution.replace(false) {
-                if self.posix_mode_enabled()
-                    && self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        != Some("1")
-                {
+                if self.posix_mode_enabled() && !self.invocation_interactive() {
                     // FORCE_EOF status is context-owned: 127 only at the
                     // `-c` top-level catch (shell.c:1471); a `( ... )`
                     // subshell child contains the jump at

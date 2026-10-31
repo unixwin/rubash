@@ -903,6 +903,18 @@ fn dap_evaluate_safe_and_rejected_forms() {
     );
     assert_eq!(s(&body, "result"), "42");
 
+    // An editor hovers the identifier itself (no `$`): the answer
+    // is the variable's value, the same one `print`/watch show,
+    // not the literal word "X".
+    let body = client.ok(
+        "evaluate",
+        Json::obj(vec![
+            ("expression", Json::from("X")),
+            ("context", Json::from("hover")),
+        ]),
+    );
+    assert_eq!(s(&body, "result"), "41");
+
     // Rejected implicit forms error over DAP...
     let response = client.command(
         "evaluate",

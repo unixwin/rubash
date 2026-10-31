@@ -928,10 +928,7 @@ impl Executor {
         // GNU execute_cmd.c:3267 REAP() runs once per loop iteration; an
         // empty table makes the scan plus cleanup below no-ops, so skip the
         // consults too. Any `&` spawn restores the full path next iteration.
-        let interactive = self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE");
+        let interactive = self.invocation_interactive();
         let job_control =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         if interactive && job_control {
@@ -1848,10 +1845,11 @@ impl Executor {
                 // not fatal, not interrupting.
                 Some(_) => continue,
                 None => {
-                    // rubash#2233: an untrapped SIGHUP interrupting the
-                    // wait is the hangup death, not the discard below
-                    // (see the boundary dispatch's untrapped branch).
-                    if self.note_untrapped_hangup(signal) {
+                    // rubash#2233/#2346: an untrapped terminating
+                    // signal GNU catches, interrupting the wait, is the
+                    // termsig death, not the discard below (see the
+                    // boundary dispatch's untrapped branch).
+                    if self.note_untrapped_termsig(signal) {
                         return Err(ExecuteError::ExitCode(128 + signal));
                     }
                     // rubash#1825: the same classification the boundary
@@ -1869,13 +1867,7 @@ impl Executor {
                     // re-queued on this path: this delivery IS the
                     // wait's verdict.
                     self.exit_code = 128 + signal;
-                    if self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        == Some("1")
-                    {
+                    if self.invocation_interactive() {
                         self.signal_discard_pending = true;
                     }
                     return Err(ExecuteError::ExitCode(128 + signal));

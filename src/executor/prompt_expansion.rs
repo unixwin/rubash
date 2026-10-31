@@ -676,10 +676,7 @@ impl Executor {
                 Some(option) => {
                     crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option)
                 }
-                None => self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_INTERACTIVE"),
+                None => self.invocation_interactive(),
             };
             if on {
                 flags.push(flag);

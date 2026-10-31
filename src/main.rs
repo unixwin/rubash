@@ -255,6 +255,13 @@ fn run_main() -> i32 {
 
 fn print_usage() {
     println!("Usage: rubash [-c command] [script]");
+    println!("       rubash --debug [--dap] [script] [args]");
+    println!();
+    println!("Debugger:");
+    println!("  --debug                Debug a script in the interactive CLI");
+    println!("                         (reads commands from the controlling terminal)");
+    println!("  --dap                  Serve the Debug Adapter Protocol on stdio");
+    println!("                         (`--debug --dap` is the editor launch form)");
     print_identity_disclosure();
 }
 
@@ -1496,8 +1503,17 @@ fn run_script_file_with_init(
     if bytes.is_none() && !script.contains('/') && !script.contains('\\') {
         if let Some(found) = executor.find_script_on_path(script) {
             if let Ok(found_bytes) = fs::read(&found) {
-                path_found_name =
-                    Some(executor.script_identity_display_path(&found.to_string_lossy()));
+                // rubash#2317: the recorded name is the search's own
+                // string — the as-written join of the winning PATH
+                // element (find_in_path_element's sh_makepath) — so a
+                // relative element records `sub/name`, not the anchored
+                // absolute form `found` carries for the open. Fall back
+                // to the found path's display form if the walk no
+                // longer resolves the name.
+                let recorded = executor
+                    .find_script_recorded_name(script)
+                    .unwrap_or_else(|| found.to_string_lossy().into_owned());
+                path_found_name = Some(executor.script_identity_display_path(&recorded));
                 path = found;
                 bytes = Some(found_bytes);
             }

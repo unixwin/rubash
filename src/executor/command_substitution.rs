@@ -131,6 +131,34 @@ pub(in crate::executor) fn normalize_comsub_body_statement_lines(
     layout_command_list(&mut ast.commands, seed, &mut boundaries, &mut line, false);
 }
 
+/// rubash#1184 f6 follow-up: does an extracted backquote body end with
+/// an ACTIVE backslash — a trailing backslash run of odd length, whose
+/// last `\` would quote the character that follows it in the body's own
+/// parse? The parity rule is exact for every body that reaches the
+/// body parse: a trailing run inside a still-open quote is an
+/// unclosed-construct verdict / parse-error path, never a body that
+/// executes, and outside quotes a backslash quotes the next character
+/// regardless of context (parse.y read_token_word).
+///
+/// The three backquote funnels append a `\n` terminator to the body
+/// before parsing it (issue #515: the terminator stands in for EOF in
+/// the body reader's line accounting). GNU never appends one:
+/// command_substitute hands the extracted string to parse_and_execute
+/// as-is (subst.c:7143, 7413), so a trailing `\` meets EOF there, and
+/// read_token_word's backslash branch keeps it as literal word data —
+/// only a peeked CHARACTER equal to '\n' makes the pair a line
+/// continuation (parse.y:5368-5396, the '\n' arm at 5379-5384). An
+/// appended terminator after an active trailing backslash therefore
+/// manufactures a continuation GNU never parses and silently eats the
+/// backslash (GNU tests/comsub2.sub's second printf line:
+/// `${qpath//"`printf '%s' \\`"/}` must strip the backslashes, and
+/// `` echo "[`echo a\\`]" `` must print `[a\]`). The funnels consult
+/// this before appending: the terminator is added only when it will
+/// act as a terminator, never when it would be quoted.
+pub(in crate::executor) fn backtick_body_ends_with_active_backslash(source: &str) -> bool {
+    source.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
+}
+
 /// Parse an inline-executed process-substitution body with GNU's line
 /// attribution (rubash#1024).
 ///
@@ -1465,15 +1493,58 @@ impl Executor {
             .unwrap_or(1);
         let alias_spliced = self.comsub_body_alias_splice_extracted(source);
         // Newline-terminated backtick body reader — see the run_ast path
-        // (issue #515).
+        // (issue #515). The terminator is withheld when the body ends
+        // with an active backslash: it would be quoted into a line
+        // continuation instead of terminating (see
+        // backtick_body_ends_with_active_backslash).
         let newline_terminated;
-        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
+        let source: &str = if self.backtick_body_diagnostic.get()
+            && !alias_spliced.ends_with('\n')
+            && !backtick_body_ends_with_active_backslash(&alias_spliced)
         {
             newline_terminated = format!("{alias_spliced}\n");
             &newline_terminated
         } else {
             &alias_spliced
         };
+        // rubash#1184 f6, layer 2: a backquote body that is itself
+        // unclosed — the verdict scan over the extracted body reports
+        // a pending matched-pair construct — is a BODY-parse error in
+        // GNU, not a lenient execution. The body is parsed as its own
+        // input (parse.y parse_comsub over the extracted text), so
+        // its EOF verdict is the one the reader would give the body
+        // standalone, reported through the `command substitution:`
+        // diagnostic family (subst.c:7413 command_substitute's
+        // parse_and_execute child): the substitution yields empty
+        // with status 2 and the enclosing command line runs on. The
+        // diagnostic line composes exactly like the reader path's
+        // rendering (script_driver): the construct's open line when
+        // the pair reports start_lineno (report_open), else the EOF
+        // line, offset by the body's start line in the enclosing
+        // script. Keyword pendings (`if` without `fi`) carry no
+        // matched-pair verdict and fall through to the body's own
+        // parser diagnostic below. Only old-style backquote bodies
+        // carry the diagnostic flag; `$(` bodies are not gated here.
+        if self.backtick_body_diagnostic.get() {
+            if let Some(v) =
+                crate::lexer::unclosed_input_close_char_posix(source, self.posix_mode_enabled())
+            {
+                let verdict_line = if v.report_open {
+                    v.open_line
+                } else {
+                    v.eof_line
+                };
+                let line = body_start_line + verdict_line - 1;
+                eprintln!(
+                    "{}unexpected EOF while looking for matching `{}'",
+                    self.comsub_eof_error_diagnostic(line),
+                    v.close
+                );
+                self.latch_command_substitution_parse_error();
+                self.last_command_substitution_status.set(Some(2));
+                return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
+            }
+        }
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),
@@ -1801,7 +1872,7 @@ impl Executor {
             exit_code: self.exit_code,
             parse_error_occurred: false,
             signal_discard_pending: false,
-            hangup_death_pending: false,
+            termsig_death_pending: None,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
@@ -1811,6 +1882,11 @@ impl Executor {
             // spawn-realized BASHPID level carries over unchanged.
             bashpid_origin_depth: self.bashpid_origin_depth,
             owns_signal_mailbox: false,
+            // rubash#2084: a fork copy holds no signal-policy share
+            // and journals no umask — it is not a root session.
+            owns_session_process_state: false,
+            birth_process_umask: self.birth_process_umask,
+            session_set_umask: None,
             is_process_exit_executor: false,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),

@@ -637,12 +637,7 @@ impl Executor {
                         write_result?;
                         let posix_mode =
                             self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                        let interactive = self
-                            .shell_state
-                            .env_vars
-                            .get("__RUBASH_INTERACTIVE")
-                            .map(String::as_str)
-                            == Some("1");
+                        let interactive = self.invocation_interactive();
                         // evalstring.c:588-595: the ONLY exit for a
                         // main-grammar parse error in the eval'd string —
                         // non-interactive + posix + bare eval/source (not
@@ -1594,48 +1589,63 @@ impl Executor {
         }
     }
 
-    /// rubash#2233: whether GNU has a termsig handler installed for
-    /// an untrapped SIGHUP in this shell — true for interactive
-    /// shells (sig.c:315-316) and for ANY shell with an EXIT trap
-    /// armed (sig.c: the terminating set is caught so the trap can
-    /// run before the signal death). Without either, SIGHUP stays at
-    /// SIG_DFL and the kernel kills the shell in place; no drain
-    /// ever sees the delivery.
-    fn hangup_termsig_armed(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_INTERACTIVE")
-            .map(String::as_str)
-            == Some("1")
-            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some()
+    /// rubash#2233, generalized by rubash#2346: whether GNU settles an
+    /// untrapped delivery of `signal` through termsig_handler
+    /// (sig.c:590) in this shell — the terminating set is caught when
+    /// an EXIT trap is armed (sig.c:226-229, the kill.rs exit_reroutes
+    /// set is exactly that catch set), and SIGHUP is additionally
+    /// caught in interactive shells (sig.c:315-316). Without a catch,
+    /// the signal stays at SIG_DFL and the kernel kills the shell in
+    /// place; no drain ever sees the delivery. The one exception is
+    /// SIGINT in an interactive shell: GNU routes it to the dedicated
+    /// sigint handler (sig.c sigint_sighandler), whose verdict is a
+    /// top-level DISCARD, never the termsig death — so it is never
+    /// armed here, EXIT trap or not.
+    /// rubash#2130: interactivity is judged by the typed invocation
+    /// shape, not the env carrier.
+    #[cfg(unix)]
+    fn termsig_death_armed(&self, signal: i32) -> bool {
+        let interactive = self.invocation_interactive();
+        if interactive && signal == libc::SIGINT as i32 {
+            return false;
+        }
+        if crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some()
+            && crate::builtins::kill::exit_reroutes(signal)
+        {
+            return true;
+        }
+        interactive && signal == libc::SIGHUP as i32
     }
 
-    /// rubash#2233: the untrapped-SIGHUP verdict shared by every
-    /// mailbox drain (boundary dispatch, blocked-wait observer, the
-    /// `wait` builtin's drain): where GNU catches the delivery
-    /// (hangup_termsig_armed) it is neither a discard (the shell does
-    /// NOT survive — termsig_handler hangs up the jobs and dies by
-    /// the signal) nor a plain exit (the death must be BY SIGHUP,
-    /// after the finish funnel runs the EXIT trap). Record the
-    /// hangup-death mark and unwind exit-class with 128+SIGHUP;
-    /// finish_shell consumes the mark. Returns true when the
-    /// delivery was a hangup (the caller then unwinds with the
-    /// returned error class), false otherwise.
+    /// rubash#2233, generalized by rubash#2346: the untrapped
+    /// terminating-signal verdict shared by every mailbox drain
+    /// (boundary dispatch, blocked-wait observer, the `wait` builtin's
+    /// drain): where GNU catches the delivery (termsig_death_armed) it
+    /// is neither a discard (the shell does NOT survive —
+    /// termsig_handler runs the EXIT trap and dies by the signal) nor
+    /// a plain exit (the death must be BY the signal, after the finish
+    /// funnel runs the EXIT trap). Record the termsig-death mark and
+    /// unwind exit-class with 128+sig; finish_shell consumes the mark.
+    /// Returns true when the delivery was a termsig death (the caller
+    /// then unwinds with the returned error class), false otherwise.
+    /// (Built for SIGHUP under #2233; the audit found TERM, INT and
+    /// USR1 taking the plain-exit path below the drains instead, so
+    /// the verdict now covers the whole caught terminating set.)
     #[cfg(unix)]
-    pub(crate) fn note_untrapped_hangup(&mut self, signal: i32) -> bool {
-        if signal != libc::SIGHUP as i32 || !self.hangup_termsig_armed() {
+    pub(crate) fn note_untrapped_termsig(&mut self, signal: i32) -> bool {
+        if !self.termsig_death_armed(signal) {
             return false;
         }
         self.exit_code = 128 + signal;
-        self.hangup_death_pending = true;
+        self.termsig_death_pending = Some(signal);
         true
     }
 
-    /// Non-unix shells have no SIGHUP to settle (the Windows console
-    /// hangup face is a different mechanism); the drains' untrapped
-    /// classification is unchanged there.
+    /// Non-unix shells have no signal death to settle (the Windows
+    /// console hangup face is a different mechanism); the drains'
+    /// untrapped classification is unchanged there.
     #[cfg(not(unix))]
-    pub(crate) fn note_untrapped_hangup(&mut self, _signal: i32) -> bool {
+    pub(crate) fn note_untrapped_termsig(&mut self, _signal: i32) -> bool {
         false
     }
 
@@ -1658,7 +1668,7 @@ impl Executor {
     /// The trap table keys by the canonical SIGNALS spelling
     /// ("SIGHUP"); a "HUP" lookup reads a phantom key and would
     /// misclassify a TRAPPED hangup as untrapped (the drains above
-    /// reach note_untrapped_hangup only after the canonical lookup
+    /// reach note_untrapped_termsig only after the canonical lookup
     /// found no action).
     #[cfg(unix)]
     fn classify_drained_hangup(&mut self, signals: Vec<i32>) -> (bool, bool) {
@@ -1671,7 +1681,7 @@ impl Executor {
                 if !found
                     && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "SIGHUP")
                         .is_none()
-                    && self.hangup_termsig_armed()
+                    && self.termsig_death_armed(signal)
                 {
                     found = true;
                     continue;
@@ -1684,14 +1694,14 @@ impl Executor {
         }
         if found {
             self.exit_code = 128 + libc::SIGHUP as i32;
-            self.hangup_death_pending = true;
+            self.termsig_death_pending = Some(libc::SIGHUP as i32);
         }
         (found, saw_sighup)
     }
 
     #[cfg(unix)]
     pub(crate) fn poll_untrapped_hangup(&mut self) -> bool {
-        if self.hangup_death_pending {
+        if self.hangup_death_pending() {
             return true;
         }
         for attempt in 0..2 {
@@ -1731,7 +1741,7 @@ impl Executor {
     /// termsig handler is synchronous with the delivery.
     #[cfg(unix)]
     pub(crate) fn poll_untrapped_hangup_settled(&mut self, budget: std::time::Duration) -> bool {
-        if self.hangup_death_pending {
+        if self.hangup_death_pending() {
             return true;
         }
         let deadline = std::time::Instant::now() + budget;
@@ -1842,14 +1852,21 @@ impl Executor {
                 if signal == crate::builtins::kill::SIGQUIT_NUMBER {
                     continue;
                 }
-                // rubash#2233: an untrapped SIGHUP delivered to an
-                // interactive shell is a hangup death (sig.c:590
+                // rubash#2233/#2346: an untrapped terminating signal
+                // GNU catches (an EXIT trap is armed, or an interactive
+                // SIGHUP) is a termsig death (sig.c:590
                 // termsig_handler): the session does NOT survive as
                 // the discard classification below would have it, and
-                // the finish funnel owes the jobs their hangup before
-                // the shell dies by the signal. The helper records the
+                // the finish funnel owes the EXIT trap (and, for an
+                // interactive hangup, the jobs' hangup) before the
+                // shell dies BY the signal. The helper records the
                 // mark and the exit status; unwind exit-class.
-                if self.note_untrapped_hangup(signal) {
+                if self.note_untrapped_termsig(signal) {
+                    // rubash#2236: record the death so an in-process
+                    // child's exit boundary can queue the parent's
+                    // job-death notice for it (a real child's wait(2)
+                    // status carries the same fact).
+                    crate::builtins::kill::note_adjudicated_signal_death(signal);
                     return Err(ExecuteError::ExitCode(128 + signal));
                 }
                 self.exit_code = 128 + signal;
@@ -1865,13 +1882,7 @@ impl Executor {
                 // an exit jump for the unit. Non-interactive shells keep
                 // the exit classification (the delivery is how a script
                 // shell dies at 128+sig, running any EXIT trap).
-                if self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    == Some("1")
-                {
+                if self.invocation_interactive() {
                     self.signal_discard_pending = true;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));
@@ -2078,11 +2089,12 @@ impl Executor {
                 // untrapped delivery while blocked is dropped, not fatal.
                 None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
                 None => {
-                    // rubash#2233: an untrapped SIGHUP while blocked is
-                    // the hangup death, not the interactive discard the
-                    // generic arm below records (see the boundary
+                    // rubash#2233/#2346: an untrapped terminating
+                    // signal GNU catches, delivered while blocked, is
+                    // the termsig death, not the interactive discard
+                    // the generic arm below records (see the boundary
                     // dispatch's untrapped branch).
-                    if self.note_untrapped_hangup(signal) {
+                    if self.note_untrapped_termsig(signal) {
                         return Err(ExecuteError::ExitCode(128 + signal));
                     }
                     // Record $? before the unwind so an interactive host that
@@ -2110,13 +2122,7 @@ impl Executor {
                     // classification reads), never the process env.
                     // Non-interactive sessions set nothing and keep the
                     // exit classification byte-identically.
-                    if self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        == Some("1")
-                    {
+                    if self.invocation_interactive() {
                         self.signal_discard_pending = true;
                     }
                     // rubash#2236: same death record as the boundary
@@ -2280,7 +2286,15 @@ impl Executor {
             let abort = pending.iter().copied().find(|&signal| {
                 #[cfg(unix)]
                 {
-                    crate::builtins::kill::kernel_handler_installed(signal)
+                    // rubash#2344: a stop-class signal never KILLS a
+                    // real foreground child (it stops it), so the death
+                    // model below cannot fire for one — the delivery
+                    // defers to the sleep's completion like any other
+                    // trapped arrival. Before the stop class joined
+                    // the managed set no such delivery could be pending
+                    // here at all; the exclusion keeps that invariant.
+                    !crate::builtins::kill::kernel_is_stop_class(signal)
+                        && crate::builtins::kill::kernel_handler_installed(signal)
                         // Kernel-caused (terminal ^C): the real child
                         // dies, rubash#1034. Kill(2)-caused: the real
                         // child dies only when the delivery addressed
@@ -5505,6 +5519,280 @@ impl Executor {
         self.restore_fd_var_close_snapshots(close_restore);
     }
 
+    /// rubash#2310: the same-exe script face's ordered input binding.
+    /// GNU applies a command's redirections as ONE ordered walk in
+    /// the child (redir.c:237 do_redirections; each dup copies the
+    /// descriptor as bound at its own position, redir.c:1138-1193,
+    /// dup2 at :1193). rubash splits that walk: the dynamic-fd
+    /// applier (apply_dynamic_fd_var_redirects) runs in the parent
+    /// ahead of dispatch and resolves every `{var}` dup against the
+    /// AMBIENT table, while the numbered input binds land only in
+    /// execute_direct_shell_script — so a `{var}` dup whose source
+    /// an earlier entry of the command's OWN list binds kept the
+    /// ambient copy (`rubash obs.sh {v}<&- 9<f9 {w}<&9` delivered
+    /// the parent's seed at the var's slot where GNU delivers f9),
+    /// and the `{var}` closes the applier recorded were never
+    /// performed for the in-process child at all. This binder
+    /// restores the walk order for the input side: it binds the
+    /// numbered inputs in segments split at each `{var}` entry and
+    /// applies that entry's child-visible effect
+    /// (apply_script_fd_var_entry) at its list position, so at each
+    /// such entry the fd table holds exactly the bindings GNU's
+    /// walk would have produced by then. The numbered output binds
+    /// keep their own pass afterwards, as before.
+    pub(in crate::executor) fn bind_script_numbered_inputs_and_fd_vars(
+        &mut self,
+        cmd: &CommandNode,
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) -> Result<Vec<super::command_input_scope::SavedNumberedFd>, ExecuteError> {
+        // The applier's deferred-close records belong to THIS
+        // command; the script face consumes them here (performed at
+        // their positions below). The spawn delivery prologue is the
+        // other consumer and never runs for a command the script
+        // face takes; unperformed records are dropped by
+        // undo_child_fd_var_redirects either way (see the
+        // fd_var_pending_closes field comment in mod.rs).
+        let mut pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
+        let mut performed_closes: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut saved: Vec<super::command_input_scope::SavedNumberedFd> = Vec::new();
+        let mut start = 0usize;
+        for position in 0..cmd.redirects.len() {
+            if cmd.redirects[position].fd_var.is_none() {
+                continue;
+            }
+            self.open_compound_numbered_input_redirects_in(cmd, start, position, &mut saved)?;
+            self.apply_script_fd_var_entry(
+                cmd,
+                position,
+                &mut pending_closes,
+                &mut performed_closes,
+                &saved,
+                heredoc_saved,
+            )?;
+            start = position + 1;
+        }
+        self.open_compound_numbered_input_redirects_in(
+            cmd,
+            start,
+            cmd.redirects.len(),
+            &mut saved,
+        )?;
+        Ok(saved)
+    }
+
+    /// rubash#2310: whether an entry of the command's OWN list
+    /// before `position` binds `fd` on the input side (a numbered
+    /// input/read-write/dup/close entry, or a numbered heredoc) —
+    /// i.e. whether the fd table's state for `fd` at that walk
+    /// position is governed by the list rather than the ambient
+    /// table. `{var}` entries do not count: the applier binds them
+    /// into the same table in list order, so its own resolution
+    /// already sees them at their positions.
+    fn script_own_input_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
+        if cmd
+            .heredoc_redirects
+            .iter()
+            .any(|entry| entry.fd == Some(fd))
+        {
+            return true;
+        }
+        cmd.redirects[..position].iter().any(|entry| {
+            entry.fd_var.is_none()
+                && entry.fd.unwrap_or(0) == fd
+                && matches!(
+                    entry.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::CloseInput
+                )
+        })
+    }
+
+    /// rubash#2310: perform one deferred `{var}` close for the
+    /// in-process script child, mirroring the spawn delivery
+    /// prologue's bookkeeping (apply_external_fd_delivery): snapshot
+    /// the slot into fd_var_close_restore so
+    /// undo_child_fd_var_redirects restores the parent's binding
+    /// once the command completes, then flag the slot closed for
+    /// the child's run (the endpoints stay in place; readers consult
+    /// the closed flag). The snapshot must carry the PRE-COMMAND
+    /// state of the slot: when an earlier own-list bind already
+    /// snapshotted the slot (the numbered-input accumulator, or the
+    /// heredoc saves), that snapshot is the pre-command state — the
+    /// current entry is the child's own binding, and replaying it
+    /// at undo time would leak the binding into the parent (the
+    /// undo's variable loop closes the descriptor the close entry's
+    /// variable names; only this replay puts the parent's binding
+    /// back). `performed` guards against performing one descriptor
+    /// twice (two entries can name the same fd), which would
+    /// snapshot the already-closed state.
+    fn perform_script_fd_var_close(
+        &mut self,
+        fd: u32,
+        performed: &mut std::collections::HashSet<u32>,
+        saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) {
+        if !performed.insert(fd) {
+            return;
+        }
+        let (entry, marker) = match saved_inputs.iter().find(|saved| saved.fd() == fd) {
+            Some(saved) => (
+                saved.saved_entry().cloned(),
+                saved.saved_fd_closed().cloned(),
+            ),
+            None => match heredoc_saved.iter().find(|(saved_fd, _)| *saved_fd == fd) {
+                Some((_, saved_entry)) => (
+                    saved_entry.clone(),
+                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                ),
+                None => (
+                    self.fd_table.entries.get(&fd).cloned(),
+                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                ),
+            },
+        };
+        self.fd_var_close_restore.push((fd, entry, marker));
+        if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
+            entry.closed = true;
+        }
+        self.shell_state
+            .env_vars
+            .insert(fd_closed_key(fd), "1".to_string());
+    }
+
+    /// rubash#2310: apply one `{var}` entry's child-visible effect
+    /// at its list position during the script face's segmented
+    /// input binding (bind_script_numbered_inputs_and_fd_vars). The
+    /// dynamic-fd applier already ran in the parent: it bound the
+    /// file kinds outright (an open installs the same binding at
+    /// any position), copied dup sources from the AMBIENT table,
+    /// and recorded closes instead of performing them. At the
+    /// entry's segment point the fd table holds the command's own
+    /// earlier binds, so:
+    /// - a dup whose source an earlier own-list entry binds is
+    ///   re-resolved against the table as of this position — the
+    ///   same own-list-first correction the spawn face's
+    ///   deliver_fd_var_dup makes at delivery time (GNU's one
+    ///   ordered walk, redir.c:237);
+    /// - a close is performed in the table (the spawn face
+    ///   performs the same records in its delivery prologue).
+    /// A dup whose source no earlier own-list entry binds keeps
+    /// the applier's ambient copy — already the at-position
+    /// binding.
+    fn apply_script_fd_var_entry(
+        &mut self,
+        cmd: &CommandNode,
+        position: usize,
+        pending_closes: &mut Vec<(usize, u32)>,
+        performed_closes: &mut std::collections::HashSet<u32>,
+        saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
+    ) -> Result<(), ExecuteError> {
+        let redirect = &cmd.redirects[position];
+        let Some(name) = redirect.fd_var.as_deref() else {
+            return Ok(());
+        };
+        match redirect.kind {
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                // GNU redir.c:1239-1248 (r_close_this +
+                // REDIR_VARASSIGN): the descriptor the variable
+                // holds at this position closes for the child.
+                if let Some(fd) = self.dynamic_fd_variable_value(name) {
+                    self.perform_script_fd_var_close(
+                        fd,
+                        performed_closes,
+                        saved_inputs,
+                        heredoc_saved,
+                    );
+                    if let Some(index) = pending_closes.iter().position(|pending| pending.1 == fd) {
+                        pending_closes.remove(index);
+                    }
+                }
+                Ok(())
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                let target = self.expand_redirect_target(redirect);
+                let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) else {
+                    return Ok(());
+                };
+                let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
+                if self.script_own_input_binding_before(cmd, position, source_fd) {
+                    match self.dynamic_fd_variable_value(name) {
+                        Some(var_fd) => {
+                            // Replace the applier's ambient copy
+                            // with a dup of the descriptor as bound
+                            // at this position — one shared
+                            // description, like dup2 (redir.c:1193).
+                            if write {
+                                self.copy_persistent_output_fd(var_fd, source_fd);
+                            } else {
+                                self.copy_persistent_input_fd(var_fd, source_fd);
+                            }
+                        }
+                        None => {
+                            // The applier bound nothing: it saw
+                            // only the ambient table, where the
+                            // source was closed, but an own-list
+                            // entry opened it. Bind now, at this
+                            // position — the allocator sees the
+                            // command's own binds, so the number
+                            // is the one GNU's walk assigns
+                            // (redir.c:1144-1150 F_DUPFD).
+                            if self.fd_table.is_open(source_fd) {
+                                let Some(fd) = self.allocate_dynamic_fd() else {
+                                    return Err(ExecuteError::IoError(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        self.fd_dup_error_payload(&target),
+                                    )));
+                                };
+                                if write {
+                                    self.copy_persistent_output_fd(fd, source_fd);
+                                } else {
+                                    self.copy_persistent_input_fd(fd, source_fd);
+                                }
+                                if !self.set_dynamic_fd_variable(name, fd) {
+                                    // GNU redir.c:1161-1166:
+                                    // redir_varassign failure closes
+                                    // the just-duplicated fd.
+                                    self.close_persistent_fd(fd)?;
+                                    return Err(ExecuteError::IoError(std::io::Error::new(
+                                        std::io::ErrorKind::Other,
+                                        format!("{name}: cannot assign fd to variable"),
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+                if move_source {
+                    // A move's source close takes effect at the
+                    // dup's position for the child. The applier
+                    // recorded it in fd_var_pending_closes when it
+                    // serviced the dup; when it could not (the
+                    // repair above just performed the dup), the
+                    // move applies from that binding instead.
+                    let recorded = pending_closes
+                        .iter()
+                        .position(|pending| pending.1 == source_fd)
+                        .map(|index| pending_closes.remove(index));
+                    if recorded.is_some() || self.dynamic_fd_variable_value(name).is_some() {
+                        self.perform_script_fd_var_close(
+                            source_fd,
+                            performed_closes,
+                            saved_inputs,
+                            heredoc_saved,
+                        );
+                    }
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
         &mut self,
         redirect: &Redirect,
@@ -6501,12 +6789,7 @@ impl Executor {
             // running, $? = 127).
             let execfail =
                 crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "execfail");
-            let interactive = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                == Some("1");
+            let interactive = self.invocation_interactive();
             if status == 0
                 || self.shell_state.subshell_depth.get() > 0
                 || (!interactive && !execfail)

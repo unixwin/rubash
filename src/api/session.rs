@@ -84,6 +84,76 @@ impl RunOptions {
     }
 }
 
+/// Where a session's process shape came from (rubash#2130): a
+/// fresh invocation, or an engine respawn — this process/session
+/// is a fork-shaped child (process substitution, coproc, async
+/// wrapper) continuing a parent session's post-startup state.
+/// GNU's forked children never run the startup chain
+/// (execute_cmd.c:1576 `execute_in_subshell`); a respawn-shaped
+/// session declares that here, as a construction fact, instead of
+/// the transport layer guessing from inherited environment marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RespawnSource {
+    /// A fresh invocation: the startup chain is this session's
+    /// own to run.
+    #[default]
+    Fresh,
+    /// An engine respawn continuing a parent session: the startup
+    /// chain must not run (the parent already ran it, and this
+    /// session inherits the post-startup state).
+    EngineChild,
+}
+
+/// The session's invocation shape, declared at construction time
+/// (rubash#2130). GNU decides startup behavior from the invocation
+/// itself — shell.c:540-549 derives `interactive_shell` from the
+/// process's own argv/tty shape and shell.c:497-503 sets
+/// `login_shell` only from `-l`/`--login` or the argv[0] `-` mark —
+/// and keeps both in process-local globals, never in the
+/// environment. The shape is therefore a construction parameter
+/// of the session, not a set of environment seeds: the builder
+/// applies it to the executor's typed invocation state after the
+/// environment seeds, so the structured declaration is
+/// authoritative for the fields it names. The
+/// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env-table
+/// entries continue to exist as the state's write-through
+/// projection for the faces that render them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct InvocationShape {
+    /// Interactive shell (the `-i` / no-operand-tty shape).
+    pub interactive: bool,
+    /// Login shell (the `-l` / argv[0] `-` shape).
+    pub login: bool,
+    /// Whether this session is an engine respawn.
+    pub respawn: RespawnSource,
+}
+
+impl InvocationShape {
+    /// The plain shape: non-interactive, non-login, fresh.
+    pub fn new() -> InvocationShape {
+        InvocationShape::default()
+    }
+
+    /// An interactive fresh session.
+    pub fn interactive() -> InvocationShape {
+        InvocationShape {
+            interactive: true,
+            ..InvocationShape::default()
+        }
+    }
+
+    /// An interactive login session (the desktop-login shape).
+    pub fn login_interactive() -> InvocationShape {
+        InvocationShape {
+            interactive: true,
+            login: true,
+            ..InvocationShape::default()
+        }
+    }
+}
+
 /// What a run produced (§5.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -215,6 +285,11 @@ pub struct Session {
     rc_override: Option<String>,
     argv0: Option<String>,
     interactive: bool,
+    /// The invocation shape this session was built with
+    /// (rubash#2130). The executor's typed invocation state is the
+    /// live copy engine decisions read; this is the as-built
+    /// record the host reads back.
+    shape: InvocationShape,
     /// Q5 made literal: whatever the executor's own auto traits
     /// do, a `Session` never becomes `Send`/`Sync` by accident.
     _single_thread: PhantomData<Rc<()>>,
@@ -638,6 +713,15 @@ impl Session {
     }
 
     /// The session's current working directory.
+    /// The invocation shape this session was built with
+    /// (rubash#2130), as declared through
+    /// [`SessionBuilder::invocation_shape`] /
+    /// [`SessionBuilder::login_shell`] /
+    /// [`SessionBuilder::interactive`].
+    pub fn invocation_shape(&self) -> InvocationShape {
+        self.shape
+    }
+
     pub fn cwd(&self) -> &Path {
         self.executor.session_cwd()
     }
@@ -721,6 +805,19 @@ impl Session {
         &mut self,
         class: StartupClass,
     ) -> Result<RunOutcome, SessionError> {
+        // rubash#2130: a session constructed as an engine respawn
+        // inherits its parent's post-startup state and runs no
+        // startup chain — the API form of the CLI respawn door in
+        // main.rs's run_startup_files (execute_cmd.c:1576: a
+        // forked subshell never re-sources). The declared shape
+        // decides, not an inherited environment mark.
+        if self.shape.respawn == RespawnSource::EngineChild {
+            return Ok(RunOutcome {
+                status: self.executor.last_exit_code(),
+                flow: Flow::Completed,
+                diagnostics: Vec::new(),
+            });
+        }
         let files = self.startup_files_for(class);
         let mut status = self.executor.last_exit_code();
         for file in &files {
@@ -1009,6 +1106,14 @@ pub struct SessionBuilder {
     process_exit_role: bool,
     login_shell: bool,
     interactive: bool,
+    /// The declared invocation shape (rubash#2130); `login_shell`
+    /// / `interactive` above write its fields, and `build()`
+    /// applies it to the executor after the environment seeds.
+    /// `shape_declared` records whether the host used the
+    /// structured face at all — undeclared keeps the legacy
+    /// per-flag behavior bit for bit.
+    shape: InvocationShape,
+    shape_declared: bool,
     inherit_process_stdin: bool,
     shell_root: Option<PathBuf>,
     winuxcmd_path: Option<PathBuf>,
@@ -1137,6 +1242,8 @@ impl SessionBuilder {
     /// builder-time form of the session-configuration family).
     pub fn login_shell(mut self, login: bool) -> SessionBuilder {
         self.login_shell = login;
+        self.shape.login = login;
+        self.shape_declared = true;
         self
     }
 
@@ -1144,6 +1251,28 @@ impl SessionBuilder {
     /// [`Session::close`] passes to the finish machinery.
     pub fn interactive(mut self, interactive: bool) -> SessionBuilder {
         self.interactive = interactive;
+        self.shape.interactive = interactive;
+        self.shape_declared = true;
+        self
+    }
+
+    /// Declare the session's invocation shape as one structured
+    /// construction parameter (rubash#2130): interactivity, login
+    /// shape, and respawn source as construction facts, applied
+    /// to the executor's typed invocation state at `build()` —
+    /// after the environment seeds, so the declaration, not a
+    /// stray seed of the `__RUBASH_INTERACTIVE` /
+    /// `__RUBASH_LOGIN_SHELL` carriers, is authoritative. This
+    /// supersedes the per-flag [`SessionBuilder::login_shell`] /
+    /// [`SessionBuilder::interactive`] methods (it also sets
+    /// them, so `close` semantics and
+    /// [`Session::invocation_shape`] read back the same shape);
+    /// hosts should use one face or the other, not mix them.
+    pub fn invocation_shape(mut self, shape: InvocationShape) -> SessionBuilder {
+        self.shape = shape;
+        self.shape_declared = true;
+        self.login_shell = shape.login;
+        self.interactive = shape.interactive;
         self
     }
 
@@ -1212,6 +1341,12 @@ impl SessionBuilder {
         if self.login_shell {
             executor.mark_login_shell();
         }
+        if self.shape_declared {
+            // rubash#2130: the structured declaration is applied
+            // last — it is authoritative for the executor's typed
+            // invocation state and its projection carriers.
+            executor.set_invocation_shape(self.shape.interactive, self.shape.login);
+        }
         if let Some(provider) = self.history_provider {
             executor.set_history_provider(provider);
         }
@@ -1249,6 +1384,7 @@ impl SessionBuilder {
             rc_override: self.rc_override,
             argv0: self.argv0,
             interactive: self.interactive,
+            shape: self.shape,
             _single_thread: PhantomData,
         })
     }

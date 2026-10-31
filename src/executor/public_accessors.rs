@@ -171,11 +171,7 @@ impl Executor {
     /// verification covered only the stdin-stream case). Every
     /// `__RUBASH_PARSE_SOURCE__' echo site must consult this gate.
     pub(in crate::executor) fn offending_line_echo_enabled(&self) -> bool {
-        !self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-            || self.in_source_context()
+        !self.invocation_interactive() || self.in_source_context()
     }
 
     /// GNU error.c:324-327 (parser_error): when `exit_immediately_on_error`
@@ -345,16 +341,50 @@ impl Executor {
         std::mem::take(&mut self.signal_discard_pending)
     }
 
-    /// rubash#2233: non-consuming read of the hangup-death mark (see
-    /// Executor::hangup_death_pending) — the interactive reader peeks
+    /// rubash#2233: non-consuming read of the hangup-death mark — the
+    /// SIGHUP view of the generalized termsig-death mark (see
+    /// Executor::termsig_death_pending). The interactive reader peeks
     /// to break its loop; finish_shell is the sole consumer.
     pub fn hangup_death_pending(&self) -> bool {
-        self.hangup_death_pending
+        #[cfg(unix)]
+        {
+            self.termsig_death_pending == Some(libc::SIGHUP as i32)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
-    /// rubash#2233: take-style read of the hangup-death mark.
+    /// rubash#2233: take-style read of the hangup-death mark. Only a
+    /// SIGHUP mark is taken; a pending death by another signal is a
+    /// different funnel's business and is left in place.
     pub fn take_hangup_death_pending(&mut self) -> bool {
-        std::mem::take(&mut self.hangup_death_pending)
+        #[cfg(unix)]
+        {
+            if self.termsig_death_pending == Some(libc::SIGHUP as i32) {
+                self.termsig_death_pending = None;
+                return true;
+            }
+            false
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// rubash#2346: non-consuming read of the termsig-death mark (see
+    /// Executor::termsig_death_pending) — the signal the finish funnel
+    /// owes a kill_shell death by, if any.
+    pub(crate) fn termsig_death_pending(&self) -> Option<i32> {
+        self.termsig_death_pending
+    }
+
+    /// rubash#2346: take-style read of the termsig-death mark;
+    /// finish_shell is the sole consumer.
+    pub(crate) fn take_termsig_death_pending(&mut self) -> Option<i32> {
+        self.termsig_death_pending.take()
     }
 
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
@@ -806,6 +836,21 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert(name.to_string(), value.clone());
+        // rubash#2130: the invocation-shape carriers write through
+        // to the typed invocation state, so every host seed that
+        // worked through this funnel keeps deciding the shape —
+        // while the table entry alone (a script assignment writes
+        // the store through the assignment machinery, not here)
+        // no longer does. See shell/state.rs on the fields.
+        match name {
+            "__RUBASH_INTERACTIVE" => {
+                self.shell_state.invocation_interactive = value == "1";
+            }
+            "__RUBASH_LOGIN_SHELL" => {
+                self.shell_state.invocation_login = value == "1";
+            }
+            _ => {}
+        }
         if is_valid_process_env(name, &value) {
             // G-03: a host-directed write is this lineage's mirror write
             // and must be journaled exactly like remove_env's — set_env
@@ -915,6 +960,13 @@ impl Executor {
 
     pub fn remove_env(&mut self, name: &str) {
         self.shell_state.env_vars.remove(name);
+        // rubash#2130: write-through counterpart of set_env's —
+        // removing a shape carrier clears the typed state.
+        match name {
+            "__RUBASH_INTERACTIVE" => self.shell_state.invocation_interactive = false,
+            "__RUBASH_LOGIN_SHELL" => self.shell_state.invocation_login = false,
+            _ => {}
+        }
         // G-03: a host-directed removal is still this lineage's
         // mirror write — journal it so Drop treats it like any other.
         let _journal = push_env_journal(&self.env_write_journal);
@@ -1176,6 +1228,16 @@ impl Executor {
         crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
     }
 
+    /// rubash#2317: the recorded name for the find_script_on_path search —
+    /// the as-written `<elem>/<name>` join of the winning PATH element
+    /// (findcmd.c:623 via sh_makepath), which is what GNU's
+    /// open_shell_script records via push_source after replacing filename
+    /// with the find (shell.c:1595-1597, shell.c:1640). The anchored path
+    /// find_script_on_path returns stays the open/spawn form.
+    pub fn find_script_recorded_name(&self, name: &str) -> Option<String> {
+        crate::executor::path::find_user_command_as_written(name, &self.shell_state.env_vars)
+    }
+
     pub fn is_shell_option(&self, name: &str) -> bool {
         crate::builtins::set::is_shell_option(name)
     }
@@ -1198,6 +1260,59 @@ impl Executor {
     pub fn mark_login_shell(&mut self) {
         self.set_env("__RUBASH_LOGIN_SHELL", "1");
         self.set_shopt_option("login_shell", true);
+    }
+
+    /// rubash#2130: the session's invocation shape as typed state
+    /// (shell.c:540-549 `interactive_shell`, shell.c:497-503
+    /// `login_shell` — process-local facts in GNU, never
+    /// environment). Engine decisions read these; the
+    /// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` env-table
+    /// entries are the write-through projection (see
+    /// `shell::ShellState` on the fields).
+    pub fn invocation_interactive(&self) -> bool {
+        self.shell_state.invocation_interactive
+    }
+
+    /// The login half of [`Executor::invocation_interactive`].
+    pub fn invocation_login(&self) -> bool {
+        self.shell_state.invocation_login
+    }
+
+    /// Declare the invocation shape directly (the funnel
+    /// `SessionBuilder::invocation_shape` applies at build time):
+    /// writes the typed state AND its projection carriers in one
+    /// step, so the pair cannot split. `mark_login_shell` remains
+    /// the login funnel for callers that also need the shopt sync;
+    /// this one is the shape-only form.
+    pub fn set_invocation_shape(&mut self, interactive: bool, login: bool) {
+        if interactive {
+            self.set_env("__RUBASH_INTERACTIVE", "1");
+        } else {
+            self.remove_env("__RUBASH_INTERACTIVE");
+        }
+        if login {
+            self.set_env("__RUBASH_LOGIN_SHELL", "1");
+        } else {
+            self.remove_env("__RUBASH_LOGIN_SHELL");
+        }
+    }
+
+    /// Re-derive the typed invocation state from the env table's
+    /// projection carriers (whole-table swaps — `restore_shell_env`
+    /// — replace the carriers without passing the funnels).
+    pub(in crate::executor) fn sync_invocation_state_from_table(&mut self) {
+        self.shell_state.invocation_interactive = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_INTERACTIVE")
+            .map(String::as_str)
+            == Some("1");
+        self.shell_state.invocation_login = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_LOGIN_SHELL")
+            .map(String::as_str)
+            == Some("1");
     }
 
     pub(in crate::executor) fn restore_shell_env(
@@ -1232,6 +1347,10 @@ impl Executor {
         }
 
         self.shell_state.env_vars = saved_env;
+        // rubash#2130: the swap replaced the projection carriers
+        // wholesale — re-derive the typed invocation state from the
+        // restored table so the pair cannot split across a restore.
+        self.sync_invocation_state_from_table();
     }
 
     /// GNU execute_cmd.c:1576 execute_in_subshell: a `( )` subshell's parent
@@ -2104,11 +2223,7 @@ impl Executor {
         // Interactive mode (shell reading input from a terminal) omits the
         // line segment entirely (error.c:88-120 get_name_for_error returns
         // only base_pathname(shell_name), no line number).
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if self.invocation_interactive() {
             // Interactive mode: report only the shell name, no line segment.
             // GNU error.c:88-120 (get_name_for_error) for interactive shells
             // returns base_pathname(shell_name) with no line number.
@@ -2194,11 +2309,7 @@ impl Executor {
     /// Builtin errors (builtin_error_prolog, no gate) keep
     /// diagnostic_prefix().
     pub fn error_prefix(&self) -> String {
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if self.invocation_interactive() {
             // Interactive: no line segment in either family (error.c:80).
             return format!(
                 "{}: ",
@@ -2264,12 +2375,7 @@ impl Executor {
             if is_c && !self.in_source_context() {
                 return format!("{script}: -c: line {line}: ");
             }
-            if self.in_source_context()
-                && self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_INTERACTIVE")
-            {
+            if self.in_source_context() && self.invocation_interactive() {
                 // Interactive + sourced file: shell name prolog plus the
                 // file as input name (see parser_diagnostic_prefix_for_line).
                 return format!(
@@ -2311,12 +2417,7 @@ impl Executor {
             if is_c && !self.in_source_context() {
                 return self.gnu_error_line(&format!("{script}: -c"), line);
             }
-            if self.in_source_context()
-                && self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_INTERACTIVE")
-            {
+            if self.in_source_context() && self.invocation_interactive() {
                 return self.gnu_error_line(
                     &format!(
                         "{}: {script}",
@@ -2349,11 +2450,7 @@ impl Executor {
     /// this shape (verified vs WSL GNU 5.3.0: `script: redirection error:
     /// cannot duplicate fd: Bad file descriptor`).
     pub(in crate::executor) fn script_name_prefix(&self) -> String {
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if self.invocation_interactive() {
             return format!(
                 "{}: ",
                 Self::interactive_shell_basename(&self.shell_state.env_vars)
@@ -2369,11 +2466,7 @@ impl Executor {
     }
 
     pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if self.invocation_interactive() {
             // parser_error's interactive branch prints only the shell name
             // (base_pathname(shell_name), same rule as get_name_for_error).
             return format!(
@@ -2393,11 +2486,7 @@ impl Executor {
     /// GNU error.c:300-316 parser_error gated twin of comsub_eof_diagnostic:
     /// `script: command substitution:2: ` under gnu_errfmt.
     pub(in crate::executor) fn comsub_eof_error_diagnostic(&self, line: usize) -> String {
-        if self
-            .shell_state
-            .env_vars
-            .contains_key("__RUBASH_INTERACTIVE")
-        {
+        if self.invocation_interactive() {
             return format!(
                 "{}: ",
                 Self::interactive_shell_basename(&self.shell_state.env_vars)
@@ -2452,12 +2541,7 @@ impl Executor {
             if is_c && !self.in_source_context() {
                 return format!("{script}: -c: line {line}: ");
             }
-            if self.in_source_context()
-                && self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_INTERACTIVE")
-            {
+            if self.in_source_context() && self.invocation_interactive() {
                 // GNU error.c parser_error in an interactive shell: the
                 // prolog name is the shell name (get_name_for_error) and
                 // the sourced file rides as yy_input_name —
@@ -2509,12 +2593,7 @@ impl Executor {
             if is_c && !self.in_source_context() {
                 return self.gnu_error_line(&format!("{script}: -c"), line);
             }
-            if self.in_source_context()
-                && self
-                    .shell_state
-                    .env_vars
-                    .contains_key("__RUBASH_INTERACTIVE")
-            {
+            if self.in_source_context() && self.invocation_interactive() {
                 return self.gnu_error_line(
                     &format!(
                         "{}: {script}",
@@ -2713,6 +2792,26 @@ impl Drop for Executor {
         // environment afterward — so the restore is skipped there.
         if self.is_process_exit_executor {
             return;
+        }
+        // rubash#2084: a root executor that held a signal-policy share
+        // releases it here: the last root of the era restores the
+        // host's pre-session kernel dispositions. The process umask
+        // returns to this executor's birth value when the process
+        // still carries this session's own setting — a later writer
+        // (host or sibling session) is never overridden, the same
+        // conditional discipline as the env restore below.
+        if self.owns_session_process_state {
+            crate::builtins::kill::session_dispositions_release();
+            if let (Some(birth), Some(set)) = (self.birth_process_umask, self.session_set_umask) {
+                if set != birth && crate::builtins::umask::snapshot_process_umask() == Some(set) {
+                    #[cfg(unix)]
+                    // SAFETY: restoring a mode mask this process read
+                    // at this executor's birth.
+                    unsafe {
+                        libc::umask(birth as libc::mode_t);
+                    }
+                }
+            }
         }
         // G-03: the restore is scoped to this executor lineage's own
         // process-env mirror writes (env_write_journal). The pre-G-03

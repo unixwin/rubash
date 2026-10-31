@@ -242,6 +242,11 @@ fn c_external_command_reports_write_error_for_closed_stdout() {
     // path (GNU findcmd.c records the found path; verified against GNU
     // bash 5.3.20 on both the -c and program faces, 2026-10-31). The
     // earlier bare-name expectation pinned the pre-#2302 deviation.
+    // rubash#2317: for a RELATIVE PATH element the recorded form is the
+    // as-written `<elem>/<name>` join (GNU `sh_makepath`, findcmd.c via
+    // find_user_command_in_path), not the cwd-anchored absolute — the
+    // `target/...` bin dir is deliberately relative, so the prefix is
+    // `script_path` exactly as constructed.
     // Windows keeps the shell-spawn path, where the parent reports the
     // command-level write error as before.
     #[cfg(unix)]
@@ -249,15 +254,7 @@ fn c_external_command_reports_write_error_for_closed_stdout() {
         stream_text(&output.stderr),
         format!(
             "{}: line 1: echo: write error: Bad file descriptor\n",
-            if script_path.is_absolute() {
-                script_path.display().to_string()
-            } else {
-                std::env::current_dir()
-                    .unwrap()
-                    .join(&script_path)
-                    .display()
-                    .to_string()
-            }
+            script_path.display()
         )
     );
     #[cfg(not(unix))]

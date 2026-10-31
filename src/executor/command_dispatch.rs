@@ -532,12 +532,7 @@ impl Executor {
             && self.command_builtin_depth == 0
             && self.errexit_is_active()
             && self.posix_mode_enabled()
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                != Some("1")
+            && !self.invocation_interactive()
         {
             // rubash#2117: GNU's order in execute_command_internal is
             // the ERR-trap call (execute_cmd.c:993-1001) BEFORE the
