@@ -108,6 +108,7 @@ pub mod profiler;
 // executor uses for $PWD.
 pub use path::shell_pwd_display_path;
 mod job_builtins;
+mod job_control_wait;
 mod limit_builtins;
 mod lookup_paths;
 mod loop_select;
