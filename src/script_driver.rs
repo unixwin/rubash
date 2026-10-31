@@ -3329,6 +3329,73 @@ fn report_heredoc_overflow_fatal(
     2
 }
 
+/// rubash#2332: re-seed one reader unit's node lines from the
+/// respawn root-body span transport (see
+/// docs/design/respawn-root-line-spans.md). The unit's commands are
+/// walked in order: the stamped prelude-definition count is skipped
+/// first (those commands re-seed their bodies through the
+/// __RUBASH_FORK_FN_SPANS path instead), then the root spans apply —
+/// in one count-gated `apply_command_line_spans` call when this unit
+/// holds exactly the remaining body, or per top-level command from
+/// the cursor for a grouped unit. Any structural overrun drops the
+/// transport unapplied from that point on: a re-render that diverged
+/// from the parent's tree keeps the child's own parse lines rather
+/// than misaligned spans, exactly the #2202 safety posture.
+fn apply_respawn_root_line_spans(executor: &mut Executor, commands: &mut [CommandNode]) {
+    let state = &mut executor.shell_state;
+    let Some(spans) = state.respawn_root_line_spans.take() else {
+        return;
+    };
+    let total = spans.len();
+    let mut cursor = state.respawn_root_span_cursor;
+    let mut skip = state.respawn_root_span_skip;
+    let mut idx = 0;
+    while idx < commands.len() && skip > 0 {
+        skip -= 1;
+        idx += 1;
+    }
+    state.respawn_root_span_skip = skip;
+    // Retain the transport for the next reader unit unless it is
+    // fully consumed here or found misaligned.
+    let mut retain = true;
+    if idx < commands.len() && cursor < total {
+        let mut rest_spans = Vec::new();
+        crate::parser::collect_command_line_spans(&commands[idx..], &mut rest_spans);
+        let rest_count = rest_spans.len();
+        if cursor + rest_count == total {
+            if crate::parser::apply_command_line_spans(&mut commands[idx..], &spans[cursor..]) {
+                cursor = total;
+            } else {
+                retain = false;
+            }
+        } else if cursor + rest_count < total {
+            for command in commands[idx..].iter_mut() {
+                let mut own_spans = Vec::new();
+                crate::parser::collect_command_line_spans(
+                    std::slice::from_ref(&*command),
+                    &mut own_spans,
+                );
+                let count = own_spans.len();
+                if cursor + count > total {
+                    retain = false;
+                    break;
+                }
+                crate::parser::apply_command_line_spans(
+                    std::slice::from_mut(command),
+                    &spans[cursor..cursor + count],
+                );
+                cursor += count;
+            }
+        } else {
+            retain = false;
+        }
+    }
+    state.respawn_root_span_cursor = cursor;
+    if retain && cursor < total {
+        state.respawn_root_line_spans = Some(spans);
+    }
+}
+
 fn run_source_impl(
     executor: &mut Executor,
     input: &str,
@@ -3338,6 +3405,41 @@ fn run_source_impl(
     diagnostic_text: Option<&str>,
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
+) -> i32 {
+    // rubash#2332: mark the call active for its whole duration so the
+    // root-span re-seed inside run_source_impl_inner fires only for
+    // the outermost reader unit — nested runs (a sourced file or eval
+    // inside this unit's execution, the unclosed-diagnostics prefix
+    // runs below) must never consume the root transport. The prior
+    // value is restored on exit; this wrapper is the single exit.
+    let source_run_prior = executor.source_run_active.get();
+    executor.source_run_active.set(true);
+    let status = run_source_impl_inner(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        pre_lexed,
+        suppress_unclosed_diagnostic,
+        !source_run_prior,
+    );
+    executor.source_run_active.set(source_run_prior);
+    status
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_source_impl_inner(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Option<Vec<Token>>,
+    suppress_unclosed_diagnostic: bool,
+    root_span_outermost: bool,
 ) -> i32 {
     // WP-8 (debugger design 5.1): take the file identity the
     // calling group driver set for this unit, if any (see
@@ -3799,6 +3901,15 @@ fn run_source_impl(
     // units): nothing registers.
     if let Some(file) = &syntax_unit_file {
         executor.debugger_register_syntax(file, &ast);
+    }
+
+    // rubash#2332: a respawned child running its transported `-c`
+    // text (main.rs arms the run) re-seeds this unit's node lines
+    // from the root-body span transport — the patch point both -c
+    // drivers share. Outermost units only: nested runs inside this
+    // unit's execution keep their own lines.
+    if root_span_outermost && executor.root_line_span_run_armed.get() {
+        apply_respawn_root_line_spans(executor, &mut ast.commands);
     }
 
     let saved_final_frame = executor.exec_replace_final_frame.get();

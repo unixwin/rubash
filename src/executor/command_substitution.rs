@@ -1934,6 +1934,8 @@ impl Executor {
             command_string_final_pending: Cell::new(false),
             exec_replace_final_frame: Cell::new(false),
             exec_replace_dispatch_stamp: Cell::new(0),
+            root_line_span_run_armed: Cell::new(false),
+            source_run_active: Cell::new(false),
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),

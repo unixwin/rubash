@@ -104,9 +104,19 @@ pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_
 pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
 pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
 pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_SPANS";
+/// rubash#2332: source-line spans of the respawned child's ROOT body —
+/// the inline TEXT body that becomes the child's main `-c` source
+/// (an async `( list ) &` / coproc compound body), sibling to the
+/// per-function carrier above. Element 0 of the value is the count of
+/// prelude function-definition commands ahead of the body in the
+/// child's source (0 for coproc children); element 1 is the body's
+/// comma-joined `line.end_line.logical_line` triples in
+/// collect_command_line_spans order. See
+/// docs/design/respawn-root-line-spans.md.
+pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_ROOT_SPANS";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 10] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -117,6 +127,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 10] = [
     FORK_MAIN_FRAME_TRANSPORT,
     FORK_PIPESTATUS_TRANSPORT,
     FORK_FN_SPANS_TRANSPORT,
+    FORK_ROOT_SPANS_TRANSPORT,
 ];
 
 impl Executor {
@@ -231,6 +242,64 @@ impl Executor {
     }
 }
 
+/// rubash#2332: one span slot of the FN/ROOT span codecs — `0`
+/// encodes None, any other value is the line itself.
+fn parse_span_slot(text: &str) -> Option<Option<usize>> {
+    match text.parse::<usize>() {
+        Ok(0) => Some(None),
+        Ok(line) => Some(Some(line)),
+        Err(_) => None,
+    }
+}
+
+/// rubash#2332: parse a comma-joined `line.end_line.logical_line`
+/// triple list (the encoding both span carriers share). Returns None
+/// when any triple is malformed — a span that cannot be parsed must
+/// never reach a re-seed. The empty string is an empty vector.
+fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
+    let mut spans = Vec::new();
+    if !text.is_empty() {
+        for triple in text.split(',') {
+            let fields: Vec<&str> = triple.split('.').collect();
+            if fields.len() != 3 {
+                return None;
+            }
+            match (
+                parse_span_slot(fields[0]),
+                parse_span_slot(fields[1]),
+                parse_span_slot(fields[2]),
+            ) {
+                (Some(line), Some(end_line), Some(logical_line)) => {
+                    spans.push(crate::parser::CommandLineSpan {
+                        line,
+                        end_line,
+                        logical_line,
+                    });
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some(spans)
+}
+
+/// rubash#2332: format spans in the triple-list encoding
+/// parse_line_span_triples reads (None renders as 0).
+fn format_line_span_triples(spans: &[crate::parser::CommandLineSpan]) -> String {
+    spans
+        .iter()
+        .map(|span| {
+            format!(
+                "{}.{}.{}",
+                span.line.unwrap_or(0),
+                span.end_line.unwrap_or(0),
+                span.logical_line.unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// rubash#2202: decode a __RUBASH_FORK_FN_SPANS stamp value into the
 /// per-function span map the child's definition path consumes
 /// (init.rs). Malformed entries are dropped individually — a span
@@ -238,51 +307,43 @@ impl Executor {
 pub(in crate::executor) fn decode_function_line_spans(
     value: &str,
 ) -> std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>> {
-    fn parse_slot(text: &str) -> Option<Option<usize>> {
-        match text.parse::<usize>() {
-            Ok(0) => Some(None),
-            Ok(line) => Some(Some(line)),
-            Err(_) => None,
-        }
-    }
     let mut map = std::collections::HashMap::new();
     for entry in array_values(value) {
         let Some((name, nodes)) = entry.split_once('=') else {
             continue;
         };
-        let mut spans = Vec::new();
-        let mut valid = true;
-        if !nodes.is_empty() {
-            for triple in nodes.split(',') {
-                let fields: Vec<&str> = triple.split('.').collect();
-                if fields.len() != 3 {
-                    valid = false;
-                    break;
-                }
-                match (
-                    parse_slot(fields[0]),
-                    parse_slot(fields[1]),
-                    parse_slot(fields[2]),
-                ) {
-                    (Some(line), Some(end_line), Some(logical_line)) => {
-                        spans.push(crate::parser::CommandLineSpan {
-                            line,
-                            end_line,
-                            logical_line,
-                        });
-                    }
-                    _ => {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if valid {
+        if let Some(spans) = parse_line_span_triples(nodes) {
             map.insert(name.to_string(), spans);
         }
     }
     map
+}
+
+/// rubash#2332: encode a __RUBASH_FORK_ROOT_SPANS stamp value —
+/// element 0 is the count of prelude function-definition commands
+/// ahead of the body in the child's `-c` source, element 1 the root
+/// body's span triples.
+pub(in crate::executor) fn encode_root_line_spans(
+    prelude_defs: usize,
+    spans: &[crate::parser::CommandLineSpan],
+) -> String {
+    format_indexed_array_values(vec![
+        prelude_defs.to_string(),
+        format_line_span_triples(spans),
+    ])
+}
+
+/// rubash#2332: decode a __RUBASH_FORK_ROOT_SPANS stamp value into
+/// (prelude definition count, root span vector). Any malformation
+/// drops the whole stamp: the root body is one unit, and a partially
+/// decoded span vector would misalign every command after the gap.
+pub(in crate::executor) fn decode_root_line_spans(
+    value: &str,
+) -> Option<(usize, Vec<crate::parser::CommandLineSpan>)> {
+    let values = array_values(value);
+    let prelude_defs: usize = values.first()?.parse().ok()?;
+    let spans = parse_line_span_triples(values.get(1)?)?;
+    Some((prelude_defs, spans))
 }
 
 /// The parent-source line of the first command that will execute from
@@ -1462,6 +1523,15 @@ impl Executor {
         let strip_parens = background_paren_absorbable(&background_command.command, &consumed);
         let mut child_command = background_command.command.clone();
         strip_consumed_redirects(&mut child_command, &consumed);
+        // rubash#2332: the root body's line spans ride along with the
+        // source built here — collect them over exactly the nodes each
+        // form renders (the absorbed inner list, or the single
+        // transported command after redirect stripping), so the
+        // child's re-parse can be re-seeded onto the parent's parse
+        // lines (see docs/design/respawn-root-line-spans.md). The
+        // prelude count is background_function_prelude's own
+        // definition count, taken over the same map and filter.
+        let mut root_spans = Vec::new();
         let source = if strip_parens {
             // SAFETY: strip gate guarantees subshell_command.is_some().
             let inner = child_command
@@ -1469,10 +1539,27 @@ impl Executor {
                 .as_ref()
                 .map(|subshell| subshell.body.clone())
                 .unwrap_or_default();
+            crate::parser::collect_command_line_spans(&inner, &mut root_spans);
             self.background_command_source_for_body(&inner)
         } else {
+            crate::parser::collect_command_line_spans(
+                std::slice::from_ref(&child_command),
+                &mut root_spans,
+            );
             self.background_command_source(&child_command)
         };
+        if !root_spans.is_empty() {
+            let prelude_defs = self
+                .shell_state
+                .functions
+                .keys()
+                .filter(|name| is_exportable_function_name(name))
+                .count();
+            env_map.insert(
+                FORK_ROOT_SPANS_TRANSPORT.to_string(),
+                encode_root_line_spans(prelude_defs, &root_spans),
+            );
+        }
         env_map.insert(
             "__RUBASH_BG_DEPTH".to_string(),
             (if strip_parens || background_command.command.subshell_command.is_none() {
@@ -4665,6 +4752,23 @@ impl Executor {
             // fork-shaped respawn (see fork_context_transport_entries).
             for (key, value) in self.fork_context_transport_entries() {
                 child.env(key, value);
+            }
+            // rubash#2332: the compound body's line spans, collected
+            // over the same list bash_command_sequence_text rendered
+            // into the child's `-c` source above; prelude count 0 —
+            // coproc children take their functions via the BASH_FUNC
+            // entries, not prelude text. Simple-command coprocs have
+            // no body statements to re-seed (the command IS the body
+            // and keeps the node-line seed above).
+            if let Some(body) = &coproc_cmd.body {
+                let mut root_spans = Vec::new();
+                crate::parser::collect_command_line_spans(body, &mut root_spans);
+                if !root_spans.is_empty() {
+                    child.env(
+                        FORK_ROOT_SPANS_TRANSPORT,
+                        encode_root_line_spans(0, &root_spans),
+                    );
+                }
             }
             // rubash#2058: this site never stamped the shell-pid
             // carrier, so the coproc child's $$ projected neither the

@@ -187,6 +187,27 @@ pub struct ShellState {
     /// for ordinary shells.
     pub(crate) respawn_function_line_spans:
         std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>>,
+    /// rubash#2332: source-line spans of the transported TEXT body a
+    /// respawned child was born with (the __RUBASH_FORK_ROOT_SPANS
+    /// stamp; see docs/design/respawn-root-line-spans.md). The child's
+    /// main source IS that body (an async `( list ) &` / coproc
+    /// compound body re-rendered as `-c` text), so the -c driver's
+    /// reader units re-seed their node lines from this vector —
+    /// GNU's fork child executes the parent's parsed tree, whose
+    /// nodes keep their parse lines (make_cmd.c:196), and needs no
+    /// transport. None for ordinary shells; consumed progressively
+    /// (respawn_root_span_cursor) and dropped once fully applied or
+    /// found misaligned.
+    pub(crate) respawn_root_line_spans: Option<Vec<crate::parser::CommandLineSpan>>,
+    /// rubash#2332: prelude function-definition commands at the head
+    /// of the child's `-c` source still to skip before the root spans
+    /// start applying (the async respawn renders
+    /// background_function_prelude ahead of the body; coproc children
+    /// have no prelude, so 0).
+    pub(crate) respawn_root_span_skip: usize,
+    /// rubash#2332: entries of respawn_root_line_spans consumed so
+    /// far by the -c driver's reader units.
+    pub(crate) respawn_root_span_cursor: usize,
     /// variables.c variable_context — local scope stacks.
     pub(crate) local_var_scopes: Vec<HashMap<String, Option<String>>>,
     pub(crate) local_attr_scopes: Vec<HashMap<String, VarAttrs>>,
@@ -697,6 +718,9 @@ impl Clone for ShellState {
             bash_source_stack: self.bash_source_stack.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
             respawn_function_line_spans: self.respawn_function_line_spans.clone(),
+            respawn_root_line_spans: self.respawn_root_line_spans.clone(),
+            respawn_root_span_skip: self.respawn_root_span_skip,
+            respawn_root_span_cursor: self.respawn_root_span_cursor,
             local_var_scopes: self.local_var_scopes.clone(),
             local_attr_scopes: self.local_attr_scopes.clone(),
             local_typed_scopes: self.local_typed_scopes.clone(),

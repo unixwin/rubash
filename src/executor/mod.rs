@@ -1288,6 +1288,17 @@ pub struct Executor {
     /// units, compound bodies), so the spawn-site exec gate can only
     /// ever fire for the tail command's own dispatch.
     pub(crate) exec_replace_dispatch_stamp: Cell<u64>,
+    /// rubash#2332: armed by main.rs around the `-c` root driver call
+    /// of a respawned child carrying root-body line spans
+    /// (ShellState::respawn_root_line_spans); while armed,
+    /// run_source_impl re-seeds each root reader unit's node lines
+    /// from the transport (see script_driver::run_source_impl).
+    pub(crate) root_line_span_run_armed: Cell<bool>,
+    /// rubash#2332: set for the duration of a run_source_impl call;
+    /// the root-span re-seed fires only on the outermost reader unit,
+    /// so nested source/eval/diagnostic-prefix runs inside a unit's
+    /// execution never consume the root transport.
+    pub(crate) source_run_active: Cell<bool>,
     /// rubash#1497: monotonic source for exec_replace_dispatch_stamp.
     pub(crate) exec_replace_stamp_counter: Cell<u64>,
     /// rubash#1497: one-shot pass letting an and_or_list's last element

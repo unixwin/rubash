@@ -729,6 +729,11 @@ impl Executor {
             String,
             Vec<crate::parser::CommandLineSpan>,
         > = std::collections::HashMap::new();
+        // rubash#2332: (prelude definition count, root-body spans)
+        // from the __RUBASH_FORK_ROOT_SPANS stamp; lands in the
+        // ShellState literal below for the -c driver's re-seed.
+        let mut respawn_root_line_spans: Option<(usize, Vec<crate::parser::CommandLineSpan>)> =
+            None;
         let mut respawn_argv_bottom: Option<Vec<String>> = None;
         let mut respawn_pipestatus: Option<(
             crate::shell::state::PipestatusShape,
@@ -769,6 +774,13 @@ impl Executor {
             if let Some(value) = env_vars.get(super::compound_exec::FORK_FN_SPANS_TRANSPORT) {
                 respawn_function_line_spans =
                     super::compound_exec::decode_function_line_spans(value);
+            }
+            // rubash#2332: root-body source-line spans (see
+            // FORK_ROOT_SPANS_TRANSPORT); the -c driver's reader units
+            // re-seed the re-parsed body's node lines from these
+            // (script_driver::run_source_impl).
+            if let Some(value) = env_vars.get(super::compound_exec::FORK_ROOT_SPANS_TRANSPORT) {
+                respawn_root_line_spans = super::compound_exec::decode_root_line_spans(value);
             }
         }
         // rubash#2202: function bodies that crossed as BASH_FUNC
@@ -927,6 +939,14 @@ impl Executor {
                 bash_source_stack: Vec::new(),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
+                respawn_root_line_spans: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(_, spans)| spans.clone()),
+                respawn_root_span_skip: respawn_root_line_spans
+                    .as_ref()
+                    .map(|(skip, _)| *skip)
+                    .unwrap_or(0),
+                respawn_root_span_cursor: 0,
                 local_var_scopes: Vec::new(),
                 local_attr_scopes: Vec::new(),
                 local_typed_scopes: Vec::new(),
@@ -1092,6 +1112,8 @@ impl Executor {
             command_string_final_pending: Cell::new(false),
             exec_replace_final_frame: Cell::new(false),
             exec_replace_dispatch_stamp: Cell::new(0),
+            root_line_span_run_armed: Cell::new(false),
+            source_run_active: Cell::new(false),
             exec_replace_stamp_counter: Cell::new(0),
             exec_replace_stamp_hold: Cell::new(0),
             exec_replace_shlvl_snapshot: Cell::new(None),
