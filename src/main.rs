@@ -496,70 +496,154 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
     // upstream set-e2.sub with THIS_SH=rubash). Expand any combined `-Xc`
     // form into separate `-X` / `-c` arguments first so the `-c` branch can
     // consume the command string that follows.
+    //
+    // GNU shell.c parse_shell_options consumes option words only until
+    // the first operand — the script name, the command string after
+    // `-c`, or `--`. Every word from the operand on is the script's (or
+    // the -c string's) own argv and must pass through VERBATIM:
+    // expanding a bundled-flag shape there rewrites the child's
+    // positional parameters (rubash#2212: `rubash bats -cf -- -- -tr`
+    // delivered `-f -c` to the script — its option bundle split and
+    // reversed — and `rubash script -o posix` would eat the operand).
+    // The scan therefore tracks the option region. It ends at `--`, at
+    // the first word that is not an option word and was not consumed as
+    // an option's operand, and right after the `-c` command string.
+    // Words consumed as `-o`/`-O` operands or as the operands of the
+    // long options that take one (--init-file/--rcfile, the only such
+    // pair in parse_long_options below) pass through unexpanded
+    // without ending the region.
     let mut expanded_args: Vec<String> = Vec::with_capacity(args.len());
-    for arg in args {
-        if let Some(flags) = arg.strip_prefix('-') {
-            let flags = flags.strip_prefix('-').unwrap_or(flags);
-            if !arg.starts_with("--")
-                && flags.len() > 1
-                && flags.contains('c')
-                && flags.chars().all(|flag| {
-                    flag == 'c'
-                        || flag == 'l'
-                        || flag == 'i'
-                        || cli_shell_flag_name(flag).is_some()
-                        || flag == 's'
-                        || flag == 'o'
+    let mut index = 0usize;
+    let mut options_open = true;
+    while index < args.len() {
+        let arg = args[index].clone();
+        index += 1;
+        if !options_open {
+            expanded_args.push(arg);
+            continue;
+        }
+        if arg == "--" {
+            expanded_args.push(arg);
+            options_open = false;
+            continue;
+        }
+        if let Some(long) = arg.strip_prefix("--") {
+            expanded_args.push(arg.clone());
+            let long_name = long.split('=').next().unwrap_or(long);
+            if !long.contains('=') && matches!(long_name, "init-file" | "rcfile") {
+                if index < args.len() {
+                    expanded_args.push(args[index].clone());
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if arg == "-" || arg == "+" || (!arg.starts_with('-') && !arg.starts_with('+')) {
+            // The operand itself: the script name (or the stdin face).
+            // From here on everything is the operand's own argv.
+            expanded_args.push(arg);
+            options_open = false;
+            continue;
+        }
+        if let Some(plus_flags) = arg.strip_prefix('+') {
+            // `+flag` words are option words for GNU's parser too; the
+            // expansion arms below only cover `-` bundles, so pass the
+            // word through — but a trailing `o`/`O` still consumes the
+            // next word as its operand, exactly like the `-` form.
+            expanded_args.push(arg.clone());
+            if (plus_flags.ends_with('o') || plus_flags.ends_with('O'))
+                && plus_flags[..plus_flags.len() - 1].chars().all(|flag| {
+                    flag == 'l' || flag == 'i' || flag == 's' || cli_shell_flag_name(flag).is_some()
                 })
             {
-                // Bash's getopt consumes the next argv for `-c`, so emit the
-                // boolean flags first and `-c` last (`-ce 'x'` == `-e -c 'x'`).
-                // `-l` (login) and `-i` (interactive) are not shell options:
-                // they have dedicated arms in the option loop below, so they
-                // are emitted as their own flags (`-ilc` == `-i -l -c`).
-                let mut c_count = 0usize;
-                for flag in flags.chars() {
-                    if flag == 'c' {
-                        c_count += 1;
-                    } else if flag == 's' {
-                        expanded_args.push("-s".to_string());
-                    } else if flag == 'l' {
-                        expanded_args.push("-l".to_string());
-                    } else if flag == 'i' {
-                        expanded_args.push("-i".to_string());
-                    } else {
-                        expanded_args.push(format!("-{flag}"));
-                    }
+                if index < args.len() {
+                    expanded_args.push(args[index].clone());
+                    index += 1;
                 }
-                for _ in 0..c_count {
-                    expanded_args.push("-c".to_string());
-                }
-                continue;
             }
+            continue;
+        }
+        let flags = &arg[1..];
+        // Whether this word reaches the parser as an expanded bundle or
+        // as one exact flag word, the `-o`/`-O` and `-c` tokens in it
+        // consume following words; account for them after emitting so
+        // the region boundary matches the parser's own consumption.
+        let mut tokens: Vec<String> = Vec::new();
+        if flags.len() > 1
+            && flags.contains('c')
+            && flags.chars().all(|flag| {
+                flag == 'c'
+                    || flag == 'l'
+                    || flag == 'i'
+                    || cli_shell_flag_name(flag).is_some()
+                    || flag == 's'
+                    || flag == 'o'
+            })
+        {
+            // Bash's getopt consumes the next argv for `-c`, so emit the
+            // boolean flags first and `-c` last (`-ce 'x'` == `-e -c 'x'`).
+            // `-l` (login) and `-i` (interactive) are not shell options:
+            // they have dedicated arms in the option loop below, so they
+            // are emitted as their own flags (`-ilc` == `-i -l -c`).
+            let mut c_count = 0usize;
+            for flag in flags.chars() {
+                if flag == 'c' {
+                    c_count += 1;
+                } else if flag == 's' {
+                    tokens.push("-s".to_string());
+                } else if flag == 'l' {
+                    tokens.push("-l".to_string());
+                } else if flag == 'i' {
+                    tokens.push("-i".to_string());
+                } else {
+                    tokens.push(format!("-{flag}"));
+                }
+            }
+            for _ in 0..c_count {
+                tokens.push("-c".to_string());
+            }
+        } else if flags.len() > 1
+            && !flags.contains('c')
+            && !flags.contains('o')
+            && !flags.contains('O')
+            && flags.chars().all(|flag| {
+                flag == 's'
+                    || flag == 'i'
+                    || flag == 'l'
+                    || flag == 'D'
+                    || cli_shell_flag_name(flag).is_some()
+            })
+        {
             // shell.c:913-974 parse_shell_options: short flags are parsed
             // character by character. Expand clusters without -c/-o/-O
             // (e.g. `-in` -> `-i` `-n`) so the per-flag match below sees
             // them individually.
-            if !arg.starts_with("--")
-                && flags.len() > 1
-                && !flags.contains('c')
-                && !flags.contains('o')
-                && !flags.contains('O')
-                && flags.chars().all(|flag| {
-                    flag == 's'
-                        || flag == 'i'
-                        || flag == 'l'
-                        || flag == 'D'
-                        || cli_shell_flag_name(flag).is_some()
-                })
-            {
-                for flag in flags.chars() {
-                    expanded_args.push(format!("-{flag}"));
+            for flag in flags.chars() {
+                tokens.push(format!("-{flag}"));
+            }
+        } else {
+            tokens.push(arg.clone());
+        }
+        // Operands the emitted tokens make the parser consume are
+        // collected here and appended AFTER the tokens themselves —
+        // `-ce 'script'` must stay `-e -c 'script'`, in that order.
+        let mut consumed: Vec<String> = Vec::new();
+        for token in &tokens {
+            if token == "-o" || token == "-O" {
+                if index < args.len() {
+                    consumed.push(args[index].clone());
+                    index += 1;
                 }
-                continue;
+            } else if token == "-c" {
+                if index < args.len() {
+                    consumed.push(args[index].clone());
+                    index += 1;
+                }
+                options_open = false;
             }
         }
-        expanded_args.push(arg.clone());
+        expanded_args.extend(tokens);
+        expanded_args.extend(consumed);
     }
     let args = &expanded_args;
     // GNU shell.c:838-889 (parse_long_options): argv entries starting with

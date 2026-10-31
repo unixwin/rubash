@@ -2344,6 +2344,81 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#2285: the File-returning twin of
+    /// [`Self::write_fresh_alias_file_output`]: an output redirect's
+    /// alias target resolved to a regular file, so the open is an
+    /// ordinary open of that file — truncate (with the noclobber
+    /// O_EXCL refusal under `set -C`, unless the redirect clobbers)
+    /// or append per the caller's redirect arm — and the aliased
+    /// descriptor's own offset never moves. The external faces (the
+    /// stdio plan, the legacy stdio arms, the numbered spawn
+    /// delivery) need a live handle for the child rather than
+    /// buffered bytes. The option ladder mirrors the buffered twin
+    /// exactly (the append arm carries no create: the resolved path
+    /// names an already-open file). Errors carry the alias spelling,
+    /// exactly as create_redirect_output shapes them.
+    pub(in crate::executor) fn open_fresh_alias_file(
+        &self,
+        path: &std::path::Path,
+        target: &str,
+        append: bool,
+        clobber: bool,
+    ) -> io::Result<File> {
+        let mut options = OpenOptions::new();
+        options.write(true);
+        if append {
+            options.append(true);
+        } else if !clobber
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
+            && !Self::noclobber_target_is_device_like(path)
+        {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+        options.open(path).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("{target}: cannot overwrite existing file"),
+                )
+            } else {
+                crate::posix_errors::path_error(target, e)
+            }
+        })
+    }
+
+    /// rubash#2285: resolve an output redirect's target word through
+    /// the alias layer and fresh-open the regular file it names.
+    /// Some only when the word is an fd-alias PATH spelling
+    /// (/dev/fd/N, /proc/self/fd/N, /dev/std*) — a `&N` spelling is a
+    /// dup2, never an open (redir.c r_duplicating_output, redir.c:157)
+    /// — and the aliased endpoint re-opens fresh (rubash#2256: with
+    /// HAVE_DEV_FD defined, redir.c's RF_DEVFD dup special case at
+    /// redir.c:602-629 does not compile, so the word takes the plain
+    /// open in redir_open, redir.c:725, like every other r_output /
+    /// r_appending_to word in do_redirections, redir.c:237). Every
+    /// other shape returns None and the caller's existing arms own
+    /// it. This is the resolver arm the buffered face
+    /// (write_dev_stdio_redirect_output) already had; the external
+    /// faces lacked it, so a read-bound source — which has no write
+    /// endpoint to dup — fell through every arm and the child
+    /// inherited the shell's real stdout (or, at a numbered slot,
+    /// got no descriptor at all).
+    pub(in crate::executor) fn open_alias_spelling_fresh_output(
+        &self,
+        target: &str,
+        append: bool,
+        clobber: bool,
+    ) -> Option<io::Result<File>> {
+        if redirect_target_is_dup_spelling(target) {
+            return None;
+        }
+        let fd = redirect_target_fd(target)?;
+        let path = self.fd_alias_reopen_path(fd)?;
+        Some(self.open_fresh_alias_file(&path, target, append, clobber))
+    }
+
     pub(in crate::executor) fn output_fd_redirects_to_stderr(&self, target: &str) -> bool {
         if redirect_target_fd(target).map_or(false, |fd| {
             matches!(

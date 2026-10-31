@@ -645,6 +645,7 @@ impl Executor {
             &mut env_vars,
             &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             internal_respawn,
+            process_exit,
         );
 
         // rubash#2136: the stamped pid is adopted as `$$` only for a
@@ -1047,6 +1048,7 @@ impl Executor {
             comsub_stdin_writeback: Cell::new(None),
             pipeline_stdin_consumed: Cell::new(None),
             pipeline_stage_fds_pre_wired: std::cell::Cell::new(false),
+            stage_dup_channel_payloads: std::cell::RefCell::new(Vec::new()),
             pipeline_final_stage: std::cell::Cell::new(false),
             pipeline_stage_pre_traced: std::cell::Cell::new(false),
             pipeline_stage_restricted_refused: std::cell::Cell::new(false),
@@ -1163,6 +1165,14 @@ impl Executor {
         // is not a new shell, so SHLVL keeps the parent's value
         // instead of taking the startup increment.
         keep_shlvl: bool,
+        // rubash#2212: true only for the standalone shell process's
+        // own birth (Executor::new_process_exit via main) — its
+        // environment import follows GNU wholesale (see
+        // env_helpers::is_process_startup_export_candidate).
+        // In-process children and embedded executors keep the
+        // anti-leak heuristic: their "environment" is a parent
+        // session's serialization or a shared host process env.
+        process_startup: bool,
     ) {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
@@ -1280,7 +1290,7 @@ impl Executor {
         if !keep_shlvl {
             initialize_shell_level(env_vars);
         }
-        mark_initial_exported_vars(env_vars);
+        mark_initial_exported_vars(env_vars, process_startup);
         mark_env_name(env_vars, EXPORTED_VARS, "OLDPWD");
         // Undo the export mark for the SHELL/PATH fallbacks fabricated
         // above (see the note at the SHELL bind): GNU binds both without
