@@ -933,7 +933,26 @@ impl Executor {
         let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
         let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
-        let result = if uses_history_driver && fresh_shell {
+        // GNU shell.c:722 run_startup_files in the fresh process: a
+        // fresh shell runs the startup chain before the script body —
+        // for this non-interactive child that is the env-file step
+        // (shell.c:1214-1220, $BASH_ENV unless invoked as `sh` or in
+        // posix mode). The fresh-shell initialization above rebuilt
+        // the environment but never ran this step, so a ${THIS_SH} /
+        // ENOEXEC child's $BASH_ENV was silently skipped and its
+        // definitions (and its `exit`) never reached the script
+        // (rubash#2393). An `exit` in the env file ends the child
+        // here, before the body; the EXIT-trap arm below still runs,
+        // as exit_shell's would.
+        let startup_exit = if fresh_shell {
+            self.run_fresh_child_startup_env_file(cmd)
+        } else {
+            None
+        };
+        let result = if let Some(status) = startup_exit {
+            self.exit_code = status;
+            Ok(())
+        } else if uses_history_driver && fresh_shell {
             // bashhist.c pre_process_line / shell.c reader loop: expand and
             // record history group-by-group so `!!`/`!str` see the entries
             // the child's earlier lines recorded. The child gets a fresh
@@ -1146,6 +1165,79 @@ impl Executor {
     /// Converts a fatal `ExecuteError` escaping an in-process child script
     /// into the child's exit status, mirroring how GNU's `exit_shell` /
     /// `jump_to_top_level` terminate only the child process.
+    /// The fresh-shell child's env-file startup step: GNU
+    /// run_startup_files (shell.c:722) in the exec'd process sources
+    /// $BASH_ENV for a non-interactive shell — gated on the CHILD's
+    /// own modes (shell.c:1216: not when invoked as `sh`, not in
+    /// posix mode), read from the child's rebuilt state: act_like_sh
+    /// from the invocation name as spelled, posix from the option
+    /// state the fresh-shell initialization replayed. The selection
+    /// itself is the shared invocation::startup_env_file the
+    /// standalone binary's run_startup_files uses. Returns
+    /// Some(status) when the env file ended the child with `exit`
+    /// (shell.c exit_shell: the script body never runs).
+    fn run_fresh_child_startup_env_file(&mut self, cmd: &CommandNode) -> Option<i32> {
+        let act_like_sh = cmd.words.first().is_some_and(|word| {
+            let expanded = self.expand_word(word);
+            let base = expanded
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            base.strip_prefix('-').unwrap_or(base.as_str()) == "sh"
+        });
+        let file = crate::invocation::startup_env_file(
+            self,
+            false,
+            act_like_sh,
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "posix"),
+        )?;
+        let status = self.run_child_startup_file(&file);
+        if self.take_exit_jump_pending() {
+            Some(status)
+        } else {
+            None
+        }
+    }
+
+    /// Source one startup file in the fresh child, with the sourced-
+    /// file context the standalone binary's run_init_file establishes
+    /// (rubash#1161): the file is the input stream for diagnostics, a
+    /// top-level `return` is legal, and a parse error aborts only
+    /// this file (evalstring.c:585-606 — EX_BADUSAGE as an ordinary
+    /// value, consumed here like the `source` builtin's arm) while a
+    /// real `exit` keeps its jump for the caller to observe.
+    fn run_child_startup_file(&mut self, file: &str) -> i32 {
+        let path = self.resolve_shell_path(file);
+        let contents = match crate::script_driver::read_script_bytes(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!("rubash: {}: {}", file, crate::posix_errors::message(&e));
+                return 1;
+            }
+        };
+        self.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
+        let old_in_source = self.get_env("__RUBASH_IN_SOURCE").map(str::to_string);
+        let old_script_name = self.get_env("__RUBASH_SCRIPT_NAME").map(str::to_string);
+        self.set_env("__RUBASH_IN_SOURCE", "1");
+        self.set_env("__RUBASH_SCRIPT_NAME", file);
+        let _ = self.take_parse_error();
+        let status = crate::script_driver::run_source(self, &contents, false);
+        if self.take_parse_error() {
+            self.take_exit_jump_pending();
+        }
+        match old_in_source {
+            Some(value) => self.set_env("__RUBASH_IN_SOURCE", &value),
+            None => self.remove_env("__RUBASH_IN_SOURCE"),
+        }
+        match old_script_name {
+            Some(value) => self.set_env("__RUBASH_SCRIPT_NAME", &value),
+            None => self.remove_env("__RUBASH_SCRIPT_NAME"),
+        }
+        self.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
+        status
+    }
+
     fn child_process_exit_status(&self, error: ExecuteError) -> Result<i32, ExecuteError> {
         match error {
             // `exit N`, errexit, and the lastpipe variant all terminate the
