@@ -637,12 +637,7 @@ impl Executor {
                         write_result?;
                         let posix_mode =
                             self.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-                        let interactive = self
-                            .shell_state
-                            .env_vars
-                            .get("__RUBASH_INTERACTIVE")
-                            .map(String::as_str)
-                            == Some("1");
+                        let interactive = self.invocation_interactive();
                         // evalstring.c:588-595: the ONLY exit for a
                         // main-grammar parse error in the eval'd string —
                         // non-interactive + posix + bare eval/source (not
@@ -1602,11 +1597,7 @@ impl Executor {
     /// SIG_DFL and the kernel kills the shell in place; no drain
     /// ever sees the delivery.
     fn hangup_termsig_armed(&self) -> bool {
-        self.shell_state
-            .env_vars
-            .get("__RUBASH_INTERACTIVE")
-            .map(String::as_str)
-            == Some("1")
+        self.invocation_interactive()
             || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some()
     }
 
@@ -1865,13 +1856,7 @@ impl Executor {
                 // an exit jump for the unit. Non-interactive shells keep
                 // the exit classification (the delivery is how a script
                 // shell dies at 128+sig, running any EXIT trap).
-                if self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    == Some("1")
-                {
+                if self.invocation_interactive() {
                     self.signal_discard_pending = true;
                 }
                 return Err(ExecuteError::ExitCode(128 + signal));
@@ -2110,13 +2095,7 @@ impl Executor {
                     // classification reads), never the process env.
                     // Non-interactive sessions set nothing and keep the
                     // exit classification byte-identically.
-                    if self
-                        .shell_state
-                        .env_vars
-                        .get("__RUBASH_INTERACTIVE")
-                        .map(String::as_str)
-                        == Some("1")
-                    {
+                    if self.invocation_interactive() {
                         self.signal_discard_pending = true;
                     }
                     // rubash#2236: same death record as the boundary
@@ -6501,12 +6480,7 @@ impl Executor {
             // running, $? = 127).
             let execfail =
                 crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "execfail");
-            let interactive = self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_INTERACTIVE")
-                .map(String::as_str)
-                == Some("1");
+            let interactive = self.invocation_interactive();
             if status == 0
                 || self.shell_state.subshell_depth.get() > 0
                 || (!interactive && !execfail)

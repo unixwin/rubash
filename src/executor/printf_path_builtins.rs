@@ -99,13 +99,13 @@ impl Executor {
         // prints nothing (pty-verified GNU 5.3.20: interactive `(exit 3)`
         // is silent, top-level `exit` echoes; rubash#1254) — the engine's
         // subshell_depth carries that distinction.
-        if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1")
+        if self.invocation_interactive()
             && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
             && self.get_env("__RUBASH_IN_SOURCE").is_none()
             && self.shell_state.subshell_depth.get() == 0
             && cmd.words.get(1).map(String::as_str) != Some("--help")
         {
-            let login = self.get_env("__RUBASH_LOGIN_SHELL").as_deref() == Some("1");
+            let login = self.invocation_login();
             writeln!(stderr, "{}", if login { "logout" } else { "exit" })?;
         }
         let args: Vec<&str> = cmd.words[1..].iter().map(String::as_str).collect();
@@ -160,12 +160,7 @@ impl Executor {
         // echo above does).
         if matches!(action, crate::builtins::exit::ExitAction::Exit(_))
             && self.shell_state.subshell_depth.get() == 0
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_LOGIN_SHELL")
-                .map(String::as_str)
-                == Some("1")
+            && self.invocation_login()
         {
             self.source_bash_logout_once()?;
         }
@@ -202,12 +197,7 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
         // may logout; anything else reports and continues.
-        let login_shell = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_LOGIN_SHELL")
-            .map(String::as_str)
-            == Some("1");
+        let login_shell = self.invocation_login();
         if !login_shell {
             let mut stderr = Vec::new();
             let status =

@@ -234,7 +234,7 @@ impl Executor {
                 // the park a POSIX-mode script (or -c string) unwound
                 // correctly but exited with the stale code (rubash#2127).
                 self.exit_code = 2;
-                if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+                if self.invocation_interactive() {
                     return Err(ExecuteError::ExpansionFailure(2));
                 }
                 Err(ExecuteError::ExitCode(2))
@@ -393,12 +393,7 @@ impl Executor {
             // RC audit phase-1 finding ④ / errors10.
             if self.posix_mode_enabled()
                 && self.command_builtin_depth == 0
-                && self
-                    .shell_state
-                    .env_vars
-                    .get("__RUBASH_INTERACTIVE")
-                    .map(String::as_str)
-                    != Some("1")
+                && !self.invocation_interactive()
             {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 2;

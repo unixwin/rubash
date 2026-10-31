@@ -843,6 +843,13 @@ impl Executor {
                 // the process, carries the session's cwd.
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
                 array_compact_budget: HashMap::new(),
+                // rubash#2130: born unshaped — the ambient carriers
+                // were stripped from the import above (#2259), and
+                // the owning host declares the shape through the
+                // funnels (builder / argv classification) after
+                // construction.
+                invocation_interactive: false,
+                invocation_login: false,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),

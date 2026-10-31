@@ -582,6 +582,18 @@ pub struct Executor {
     /// with origin = 0 for ordinary shells.
     bashpid_origin_depth: usize,
     owns_signal_mailbox: bool,
+    /// rubash#2084: root executors (every `Executor::new` that is not
+    /// the process-exit form) hold a share of the process signal
+    /// policy from birth: the first share of an era snapshots the
+    /// host's kernel dispositions, and the last share's Drop restores
+    /// them. The process umask is restored conditionally alongside
+    /// (see the Drop impl): `birth_process_umask` is the process
+    /// value at this executor's birth, `session_set_umask` the last
+    /// value this executor's `umask` builtin set, if any. Fork copies
+    /// and process-exit executors hold no share and carry `None`s.
+    owns_session_process_state: bool,
+    birth_process_umask: Option<u32>,
+    session_set_umask: Option<u32>,
     /// startup21: true when this Executor is the process's outermost one
     /// AND the process exits immediately after it drops (main.rs sets it
     /// for the run_main executor). The Drop-time process-environment

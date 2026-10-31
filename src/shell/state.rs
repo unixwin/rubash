@@ -99,6 +99,24 @@ pub struct ShellState {
     /// parses as cheap as before. A scheduling hint only: a stale budget moves
     /// the compaction, never the resulting value.
     pub(crate) array_compact_budget: HashMap<String, u32>,
+    /// rubash#2130: the session's invocation shape as typed state —
+    /// GNU keeps exactly this in process-local globals
+    /// (shell.c:497-503 `login_shell`, shell.c:540-549
+    /// `interactive_shell`), never in the environment. The
+    /// `__RUBASH_INTERACTIVE` / `__RUBASH_LOGIN_SHELL` entries in
+    /// `env_vars` are a write-through projection of these fields
+    /// (every host funnel that writes the entry also writes the
+    /// field — `Executor::set_env` / `remove_env` /
+    /// `mark_login_shell` / whole-table restore), kept for the
+    /// faces that render the carrier; engine DECISIONS read these
+    /// fields, so an in-session script assignment to the carrier
+    /// can no longer flip the session's shape (the forgery surface
+    /// #2130 closes; the cross-process half was #2259, the
+    /// inheritance half #2129). Like `cwd` above, the fields ride
+    /// the ShellState Clone fork boundary: a forked child has its
+    /// parent's shape.
+    pub(crate) invocation_interactive: bool,
+    pub(crate) invocation_login: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -651,6 +669,8 @@ impl Clone for ShellState {
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
             array_compact_budget: self.array_compact_budget.clone(),
+            invocation_interactive: self.invocation_interactive,
+            invocation_login: self.invocation_login,
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),

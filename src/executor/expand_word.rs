@@ -126,11 +126,7 @@ impl Executor {
         if !target.chars().any(char::is_whitespace) {
             return redirect_target_is_ambiguous(raw, target, extglob);
         }
-        let posix_nosplit = self.posix_mode_enabled()
-            && !self
-                .shell_state
-                .env_vars
-                .contains_key("__RUBASH_INTERACTIVE");
+        let posix_nosplit = self.posix_mode_enabled() && !self.invocation_interactive();
         if posix_nosplit {
             let branched = self.is_brace_expand_enabled()
                 && super::command_prepare::expand_braces_with_optional_raw(
@@ -313,11 +309,7 @@ impl Executor {
         // operands, even one that would expand to a single filename
         // (redir.tests 178-184: `set -o posix; cat < redir1.*' fails with
         // redir1.*: No such file or directory).
-        let posix_noglob = self.posix_mode_enabled()
-            && !self
-                .shell_state
-                .env_vars
-                .contains_key("__RUBASH_INTERACTIVE");
+        let posix_noglob = self.posix_mode_enabled() && !self.invocation_interactive();
         let suppress_glob = posix_noglob
             || super::command_prepare::raw_word_suppresses_pathname_expansion(
                 Some(raw),

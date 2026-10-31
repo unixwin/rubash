@@ -596,3 +596,247 @@ fn act2_inspection_snapshot_matches_debuggee_own_output() {
         "NR (nameref to SCALAR) resolves to the scalar's value"
     );
 }
+
+// ---- rubash#2084 / rubash#2130: Session <-> environment boundary ----
+//
+// #2130: the invocation shape is declared construction data
+// (InvocationShape on the builder); engine decision points read the
+// typed executor state, and the __RUBASH_* carriers survive only as
+// projections for observable faces. #2084: a root Session's era of
+// process-global writes (signal policy, umask, env mirror) is
+// restored when the last root executor drops.
+
+use super::capabilities::StartupClass;
+use super::session::{InvocationShape, RespawnSource, RunOptions, Session};
+
+#[test]
+fn issue2130_invocation_shape_reaches_executor_state() {
+    let session = Session::builder()
+        .invocation_shape(InvocationShape::login_interactive())
+        .build()
+        .expect("session builds");
+    let shape = session.invocation_shape();
+    assert!(shape.interactive && shape.login);
+    assert_eq!(shape.respawn, RespawnSource::Fresh);
+    assert!(session.executor().invocation_interactive());
+    assert!(session.executor().invocation_login());
+
+    // The legacy per-flag builder methods declare the same shape.
+    let session = Session::builder()
+        .login_shell(true)
+        .interactive(true)
+        .build()
+        .expect("session builds");
+    let shape = session.invocation_shape();
+    assert!(shape.interactive && shape.login);
+    assert!(session.executor().invocation_interactive());
+    assert!(session.executor().invocation_login());
+}
+
+#[test]
+fn issue2130_forged_carrier_assignment_does_not_flip_decisions() {
+    let mut session = Session::builder().build().expect("session builds");
+    assert!(!session.executor().invocation_interactive());
+    assert!(!session.executor().invocation_login());
+    // A script assignment to a carrier name is a variable write, not
+    // a shape declaration: the typed decision state must not move.
+    session
+        .run(
+            "__RUBASH_INTERACTIVE=1\n__RUBASH_LOGIN_SHELL=1",
+            &RunOptions::new(),
+        )
+        .expect("run");
+    assert!(!session.executor().invocation_interactive());
+    assert!(!session.executor().invocation_login());
+    // The host funnel, by contrast, is a legitimate shape write: it
+    // moves the typed state (and keeps the carrier projection in
+    // step), and removing the carrier clears both.
+    session.executor_mut().set_env("__RUBASH_INTERACTIVE", "1");
+    assert!(session.executor().invocation_interactive());
+    session.executor_mut().remove_env("__RUBASH_INTERACTIVE");
+    assert!(!session.executor().invocation_interactive());
+}
+
+#[test]
+fn issue2130_engine_child_shape_skips_startup_files() {
+    let dir = temp_dir("issue2130-respawn");
+    let env_file = dir.join("env.sh");
+    let marker = dir.join("sourced.txt");
+    std::fs::write(&env_file, format!("printf x > '{}'", marker.display())).expect("env file");
+    let mut fresh = Session::builder()
+        .env("BASH_ENV", env_file.to_string_lossy().into_owned())
+        .build()
+        .expect("session builds");
+    fresh
+        .source_startup_files(StartupClass::EnvFile)
+        .expect("startup chain runs");
+    assert!(
+        marker.exists(),
+        "control: a fresh session sources $BASH_ENV"
+    );
+    std::fs::remove_file(&marker).expect("marker cleanup");
+
+    let mut shape = InvocationShape::new();
+    shape.respawn = RespawnSource::EngineChild;
+    let mut child = Session::builder()
+        .env("BASH_ENV", env_file.to_string_lossy().into_owned())
+        .invocation_shape(shape)
+        .build()
+        .expect("session builds");
+    child
+        .source_startup_files(StartupClass::EnvFile)
+        .expect("startup chain is a no-op, not an error");
+    assert!(
+        !marker.exists(),
+        "an engine-child session runs no startup chain (execute_cmd.c:1576)"
+    );
+}
+
+/// The #2084 end-to-end pin. Process-global state (signal
+/// dispositions, umask, the env mirror) is only deterministic when
+/// no sibling test's session era overlaps, so the scenario runs in a
+/// re-executed child test process; the parent asserts its exit.
+#[test]
+fn issue2084_session_end_restores_host_process_state() {
+    if std::env::var_os("ISSUE2084_CHILD_SCENARIO").is_none() {
+        let exe = std::env::current_exe().expect("test exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "api::consumer_tests::issue2084_session_end_restores_host_process_state",
+                "--nocapture",
+            ])
+            .env("ISSUE2084_CHILD_SCENARIO", "1")
+            .status()
+            .expect("child test process spawns");
+        assert!(status.success(), "child scenario failed: {status}");
+        return;
+    }
+    issue2084_child_scenario();
+}
+
+#[cfg(unix)]
+fn issue2084_disposition(sig: i32) -> usize {
+    let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: querying this process's own disposition.
+    unsafe {
+        libc::sigaction(sig, std::ptr::null(), &mut action);
+    }
+    action.sa_sigaction
+}
+
+fn issue2084_child_scenario() {
+    // Environment. Ordinary exports never touch the host env at all
+    // (#916: children receive them through the explicit spawn env).
+    // The special-name set (PATH/PWD/OLDPWD/HOME, every __RUBASH_*
+    // bookkeeping name, the locale family) DOES mirror to the
+    // process env while the session lives — those writes are
+    // journaled (G-03) and unwound when the session's executor
+    // drops. PATH is the #2084 evidence shape (a session rewrote
+    // the host's PATH/PWD/OLDPWD).
+    std::env::set_var("__RUBASH_ISSUE2084_HOSTVAR", "before");
+    let host_path = std::env::var("PATH").unwrap_or_default();
+    {
+        let mut session = Session::builder().build().expect("session builds");
+        session
+            .run(
+                "export ISSUE2084_SESSION_ONLY=1\nexport PATH=/issue2084-session-path",
+                &RunOptions::new(),
+            )
+            .expect("run");
+        assert!(
+            std::env::var_os("ISSUE2084_SESSION_ONLY").is_none(),
+            "an ordinary export never reaches the host env"
+        );
+        assert_eq!(
+            std::env::var("PATH").unwrap(),
+            "/issue2084-session-path",
+            "a special-name (PATH) write mirrors while the session lives"
+        );
+        // The host funnel writes through the same journal for
+        // mirrored names, and stays out of the process env for
+        // ordinary ones.
+        session
+            .executor_mut()
+            .set_env("__RUBASH_ISSUE2084_HOSTVAR", "session");
+        assert_eq!(
+            std::env::var("__RUBASH_ISSUE2084_HOSTVAR").unwrap(),
+            "session"
+        );
+        session.executor_mut().set_env("ISSUE2084_PLAIN", "x");
+        assert!(
+            std::env::var_os("ISSUE2084_PLAIN").is_none(),
+            "the funnel does not mirror ordinary names either"
+        );
+    }
+    assert_eq!(
+        std::env::var("PATH").unwrap(),
+        host_path,
+        "the mirrored PATH returns to its pre-session value at drop"
+    );
+    assert_eq!(
+        std::env::var("__RUBASH_ISSUE2084_HOSTVAR").unwrap(),
+        "before",
+        "the host's variable returns to its pre-session value at drop"
+    );
+    assert!(
+        std::env::var_os("__RUBASH_CURRENT_LINE").is_none(),
+        "engine bookkeeping never persists in the host env"
+    );
+    std::env::remove_var("__RUBASH_ISSUE2084_HOSTVAR");
+
+    #[cfg(unix)]
+    {
+        // Signal dispositions: an interactive session era applies
+        // the shell policy (SIGQUIT ignored, sig.c:333); at the last
+        // root drop the host's exact pre-session handlers return.
+        let quit_before = issue2084_disposition(libc::SIGQUIT);
+        let pipe_before = issue2084_disposition(libc::SIGPIPE);
+        let int_before = issue2084_disposition(libc::SIGINT);
+        {
+            let mut session = Session::builder()
+                .invocation_shape(InvocationShape::interactive())
+                .build()
+                .expect("session builds");
+            session.run("true", &RunOptions::new()).expect("run");
+            assert_eq!(
+                issue2084_disposition(libc::SIGQUIT),
+                libc::SIG_IGN,
+                "during the session the SIGQUIT policy holds"
+            );
+        }
+        assert_eq!(
+            issue2084_disposition(libc::SIGQUIT),
+            quit_before,
+            "SIGQUIT disposition restored at session end"
+        );
+        assert_eq!(
+            issue2084_disposition(libc::SIGPIPE),
+            pipe_before,
+            "SIGPIPE disposition restored at session end"
+        );
+        assert_eq!(
+            issue2084_disposition(libc::SIGINT),
+            int_before,
+            "SIGINT disposition restored at session end"
+        );
+
+        // umask: a session-set mask returns to the birth value when
+        // the session ends and nothing else overwrote it.
+        let birth = crate::builtins::umask::snapshot_process_umask().expect("umask readable");
+        {
+            let mut session = Session::builder().build().expect("session builds");
+            session.run("umask 077", &RunOptions::new()).expect("run");
+            assert_eq!(
+                crate::builtins::umask::snapshot_process_umask(),
+                Some(0o077),
+                "during the session its umask holds"
+            );
+        }
+        assert_eq!(
+            crate::builtins::umask::snapshot_process_umask(),
+            Some(birth),
+            "process umask restored at session end"
+        );
+    }
+}

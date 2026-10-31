@@ -150,8 +150,8 @@ the funnel where touched — expectations unchanged).
 | executor/command_execute.rs, command_dispatch.rs, command_prepare.rs, temporary_assignments.rs | M | Dispatch-time decisions over the executing executor's table snapshot — the snapshot is taken from the same executor the typed state lives on |
 | executor/trap_exec.rs (5), executor/job_builtins.rs (2), executor/compound_exec.rs, executor/expand_word.rs (2), executor/prompt_expansion.rs, executor/bind_builtins.rs, executor/external_inner.rs, executor/pwd_loop_builtins.rs (2) | M | Executor self-reads (decisions: trap behavior, job notices, expansion gates, prompt faces) |
 | executor/parameter_errors.rs (2) | M | Diagnostic-shape decisions inside executor methods |
-| builtins/kill.rs `reconcile_kernel_trap_dispositions` | M | Signature gains the interactive verdict from the caller (all callers sit under an executor: trap_exec, script_driver, the trap builtin's dispatch) |
-| builtins/set.rs `builtin_error_prefix`, builtins/set/options.rs (posix walk) | M | Free functions over an env map: the map's owner threads the typed verdict in (callers are executor dispatch paths) — or, where a caller has no executor, the census names it below |
+| builtins/kill.rs `reconcile_kernel_trap_dispositions` | P (residual, explained) | As implemented, this stays on the carrier map: the function sits at the builtin ABI boundary — builtins receive the env map, not the executor, and its interactive verdict feeds the trap-listing reconciliation whose input IS the builtin-visible table. The decision points *around* it (trap_exec's five reads, script_driver's hangup faces) migrated to the typed state; this one map-level read remains because its contract is the map itself. Revisit if the builtin ABI grows an executor handle. |
+| builtins/set.rs `builtin_error_prefix`, builtins/set/options.rs (posix walk) | P (residual, explained) | Same ABI-boundary reason: free functions over the env map handed to builtins. `builtin_error_prefix`'s presence semantics are preserved exactly (any carrier entry counts). The posix walk in options.rs iterates the *startup* map to classify the invocation the process was born with — a birth-fact read, not a session-state read, so the carrier is the correct source there. |
 | builtins/set.rs `$-` / option rendering | P | `$-` and `set -o` render the option state; interactivity there is the shell-option face, which the option machinery already keeps — the carrier read is the projection of record for that face |
 | src/main.rs (all reads) | H | Host reads its own seeds; startup chain adjudicates via OWN_* statics (#2129) |
 | executor/tests.rs (7 seeds) | T | `set_env` write-through keeps them working verbatim |
@@ -173,6 +173,14 @@ the funnel where touched — expectations unchanged).
   composition inside the session) and disappear from the decision
   path as §2.2's M rows land. They were already invisible outside
   the process (#2259).
+  Forgery surface, verified from the assignment machinery: a script
+  assignment (`__RUBASH_INTERACTIVE=1`, including the temporary
+  form) writes `env_vars` directly — the assignment executor and
+  its restore path never pass through `Executor::set_env` — so a
+  forged entry lands in the *projection* (a child composed from
+  this table would inherit it; the §2.2 P-residual readers still
+  see it) but never in the typed state, and every migrated decision
+  point is immune. Pin: `issue2130_forged_carrier_assignment_does_not_flip_decisions`.
 - `__RUBASH_INTERACTIVE_FLAG_OFF`: stays a carrier (§2.3).
 - `__RUBASH_STARTUP_FILES_DONE`: retired (already).
 

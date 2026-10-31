@@ -1735,7 +1735,7 @@ impl Executor {
         if self.exec_replace_dispatch_stamp.get() == 0 {
             return false;
         }
-        if self.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1") {
+        if self.invocation_interactive() {
             return false;
         }
         if self
