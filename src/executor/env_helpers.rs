@@ -43,12 +43,36 @@ pub(in crate::executor) fn exact_case_env_var(name: &str) -> Option<String> {
         .map(|(_, value)| value)
 }
 
+/// The export candidates for the standalone shell PROCESS's own
+/// startup import (rubash#2212, bats-core's BATS_TMPDIR case): GNU
+/// variables.c initialize_shell_variables binds EVERY imported
+/// environment entry as an exported shell variable, whatever the
+/// name's case — a lowercase `expected`/`http_proxy` set by the
+/// parent reaches the shell's children exactly like an uppercase
+/// one. The uppercase-first heuristic in is_initial_export_candidate
+/// exists only for executors constructed INSIDE a shared process
+/// (unit tests, embedded sessions), where the process environment
+/// accumulates other executors' shell-local mirror writes; a real
+/// shell process has one session and no such leak surface, so only
+/// rubash's internal transport names and bash-managed names stay
+/// unmarked there.
+pub(in crate::executor) fn is_process_startup_export_candidate(name: &str) -> bool {
+    !(name.starts_with("__RUBASH_") || name.len() <= 1 || is_bash_managed_shell_var(name))
+}
+
 pub(in crate::executor) fn mark_initial_exported_vars(
     env_vars: &mut crate::shell::var_table::VarTable,
+    process_startup: bool,
 ) {
     let mut names: Vec<String> = env_vars
         .keys()
-        .filter(|name| is_initial_export_candidate(name))
+        .filter(|name| {
+            if process_startup {
+                is_process_startup_export_candidate(name)
+            } else {
+                is_initial_export_candidate(name)
+            }
+        })
         .cloned()
         .collect();
     names.sort();

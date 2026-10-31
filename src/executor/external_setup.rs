@@ -2980,7 +2980,28 @@ impl Executor {
         // Closed plan fd needs no key: the child inherits nothing
         // at >= 3 except through this channel.
         let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
-        for (fd, disposition) in &spawn_plan.fds {
+        // rubash#2212 (bats-core report-formatter case): GNU's
+        // process_substitute fork (subst.c:6362) inherits the shell's
+        // WHOLE ambient fd table, not just the owning command's
+        // redirect prefix the plan captures — an `exec 3>file` fd
+        // opened by an earlier command must reach a consumer whose
+        // body writes `>&3` (bats' `tee >(cat >&3)`). Plan entries
+        // win where present; every other open ambient fd >= 3 is
+        // resolved through the same ambient adjudication the prefix
+        // walk uses for dup sources. Virtual endpoints (text inputs,
+        // pipes) cannot cross this transport and stay unforwarded,
+        // matching ambient_procsub_spawn_fd's Inherit verdict.
+        let mut spawn_fds: Vec<(u32, ProcsubSpawnFd)> = spawn_plan.fds.clone();
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed || spawn_plan.get(*fd).is_some() {
+                continue;
+            }
+            let disposition = self.ambient_procsub_spawn_fd(*fd);
+            if !matches!(disposition, ProcsubSpawnFd::Inherit) {
+                spawn_fds.push((*fd, disposition));
+            }
+        }
+        for (fd, disposition) in &spawn_fds {
             if *fd < 3 {
                 continue;
             }

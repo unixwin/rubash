@@ -2735,6 +2735,23 @@ impl Executor {
                         } else {
                             !self.nounset_indexed_element_absent(&tbase, &tsub)
                         }
+                    } else if let Ok(index) = target.parse::<usize>() {
+                        // GNU subst.c parameter_brace_expand_indir +
+                        // variables.c find_variable: a purely numeric
+                        // target names a POSITIONAL parameter, whose
+                        // boundness is the positional window, not the
+                        // variable table — `${!i}` with i holding a
+                        // positional index (bats' bats_all_in loop over
+                        // "$@", lib/bats-core/common.bash) must not
+                        // report `!i` for an in-window index, and must
+                        // still report it past the window (rubash#2212).
+                        // Index 0 is $0, which always exists.
+                        index == 0
+                            || self
+                                .shell_state
+                                .positional_window()
+                                .get(index - 1)
+                                .is_some()
                     } else {
                         self.nounset_variable_bound(&target)
                     };
@@ -2975,6 +2992,22 @@ impl Executor {
         if self.dynamic_parameter_is_set(name) {
             return true;
         }
+        // GNU variables.c: the dynamic stack arrays (BASH_SOURCE,
+        // BASH_LINENO, FUNCNAME, BASH_ARGV, BASH_ARGC, PIPESTATUS) are
+        // dynamic-var cells whose value is composed live from the
+        // call/source stacks, so the scalar form is bound exactly when
+        // element 0 of that composed view exists. The env mirror is only
+        // refreshed where source frames are pushed, so mirror-based
+        // adjudication can report a live array as unbound on paths the
+        // push never took (bats#385 under rubash#2212: ${BASH_SOURCE[0]}
+        // in a command substitution at a fresh main script's top level).
+        // An explicit `unset` of the name (UNSET_DYNAMIC_VARS) keeps the
+        // unbound verdict.
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            if let Some(view) = self.dynamic_stack_array_values(name) {
+                return !view.is_empty();
+            }
+        }
         // GNU variables.c bind: att_invisible (rubash DECLARED_UNSET_VARS)
         // means the cell carries no value — the name is unbound even when a
         // stale typed-mirror cell or an inherited process-env residue
@@ -3148,6 +3181,18 @@ impl Executor {
     ) -> Option<String> {
         if sub == "@" || sub == "*" {
             return None;
+        }
+        // Dynamic stack arrays: adjudicate the element against the live
+        // composed view, as in nounset_variable_bound — the env mirror
+        // below is not refreshed on every path the stack itself takes
+        // (bats#385 under rubash#2212).
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base) {
+            if let Some(view) = self.dynamic_stack_array_values(base) {
+                let index = self.eval_integer_assignment_value(sub);
+                let len = view.len() as i128;
+                let effective = if index < 0 { len + index } else { index };
+                return (effective < 0 || effective >= len).then(|| reported.to_string());
+            }
         }
         if self.is_assoc_parameter_array(base) {
             let key = self.assoc_subscript_key(sub);
