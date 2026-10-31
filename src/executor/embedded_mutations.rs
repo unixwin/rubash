@@ -1787,10 +1787,17 @@ impl Executor {
         // so a 1-line unterminated `case x in` body reports its EOF on the
         // NEXT line (`command substitution: line 2: ... on line 1`, issue
         // #515). A `$(` body keeps the verbatim text (the outer parse owns
-        // its EOF shape).
+        // its EOF shape). The terminator is withheld when the body ends
+        // with an active backslash: it would be quoted into a line
+        // continuation instead of terminating (see
+        // backtick_body_ends_with_active_backslash in
+        // command_substitution.rs).
         let newline_terminated;
-        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
-        {
+        let source: &str = if self.backtick_body_diagnostic.get()
+            && !alias_spliced.ends_with('\n')
+            && !super::command_substitution::backtick_body_ends_with_active_backslash(
+                &alias_spliced,
+            ) {
             newline_terminated = format!("{alias_spliced}\n");
             &newline_terminated
         } else {
@@ -2161,10 +2168,17 @@ impl Executor {
         // so a 1-line unterminated `case x in` body reports its EOF on the
         // NEXT line (`command substitution: line 2: ... on line 1`, issue
         // #515). A `$(` body keeps the verbatim text (the outer parse owns
-        // its EOF shape).
+        // its EOF shape). The terminator is withheld when the body ends
+        // with an active backslash: it would be quoted into a line
+        // continuation instead of terminating (see
+        // backtick_body_ends_with_active_backslash in
+        // command_substitution.rs).
         let newline_terminated;
-        let source: &str = if self.backtick_body_diagnostic.get() && !alias_spliced.ends_with('\n')
-        {
+        let source: &str = if self.backtick_body_diagnostic.get()
+            && !alias_spliced.ends_with('\n')
+            && !super::command_substitution::backtick_body_ends_with_active_backslash(
+                &alias_spliced,
+            ) {
             newline_terminated = format!("{alias_spliced}\n");
             &newline_terminated
         } else {
