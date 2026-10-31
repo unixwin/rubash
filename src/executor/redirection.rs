@@ -1189,6 +1189,37 @@ impl Executor {
                             )
                             .map(|_| Some(RedirectRejection::Command));
                     }
+                    // rubash#2276: the alias is OPEN (the judgment
+                    // above), but the spelling is an open() of the
+                    // magic link (redir.c's r_input/r_output arms via
+                    // redir_open), and a socket's magic link refuses
+                    // the open with ENXIO — the dup faces the #1963
+                    // judgment models are not this face, and the
+                    // serve ladders that resolve the spelling per
+                    // face (the text stdin channel, the stdio plan)
+                    // cannot be relied on to refuse it. The endpoint
+                    // judged is the one the ordered walk would open
+                    // at this entry: the ambient table entry, or a
+                    // socket an earlier entry of THIS list bound
+                    // from a net target (the walk's connect precedes
+                    // the spelling's open in GNU's walk too).
+                    let socket = self.fd_alias_spelling_open_error(fd).is_some()
+                        || cmd.redirects[..index].iter().any(|earlier| {
+                            earlier.fd == Some(fd)
+                                && crate::special_paths::is_net_redirect_target(
+                                    &self.expand_redirect_target(earlier),
+                                )
+                        });
+                    if socket {
+                        let message = crate::posix_errors::path_error(
+                            &target,
+                            super::shell_options::enxio_error(),
+                        );
+                        let text = crate::posix_errors::message(&message);
+                        return self
+                            .reject_redirect_at(cmd, index, &text)
+                            .map(|_| Some(RedirectRejection::Command));
+                    }
                 }
             }
             // rubash#2098: a non-winning fd-0 NET redirect's open is

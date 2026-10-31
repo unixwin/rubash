@@ -40,7 +40,7 @@ fn services_db_path() -> std::path::PathBuf {
 /// fails with. On Unix the errno is real (the kernel raises it for
 /// the magic link itself); elsewhere the GNU strerror text is the
 /// payload, and posix_errors::message renders it unchanged.
-fn enxio_error() -> io::Error {
+pub(in crate::executor) fn enxio_error() -> io::Error {
     #[cfg(unix)]
     {
         io::Error::from_raw_os_error(libc::ENXIO)
@@ -3237,6 +3237,17 @@ impl Executor {
             // without moving fd N.
             if let Some(source_fd) = redirect_target_fd(&target) {
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    // rubash#2276: a socket endpoint's spelling-open
+                    // fails ENXIO (see fd_alias_spelling_open_error) —
+                    // decline the text serve instead of falling
+                    // through to the stream serve below, which is the
+                    // `<&N` dup model. The reject gate reports the
+                    // failure for gated commands; an ungated
+                    // synthesized command must not stream the socket
+                    // either.
+                    if self.fd_alias_spelling_open_error(source_fd).is_some() {
+                        return None;
+                    }
                     if let Some(path) = self.fd_alias_reopen_path(source_fd) {
                         if let Ok(bytes) = std::fs::read(&path) {
                             return Some(
