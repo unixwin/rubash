@@ -208,6 +208,46 @@ impl BindRegistry {
         removed
     }
 
+    /// The key sequences that invoke `function` in one keymap, in
+    /// readline's listing order — GNU's rl_invoking_keyseqs_in_map over
+    /// the effective map (bind.def query_bindings and
+    /// rl_print_keybinding consume exactly this). The effective map is
+    /// the keymap's default table (see
+    /// [`crate::builtins::bind::default_bindings_for_keymap`]) with
+    /// session registrations applied: a registered sequence shadows the
+    /// default binding of the same sequence (rl_generic_bind replaces
+    /// the slot, whatever kind the new binding is), and the session's
+    /// own function bindings join the list. The merged list is sorted
+    /// by translated key bytes, which is the C scan's order.
+    pub fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
+        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let mut seqs: Vec<String> = crate::builtins::bind::default_bindings_for_keymap(keymap)
+            .iter()
+            .filter(|(_, bound)| *bound == function)
+            .map(|(seq, _)| seq.to_string())
+            .filter(|seq| {
+                !self.entries.iter().any(|entry| {
+                    entry.keyseq == *seq
+                        && normalize_keymap_name(
+                            entry.keymap.as_deref().unwrap_or("emacs-standard"),
+                        ) == wanted
+                })
+            })
+            .collect();
+        for entry in self.entries_for_keymap(keymap) {
+            if let BindKind::Function { name } = &entry.kind {
+                if name == function {
+                    seqs.push(entry.keyseq.clone());
+                }
+            }
+        }
+        seqs.sort_by(|a, b| {
+            crate::builtins::bind::keyseq_bytes(a).cmp(&crate::builtins::bind::keyseq_bytes(b))
+        });
+        seqs.dedup();
+        seqs
+    }
+
     pub fn snapshot(&self) -> Vec<BindEntry> {
         self.entries.clone()
     }
@@ -320,6 +360,60 @@ mod tests {
             .map(|entry| entry.keyseq.as_str())
             .collect();
         assert_eq!(viins_names, vec!["\\C-i"]);
+    }
+
+    #[test]
+    fn invoking_keyseqs_reports_gnu_defaults_in_scan_order() {
+        // rubash#2338: the oracle's `bind -q backward-char` answer,
+        // per keymap (hunt cases bd01/bd27/bd28).
+        let registry = BindRegistry::default();
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\C-b", r"\eOD", r"\e[D"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-insert")),
+            vec![r"\eOD", r"\e[D"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-command")),
+            vec![r"\C-h", r"\eOD", r"\e[D", "h"]
+        );
+        assert_eq!(registry.invoking_keyseqs("yank", None), vec![r"\C-y"]);
+        assert_eq!(
+            registry.invoking_keyseqs("complete", None),
+            vec![r"\C-i", r"\e\e"]
+        );
+    }
+
+    #[test]
+    fn invoking_keyseqs_merges_session_bindings_in_scan_order() {
+        // A session binding joins the list at its byte position; a
+        // session binding for an existing default sequence shadows the
+        // default (the sequence leaves the old function's list).
+        let mut registry = BindRegistry::default();
+        registry.register(BindEntry {
+            keyseq: r"\ez".to_string(),
+            kind: BindKind::Function {
+                name: "backward-char".to_string(),
+            },
+            keymap: None,
+        });
+        registry.register(BindEntry {
+            keyseq: r"\C-b".to_string(),
+            kind: BindKind::Function {
+                name: "forward-char".to_string(),
+            },
+            keymap: None,
+        });
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\eOD", r"\e[D", r"\ez"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("forward-char", None),
+            vec![r"\C-b", r"\C-f", r"\eOC", r"\e[C"]
+        );
     }
 
     #[test]
