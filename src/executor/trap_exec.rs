@@ -587,6 +587,15 @@ impl Executor {
                                 "{}unexpected EOF while looking for matching `)'\n",
                                 self.parser_error_prefix_for_line(caller_line + line)
                             ),
+                            crate::lexer::UnclosedComsubShape::ArithEof { line } => format!(
+                                // parse.y:3908-3915 parse_matched_pair:
+                                // the arithmetic scan's EOF names its
+                                // start_lineno — the `$((` open line,
+                                // mapped like the other open-line reports
+                                // (caller_line + line - 1).
+                                "{}unexpected EOF while looking for matching `)'\n",
+                                self.parser_error_prefix_for_line(caller_line + line - 1)
+                            ),
                             crate::lexer::UnclosedComsubShape::PlainSubshellEof {
                                 line,
                                 open_line,
