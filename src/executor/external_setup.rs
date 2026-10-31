@@ -1025,6 +1025,23 @@ impl Executor {
         let fold_is_ours = self.pending_stdin_fold.is_none();
         let (mut cmd, mut process_substitutions) =
             self.command_with_process_substitution_files(cmd)?;
+        // rubash#2396: GNU execute_cmd.c:4909-4917 — with autocd set,
+        // an interactive simple command whose first word names a
+        // directory (and which resolved to neither a builtin nor a
+        // function, or every dispatch funnel would have claimed it
+        // before reaching the disk-command entry) is rewritten to
+        // `cd -- <words...>` and run through the builtin path. The
+        // attempt sits after process-substitution materialization so
+        // the rewritten command's words are final.
+        if let Some(status) = self.try_autocd(&cmd)? {
+            self.exit_code = status;
+            if fold_is_ours {
+                self.settle_pending_stdin_fold();
+            }
+            self.undo_child_fd_var_redirects();
+            self.finish_process_substitutions(process_substitutions)?;
+            return Ok(());
+        }
         self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
         if fold_is_ours {
@@ -1036,6 +1053,84 @@ impl Executor {
         self.undo_child_fd_var_redirects();
         self.finish_process_substitutions(process_substitutions)?;
         result
+    }
+
+    /// GNU execute_cmd.c:4909-4917 (autocd): when the shopt is set
+    /// and the shell is interactive (the same `interactive`
+    /// projection as the exit banner/check), a first word that
+    /// `is_dirname` accepts rewrites the command to `cd -- <words>`
+    /// and dispatches it as a builtin — a `cd` FUNCTION wins over
+    /// the builtin (`func = find_function ("cd")`, goto run_builtin).
+    /// The `cd -- ...` line is printed to stderr through
+    /// xtrace_print_word_list (words, 0) at the transform site,
+    /// whether or not xtrace is on. Returns the cd dispatch's status
+    /// when the transform fired. The command's leading assignments
+    /// were classified for a disk command by the materializer and are
+    /// not re-bound as the builtin's tempenv — a known residual.
+    pub(in crate::executor) fn try_autocd(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<i32>, ExecuteError> {
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "autocd") {
+            return Ok(None);
+        }
+        // GNU's condition is the C `interactive` global; reuse the
+        // exit path's projection of it (job_builtins).
+        if !self.exit_job_check_applies() {
+            return Ok(None);
+        }
+        let Some(word) = cmd.words.first() else {
+            return Ok(None);
+        };
+        if word.is_empty() || !self.autocd_is_dirname(word) {
+            return Ok(None);
+        }
+        let mut cd_cmd = cmd.clone();
+        let mut words = Vec::with_capacity(cmd.words.len() + 2);
+        words.push("cd".to_string());
+        words.push("--".to_string());
+        words.extend(cmd.words.iter().cloned());
+        cd_cmd.words = words;
+        let rendered = cd_cmd
+            .words
+            .iter()
+            .map(|word| super::prompt_expansion::xtrace_quote_word(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("{rendered}");
+        // The rewritten command is a builtin dispatch, not a disk
+        // command: undo the disk-class marks execute_external set on
+        // entry, and roll this/last like run_builtin (the cd builtin
+        // or, for a cd function, GNU's NULL — both project to Other).
+        self.external_dispatch_ran.set(false);
+        self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
+        if self.shell_state.functions.contains_key("cd") {
+            self.execute_function("cd", &cd_cmd.words[1..], &cd_cmd)?;
+            Ok(Some(self.exit_code))
+        } else {
+            Ok(Some(self.execute_cd(&cd_cmd)?))
+        }
+    }
+
+    /// GNU execute_cmd.c:4451-4462 `is_dirname`: the PATH search
+    /// result is tested when the search finds one (findcmd.c
+    /// search_for_command — a word containing a slash is its own
+    /// search result); otherwise the raw word, resolved against the
+    /// shell's cwd, is tested with file_isdir.
+    fn autocd_is_dirname(&self, word: &str) -> bool {
+        if !word.contains('/') {
+            if let Some(found) =
+                crate::executor::path::find_user_command(word, &self.shell_state.env_vars)
+            {
+                return std::fs::metadata(&found)
+                    .map(|md| md.is_dir())
+                    .unwrap_or(false);
+            }
+        }
+        let anchored = self.session_path(shell_path_to_windows(word, &self.shell_state.env_vars));
+        std::fs::metadata(&anchored)
+            .map(|md| md.is_dir())
+            .unwrap_or(false)
     }
 
     pub(in crate::executor) fn command_with_process_substitution_files(
