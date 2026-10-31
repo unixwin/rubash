@@ -250,6 +250,47 @@ fn issue2390_single_quoted_procsub_stays_literal() {
     );
 }
 
+/// Adjacency control (rubash#1933 shape): text glued DIRECTLY to
+/// a procsub span with no intervening whitespace is part of the
+/// same word — the pathname takes the suffix.
+#[cfg(unix)]
+#[test]
+fn issue2390_glued_suffix_stays_one_word() {
+    assert_case(
+        "suffix",
+        "for f in <(echo hi)x; do echo \"[$f]\"; done\n",
+        "[/dev/fd/Nx]\n",
+        0,
+    );
+}
+
+/// Adjacency control: a prefix glued directly to the span is part
+/// of the same word too.
+#[cfg(unix)]
+#[test]
+fn issue2390_glued_prefix_stays_one_word() {
+    assert_case(
+        "prefix",
+        "for f in x<(echo hi); do echo \"[$f]\"; done\n",
+        "[x/dev/fd/N]\n",
+        0,
+    );
+}
+
+/// Expansion results are data: a variable whose VALUE spells a
+/// procsub is field-split as literal text, never materialised
+/// (GNU: two iterations over the literal pieces).
+#[cfg(unix)]
+#[test]
+fn issue2390_variable_value_procsub_text_stays_data() {
+    assert_case(
+        "varvalue",
+        "x='<(echo hi)'\nfor f in $x; do echo \"[$f]\"; done\n",
+        "[<(echo]\n[hi)]\n",
+        0,
+    );
+}
+
 /// Output-side procsub in a for list iterates per word as well.
 #[cfg(unix)]
 #[test]
