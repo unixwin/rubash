@@ -15,8 +15,11 @@
 //!   line still run (probe A);
 //! - a quote/backtick recursion inside the hunt names ITSELF at its own
 //!   line (a5/q11/[6]/[14] — parse.y:4040-4051 shellquote arm);
-//! - a hunt bounded by a double-quoted span names the DQUOTE at the span's
-//!   line (q2/w1-w4: `echo "$[1+2"` -> `"');
+//! - a hunt inside a double-quoted span is NOT bounded by the span: the
+//!   span's closing quote opens a quote unit inside the hunt, whose EOF
+//!   names the DQUOTE at the UNIT's line (q2/w1-w4 sit on the span's line,
+//!   where the two coincide: `echo "$[1+2"` -> `"'; rubash#2227 face 2
+//!   splits them — `echo "a $[1+<NL>2"` names `"'` at line 2);
 //! - the hunt owns the EOF inside `${` (`echo ${x[$[1}` -> `]', not the `}'
 //!   close-char verdict) and inside `$(` (`echo $(echo $[1+2` -> `]');
 //! - `$((`/`((` unclosed arithmetic keeps its `)' family verdict (a1/a3);
@@ -193,8 +196,11 @@ fn hunt_inside_comsub_owns_eof() {
     );
 }
 
-/// A hunt bounded by a double-quoted span names the DQUOTE at the span's
-/// line (q2/w1: `echo "$[1+2"` and `echo "$[1+2" ]` both say `"').
+/// A hunt inside a double-quoted span names the DQUOTE when the span's
+/// closing quote opens a quote unit inside the hunt that never closes
+/// (q2/w1: `echo "$[1+2"` and `echo "$[1+2" ]` both say `"'` — the unit
+/// sits on the span's line here; for the split-line attribution see the
+/// rubash#2227 pins).
 #[test]
 fn hunt_inside_dquote_names_the_dquote() {
     for script in [

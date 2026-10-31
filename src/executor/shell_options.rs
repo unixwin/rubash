@@ -128,6 +128,39 @@ impl io::Read for NetStream {
     }
 }
 
+/// The byte source behind a pump-fed simulated stream device
+/// (niubash#758 generalizes rubash#1898's zero pump): a constant
+/// zero stream, or the OS CSPRNG.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::executor) enum PumpSource {
+    Zeros,
+    Random,
+}
+
+/// Fill `buffer` from the Windows CSPRNG (BCryptGenRandom with the
+/// system-preferred RNG — no algorithm handle to open or leak). The
+/// entropy source behind the simulated /dev/random read face.
+#[cfg(windows)]
+pub(in crate::executor) fn fill_random_bytes(buffer: &mut [u8]) -> io::Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status))
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn open_input_redirect(&self, target: &str) -> io::Result<File> {
         self.open_input_redirect_impl(target, true)
@@ -168,6 +201,10 @@ impl Executor {
             // stand-in carries the write side of the bind contract).
             SpecialPathClass::ZeroDevice => return Self::zero_device_file(&target),
             SpecialPathClass::FullDevice => return Self::synthetic_proc_write_sink(false),
+            // niubash#758: <> on an entropy device reads the CSPRNG
+            // stream and discards writes (the probe's File is dropped
+            // by every caller, exactly like the zero arm above).
+            SpecialPathClass::RandomDevice => return Self::random_device_file(&target),
             SpecialPathClass::FdAlias(fd) => {
                 if super::redirection::dup_source_fd_open(
                     &self.fd_table,
@@ -405,6 +442,13 @@ impl Executor {
         {
             return Some(Self::zero_device_file(&target));
         }
+        // niubash#758: the entropy devices read as an unbounded
+        // CSPRNG stream — the pump-fed random source (a real handle,
+        // like the zero source). On Unix the construction is
+        // equivalent to opening the real device.
+        if crate::special_paths::is_random_device(target) {
+            return Some(Self::random_device_file(&target));
+        }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — an open of fd N's target, not a
         // filesystem path open of the spelling. Windows has no /dev, so
@@ -533,16 +577,52 @@ impl Executor {
         #[cfg(windows)]
         {
             let _ = target;
-            use std::io::Write as _;
-            let (reader, mut writer) = std::io::pipe()?;
-            std::thread::spawn(move || {
+            Self::pump_device_file(PumpSource::Zeros)
+        }
+    }
+
+    /// niubash#758: a readable File that yields an unbounded stream
+    /// of CSPRNG bytes — the /dev/random and /dev/urandom read face.
+    /// The zero device's construction with a different byte source:
+    /// on Unix the real device opens; on Windows a pump thread feeds
+    /// a pipe from BCryptGenRandom (the OS CSPRNG — the same source
+    /// the platform's own runtimes seed from). If the CSPRNG call
+    /// fails the pump ends and the reader sees EOF rather than
+    /// fabricated bytes: an entropy face that invents its bytes is
+    /// worse than a short stream.
+    pub(in crate::executor) fn random_device_file(target: &str) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            File::open(target)
+        }
+        #[cfg(windows)]
+        {
+            let _ = target;
+            Self::pump_device_file(PumpSource::Random)
+        }
+    }
+
+    /// The pump-fed pipe behind the simulated stream devices
+    /// (rubash#1898's precedent, generalized by niubash#758): a
+    /// writer thread fills the pipe from `source` until the last
+    /// reader closes (broken pipe ends the thread).
+    #[cfg(windows)]
+    fn pump_device_file(source: PumpSource) -> io::Result<File> {
+        use std::io::Write as _;
+        let (reader, mut writer) = std::io::pipe()?;
+        std::thread::spawn(move || match source {
+            PumpSource::Zeros => {
                 const ZEROS: [u8; 8192] = [0u8; 8192];
                 while writer.write_all(&ZEROS).is_ok() {}
-            });
-            use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
-            let handle = reader.into_raw_handle();
-            Ok(unsafe { File::from_raw_handle(handle) })
-        }
+            }
+            PumpSource::Random => {
+                let mut chunk = [0u8; 8192];
+                while fill_random_bytes(&mut chunk).is_ok() && writer.write_all(&chunk).is_ok() {}
+            }
+        });
+        use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+        let handle = reader.into_raw_handle();
+        Ok(unsafe { File::from_raw_handle(handle) })
     }
 
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
@@ -1617,11 +1697,13 @@ impl Executor {
         if is_null_device(target)
             || crate::special_paths::is_zero_device(target)
             || crate::special_paths::is_full_device(target)
+            || crate::special_paths::is_random_device(target)
         {
             // /dev/null classifies as a char device (crw-rw-rw-) on
-            // every platform; the binds answer zero/full with the
-            // same 'n' inode (the DOS-device judgment, the symbolic
-            // FullDevice endpoint, rubash#1898).
+            // every platform; the binds answer zero/full — and the
+            // entropy devices (niubash#758) — with the same 'n' inode
+            // (the DOS-device judgment, the symbolic FullDevice
+            // endpoint, rubash#1898).
             return FdFactMark::Access("nrw".to_string());
         }
         if crate::special_paths::is_net_redirect_target(target) {
@@ -1843,8 +1925,12 @@ impl Executor {
             ));
         }
         // rubash#1898: /dev/zero discards writes exactly like the
-        // null device; opens route to the same sink.
-        if crate::special_paths::is_zero_device(target) {
+        // null device; opens route to the same sink. The entropy
+        // devices discard writes the same way (niubash#758: into the
+        // pool on Linux — observably a sink).
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_random_device(target)
+        {
             return OpenOptions::new().write(true).open(shell_path_to_windows(
                 "/dev/null",
                 &self.shell_state.env_vars,
@@ -2142,6 +2228,17 @@ impl Executor {
             // open succeeds — GNU fails only the write; the direct
             // builtin faces own that shape via OutputTarget).
             SpecialPathClass::ZeroDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            // niubash#758: entropy-device appends discard like the
+            // null device — the write side of every random face.
+            SpecialPathClass::RandomDevice => {
                 OpenOptions::new()
                     .write(true)
                     .append(true)

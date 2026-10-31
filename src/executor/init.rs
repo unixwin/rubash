@@ -983,6 +983,7 @@ impl Executor {
             parse_error_occurred: false,
             signal_discard_pending: false,
             termsig_death_pending: None,
+            termsig_death_trap_status: None,
             bash_logout_sourced: false,
             shell_pid,
             bashpid_origin_depth: bg_bashpid_base.unwrap_or(0),
