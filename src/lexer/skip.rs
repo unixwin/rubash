@@ -2684,6 +2684,17 @@ pub enum UnclosedComsubShape {
     /// (evalstring.c:588-595) can exit, and `command eval` suppresses even
     /// that (executing_command_builtin, execute_cmd.c:4735).
     ComsubEof { line: usize },
+    /// Unclosed arithmetic expansion `$(( ...` at EOF with grouping
+    /// parens still open inside it (`$(( (echo`). GNU never reads the
+    /// digraph as comsub+subshell: parse_comsub peeks the second `(`
+    /// and hands the whole construct to the arithmetic matched-pair
+    /// scan (parse.y:4463-4470, POSIX interp 217 — arithmetic has
+    /// precedence), inside which every further `(` is a grouping
+    /// count, and that scan's EOF reports its start_lineno — the
+    /// arithmetic open line (parse.y:3908-3915). Message: "unexpected
+    /// EOF while looking for matching `)'" at the open line. Abort:
+    /// the same eval-string containment as ComsubEof.
+    ArithEof { line: usize },
     /// Plain subshell `(` in command position at the eval-string main level
     /// (`( `, `( hi`, `echo a\n( hi`). Message: "syntax error: unexpected
     /// end of file from `(' command on line N" — the bash-5.3 compoundcmd
@@ -2868,10 +2879,13 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     }
     let invalid = stack
         .iter()
-        .find(|&&(idx, _, kind)| {
-            kind == OpenerKind::Plain && !opens_in_command_position(&chars, idx)
+        .enumerate()
+        .find(|&(pos, &(idx, _, kind))| {
+            kind == OpenerKind::Plain
+                && !opens_in_command_position(&chars, idx)
+                && !arith_internal_frame(&stack, pos, &chars)
         })
-        .map(|&(idx, line, _)| (idx, line));
+        .map(|(_, &(idx, line, _))| (idx, line));
     if let Some((idx, line)) = invalid {
         let inside_comsub = stack
             .iter()
@@ -2912,6 +2926,35 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     // comsub EOF line.
     if open_kind == OpenerKind::Comsub && chars.get(open_idx + 1) == Some(&'(') {
         return None;
+    }
+    // rubash#2342, nested case: the same `$((` arithmetic root with
+    // grouping parens still open inside it (e.g. `$(( (echo`). GNU
+    // never reads the digraph as comsub+subshell at all: parse_comsub
+    // peeks the second `(` and hands the whole construct to the
+    // arithmetic matched-pair scan (parse.y:4463-4470, POSIX interp
+    // 217 — arithmetic has precedence), inside which every further
+    // `(` is a grouping count, and that scan's EOF reports its
+    // start_lineno — the arithmetic open line (parse.y:3908-3915).
+    // So when a `$((` digraph frame is on the stack and every frame
+    // above it is a plain paren, the unclosed tail is that one
+    // arithmetic scan, not a comsub: report the digraph's open line
+    // (ArithEof). A comsub or compassign frame above the digraph is
+    // a genuinely nested construct and keeps the classification
+    // below.
+    if let Some(digraph_pos) = stack
+        .iter()
+        .position(|&(idx, _, kind)| kind == OpenerKind::Comsub && chars.get(idx + 1) == Some(&'('))
+    {
+        if stack[digraph_pos + 1..]
+            .iter()
+            .all(|&(_, _, kind)| kind == OpenerKind::Plain)
+        {
+            let (_, digraph_line, _) = stack[digraph_pos];
+            return Some((
+                UnclosedComsubShape::ArithEof { line: digraph_line },
+                digraph_line,
+            ));
+        }
     }
 
     // EOF shapes. A comsub anywhere in the enclosing chain keeps the
@@ -2960,6 +3003,24 @@ fn opens_in_command_position(chars: &[char], idx: usize) -> bool {
         }
     }
     true
+}
+
+/// Is the plain frame at stack position `pos` arithmetic-internal —
+/// nested directly inside a `$((` digraph frame, i.e. its nearest
+/// non-plain enclosing frame is the digraph? Such parens are grouping
+/// counts in GNU's arithmetic matched-pair scan (parse_comsub hands
+/// `$((` to parse_matched_pair, parse.y:4463-4470), never yyparse
+/// tokens, so the invalid-position classification must not claim
+/// them: the `(` in `$((a (b` is arithmetic text, and GNU reports
+/// the arithmetic EOF there, not a token error.
+fn arith_internal_frame(stack: &[(usize, usize, OpenerKind)], pos: usize, chars: &[char]) -> bool {
+    stack[..pos]
+        .iter()
+        .rev()
+        .find(|&&(_, _, kind)| kind != OpenerKind::Plain)
+        .is_some_and(|&(idx, _, kind)| {
+            kind == OpenerKind::Comsub && chars.get(idx + 1) == Some(&'(')
+        })
 }
 
 /// The token a yacc error names for a `(` in invalid position: the grammar
