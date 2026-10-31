@@ -862,6 +862,19 @@ impl Executor {
         if contain_child_signals {
             let _ = crate::builtins::kill::take_adjudicated_signal_death();
         }
+        // rubash#2346: the termsig-death mark is an Executor transient
+        // outside the saved ShellState, so park the parent's mark for
+        // the span of the run: the child's own dispatches record the
+        // child's verdicts on it, and the exit boundary below drops
+        // the child's mark instead of handing it back — a contained
+        // child's death is simulated through the adjudicated-death
+        // record, and the hosting process must not die by the mark at
+        // the parent's own finish.
+        let saved_termsig_death = if contain_child_signals {
+            self.termsig_death_pending.take()
+        } else {
+            None
+        };
         let saved_shell_pid = self.shell_pid;
         if contain_child_signals {
             self.shell_pid = std::process::id();
@@ -966,6 +979,12 @@ impl Executor {
         } else {
             None
         };
+        // rubash#2346: drop the contained child's termsig-death mark
+        // (its death is the simulated child_signal_death above) and
+        // hand the parent back its parked mark.
+        if contain_child_signals {
+            self.termsig_death_pending = saved_termsig_death;
+        }
         self.shell_pid = saved_shell_pid;
 
         if let Some(saved) = saved_process_env {

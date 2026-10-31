@@ -3393,7 +3393,7 @@ fn signal_short_name(signal: i32) -> &'static str {
 /// 128+n, while URG and WINCH are ignored outright and RTMIN dies
 /// without the EXIT trap running. rubash#1511.
 #[cfg(unix)]
-fn exit_reroutes(sig: i32) -> bool {
+pub(crate) fn exit_reroutes(sig: i32) -> bool {
     if sig == libc::SIGURG as i32 || sig == libc::SIGWINCH as i32 {
         return false;
     }

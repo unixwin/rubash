@@ -4476,11 +4476,12 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     }
 
     while !eof {
-        // rubash#2233: a hangup death recorded by the signal dispatch
-        // (e.g. the prompt poll swallowed the unwind as an abort) ends
-        // the reader here; finish_shell runs the hangup funnel and the
-        // signal death. finish_shell is the mark's only consumer.
-        if executor.hangup_death_pending() {
+        // rubash#2233/#2346: a termsig death recorded by the signal
+        // dispatch (e.g. the prompt poll swallowed the unwind as an
+        // abort) ends the reader here; finish_shell runs the termsig
+        // funnel and the signal death. finish_shell is the mark's
+        // only consumer.
+        if executor.termsig_death_pending().is_some() {
             eof = true;
             continue;
         }
@@ -5637,18 +5638,22 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
             }
         }
     }
-    // rubash#2233: the hangup-death funnel (sig.c:590 termsig_handler)
-    // hangs the jobs up AFTER the history save above and BEFORE the
-    // EXIT trap below (sig.c:621-622 precedes the run_exit_trap call),
-    // then dies by the signal at the end of this function. The mark
-    // is taken here — finish_shell is its only consumer — so a stale
-    // mark can never leak into a later session in the same process.
-    let hangup_death = executor.take_hangup_death_pending();
-    // sig.c:621-622 gates the job hangup on the shell being
-    // interactive (or a comsub/procsub subshell); a script shell
-    // caught by its EXIT trap dies by the signal without it.
+    // rubash#2233, generalized by rubash#2346: the termsig-death
+    // funnel (sig.c:590 termsig_handler) hangs the jobs up AFTER the
+    // history save above and BEFORE the EXIT trap below (sig.c:621-622
+    // precedes the run_exit_trap call), then dies by the signal at the
+    // end of this function. The mark is taken here — finish_shell is
+    // its only consumer — so a stale mark can never leak into a later
+    // session in the same process.
+    let termsig_death = executor.take_termsig_death_pending();
+    // sig.c:621-622 gates the job hangup on SIGHUP reaching an
+    // interactive (or comsub/procsub subshell) shell; a script shell
+    // caught by its EXIT trap — and any shell dying by another
+    // terminating signal — dies by the signal without it.
     #[cfg(unix)]
-    if hangup_death && executor.get_env("__RUBASH_INTERACTIVE") == Some("1") {
+    if termsig_death == Some(libc::SIGHUP as i32)
+        && executor.get_env("__RUBASH_INTERACTIVE") == Some("1")
+    {
         executor.hangup_all_jobs();
     }
     // rubash#1853: end-of-stream job notifications. The boundary
@@ -5692,7 +5697,7 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // hangup death already hung the jobs up in termsig order (before
     // the trap) and is not repeated.
     #[cfg(unix)]
-    if !hangup_death
+    if termsig_death.is_none()
         && interactive
         && executor.get_env("__RUBASH_LOGIN_SHELL") == Some("1")
         && executor
@@ -5701,44 +5706,57 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     {
         executor.hangup_all_jobs();
     }
-    // rubash#2233: the termsig funnel ends in kill_shell (sig.c:649):
-    // restore SIG_DFL and re-raise, so after history, hangup, and the
-    // EXIT trap the process dies BY SIGHUP rather than exiting 129.
-    // A hangup that landed while THIS finish was already running —
-    // its delivery drains inside the EXIT trap above and records
-    // the mark there, unwinding the trap with 129 — still owes the
-    // signal death: GNU's termsig preempts an in-progress
-    // exit_shell the same way. The jobs get their hangup at this
-    // late point in that case (the in-order funnel above handled
-    // the early one), then the death.
+    // rubash#2233, generalized by rubash#2346: the termsig funnel
+    // ends in kill_shell (sig.c:649-667): restore SIG_DFL and
+    // re-raise, so after history, hangup, and the EXIT trap the
+    // process dies BY the signal rather than exiting 128+sig. A
+    // signal that landed while THIS finish was already running — its
+    // delivery drains inside the EXIT trap above and records the
+    // mark there, unwinding the trap with 128+sig — still owes the
+    // signal death, and (as GNU's termsig_sighandler short-circuits
+    // a second terminating signal through kill_shell with the NEW
+    // signal) it supersedes an earlier mark. Jobs get their hangup
+    // at this late point when the late signal is a SIGHUP the
+    // in-order funnel above did not already service.
     #[cfg(unix)]
-    if hangup_death || executor.take_hangup_death_pending() {
-        if !hangup_death && executor.get_env("__RUBASH_INTERACTIVE") == Some("1") {
-            executor.hangup_all_jobs();
+    let termsig_death = match executor.take_termsig_death_pending() {
+        Some(late) => {
+            if termsig_death.is_none()
+                && late == libc::SIGHUP as i32
+                && executor.get_env("__RUBASH_INTERACTIVE") == Some("1")
+            {
+                executor.hangup_all_jobs();
+            }
+            Some(late)
         }
-        die_by_sighup();
+        None => termsig_death,
+    };
+    #[cfg(unix)]
+    if let Some(sig) = termsig_death {
+        die_by_signal(sig);
     }
     code
 }
 
-/// rubash#2233: GNU sig.c kill_shell — restore SIGHUP's default
-/// disposition and re-raise it so the process's wait status reports
-/// death BY SIGHUP. The signal is explicitly unblocked first (a
-/// delivery could have been consumed while masked at some layer);
-/// the plain exit is the fallback that in practice is unreachable.
+/// rubash#2233, generalized by rubash#2346: GNU sig.c:649-667
+/// kill_shell — restore the signal's default disposition and
+/// re-raise it so the process's wait status reports death BY that
+/// signal. The signal is explicitly unblocked first (a delivery
+/// could have been consumed while masked at some layer); the plain
+/// exit is the fallback that in practice is unreachable.
 #[cfg(unix)]
-fn die_by_sighup() -> ! {
+fn die_by_signal(sig: i32) -> ! {
     // SAFETY: disposition and mask changes plus a self-directed raise
     // on the way out of the process; nothing is retained.
     unsafe {
-        libc::signal(libc::SIGHUP, libc::SIG_DFL);
+        libc::signal(sig, libc::SIG_DFL);
         let mut set: libc::sigset_t = std::mem::zeroed();
         libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGHUP);
+        libc::sigaddset(&mut set, sig);
         libc::sigprocmask(libc::SIG_UNBLOCK, &set, std::ptr::null_mut());
-        libc::raise(libc::SIGHUP);
+        libc::raise(sig);
     }
-    std::process::exit(128 + libc::SIGHUP as i32);
+    std::process::exit(128 + sig);
 }
 
 /// shell.c:1830-1842 init_interactive + bashhist.c:320-345: create the
