@@ -54,9 +54,22 @@ fn suspend_bad_option_is_plain_usage_error() {
 #[cfg(unix)]
 #[test]
 fn exit_trap_runs_on_untrapped_fatal_signal() {
-    let (stdout, _, code) = run_script("trap 'echo EXIT-TRAP-RAN' EXIT\nkill -TERM $$\n");
-    assert_eq!(stdout, "EXIT-TRAP-RAN\n");
-    assert_eq!(code, Some(143));
+    use std::os::unix::process::ExitStatusExt;
+    let dir = std::env::temp_dir().join(format!("rubash-1332term-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("term.sh");
+    std::fs::write(&path, "trap 'echo EXIT-TRAP-RAN' EXIT\nkill -TERM $$\n").expect("write script");
+    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg(&path)
+        .output()
+        .expect("run rubash");
+    // rubash#1332's half: the EXIT trap runs. rubash#2346's half: the
+    // death is BY SIGTERM (sig.c:649-667 kill_shell), not a plain 143
+    // exit -- the earlier Some(143) expectation encoded the form the
+    // #2346 oracle evidence (waitpid: signaled 15) overturned.
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "EXIT-TRAP-RAN\n");
+    assert_eq!(output.status.signal(), Some(15));
+    assert_eq!(output.status.code(), None);
 }
 
 #[cfg(unix)]

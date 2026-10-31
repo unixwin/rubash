@@ -3534,7 +3534,7 @@ fn signal_short_name(signal: i32) -> &'static str {
 /// trap must not reroute them either: an untrapped TSTP still stops
 /// the shell (rubash#2344). rubash#1511.
 #[cfg(unix)]
-fn exit_reroutes(sig: i32) -> bool {
+pub(crate) fn exit_reroutes(sig: i32) -> bool {
     if sig == libc::SIGURG as i32
         || sig == libc::SIGWINCH as i32
         || kernel_signals::is_stop_class(sig)
