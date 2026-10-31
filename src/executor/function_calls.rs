@@ -137,10 +137,26 @@ impl Executor {
             self.exit_code = 1;
             return Ok(());
         }
+        // rubash#2202: in a respawned child this body was re-parsed
+        // from the prelude's collapsed re-render, so its node lines
+        // name the prelude, not the original source. When the spawn
+        // stamped the function's source span, re-seed the stored
+        // body's lines from it (consumed once: a later redefinition
+        // in this shell keeps its own parse lines). GNU needs no
+        // such step — its forked child executes the parent's parsed
+        // tree directly (execute_cmd.c:5351ff).
+        let mut body_commands = function.body.clone();
+        if let Some(spans) = self
+            .shell_state
+            .respawn_function_line_spans
+            .remove(&function.name)
+        {
+            crate::parser::apply_command_line_spans(&mut body_commands, &spans);
+        }
         self.shell_state.functions.insert(
             function.name.clone(),
             Rc::new(Ast {
-                commands: function.body.clone(),
+                commands: body_commands,
             }),
         );
         // GNU expands aliases in the reader while the definition is

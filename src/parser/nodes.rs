@@ -1376,6 +1376,208 @@ pub struct Ast {
     pub commands: Vec<CommandNode>,
 }
 
+/// rubash#2202: one command node's source lines (start line, parse-end
+/// line, logical line), recorded for every node of a transported
+/// function body. GNU's fork copies the parsed COMMAND tree verbatim,
+/// so each body command keeps the line make_cmd.c stamped at parse
+/// (make_cmd.c:196 `temp->line = lineno`) and reports it when it runs
+/// (execute_cmd.c:936 SET_LINE_NUMBER from the executing node's
+/// ->line; variables.c:1861 binds $LINENO to that line_number via
+/// get_lineno). A respawned `rubash -c` child instead re-parses the
+/// prelude's re-rendered body text, whose original line structure
+/// collapsed (bash_command_sequence_text), so the parent records
+/// these spans in the respawn stamp (__RUBASH_FORK_FN_SPANS) and the
+/// child's definition path re-seeds them onto the re-parsed body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandLineSpan {
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub logical_line: Option<usize>,
+}
+
+/// Append the line span of every node in `commands` to `out`, in the
+/// canonical traversal order shared with `apply_command_line_spans`:
+/// a node precedes its children; children are visited as
+/// process-substitution bodies first, then the node's compound
+/// payload's command lists in field order.
+pub fn collect_command_line_spans(commands: &[CommandNode], out: &mut Vec<CommandLineSpan>) {
+    for node in commands {
+        out.push(CommandLineSpan {
+            line: node.line,
+            end_line: node.end_line,
+            logical_line: node.logical_line,
+        });
+        let mut lists = Vec::new();
+        command_child_lists(node, &mut lists);
+        for list in lists {
+            collect_command_line_spans(list, out);
+        }
+    }
+}
+
+/// Re-seed the spans recorded by `collect_command_line_spans` onto a
+/// re-parse of the same body. Returns false — leaving `commands`
+/// untouched — when the traversal counts differ: the text round-trip
+/// was not shape-faithful for this body, so the child keeps the lines
+/// its own parse produced rather than a misaligned span.
+pub fn apply_command_line_spans(commands: &mut [CommandNode], spans: &[CommandLineSpan]) -> bool {
+    let mut current = Vec::new();
+    collect_command_line_spans(commands, &mut current);
+    if current.len() != spans.len() {
+        return false;
+    }
+    let mut iter = spans.iter();
+    apply_command_line_spans_inner(commands, &mut iter);
+    true
+}
+
+fn apply_command_line_spans_inner(
+    commands: &mut [CommandNode],
+    iter: &mut std::slice::Iter<'_, CommandLineSpan>,
+) {
+    for node in commands.iter_mut() {
+        let span = iter
+            .next()
+            .expect("span count pre-checked by apply_command_line_spans");
+        node.line = span.line;
+        node.end_line = span.end_line;
+        node.logical_line = span.logical_line;
+        let mut lists = Vec::new();
+        command_child_lists_mut(node, &mut lists);
+        for list in lists {
+            apply_command_line_spans_inner(list, iter);
+        }
+    }
+}
+
+/// The sub-command lists of `node`, in the canonical traversal order
+/// of `collect_command_line_spans`. A node carries at most one
+/// compound payload; process substitutions (whose bodies are parsed
+/// commands too) ride simple commands and come first.
+fn command_child_lists<'a>(node: &'a CommandNode, out: &mut Vec<&'a [CommandNode]>) {
+    for substitution in &node.process_substitutions {
+        out.push(&substitution.commands);
+    }
+    if let Some(pipeline) = &node.pipeline_command {
+        out.push(&pipeline.stages);
+    }
+    if let Some(list) = &node.and_or_list {
+        out.push(&list.commands);
+    }
+    if let Some(background) = &node.background_command {
+        out.push(std::slice::from_ref(&*background.command));
+    }
+    if let Some(time) = &node.time_command {
+        out.push(std::slice::from_ref(&*time.command));
+    }
+    if let Some(inverted) = &node.inverted_command {
+        out.push(std::slice::from_ref(&*inverted.command));
+    }
+    if let Some(subshell) = &node.subshell_command {
+        out.push(&subshell.body);
+    }
+    if let Some(group) = &node.brace_group {
+        out.push(&group.body);
+    }
+    if let Some(if_command) = &node.if_command {
+        out.push(&if_command.condition);
+        out.push(&if_command.then_body);
+        for branch in &if_command.elif_branches {
+            out.push(&branch.condition);
+            out.push(&branch.body);
+        }
+        if let Some(else_body) = &if_command.else_body {
+            out.push(else_body);
+        }
+    }
+    if let Some(loop_command) = &node.loop_command {
+        out.push(&loop_command.condition);
+        out.push(&loop_command.body);
+    }
+    if let Some(for_command) = &node.for_command {
+        out.push(&for_command.body);
+    }
+    if let Some(select_command) = &node.select_command {
+        out.push(&select_command.body);
+    }
+    if let Some(case_command) = &node.case_command {
+        for clause in &case_command.clauses {
+            out.push(&clause.body);
+        }
+    }
+    if let Some(function) = &node.function_command {
+        out.push(&function.body);
+    }
+    if let Some(coproc) = &node.coproc_command {
+        if let Some(body) = &coproc.body {
+            out.push(body);
+        }
+    }
+}
+
+/// Mutable twin of `command_child_lists` (same order, disjoint field
+/// borrows).
+fn command_child_lists_mut<'a>(node: &'a mut CommandNode, out: &mut Vec<&'a mut [CommandNode]>) {
+    for substitution in &mut node.process_substitutions {
+        out.push(&mut substitution.commands);
+    }
+    if let Some(pipeline) = &mut node.pipeline_command {
+        out.push(&mut pipeline.stages);
+    }
+    if let Some(list) = &mut node.and_or_list {
+        out.push(&mut list.commands);
+    }
+    if let Some(background) = &mut node.background_command {
+        out.push(std::slice::from_mut(&mut *background.command));
+    }
+    if let Some(time) = &mut node.time_command {
+        out.push(std::slice::from_mut(&mut *time.command));
+    }
+    if let Some(inverted) = &mut node.inverted_command {
+        out.push(std::slice::from_mut(&mut *inverted.command));
+    }
+    if let Some(subshell) = &mut node.subshell_command {
+        out.push(&mut subshell.body);
+    }
+    if let Some(group) = &mut node.brace_group {
+        out.push(&mut group.body);
+    }
+    if let Some(if_command) = &mut node.if_command {
+        out.push(&mut if_command.condition);
+        out.push(&mut if_command.then_body);
+        for branch in &mut if_command.elif_branches {
+            out.push(&mut branch.condition);
+            out.push(&mut branch.body);
+        }
+        if let Some(else_body) = &mut if_command.else_body {
+            out.push(else_body);
+        }
+    }
+    if let Some(loop_command) = &mut node.loop_command {
+        out.push(&mut loop_command.condition);
+        out.push(&mut loop_command.body);
+    }
+    if let Some(for_command) = &mut node.for_command {
+        out.push(&mut for_command.body);
+    }
+    if let Some(select_command) = &mut node.select_command {
+        out.push(&mut select_command.body);
+    }
+    if let Some(case_command) = &mut node.case_command {
+        for clause in &mut case_command.clauses {
+            out.push(&mut clause.body);
+        }
+    }
+    if let Some(function) = &mut node.function_command {
+        out.push(&mut function.body);
+    }
+    if let Some(coproc) = &mut node.coproc_command {
+        if let Some(body) = &mut coproc.body {
+            out.push(body);
+        }
+    }
+}
+
 #[cfg(test)]
 mod node_size_budget_tests {
     // Perf F4 (parse throughput): every Vec<CommandNode> in the system —

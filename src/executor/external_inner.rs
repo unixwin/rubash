@@ -2020,6 +2020,57 @@ impl Executor {
     ) {
     }
 
+    /// rubash#2308: the Text half of the ambient delivery for a stage
+    /// process built by hand in the pipeline spawn loops. Those loops
+    /// register the handle-backed ambient pins through
+    /// attach_ambient_fd_pins, but a Text endpoint (heredoc /
+    /// here-string body) has no handle to pin — #2292 taught the
+    /// sequential faces to materialize it (deliver_ambient_text_endpoints,
+    /// inside apply_external_fd_delivery), and the concurrent loops
+    /// never ran that pass, so a concurrent stage saw EBADF on every
+    /// ambient heredoc descriptor. This runs the SAME pass — same slot
+    /// selection, same skip rules, no stage-local copy — registers its
+    /// pins as a second pre_exec closure (closures compose:
+    /// spawn_external_process stacks the delivery, signal-reset and
+    /// /dev/fd closures on one Command), and returns the parent-side
+    /// duplicates for the caller to close once its spawn resolves —
+    /// the apply_external_fd_delivery contract. The carrier files
+    /// themselves live in procsub_adhoc_carriers and die at
+    /// finish_process_substitutions, after every stage of the pipeline
+    /// has been reaped; the only per-stage artifact is the dup, whose
+    /// required lifetime is exactly the one spawn (fork copies the
+    /// parent's table; CreateProcess inherits inheritable handles at
+    /// the call). GNU materializes the body once (redir.c:423
+    /// here_document_to_fd) and every forked pipeline element inherits
+    /// the descriptor (redir.c:237 do_redirections; execute_cmd.c:2620
+    /// execute_pipeline); the per-spawn snapshot carrier is the
+    /// standing #2272/#2292 delivery model, not a new compromise.
+    pub(in crate::executor) fn attach_ambient_text_delivery(
+        &mut self,
+        cmd: &CommandNode,
+        process: &mut Command,
+    ) -> Vec<crate::fd::HANDLE> {
+        let mut command_fd_pins: FdPinVec = Vec::new();
+        let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        self.deliver_ambient_text_endpoints(
+            cmd,
+            process,
+            &mut command_fd_pins,
+            &mut parent_side_dups,
+        );
+        #[cfg(unix)]
+        if !command_fd_pins.is_empty() {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: same contract as the attach_ambient_fd_pins
+            // registration — the closure runs only in the forked child
+            // before exec and only dup2/closes raw descriptors.
+            unsafe {
+                process.pre_exec(move || pin_ambient_fds_in_child(&command_fd_pins));
+            }
+        }
+        parent_side_dups
+    }
+
     /// rubash#2255: deliver a command's fd bindings to a hand-built
     /// child process — the segment of spawn_external_process that
     /// (1) stamps every fd-table entry >= 3 through the __RUBASH_FD_*

@@ -237,6 +237,24 @@ impl Executor {
             return None;
         };
 
+        // rubash#2305: same own-list discipline as the `read -u`
+        // serve — the command's own list is authoritative for the
+        // descriptor (redir.c:237 do_redirections), so a heredoc or
+        // dup own binding serves BEFORE the ambient table entry;
+        // the historic order (own file, ambient, own heredoc last)
+        // let an ambient same-fd binding shadow the effective one.
+        match self.own_input_binding_scan(cmd, fd, None) {
+            Some((_position, super::read_redirected_fd::OwnInputBinding::Heredoc)) => {
+                return self.mapfile_heredoc_fd_input(cmd, fd);
+            }
+            Some((dup_position, super::read_redirected_fd::OwnInputBinding::Duplicate(source)))
+                if source != fd =>
+            {
+                return self.mapfile_dup_fd_input(cmd, source, dup_position);
+            }
+            Some((_position, super::read_redirected_fd::OwnInputBinding::Close)) => return None,
+            _ => {}
+        }
         if let Some(input) = self.mapfile_redirected_fd_input(cmd, fd) {
             return Some(input);
         }
@@ -246,7 +264,60 @@ impl Executor {
         self.mapfile_heredoc_fd_input(cmd, fd)
     }
 
+    /// Slurp counterpart of read_dup_fd_input (rubash#2305): a
+    /// Duplicate own binding copies the source's binding as of the
+    /// dup's position — follow the source through the own list
+    /// first, then to the ambient descriptor state. rubash#2314:
+    /// positioned like the read chase — each step resolves against
+    /// the entries before the current bound and a list-sourced
+    /// winner is served entry-exactly (the `_at` serves).
+    fn mapfile_dup_fd_input(
+        &mut self,
+        cmd: &CommandNode,
+        source: u32,
+        dup_position: Option<usize>,
+    ) -> Option<String> {
+        let mut current = source;
+        let mut bound = dup_position;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert((current, bound)) {
+                return None;
+            }
+            match self.own_input_binding_scan(cmd, current, bound) {
+                Some((Some(index), super::read_redirected_fd::OwnInputBinding::File)) => {
+                    return self.mapfile_redirected_fd_input_at(cmd, current, index);
+                }
+                Some((None, super::read_redirected_fd::OwnInputBinding::File)) => {
+                    return self.mapfile_redirected_fd_input(cmd, current);
+                }
+                Some((Some(index), super::read_redirected_fd::OwnInputBinding::Heredoc)) => {
+                    return self.mapfile_heredoc_fd_input_at(cmd, current, index);
+                }
+                Some((None, super::read_redirected_fd::OwnInputBinding::Heredoc)) => {
+                    return self.mapfile_heredoc_fd_input(cmd, current);
+                }
+                Some((position, super::read_redirected_fd::OwnInputBinding::Duplicate(next))) => {
+                    current = next;
+                    bound = position;
+                }
+                Some((_position, super::read_redirected_fd::OwnInputBinding::Close)) => {
+                    return None
+                }
+                None => break,
+            }
+        }
+        self.mapfile_virtual_fd_input(current)
+    }
+
     pub(in crate::executor) fn mapfile_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
+        // rubash#2305: same own-list walk as the `read` gate — an
+        // own close makes the fd invalid even over an ambient open
+        // entry (GNU mapfile.def validates the redirected
+        // descriptor), an own dup defers to its source's state.
+        if let Some(available) = self.own_input_binding_availability(cmd, fd) {
+            return available;
+        }
         if self.fd_table.is_open_for_read(fd) {
             return true;
         }
@@ -272,6 +343,37 @@ impl Executor {
             .rev()
             .find(|redirect| redirect.fd == Some(fd))?;
 
+        self.mapfile_redirected_fd_input_entry(redirect)
+    }
+
+    /// Entry-exact counterpart (rubash#2314): serve from the input
+    /// entry AT `index` in the command's own list — the entry a
+    /// positioned binding scan resolved as the winner.
+    fn mapfile_redirected_fd_input_at(
+        &mut self,
+        cmd: &CommandNode,
+        fd: u32,
+        index: usize,
+    ) -> Option<String> {
+        let redirect = cmd
+            .redirects
+            .iter()
+            .take(index + 1)
+            .rev()
+            .find(|redirect| {
+                redirect.fd == Some(fd)
+                    && matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                    )
+            })?;
+        self.mapfile_redirected_fd_input_entry(redirect)
+    }
+
+    fn mapfile_redirected_fd_input_entry(
+        &mut self,
+        redirect: &crate::parser::Redirect,
+    ) -> Option<String> {
         if let Some(source) = redirect
             .target
             .strip_prefix("<(")
@@ -343,6 +445,42 @@ impl Executor {
             .iter()
             .rev()
             .find(|redirect| redirect.fd == Some(fd))?;
+        self.mapfile_heredoc_fd_input_entry(redirect)
+    }
+
+    /// Entry-exact counterpart (rubash#2314): serve the body of the
+    /// heredoc entry AT `index` in the command's own list, via the
+    /// same ordinal correlation as read_heredoc_fd_input_at.
+    fn mapfile_heredoc_fd_input_at(
+        &mut self,
+        cmd: &CommandNode,
+        fd: u32,
+        index: usize,
+    ) -> Option<String> {
+        let winner = cmd.redirects.get(index)?;
+        let want_string = matches!(winner.kind, crate::parser::RedirectKind::HereString);
+        let ordinal = cmd.redirects[..index]
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.kind,
+                    crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+                ) && matches!(entry.kind, crate::parser::RedirectKind::HereString) == want_string
+                    && entry.fd == Some(fd)
+            })
+            .count();
+        let redirect = cmd
+            .heredoc_redirects
+            .iter()
+            .filter(|entry| entry.fd == Some(fd) && entry.here_string == want_string)
+            .nth(ordinal)?;
+        self.mapfile_heredoc_fd_input_entry(redirect)
+    }
+
+    fn mapfile_heredoc_fd_input_entry(
+        &mut self,
+        redirect: &crate::parser::HereDocRedirect,
+    ) -> Option<String> {
         if redirect.body_carrier.is_some() {
             let mut input = if redirect.here_string {
                 self.expand_here_string_mut_from_carrier(&redirect.body_carrier)

@@ -464,6 +464,22 @@ where
     if action == "-" || action == "0" {
         for signal in signals.signals {
             remove_trap(env_vars, &signal);
+            // rubash#2347: GNU trap_builtin's REVERT branch reinstalls
+            // the fatal SIGINT handler even when SIGINT was ignored on
+            // entry (builtins/trap.def:228-251, citing POSIX interp
+            // 751) — the single exception to the hard-ignore no-op
+            // remove_trap just applied. SIGQUIT is the opposite
+            // hard-code (forced SIG_IGN, already matched) and TERM /
+            // USR1 reverts on entry-ignored signals stay no-ops in both
+            // shells, so this keys on SIGINT alone, and only when it is
+            // actually entry-ignored (an ordinary reset already landed
+            // through the reconcile below).
+            if action == "-" && signal == "SIGINT" && is_hard_ignored(env_vars, "SIGINT") {
+                #[cfg(unix)]
+                crate::builtins::kill::revert_entry_ignored_sigint(
+                    env_vars.get("__RUBASH_INTERACTIVE").map(String::as_str) == Some("1"),
+                );
+            }
         }
         // Bash treats the numeric zero action as clearing the EXIT trap too.
         if action == "0" {

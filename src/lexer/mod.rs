@@ -1926,10 +1926,36 @@ impl GroupScanFeeder {
         self.brace_cache.clear();
         self.header_scan_from = 0;
         self.brace_join_active = false;
+        // rubash#2309: the compound checkpoint is the one reset that may
+        // NOT go back to `initial()` unconditionally. Its case-region
+        // state (parse.y:3379/3396 PST_CASEPAT) spans logical lines
+        // without holding any join gate open — this commit can sit
+        // between `case WORD in` and its first arm line — so when the
+        // committed scan ended clean (no park stored: `resume` reached
+        // the mirror end, and the end state is not the `forced_closed`
+        // terminal), carry the line-boundary state (the snapshot
+        // replayed through the line's newline; see
+        // `compound_line_boundary_state`) into the next logical line's
+        // checkpoint over the cleared mirror. In every other case —
+        // parked, forced-closed, or no case open, where the boundary
+        // state is observationally the reset — keep today's `initial()`.
+        let compound_checkpoint = match self.compound_checkpoint.take() {
+            Some(checkpoint)
+                if checkpoint.resume == self.comsub_chars.len()
+                    && !checkpoint.snapshot.forced_closed
+                    && checkpoint.snapshot.case_depth > 0 =>
+            {
+                CompoundScanCheckpoint {
+                    resume: 0,
+                    snapshot: continuation::compound_line_boundary_state(&checkpoint.snapshot),
+                }
+            }
+            _ => CompoundScanCheckpoint::initial(),
+        };
         self.comsub_chars.clear();
         self.comsub_checkpoint = Some(ComsubScanCheckpoint::initial());
         self.quotes_checkpoint = Some(QuoteScanCheckpoint::initial());
-        self.compound_checkpoint = Some(CompoundScanCheckpoint::initial());
+        self.compound_checkpoint = Some(compound_checkpoint);
         self.param_checkpoint = Some(ParamScanCheckpoint::initial());
 
         for delimiter in delimiters {

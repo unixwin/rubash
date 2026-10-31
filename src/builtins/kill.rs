@@ -2079,11 +2079,20 @@ impl KillResultExt for Result<(), &'static str> {
 ///   (Executor::run_sigchld_trap_for_reaped_child) already fires the CHLD
 ///   trap exactly once per reaped child; a kernel SIGCHLD here would
 ///   double-fire it.
-/// - Stop-class signals (SIGTSTP/SIGTTIN/SIGTTOU): without a
-///   stop-the-shell implementation, catching them would turn a stop into a
-///   spurious 128+N exit at the next boundary. Kernel-default stop is the
-///   closer bash behavior until the terminal/job-control layer exists.
 /// - SIGKILL is uncatchable by design.
+///
+/// The stop class (SIGTSTP/SIGTTIN/SIGTTOU) and SIGCONT ARE registered
+/// (rubash#2344): GNU trap.c:838 set_signal installs trap_handler for
+/// ANY trapped signal, the stop class included, and defers execution
+/// to trap.c:328 run_pending_traps, so a trapped stop signal never
+/// stops the shell. Registration only makes a signal ELIGIBLE for the
+/// trap table's wishes: an untrapped stop signal's wish is Default, so
+/// its disposition stays SIG_DFL and the kernel stop is unchanged; the
+/// handler goes in only while a trap names the signal, and the
+/// boundary dispatcher's stale-handler check drops a delivery that
+/// raced a trap clear — so registration cannot turn an untrapped stop
+/// into a spurious 128+N exit (the failure mode an earlier draft of
+/// this comment feared from catching them unconditionally).
 #[cfg(unix)]
 mod kernel_signals {
     use signal_hook::iterator::exfiltrator::WithOrigin;
@@ -2241,8 +2250,13 @@ mod kernel_signals {
     /// of them run their trap. SIGSEGV/SIGBUS are NOT here: the fatal
     /// set below routes them (rubash#1475), and rubash#1511 routes
     /// SIGILL/SIGFPE there too (signal-hook refuses to register them).
-    /// SIGCHLD and the stop class stay unregistered for the reasons in
-    /// the module doc.
+    /// SIGCHLD stays unregistered for the reason in the module doc.
+    /// The stop class and SIGCONT close the set (rubash#2344): they
+    /// were the last trappable signals the trap table recorded but the
+    /// kernel never heard about — a trapped TSTP stopped the shell for
+    /// real and the trap was silently dropped on resume, where GNU
+    /// trap.c:838 set_signal installs the deferring handler for them
+    /// exactly as for every other trapped signal.
     const MANAGED_CORE: &[i32] = &[
         libc::SIGHUP as i32,
         libc::SIGINT as i32,
@@ -2262,6 +2276,10 @@ mod kernel_signals {
         libc::SIGSYS as i32,
         libc::SIGURG as i32,
         libc::SIGWINCH as i32,
+        libc::SIGTSTP as i32,
+        libc::SIGTTIN as i32,
+        libc::SIGTTOU as i32,
+        libc::SIGCONT as i32,
     ];
 
     /// Linux/Android-only managed additions: SIGSTKFLT and SIGPWR
@@ -2300,6 +2318,21 @@ mod kernel_signals {
     /// Bitmask (1 << index into MANAGED) of signals currently routed to the
     /// signal_hook handler.
     static HANDLER_SET: AtomicU64 = AtomicU64::new(0);
+
+    /// The signal_hook dispatcher's installed sigaction, captured verbatim
+    /// at the first live handler install (rubash#2348). signal-hook's
+    /// Handle caches each signal's registration, so a later add_signal for
+    /// the same signal is a no-op — but reconcile's Default/Ignore
+    /// transitions overwrite the OS disposition with raw sigaction calls
+    /// (SIG_DFL / SIG_IGN). After such a flip the backend slot is still
+    /// registered while the kernel no longer routes deliveries to it, so
+    /// re-arming a trap on that signal (GNU trap.c:838 set_signal
+    /// reinstalling trap_handler after the trap.c:1398 REVERT round-trip)
+    /// silently leaves the flipped disposition in place: a Default death
+    /// or an Ignore swallow sticks. ensure_handler detects the desync —
+    /// Handler wish, non-handler OS disposition — and reinstalls this
+    /// captured dispatcher, reconnecting the still-registered slot.
+    static BACKEND_ACTION: OnceLock<libc::sigaction> = OnceLock::new();
 
     /// Packed per-signal disposition state (2 bits each: 0=Default,
     /// 1=Ignore, 2=Handler) so the per-boundary reconcile skips
@@ -2399,6 +2432,29 @@ mod kernel_signals {
         let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
         if unsafe { libc::sigaction(sig, std::ptr::null(), &mut current) } != 0 {
             return Err(io::Error::last_os_error());
+        }
+        if current.sa_sigaction == libc::SIG_DFL || current.sa_sigaction == libc::SIG_IGN {
+            // rubash#2348: the OS disposition is not the backend
+            // dispatcher even though the Handler wish is live — a raw
+            // Default/Ignore flip overwrote it while signal-hook kept
+            // the registration cached, so the add_signal above (if any)
+            // installed nothing. Reinstall the captured dispatcher; the
+            // still-registered slot (including its chained previous
+            // disposition) receives deliveries again. First-ever install
+            // cannot reach here with an empty cell: add_signal has just
+            // put the dispatcher in place, so `current` would name it.
+            if let Some(backend) = BACKEND_ACTION.get() {
+                let backend = *backend;
+                if unsafe { libc::sigaction(sig, &backend, std::ptr::null_mut()) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                current = backend;
+            }
+        } else if BACKEND_ACTION.get().is_none() {
+            // First live install: capture the dispatcher verbatim (its
+            // SA_RESTART bit is normalized by the shared block below,
+            // and again on every reinstall, which re-enters that block).
+            let _ = BACKEND_ACTION.set(current);
         }
         if current.sa_flags & libc::SA_RESTART != 0 {
             current.sa_flags &= !libc::SA_RESTART;
@@ -2510,11 +2566,17 @@ mod kernel_signals {
                 }
                 Disposition::Default => {
                     let entry_ignored = ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0;
-                    let base = if entry_ignored || sig == libc::SIGQUIT as i32 {
-                        libc::SIG_IGN
-                    } else {
-                        libc::SIG_DFL
-                    };
+                    // rubash#2347: a reverted entry-ignored SIGINT takes
+                    // the fatal default, not the entry-ignore base
+                    // (trap.def:228-251 REVERT special case).
+                    let base =
+                        if sig == libc::SIGINT as i32 && SIGINT_REVERTED.load(Ordering::Relaxed) {
+                            libc::SIG_DFL
+                        } else if entry_ignored || sig == libc::SIGQUIT as i32 {
+                            libc::SIG_IGN
+                        } else {
+                            libc::SIG_DFL
+                        };
                     set_kernel_handler(sig, base);
                     HANDLER_SET.fetch_and(!bit(sig), Ordering::SeqCst);
                     // A delivery that raced the flip may have left the
@@ -2551,13 +2613,61 @@ mod kernel_signals {
         is_managed(sig) && ENTRY_IGNORED.load(Ordering::Relaxed) & bit(sig) != 0
     }
 
+    /// The stop class: SIGTSTP/SIGTTIN/SIGTTOU, whose default action
+    /// is to stop the process (SIGCONT is their resume counterpart).
+    pub(super) fn is_stop_class(sig: i32) -> bool {
+        sig == libc::SIGTSTP as i32 || sig == libc::SIGTTIN as i32 || sig == libc::SIGTTOU as i32
+    }
+
+    /// rubash#2347: set once `trap - SIGINT` runs against an
+    /// entry-ignored SIGINT. GNU restore_default_signal early-returns on
+    /// hard-ignored signals, but trap_builtin's REVERT branch then
+    /// unconditionally installs the fatal SIGINT handler anyway
+    /// (builtins/trap.def:228-251, citing POSIX interp 751) — the one
+    /// signal whose REVERT overrides the entry ignore. SIGQUIT is the
+    /// opposite hard-code (forced SIG_IGN, already matched) and TERM /
+    /// USR1 reverts stay no-ops, so this flag keys on SIGINT alone.
+    /// Once set, SIGINT's Default wish resolves to the plain fatal
+    /// default instead of the entry-ignore base, and the interactive
+    /// SIGINT pin may route it again. Trap-set on SIGINT stays a
+    /// hard-ignore no-op (trap.rs), exactly as in GNU.
+    static SIGINT_REVERTED: AtomicBool = AtomicBool::new(false);
+
+    pub(super) fn sigint_reverted() -> bool {
+        SIGINT_REVERTED.load(Ordering::Relaxed)
+    }
+
+    /// Apply the trap.def REVERT special case for an entry-ignored
+    /// SIGINT, synchronously like the builtin does: a non-interactive
+    /// shell gets the fatal default (SIG_DFL) right now — reconcile's
+    /// fast path may otherwise skip a table that reads all-Default —
+    /// while an interactive shell only records the flag and lets the
+    /// reconcile below install its SIGINT pin (GNU installs
+    /// sigint_sighandler there).
+    pub(super) fn revert_sigint(interactive: bool) {
+        SIGINT_REVERTED.store(true, Ordering::Relaxed);
+        if !interactive {
+            set_kernel_handler(libc::SIGINT as i32, libc::SIG_DFL);
+            HANDLER_SET.fetch_and(!bit(libc::SIGINT as i32), Ordering::SeqCst);
+            store_state(libc::SIGINT as i32, 0);
+        }
+    }
+
     /// Whether the boundary dispatcher can adjudicate `sig` at all
     /// (the managed set or the fatal set). The rubash#1654 ancestor
     /// route queues only signals whose top-level verdict the
     /// dispatcher owns; SIGKILL and the stop class are not adjudicable
-    /// and keep raw raise(2) semantics.
+    /// and keep raw raise(2) semantics. The stop class joined the
+    /// managed set for kernel-disposition purposes in rubash#2344, but
+    /// it stays non-adjudicable HERE (SIGCONT with it): these lanes
+    /// synthesize death verdicts (128+sig) for a sibling layer, and a
+    /// stop/resume has no death verdict to synthesize — the raw
+    /// raise(2) under the then-current kernel disposition (the
+    /// deferring handler if a layer trapped the signal, the SIG_DFL
+    /// stop otherwise) is the faithful outcome.
     pub(super) fn adjudicable(sig: i32) -> bool {
-        is_managed(sig) || fatal_index(sig).is_some()
+        (is_managed(sig) && !is_stop_class(sig) && sig != libc::SIGCONT as i32)
+            || fatal_index(sig).is_some()
     }
 
     /// rubash#1475: the fatal set, SIGSEGV and SIGBUS. Both are caught
@@ -3241,6 +3351,10 @@ fn managed_trap_keys() -> &'static [(i32, String, String)] {
         push(&mut keys, libc::SIGSYS as i32, "SYS");
         push(&mut keys, libc::SIGURG as i32, "URG");
         push(&mut keys, libc::SIGWINCH as i32, "WINCH");
+        push(&mut keys, libc::SIGTSTP as i32, "TSTP");
+        push(&mut keys, libc::SIGTTIN as i32, "TTIN");
+        push(&mut keys, libc::SIGTTOU as i32, "TTOU");
+        push(&mut keys, libc::SIGCONT as i32, "CONT");
         extend_trap_keys(&mut keys);
         keys
     })
@@ -3284,6 +3398,16 @@ fn extend_trap_keys(keys: &mut Vec<(i32, String, String)>) {
 
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 fn extend_trap_keys(_keys: &mut Vec<(i32, String, String)>) {}
+
+/// rubash#2347: the trap builtin's REVERT special case for an
+/// entry-ignored SIGINT (builtins/trap.def:228-251). Called from
+/// trap.rs's `trap - SIGINT` path, which remove_trap has already
+/// (correctly, per the hard-ignore rule) treated as a table no-op;
+/// this is the disposition half GNU's builtin performs anyway.
+#[cfg(unix)]
+pub fn revert_entry_ignored_sigint(interactive: bool) {
+    kernel_signals::revert_sigint(interactive);
+}
 
 /// Map the executor's trap table onto the kernel dispositions (unix arm of
 /// rubash#226). Mirrors GNU's per-signal rules: `trap 'action' SIG` installs
@@ -3390,6 +3514,19 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
                 && !reset_contains(reset, short),
         );
         let want = match env_vars.get(key.as_str()) {
+            // rubash#2347: a reverted entry-ignored SIGINT
+            // (trap.def:228-251) outranks the table: the seeded
+            // entry-ignore entry (an "" action) must not re-impose
+            // Ignore on every boundary reconcile. Non-interactive it
+            // sits at the fatal default; interactive it rides the
+            // SIGINT pin (GNU's sigint_sighandler).
+            _ if *sig == libc::SIGINT as i32 && kernel_signals::sigint_reverted() => {
+                if interactive {
+                    Disposition::Handler
+                } else {
+                    Disposition::Default
+                }
+            }
             // A real action and not reset-listed -> handler (trap.c
             // trap_builtin -> sig.c:830 set_signal_handler).
             Some(action) if !action.is_empty() && !reset_contains(reset, short) => {
@@ -3416,7 +3553,7 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             // ignored (the pin must not un-ignore it).
             None if interactive
                 && *sig == libc::SIGINT as i32
-                && !kernel_signals::entry_ignored(*sig) =>
+                && (!kernel_signals::entry_ignored(*sig) || kernel_signals::sigint_reverted()) =>
             {
                 Disposition::Handler
             }
@@ -3514,15 +3651,23 @@ fn signal_short_name(signal: i32) -> &'static str {
 
 /// Whether an armed EXIT trap reroutes `sig` through the handler
 /// (sig.c:226-229 initialize_terminating_signals). GNU's terminating
-/// set is a compile-time C table, so it cannot name the realtime
-/// signals, and it excludes the default-ignore pair — oracle-verified
-/// against GNU 5.3.20 (EXIT trap armed, untrapped self-kill): ILL, FPE,
-/// TRAP, ABRT, ALRM, XCPU, PROF and SYS run the EXIT trap and die at
-/// 128+n, while URG and WINCH are ignored outright and RTMIN dies
-/// without the EXIT trap running. rubash#1511.
+/// set is a compile-time C table (sig.c:127 terminating_signals[]), so
+/// it cannot name the realtime signals, and it excludes the
+/// default-ignore pair — oracle-verified against GNU 5.3.20 (EXIT trap
+/// armed, untrapped self-kill): ILL, FPE, TRAP, ABRT, ALRM, XCPU, PROF
+/// and SYS run the EXIT trap and die at 128+n, while URG and WINCH are
+/// ignored outright and RTMIN dies without the EXIT trap running.
+/// The same table names no stop-class signal and no SIGCONT — their
+/// default actions are stop/resume, not termination — so an armed EXIT
+/// trap must not reroute them either: an untrapped TSTP still stops
+/// the shell (rubash#2344). rubash#1511.
 #[cfg(unix)]
-fn exit_reroutes(sig: i32) -> bool {
-    if sig == libc::SIGURG as i32 || sig == libc::SIGWINCH as i32 {
+pub(crate) fn exit_reroutes(sig: i32) -> bool {
+    if sig == libc::SIGURG as i32
+        || sig == libc::SIGWINCH as i32
+        || kernel_signals::is_stop_class(sig)
+        || sig == libc::SIGCONT as i32
+    {
         return false;
     }
     exit_reroutes_platform(sig)
@@ -3558,6 +3703,13 @@ fn reset_contains(reset: &str, short: &str) -> bool {
 #[cfg(unix)]
 pub fn kernel_handler_installed(signal: i32) -> bool {
     kernel_signals::handler_installed(signal)
+}
+
+/// Whether `sig` is in the stop class (SIGTSTP/SIGTTIN/SIGTTOU; see
+/// kernel_signals::is_stop_class, rubash#2344).
+#[cfg(unix)]
+pub fn kernel_is_stop_class(signal: i32) -> bool {
+    kernel_signals::is_stop_class(signal)
 }
 
 /// Whether the most recently drained kernel delivery of `signal` was

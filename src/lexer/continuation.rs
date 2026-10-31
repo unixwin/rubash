@@ -607,6 +607,35 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // rubash#1184 f6, layer 1 (authorized captain-file change): GNU
+        // delimits a backquote body atomically. The reader hands a
+        // backquote to parse_matched_pair with open == close == '`'
+        // (parse.y:4159), whose grouping branch runs only when
+        // open != close (parse.y:4039-4042 — "Could also check
+        // open == '`' if we want to parse grouping constructs inside
+        // old-style command substitution", i.e. it deliberately does
+        // not): quotes and `$` constructs inside the body are ordinary
+        // characters that neither nest nor close anything, a bare
+        // backtick ends the body (the loop-top close arm — parse.y:
+        // 3974-3975 `ch == close` precedes the nested-begin branches),
+        // and an escape pair is consumed by the loop-top escape arm.
+        // Gate every push arm below while a backquote holds the stack
+        // top, by shadowing the scrutinee with a sentinel that lands
+        // in the inert `_` arm. The body bytes still flow through
+        // every loop-top tracker above (case machine, heredoc
+        // opacity, comment/word state) and the line counter, so no
+        // tracker diverges; and since nothing can stack above it, a
+        // pending backquote is automatically the verdict's stack top
+        // (parse.y:3908-3912 reports it at its start_lineno). The
+        // extracted body is parsed as its own input by the executor —
+        // body-internal balance is that layer's question, not this
+        // scan's (the mirror gate in close_char_residuals_advance
+        // keeps the two scans in lockstep).
+        let ch = if top.is_some_and(|d| d.close == '`') {
+            '\0'
+        } else {
+            ch
+        };
         match ch {
             '\'' if !in_double => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.
@@ -1610,6 +1639,27 @@ pub(super) fn has_unclosed_compound_assignment(input: &str) -> bool {
     state.is_open()
 }
 
+/// rubash#2309: the compound scan's state at a logical-line boundary —
+/// `state` replayed through the newline that ends the line, exactly the
+/// state the full-buffer scan reaches between the two lines. Every
+/// other residual machine's state genuinely restarts per logical line
+/// (an open quote/substitution holds its own line open, so a commit
+/// implies it closed), but the case region (parse.y:3379/3396
+/// PST_CASEPAT) spans logical lines without holding any gate open: the
+/// feeder commits `case WORD in` as its own logical line, and the arm
+/// line that follows must still be scanned inside the region or the
+/// pattern `)` poisons the arm body's first word. The feeder's
+/// checkpoint driver carries this boundary state into the next logical
+/// line's checkpoint instead of resetting to `Default` whenever a case
+/// is open; with no case open the replayed state equals the reset for
+/// every field the next line can observe (a pending word is flushed by
+/// the newline either way it is carried).
+pub(super) fn compound_line_boundary_state(state: &CompoundResidualState) -> CompoundResidualState {
+    let mut boundary = state.clone();
+    let _ = compound_residuals_advance(&['\n'], 0, &mut boundary);
+    boundary
+}
+
 /// Every scan local of the unclosed-compound-assignment checker,
 /// checkpointable across physical lines (rubash#292 plan-B shape, perf8
 /// lane).
@@ -1637,6 +1687,36 @@ pub(crate) struct CompoundResidualState {
     pub(crate) word_pure: bool,
     pub(crate) seen_command_word: bool,
     pub(crate) declaration_context: bool,
+    /// rubash#2309: case-region tracking (GNU's PST_CASEPAT model,
+    /// parse.y:3379/3396 sets it at the case `in`, parse.y:3438 clears
+    /// it at `esac`). `case_depth` counts open `case` commands;
+    /// `case_stage` is the preamble progression (0 = none, 1 = saw
+    /// `case`, 2 = subject completed, 3 = saw `in`); while
+    /// `case_pattern_region` holds, the scan is between `in` (or an arm
+    /// terminator) and the pattern list's closing `)`: pattern words
+    /// are data (no assignment is acceptable there, parse.y:3163-3164)
+    /// and the `)` ends the list instead of closing a command.
+    pub(crate) case_depth: usize,
+    pub(crate) case_stage: u8,
+    pub(crate) case_pattern_region: bool,
+    /// Pattern-internal parenthesis depth (extglob groups) while
+    /// `case_pattern_region` holds: a `)` at depth > 0 is group text,
+    /// one at depth 0 ends the pattern list.
+    pub(crate) case_pattern_depth: usize,
+    /// Whether the current pattern list has consumed any pattern
+    /// content yet (a word segment, a group, or the list's own leading
+    /// paren). Only a `(` read before any pattern content is the list's
+    /// leading paren (parse.y:1227-1234: `'(' pattern ')'`); a `(` after
+    /// content — including at the very start of a pattern that begins
+    /// with an extglob operator word like `@` — nests
+    /// `case_pattern_depth` instead, so `@(foo|bar))` keeps its first
+    /// `)` as group text and its second as the list close.
+    pub(crate) case_pattern_has_content: bool,
+    /// Whether the next completed word starts where a reserved word is
+    /// live (the staged case machine's `word_boundary`: set by
+    /// separators and by keywords that admit a following keyword,
+    /// cleared by plain-word completion and by expansion units).
+    pub(crate) case_word_boundary: bool,
     /// An unbalanced `$(`/backtick unit forced the original loop's early
     /// `return false` — the terminal answer is false regardless of the
     /// accumulated `compound_depth` at that point.
@@ -1659,6 +1739,12 @@ impl Default for CompoundResidualState {
             word_pure: true,
             seen_command_word: false,
             declaration_context: false,
+            case_depth: 0,
+            case_stage: 0,
+            case_pattern_region: false,
+            case_pattern_depth: 0,
+            case_pattern_has_content: false,
+            case_word_boundary: true,
             forced_closed: false,
         }
     }
@@ -1715,6 +1801,7 @@ pub(crate) fn compound_residuals_advance(
                 if state.compound_depth == 0 {
                     state.seen_command_word = false;
                     state.declaration_context = false;
+                    state.case_word_boundary = true;
                 }
             }
             index += 1;
@@ -1732,6 +1819,7 @@ pub(crate) fn compound_residuals_advance(
             state.comment_start = true;
             if state.compound_depth == 0 {
                 if !state.word.is_empty() {
+                    case_region_after_word(state, ch, chars, index);
                     let mut seen_command_word = state.seen_command_word;
                     let mut declaration_context = state.declaration_context;
                     classify_top_level_word(
@@ -1742,10 +1830,20 @@ pub(crate) fn compound_residuals_advance(
                     state.seen_command_word = seen_command_word;
                     state.declaration_context = declaration_context;
                     state.word.clear();
-                    state.word_pure = true;
                 }
+                // rubash#2309: a separator completes the current word
+                // even when nothing reached the buffer — a word made
+                // only of quoted/expansion spans (`"ab"`, `$(x)`) leaves
+                // the buffer empty but `word_pure` false, and that
+                // impurity belongs to the completed word, never to the
+                // next one (GNU read_token returns one word per token;
+                // the next word starts bare). Reset it here or the next
+                // word's `name=(` gate misreads it as expansion text
+                // (`echo "a b"; G=(` never opened).
+                state.word_pure = true;
                 state.seen_command_word = false;
                 state.declaration_context = false;
+                state.case_word_boundary = true;
             }
             index += 1;
             continue;
@@ -1760,17 +1858,23 @@ pub(crate) fn compound_residuals_advance(
 
         if ch.is_whitespace() && !state.single && !state.double && !state.ansi_single {
             state.comment_start = true;
-            if state.compound_depth == 0 && !state.word.is_empty() {
-                let mut seen_command_word = state.seen_command_word;
-                let mut declaration_context = state.declaration_context;
-                classify_top_level_word(
-                    &state.word,
-                    &mut seen_command_word,
-                    &mut declaration_context,
-                );
-                state.seen_command_word = seen_command_word;
-                state.declaration_context = declaration_context;
-                state.word.clear();
+            if state.compound_depth == 0 {
+                if !state.word.is_empty() {
+                    case_region_after_word(state, ch, chars, index);
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
+                    classify_top_level_word(
+                        &state.word,
+                        &mut seen_command_word,
+                        &mut declaration_context,
+                    );
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                }
+                // See the '\n' arm: a quoted/expansion-only word leaves
+                // the buffer empty; its impurity must not leak into
+                // the next word.
                 state.word_pure = true;
             }
             index += 1;
@@ -1824,6 +1928,15 @@ pub(crate) fn compound_residuals_advance(
             if let Some(scan) =
                 crate::lexer::dolbrace::scan_braced_parameter_body_chars(body, context)
             {
+                if state.compound_depth == 0 {
+                    // A completed expansion unit is a word token: it can
+                    // be the case subject, and a following word is no
+                    // longer at a reserved-word boundary.
+                    if state.case_stage == 1 {
+                        state.case_stage = 2;
+                    }
+                    state.case_word_boundary = false;
+                }
                 index += 2 + scan.end;
             } else {
                 if park.is_none() {
@@ -1853,6 +1966,15 @@ pub(crate) fn compound_residuals_advance(
                         snapshot: state.clone(),
                     });
                 }
+                if state.compound_depth == 0 {
+                    // A completed expansion unit is a word token: it can
+                    // be the case subject, and a following word is no
+                    // longer at a reserved-word boundary.
+                    if state.case_stage == 1 {
+                        state.case_stage = 2;
+                    }
+                    state.case_word_boundary = false;
+                }
                 index = end;
                 state.comment_start = false;
                 state.word_pure = false;
@@ -1870,6 +1992,15 @@ pub(crate) fn compound_residuals_advance(
 
         if ch == '`' && !state.single && !state.double {
             if let Some(end) = skip_backtick_unit(chars, index) {
+                if state.compound_depth == 0 {
+                    // A completed expansion unit is a word token: it can
+                    // be the case subject, and a following word is no
+                    // longer at a reserved-word boundary.
+                    if state.case_stage == 1 {
+                        state.case_stage = 2;
+                    }
+                    state.case_word_boundary = false;
+                }
                 index = end;
                 state.comment_start = false;
                 state.word_pure = false;
@@ -1907,6 +2038,43 @@ pub(crate) fn compound_residuals_advance(
         }
 
         if ch == '(' && state.compound_depth == 0 {
+            // rubash#2309: inside a case pattern list a `(` is pattern
+            // text — the pattern list's own leading paren or an extglob
+            // group (parse.y:1227-1234 pattern_list: `'(' pattern ')'`).
+            // It opens no assignment (no assignment word is acceptable
+            // under PST_CASEPAT, parse.y:3163-3164) and no subshell list
+            // context; it only nests the pattern's parenthesis depth,
+            // whose matching `)` the `)` arm treats as group text until
+            // the depth returns to 0.
+            if state.case_pattern_region {
+                if !state.word.is_empty() {
+                    case_region_after_word(state, ch, chars, index);
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
+                    classify_top_level_word(
+                        &state.word,
+                        &mut seen_command_word,
+                        &mut declaration_context,
+                    );
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                    state.word_pure = true;
+                }
+                // Only a `(` before any pattern content is the pattern
+                // list's own leading paren (parse.y:1227-1234); its `)`
+                // at group depth 0 closes the list. A `(` after content
+                // — an extglob group, including one that starts the
+                // pattern (`@(foo|bar))`) — nests the group depth, and
+                // its `)` stays group text.
+                if state.case_pattern_depth > 0 || state.case_pattern_has_content {
+                    state.case_pattern_depth += 1;
+                }
+                state.case_pattern_has_content = true;
+                state.comment_start = true;
+                index += 1;
+                continue;
+            }
             let opens_compound = state.word_pure
                 && state
                     .word
@@ -1938,6 +2106,7 @@ pub(crate) fn compound_residuals_advance(
             // `( A=(\n...` read as closed, exactly like the `f() { A=(`
             // shape whose `{` the classifier now resets.
             if !state.word.is_empty() {
+                case_region_after_word(state, ch, chars, index);
                 let mut seen_command_word = state.seen_command_word;
                 let mut declaration_context = state.declaration_context;
                 classify_top_level_word(
@@ -1950,8 +2119,20 @@ pub(crate) fn compound_residuals_advance(
                 state.word.clear();
                 state.word_pure = true;
             }
+            if state.case_pattern_region {
+                // rubash#2309: the flushed word was the case `in`
+                // (`case WORD in(`): this paren is the pattern list's
+                // leading paren, not a subshell — the pattern region
+                // owns the position model until the list's `)`, which
+                // arrives at group depth 0 like every list close.
+                state.case_pattern_has_content = true;
+                state.comment_start = true;
+                index += 1;
+                continue;
+            }
             state.seen_command_word = false;
             state.declaration_context = false;
+            state.case_word_boundary = true;
             state.comment_start = true;
             index += 1;
             continue;
@@ -1969,8 +2150,59 @@ pub(crate) fn compound_residuals_advance(
                 state.compound_depth -= 1;
                 state.word.clear();
                 state.word_pure = true;
+            } else if state.case_pattern_region {
+                // rubash#2309: in a case pattern list, the `)` that
+                // returns the pattern depth to 0 ends the list and the
+                // arm body begins — a compound_list at command position
+                // (parse.y:1227 pattern_list: `pattern ')' compound_list`,
+                // parse.y:1232 for the `'(' pattern ')'` form). The word
+                // before it is pattern text, unless it is `esac`, which
+                // closes the whole case instead (case_region_after_word
+                // decides). Leaving `seen_command_word` set here — the
+                // generic path below — made the body's first
+                // `name=(` read as an argument-position paren, so a
+                // multi-line array assignment opening an arm body never
+                // opened at all.
+                let esac_closed = if !state.word.is_empty() {
+                    let esac_closed = case_region_after_word(state, ch, chars, index);
+                    let mut seen_command_word = state.seen_command_word;
+                    let mut declaration_context = state.declaration_context;
+                    classify_top_level_word(
+                        &state.word,
+                        &mut seen_command_word,
+                        &mut declaration_context,
+                    );
+                    state.seen_command_word = seen_command_word;
+                    state.declaration_context = declaration_context;
+                    state.word.clear();
+                    state.word_pure = true;
+                    esac_closed
+                } else {
+                    false
+                };
+                if esac_closed {
+                    state.seen_command_word = true;
+                } else if state.case_pattern_depth > 0 {
+                    // An extglob group's close: group text — the
+                    // pattern list goes on.
+                    state.case_pattern_depth -= 1;
+                    state.comment_start = true;
+                    state.case_word_boundary = true;
+                    index += 1;
+                    continue;
+                } else {
+                    // The pattern list's close (its leading paren's
+                    // match, or the bare-pattern form): the arm body
+                    // begins at command position.
+                    state.case_pattern_region = false;
+                    state.case_pattern_has_content = false;
+                    state.seen_command_word = false;
+                    state.declaration_context = false;
+                }
+                state.case_word_boundary = true;
             } else {
                 if !state.word.is_empty() {
+                    case_region_after_word(state, ch, chars, index);
                     let mut seen_command_word = state.seen_command_word;
                     let mut declaration_context = state.declaration_context;
                     classify_top_level_word(
@@ -1984,6 +2216,7 @@ pub(crate) fn compound_residuals_advance(
                     state.word_pure = true;
                 }
                 state.seen_command_word = true;
+                state.case_word_boundary = true;
             }
             state.comment_start = true;
             index += 1;
@@ -1992,7 +2225,9 @@ pub(crate) fn compound_residuals_advance(
 
         if ch == ';' || ch == '|' || ch == '&' {
             if state.compound_depth == 0 {
-                if !state.word.is_empty() {
+                let word_was_empty = state.word.is_empty();
+                if !word_was_empty {
+                    case_region_after_word(state, ch, chars, index);
                     let mut seen_command_word = state.seen_command_word;
                     let mut declaration_context = state.declaration_context;
                     classify_top_level_word(
@@ -2003,16 +2238,39 @@ pub(crate) fn compound_residuals_advance(
                     state.seen_command_word = seen_command_word;
                     state.declaration_context = declaration_context;
                     state.word.clear();
-                    state.word_pure = true;
                 }
                 // A separator ends the simple command whether or not a
                 // word was pending at it: when whitespace already flushed
                 // the word (`true && A=(...`), the reset must still land,
                 // or the next word never re-enters the assignment-prefix
                 // region (parse.y:3157-3164 command_token_position;
-                // rubash#2274).
+                // rubash#2274). The purity reset lands unconditionally
+                // for the same reason (rubash#2309): a quoted-only word
+                // (`echo "a b"; A=(...`) leaves an empty buffer, and its
+                // impurity is the completed word's, not the next one's.
+                state.word_pure = true;
                 state.seen_command_word = false;
                 state.declaration_context = false;
+                if word_was_empty {
+                    state.case_word_boundary = true;
+                }
+                // rubash#2309: `;;`, `;&` and `;;&` end a case arm body
+                // (parse.y:1237-1247 case_clause_sequence: SEMI_SEMI /
+                // SEMI_AND / SEMI_SEMI_AND) — the next pattern list
+                // begins, so the pattern region re-arms. The terminator
+                // is a single token: only an immediately adjacent second
+                // `;` (or the `&` of `;&`) counts, never one across a
+                // newline or whitespace.
+                if ch == ';'
+                    && state.case_depth > 0
+                    && chars
+                        .get(index + 1)
+                        .is_some_and(|next| *next == ';' || *next == '&')
+                {
+                    state.case_pattern_region = true;
+                    state.case_pattern_depth = 0;
+                    state.case_pattern_has_content = false;
+                }
             }
             state.comment_start = true;
             index += 1;
@@ -2041,6 +2299,128 @@ pub(crate) fn compound_residuals_advance(
 const COMMAND_LIST_OPENER_WORDS: [&str; 10] = [
     "{", "then", "do", "else", "if", "elif", "while", "until", "!", "time",
 ];
+
+/// The non-whitespace character before a word that ends at
+/// `end_index` (the word's own bytes are the `word.len()` chars right
+/// before it; only called for pure words, whose bytes are contiguous).
+/// Mirrors the staged case machine's backward previous-token evidence
+/// (parse.y:3177-3186: in a pattern list, `esac` is word data only when
+/// the previous token is `|` or the pattern-list `(`).
+fn case_prev_non_ws_char(chars: &[char], end_index: usize, word: &str) -> Option<char> {
+    let start = end_index.saturating_sub(word.chars().count());
+    let mut back = start;
+    while back > 0 && chars[back - 1].is_whitespace() {
+        back -= 1;
+    }
+    if back > 0 {
+        Some(chars[back - 1])
+    } else {
+        None
+    }
+}
+
+/// rubash#2309: feed one completed top-level word (flushed at
+/// `end_index` by the delimiter `end_ch`) to the case-region tracker.
+/// The region model is GNU's (parse.y case_command, pattern_list and
+/// case_clause_sequence, :1037/:1227/:1237): `case` opens a region
+/// preamble, the subject word completes it, `in` arms the pattern
+/// region (PST_CASEPAT, parse.y:3379/3396), the pattern list's `)`
+/// leaves it (the `)` arm owns that transition), an arm terminator
+/// (`;;`/`;&`/`;;&`, fed by the `;` arm) re-arms it, and `esac` closes
+/// the innermost case (parse.y:3438). Inside the region a word is
+/// pattern data: no keyword but `esac` is live there
+/// (parse.y:3177 CHECK_FOR_RESERVED_WORD), and `esac` itself stays
+/// data when the previous token is `|` or the pattern-list `(` —
+/// while directly after `in` it is the ESAC token unconditionally
+/// (the empty case, parse.y:3433-3441). Words inside a pattern's
+/// extglob depth are group text throughout.
+///
+/// Returns true when the word was `esac` closing a case (the `)` arm
+/// must not then treat its `)` as a pattern-list close).
+fn case_region_after_word(
+    state: &mut CompoundResidualState,
+    end_ch: char,
+    chars: &[char],
+    end_index: usize,
+) -> bool {
+    let word = state.word.as_str();
+    let boundary = state.case_word_boundary;
+    let mut esac_closed = false;
+    let mut allows_next = false;
+    if state.case_pattern_region && !word.is_empty() {
+        // A word segment inside the pattern list is pattern content:
+        // a `(` after it nests an extglob group, never the list's own
+        // leading paren.
+        state.case_pattern_has_content = true;
+    }
+    if state.word_pure && state.case_pattern_depth == 0 {
+        if word == "esac" && state.case_stage == 3 {
+            // parse.y:3433-3441: `esac` directly after IN is ESAC —
+            // the empty case `case WORD in esac` — unconditionally.
+            state.case_depth = state.case_depth.saturating_sub(1);
+            state.case_stage = 0;
+            state.case_pattern_region = false;
+            state.case_pattern_has_content = false;
+            esac_closed = true;
+            allows_next = true;
+        } else if word == "esac"
+            && state.case_depth > 0
+            && boundary
+            && !matches!(
+                case_prev_non_ws_char(chars, end_index, word),
+                Some('|' | '(')
+            )
+        {
+            // parse.y:3177-3186: every other boundary `esac` is the
+            // keyword (after a terminator, at an arm-body start, ...).
+            state.case_depth = state.case_depth.saturating_sub(1);
+            state.case_stage = 0;
+            state.case_pattern_region = false;
+            state.case_pattern_has_content = false;
+            esac_closed = true;
+            allows_next = true;
+        } else if word == "case" && state.case_stage == 0 && !state.case_pattern_region && boundary
+        {
+            state.case_depth += 1;
+            state.case_stage = 1;
+            // GNU returns `false` for the CASE token here: the subject
+            // word that follows is not at a reserved-word boundary.
+        } else if word == "in" && state.case_stage == 2 {
+            // parse.y:3379/3396: the IN of a case arms PST_CASEPAT.
+            // Rule 6 of special_case_tokens: `in` after the subject is
+            // the IN token even off a reserved-word boundary.
+            state.case_stage = 3;
+            state.case_pattern_region = true;
+            state.case_pattern_depth = 0;
+            state.case_pattern_has_content = false;
+            allows_next = true;
+        } else {
+            // An ordinary word: it completes the subject slot when the
+            // preamble is waiting for one, and it ends the
+            // directly-after-`in` window once a pattern word has begun.
+            if state.case_stage == 1 {
+                state.case_stage = 2;
+            } else if state.case_stage == 3 {
+                state.case_stage = 0;
+            }
+            // A list-opener keyword read at a boundary admits a
+            // following keyword (the staged machine's
+            // reserved_word_allows_next); as an argument it does not.
+            allows_next = boundary && COMMAND_LIST_OPENER_WORDS.contains(&word);
+        }
+    } else {
+        // A word with expansions/quoting, or a pattern segment inside
+        // an extglob group: never a bare keyword, but it still fills
+        // the subject slot / ends the after-`in` window.
+        if state.case_stage == 1 {
+            state.case_stage = 2;
+        } else if state.case_stage == 3 {
+            state.case_stage = 0;
+        }
+    }
+    state.case_word_boundary = allows_next || matches!(end_ch, ';' | '|' | '&' | '(' | ')' | '\n');
+    esac_closed
+}
 
 fn classify_top_level_word(
     word: &str,
@@ -4631,6 +5011,22 @@ pub(crate) fn close_char_residuals_advance(
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // rubash#1184 f6, layer 1 — mirror of the gate in
+        // unclosed_input_close_char_posix above: while a backquote
+        // holds the stack top, every push arm below is gated (the
+        // scrutinee is shadowed with the inert `_` sentinel), because
+        // GNU delimits the body atomically (parse.y:4039-4042,
+        // 4159). The gate is a position-local, backward-looking
+        // decision (it reads only the stack top), so it is orthogonal
+        // to the K1–K4 park discipline: a `$` or `\` inside a pending
+        // backquote body needs no park, since its dispatch cannot
+        // depend on the following character while the gate holds, and
+        // a resumed scan re-derives the same state byte for byte.
+        let ch = if top.is_some_and(|d| d.close == '`') {
+            '\0'
+        } else {
+            ch
+        };
         match ch {
             '\'' if !in_double => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.

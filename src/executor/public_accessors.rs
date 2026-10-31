@@ -341,16 +341,50 @@ impl Executor {
         std::mem::take(&mut self.signal_discard_pending)
     }
 
-    /// rubash#2233: non-consuming read of the hangup-death mark (see
-    /// Executor::hangup_death_pending) — the interactive reader peeks
+    /// rubash#2233: non-consuming read of the hangup-death mark — the
+    /// SIGHUP view of the generalized termsig-death mark (see
+    /// Executor::termsig_death_pending). The interactive reader peeks
     /// to break its loop; finish_shell is the sole consumer.
     pub fn hangup_death_pending(&self) -> bool {
-        self.hangup_death_pending
+        #[cfg(unix)]
+        {
+            self.termsig_death_pending == Some(libc::SIGHUP as i32)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
-    /// rubash#2233: take-style read of the hangup-death mark.
+    /// rubash#2233: take-style read of the hangup-death mark. Only a
+    /// SIGHUP mark is taken; a pending death by another signal is a
+    /// different funnel's business and is left in place.
     pub fn take_hangup_death_pending(&mut self) -> bool {
-        std::mem::take(&mut self.hangup_death_pending)
+        #[cfg(unix)]
+        {
+            if self.termsig_death_pending == Some(libc::SIGHUP as i32) {
+                self.termsig_death_pending = None;
+                return true;
+            }
+            false
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// rubash#2346: non-consuming read of the termsig-death mark (see
+    /// Executor::termsig_death_pending) — the signal the finish funnel
+    /// owes a kill_shell death by, if any.
+    pub(crate) fn termsig_death_pending(&self) -> Option<i32> {
+        self.termsig_death_pending
+    }
+
+    /// rubash#2346: take-style read of the termsig-death mark;
+    /// finish_shell is the sole consumer.
+    pub(crate) fn take_termsig_death_pending(&mut self) -> Option<i32> {
+        self.termsig_death_pending.take()
     }
 
     /// Tier A signal face (Session API RFC section 6.4; PLAN row

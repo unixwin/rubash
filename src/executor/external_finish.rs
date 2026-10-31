@@ -349,13 +349,21 @@ impl Executor {
         // heredocs stay with the command-input scope (include_stdin
         // false). A failed later bind unwinds the earlier ones.
         let saved_numbered_heredocs = self.bind_numbered_heredoc_redirects(cmd, false);
-        let saved_numbered_inputs = match self.open_compound_numbered_input_redirects(cmd) {
-            Ok(saved) => saved,
-            Err(error) => {
-                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
-                return Err(error);
-            }
-        };
+        // rubash#2310: the numbered inputs bind in segments split
+        // at the command's `{var}` entries, applying each such
+        // entry's dup/close effect at its list position — the
+        // applier resolved those entries against the ambient table
+        // before dispatch, but GNU's one ordered walk
+        // (redir.c:237) services them against the command's own
+        // earlier binds.
+        let saved_numbered_inputs =
+            match self.bind_script_numbered_inputs_and_fd_vars(cmd, &saved_numbered_heredocs) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
+                    return Err(error);
+                }
+            };
         let bound_output_fds = match self.open_compound_output_redirects(cmd) {
             Ok(fds) => fds,
             Err(error) => {
@@ -854,6 +862,19 @@ impl Executor {
         if contain_child_signals {
             let _ = crate::builtins::kill::take_adjudicated_signal_death();
         }
+        // rubash#2346: the termsig-death mark is an Executor transient
+        // outside the saved ShellState, so park the parent's mark for
+        // the span of the run: the child's own dispatches record the
+        // child's verdicts on it, and the exit boundary below drops
+        // the child's mark instead of handing it back — a contained
+        // child's death is simulated through the adjudicated-death
+        // record, and the hosting process must not die by the mark at
+        // the parent's own finish.
+        let saved_termsig_death = if contain_child_signals {
+            self.termsig_death_pending.take()
+        } else {
+            None
+        };
         let saved_shell_pid = self.shell_pid;
         if contain_child_signals {
             self.shell_pid = std::process::id();
@@ -958,6 +979,12 @@ impl Executor {
         } else {
             None
         };
+        // rubash#2346: drop the contained child's termsig-death mark
+        // (its death is the simulated child_signal_death above) and
+        // hand the parent back its parked mark.
+        if contain_child_signals {
+            self.termsig_death_pending = saved_termsig_death;
+        }
         self.shell_pid = saved_shell_pid;
 
         if let Some(saved) = saved_process_env {
