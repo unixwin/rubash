@@ -518,6 +518,15 @@ impl Executor {
                 name
             }
         };
+        // GNU mapfile.def -> builtin_find_indexed_array ->
+        // find_or_make_array_variable: an att_noassign target is
+        // refused at setup, before any input is read and silently
+        // (the per-element ASSIGN_DISALLOWED check at mapfile.def:205
+        // never gets a first line to bind); the readonly guards above
+        // are its diagnosed twin (rubash#2369).
+        if is_noassign_bash_array(&name) {
+            return self.finish_mapfile_error(cmd, &stderr, 1);
+        }
         // GNU builtins/mapfile.def mapfile_builtin -> builtin_find_indexed_
         // array: the target must be an indexed array; an associative array
         // is rejected with `mapfile: NAME: not an indexed array' and

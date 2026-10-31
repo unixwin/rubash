@@ -16,7 +16,7 @@
 //!   session-cwd anchoring, consume/probe discipline);
 //! - the per-class query functions ([`is_net_redirect_target`],
 //!   [`is_shell_null_device`], [`is_zero_device`], [`is_full_device`],
-//!   [`fd_alias_target`],
+//!   [`is_random_device`], [`fd_alias_target`],
 //!   [`synthetic_proc_content`], [`is_synthetic_link_path`]) are the
 //!   same judgments in the shapes existing consumers already ask; they
 //!   are defined here once, from the same bodies, so a query answer
@@ -67,6 +67,20 @@ pub enum SpecialPathClass {
     /// zeros like /dev/zero, and every write fails ENOSPC
     /// (`write error: No space left on device`, sh_chkwrite).
     FullDevice,
+    /// `/dev/random`, `/dev/urandom` — the entropy devices
+    /// (niubash#758): reads yield an unbounded stream of CSPRNG
+    /// bytes, writes are accepted and discarded (into the pool, on
+    /// Linux — observably a sink). A real device on Unix; in the
+    /// Windows simulation the service faces build it (a pump-fed
+    /// pipe fed by BCryptGenRandom for reads, the null sink for
+    /// writes — the /dev/zero construction with a different byte
+    /// source), so, like the zero/full classes, the class is judged
+    /// on every platform and only its construction is platform work.
+    /// The two spellings are one class: the blocking distinction
+    /// GNU-era consumers drew between them has no Windows source
+    /// and no modern Linux semantics either (getrandom-era random
+    /// and urandom behave identically once the pool is seeded).
+    RandomDevice,
     /// `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/N`,
     /// `/proc/self/fd/N`, `/proc/<own-pid>/fd/N` — an alias for a dup
     /// of the named fd in the shell's fd table, never a filesystem
@@ -110,6 +124,8 @@ pub fn classify_special_path(target: &str) -> SpecialPathClass {
         SpecialPathClass::ZeroDevice
     } else if is_full_device(target) {
         SpecialPathClass::FullDevice
+    } else if is_random_device(target) {
+        SpecialPathClass::RandomDevice
     } else if let Some(fd) = fd_alias_target(target) {
         SpecialPathClass::FdAlias(fd)
     } else if is_synthetic_link_path(target) {
@@ -131,8 +147,30 @@ pub fn classify_special_path(target: &str) -> SpecialPathClass {
 /// succeeds even with no listener). Host may be a name (resolved by
 /// the OS) or an address; the port may be numeric or a service name
 /// resolved through /etc/services (getservbyname).
+///
+/// rubash#2359: the claim is the FULL two-segment shape, not the
+/// bare prefix. GNU's table (redir.c:611-612
+/// `_redir_special_filenames`) holds the patterns
+/// `/dev/tcp/*/*` and `/dev/udp/*/*`; `redir_open` (redir.c:725)
+/// consults the table first and a spelling that does not match the
+/// pattern takes the plain open() below it. A host-only spelling
+/// (`/dev/tcp/127.0.0.1`, `/dev/udp/127.0.0.1`, the bare
+/// `/dev/tcp/`) therefore fails ENOENT as a literal path on the
+/// oracle (bash 5.3.20 probes), while either segment may be EMPTY
+/// (`/dev/tcp//18741` engages netopen and fails on the host;
+/// `/dev/tcp/127.0.0.1/` engages it and fails on the service) —
+/// the glob's `*` matches an empty segment but the separating
+/// slash must be present. The pre-#2359 prefix-only judgment
+/// claimed the host-only family and reported EINVAL from the net
+/// parser instead of GNU's ENOENT.
 pub fn is_net_redirect_target(target: &str) -> bool {
-    target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+    let rest = target
+        .strip_prefix("/dev/tcp/")
+        .or_else(|| target.strip_prefix("/dev/udp/"));
+    match rest {
+        Some(rest) => rest.contains('/'),
+        None => false,
+    }
 }
 
 /// Whether `path` spells the null device: the POSIX spelling (with
@@ -156,6 +194,14 @@ pub(crate) fn is_zero_device(path: &str) -> bool {
 /// zeros, writes fail ENOSPC. Same judgment shape as the zero device.
 pub(crate) fn is_full_device(path: &str) -> bool {
     path.replace('\\', "/") == "/dev/full"
+}
+
+/// Whether `path` spells an entropy device (niubash#758):
+/// `/dev/random` or `/dev/urandom`, backslashes normalized — the
+/// same judgment shape as the zero/full devices.
+pub(crate) fn is_random_device(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    normalized == "/dev/random" || normalized == "/dev/urandom"
 }
 
 /// GNU redir.c opens `/dev/stdin`/`/dev/stdout`/`/dev/stderr`,
@@ -316,11 +362,15 @@ pub fn synthetic_proc_dir_entries(target: &str) -> Option<Vec<String>> {
 /// perform. `/dev/zero` and `/dev/full` joined the registry with
 /// the audit-D5 simulation (rubash#1898), so they are listed here
 /// in the same change, as the consistency pin below requires.
+/// `/dev/random` and `/dev/urandom` joined the same way with the
+/// niubash#758 completeness wave.
 pub fn special_dev_entries() -> &'static [(&'static str, bool)] {
     &[
         ("null", false),
         ("zero", false),
         ("full", false),
+        ("random", false),
+        ("urandom", false),
         ("stdin", false),
         ("stdout", false),
         ("stderr", false),
@@ -340,7 +390,20 @@ mod tests {
     /// this module; this reference copy lives only in the test so a
     /// future edit to one side trips the comparison.)
     fn legacy_is_net(target: &str) -> bool {
-        target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+        // Issue rubash#2359: the pre-registry body was the bare
+        // prefix (`starts_with("/dev/tcp/")`), which claimed
+        // host-only spellings GNU's pattern table does not match
+        // (redir.c:611-612 vs redir_open's fall-through at
+        // redir.c:725); the mirror carries the corrected
+        // two-segment judgment so the battery keeps tripping on
+        // drift.
+        let rest = target
+            .strip_prefix("/dev/tcp/")
+            .or_else(|| target.strip_prefix("/dev/udp/"));
+        match rest {
+            Some(rest) => rest.contains('/'),
+            None => false,
+        }
     }
 
     fn legacy_is_null(path: &str) -> bool {
@@ -446,11 +509,16 @@ mod tests {
     fn classify_battery_matches_legacy_judgments() {
         use SpecialPathClass::*;
         let battery: &[(&str, SpecialPathClass)] = &[
-            // Net (netopen spellings; the bare prefix already counts,
-            // exactly as the legacy starts_with judgment answered).
+            // Net (netopen spellings; the full two-segment shape
+            // counts, either segment may be empty — rubash#2359,
+            // GNU redir.c:611-612 pattern table).
             ("/dev/tcp/127.0.0.1/80", NetRedirect),
             ("/dev/udp/example.com/53", NetRedirect),
-            ("/dev/tcp/", NetRedirect),
+            ("/dev/tcp//80", NetRedirect),
+            ("/dev/tcp/127.0.0.1/", NetRedirect),
+            ("/dev/tcp/", Filesystem),
+            ("/dev/tcp/127.0.0.1", Filesystem),
+            ("/dev/udp/127.0.0.1", Filesystem),
             ("/dev/tcp", Filesystem),
             ("/dev/udp", Filesystem),
             ("/dev/tcpx/1", Filesystem),
@@ -518,6 +586,13 @@ mod tests {
             ("/dev/zero", ZeroDevice),
             ("/dev/full", FullDevice),
             ("\\dev\\zero", ZeroDevice),
+            // Entropy devices (niubash#758): the same class of
+            // always-present character device, one class for both
+            // spellings.
+            ("/dev/random", RandomDevice),
+            ("/dev/urandom", RandomDevice),
+            ("\\dev\\urandom", RandomDevice),
+            ("/dev/randomx", Filesystem),
             // Ordinary paths stay Filesystem.
             ("/dev/tty", Filesystem),
             ("etc/hosts", Filesystem),
@@ -558,6 +633,11 @@ mod tests {
                 is_full_device(target),
                 class == FullDevice,
                 "full query vs classify for {target:?}"
+            );
+            assert_eq!(
+                is_random_device(target),
+                class == RandomDevice,
+                "random query vs classify for {target:?}"
             );
             assert_eq!(
                 fd_alias_target(target),

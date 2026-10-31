@@ -1457,7 +1457,12 @@ impl Executor {
             } else {
                 String::new()
             };
-            if !self.apply_shell_assignment_command("read", name, value) {
+            // GNU read.def:1156 bind_read_variable: an att_noassign
+            // target (ASSIGN_DISALLOWED) fails the bind like a readonly
+            // one but silently (rubash#2369).
+            if self.assignment_target_is_noassign(name)
+                || !self.apply_shell_assignment_command("read", name, value)
+            {
                 status = if index + 1 < names.len() { 2 } else { 1 };
                 break;
             }
@@ -1480,7 +1485,10 @@ impl Executor {
             };
             // GNU read.def bind_read_variable: success -> EXECUTION_SUCCESS;
             // failure of the last (only) name -> EXECUTION_FAILURE.
-            return if self.apply_shell_assignment_command("read", &names[0], value) {
+            // An att_noassign target fails silently (rubash#2369).
+            return if !self.assignment_target_is_noassign(&names[0])
+                && self.apply_shell_assignment_command("read", &names[0], value)
+            {
                 0
             } else {
                 1
@@ -1506,7 +1514,12 @@ impl Executor {
         let mut status = 0i32;
         for (index, name) in names.iter().enumerate() {
             let value = fields.get(index).cloned().unwrap_or_default();
-            if !self.apply_shell_assignment_command("read", name, value) {
+            // GNU read.def:1156 bind_read_variable: an att_noassign
+            // target fails the bind like a readonly one but silently
+            // (rubash#2369).
+            if self.assignment_target_is_noassign(name)
+                || !self.apply_shell_assignment_command("read", name, value)
+            {
                 status = if index + 1 < names.len() { 2 } else { 1 };
                 break;
             }

@@ -3493,8 +3493,11 @@ fn run_source_impl(
         // exits 2. The verdict shapes (WSL GNU 5.2.21/5.3.0 probes,
         // 2026-10-12): unquoted hunt -> `]'; a quote/backtick recursion
         // inside names ITSELF (a5: `echo $[\n'q` -> `'` line 2); a hunt
-        // bounded by a double-quoted span names the DQUOTE at the span's
-        // line (q2/w1-w4: `echo "$[1+2"` -> `"'`); reported ahead of the
+        // inside a double-quoted span is NOT bounded by the span — the
+        // span's closing quote opens a quote unit inside the hunt whose
+        // EOF names the DQUOTE at the UNIT's line (q2/w1-w4 sit on the
+        // span's line, where the two coincide; rubash#2227 face 2 splits
+        // them: `echo "a $[1+<NL>2"` -> `"'` at line 2); reported ahead of the
         // generic close-char path because the hunt owns the EOF even when a
         // `${` is also unclosed (`echo ${x[$[1}` -> `]', not `}').
         if let Some(eof) = crate::lexer::unclosed_dollar_bracket_eof(input) {
@@ -3828,8 +3831,18 @@ fn run_source_impl(
             code
         }
         // ExpansionFailure is GNU's DISCARD: the command list aborted but
-        // the reader continues with the next complete command.
-        Err(ExecuteError::ExpansionFailure(code)) => code,
+        // the reader continues with the next complete command. When the
+        // text is a -c string, this catch is shell.c run_one_command's:
+        // its DISCARD arm returns last_command_exit_value = 1
+        // (shell.c:1478-1479) regardless of the pre-set status, where
+        // the script reader_loop preserves it (eval.c:111-118).
+        Err(ExecuteError::ExpansionFailure(code)) => {
+            if executor.command_string_mode() {
+                1
+            } else {
+                code
+            }
+        }
         // SigintUnwind is the same DISCARD shape with a fixed verdict
         // (rubash#1639): GNU threw to the top-level reader on the
         // foreground job's SIGINT death — no diagnostic, the reader
@@ -6418,6 +6431,14 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // its only consumer — so a stale mark can never leak into a later
     // session in the same process.
     let termsig_death = executor.take_termsig_death_pending();
+    // rubash#2352: the EXIT trap's entry status under a termsig
+    // death — the value captured when the death was noted (the last
+    // command completed before the signal; trap.c:1036
+    // trap_saved_exit_value = last_command_exit_value), NOT this
+    // finish's 128+sig unwind status. Taken with the mark; a death
+    // noted without a capture (none should exist) falls back to the
+    // unwind status rather than inventing one.
+    let termsig_trap_status = executor.take_termsig_death_trap_status();
     // sig.c:621-622 gates the job hangup on SIGHUP reaching an
     // interactive (or comsub/procsub subshell) shell; a script shell
     // caught by its EXIT trap — and any shell dying by another
@@ -6434,7 +6455,17 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // wait_for; jobs.c:4723 maybe_print_job_notifications). This
     // runs before the EXIT trap below, matching GNU's order.
     let _ = executor.flush_job_notifications_at_stream_end();
-    let code = match executor.run_exit_trap_with_status(status) {
+    // rubash#2352: under a termsig death the trap runs with the
+    // captured pre-signal status; every other finish keeps the
+    // caller's status (a plain exit's status IS its trap entry
+    // status). The late-mark re-take below never re-runs the trap —
+    // GNU short-circuits a second terminating signal straight to
+    // kill_shell — so the capture belongs to this first take alone.
+    let trap_entry_status = match (termsig_death, termsig_trap_status) {
+        (Some(_), Some(saved)) => saved,
+        _ => status,
+    };
+    let code = match executor.run_exit_trap_with_status(trap_entry_status) {
         Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
         Err(e) => {

@@ -604,10 +604,13 @@ fn virtual_device_test(op: &str, operand: &str) -> Option<bool> {
     // exact truth table in GNU (measured against the 5.3.20 oracle:
     // -e -r -w -c true; -x -s -b -f false) — they are the same class
     // of always-present character device, so one arm serves all
-    // three spellings, judged by the registry.
+    // three spellings, judged by the registry. The entropy devices
+    // joined the same arm with niubash#758 (crw-rw-rw- on GNU,
+    // the identical table).
     if crate::executor::path::is_shell_null_device(operand)
         || crate::special_paths::is_zero_device(operand)
         || crate::special_paths::is_full_device(operand)
+        || crate::special_paths::is_random_device(operand)
     {
         return Some(match op {
             "-a" | "-e" | "-r" | "-w" | "-c" => true,
