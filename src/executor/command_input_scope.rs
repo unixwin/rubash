@@ -85,9 +85,17 @@ impl Executor {
             .iter()
             .filter_map(|redirect| redirect.fd_var.clone())
             .collect::<Vec<_>>();
+        // rubash#2282: running set of the numbered slots preceding each
+        // entry in the list — a {var} allocation counts them as occupied
+        // (see apply_dynamic_fd_var_redirects).
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for redirect in &cmd.redirects {
+            if let Some(fd) = redirect.fd {
+                occupied_slots.insert(fd);
+            }
             if redirect.fd_var.is_some() {
-                let _ = self.execute_dynamic_fd_var_redirect(redirect, false, false)?;
+                let _ =
+                    self.execute_dynamic_fd_var_redirect(redirect, false, false, &occupied_slots)?;
             }
         }
         // The dup preflight runs before ANY bind so the abandonment it

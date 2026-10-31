@@ -3982,6 +3982,10 @@ impl Executor {
         // (redir7.sub:23), `exec 4>&- 5>&-` (redir.tests:88) and
         // single-redirect forms alike.
         let mut handled = false;
+        // rubash#2282: running set of the numbered slots this walk has
+        // bound so far — a {var} allocation counts them as occupied
+        // (see apply_dynamic_fd_var_redirects).
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
         // A compound command's redirect injected into cmd.redirects (see
         // GROUP_REDIRECT_INJECTED_MARK) is the ambient fd state GNU applies
         // before exec runs — it participates in `>&N` resolution but must
@@ -3993,6 +3997,9 @@ impl Executor {
         let mut ambient: std::collections::BTreeMap<u32, String> =
             std::collections::BTreeMap::new();
         for redirect in &cmd.redirects {
+            if let Some(fd) = redirect.fd {
+                occupied_slots.insert(fd);
+            }
             let target = self.expand_redirect_target(redirect);
             if crate::executor::support_names::is_injected_group_redirect(redirect) {
                 let fd = redirect.fd.unwrap_or_else(|| match redirect.kind {
@@ -4021,7 +4028,8 @@ impl Executor {
             // (exec redirections are never undone). A failed redirect stops
             // the list — do_redirections returns on the first error.
             if redirect.fd_var.is_some() {
-                match self.execute_dynamic_fd_var_redirect(redirect, false, false) {
+                match self.execute_dynamic_fd_var_redirect(redirect, false, false, &occupied_slots)
+                {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
                         let mut stderr = Vec::new();
@@ -4411,7 +4419,10 @@ impl Executor {
                 continue;
             }
             handled = true;
-            match self.execute_dynamic_fd_var_heredoc(redirect, false) {
+            // rubash#2282: heredoc entries apply after the plain list
+            // here too, so every numbered slot counts as occupied.
+            occupied_slots.extend(command_own_numbered_slots(cmd));
+            match self.execute_dynamic_fd_var_heredoc(redirect, false, &occupied_slots) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5239,7 +5250,21 @@ impl Executor {
         self.fd_var_external_undo.clear();
         self.fd_var_pending_closes.clear();
         self.fd_var_close_restore.clear();
+        // rubash#2282: GNU's do_redirections is one ordered walk over
+        // one descriptor space (redir.c:237): when a REDIR_VARASSIGN
+        // allocation (redir.c:940 F_DUPFD) runs, the numbered entries
+        // BEFORE it in the list already hold their slots, so
+        // `cmd 10<f2 {v}<f1` allocates v=11 — while a numbered entry
+        // AFTER the {var} entry does not count yet (`cmd {v}<f1 10<f2`
+        // allocates v=10 and the later bind wins the slot; both shapes
+        // oracle-verified against GNU 5.3.20). The numbered slots are
+        // not fd-table entries on this path, so carry the running set
+        // of slots bound so far in the walk and count them as occupied.
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for redirect in &cmd.redirects {
+            if let Some(fd) = redirect.fd {
+                occupied_slots.insert(fd);
+            }
             let Some(name) = redirect.fd_var.as_deref() else {
                 continue;
             };
@@ -5256,7 +5281,8 @@ impl Executor {
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_redirect(redirect, auto_close, true) {
+            match self.execute_dynamic_fd_var_redirect(redirect, auto_close, true, &occupied_slots)
+            {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5277,6 +5303,12 @@ impl Executor {
         // GNU redir.c make_here_document writes the body to a temp file and
         // redir_varassign binds the fresh fd to var, so `exec {v}<<-EOF`
         // leaves v holding a readable descriptor (vredir1.sub).
+        // rubash#2282: heredoc entries are applied after the plain list in
+        // this AST split, so every numbered slot of the command counts as
+        // occupied for their allocations (the split does not preserve a
+        // heredoc entry's source position among the plain entries; GNU
+        // processes it at its list position).
+        occupied_slots.extend(command_own_numbered_slots(cmd));
         for redirect in &cmd.heredoc_redirects {
             let Some(name) = redirect.fd_var.as_deref() else {
                 continue;
@@ -5288,7 +5320,7 @@ impl Executor {
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_heredoc(redirect, auto_close) {
+            match self.execute_dynamic_fd_var_heredoc(redirect, auto_close, &occupied_slots) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5315,6 +5347,10 @@ impl Executor {
         &mut self,
         redirect: &crate::parser::HereDocRedirect,
         auto_close: bool,
+        // rubash#2282: the descriptor slots the ordered walk has
+        // already bound, counted as occupied by the allocation (see
+        // apply_dynamic_fd_var_redirects).
+        occupied_slots: &std::collections::HashSet<u32>,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -5335,7 +5371,7 @@ impl Executor {
         // here_document_to_fd produces — storage prefix decoded and
         // the here-string newline present (rubash#1867).
         let body = self.expand_heredoc_redirect_text(redirect);
-        let Some(fd) = self.allocate_dynamic_fd() else {
+        let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
             // GNU exhausts {var} heredocs through the same REDIR_VARASSIGN
             // fcntl F_DUPFD path (probe: ulimit -Sn 6 then exec {v}<<E
             // prints "redirection error: cannot duplicate fd: ..." too), so
@@ -5439,6 +5475,10 @@ impl Executor {
         // persistent by definition, and the scope restores its own
         // snapshots.
         defer_closes: bool,
+        // rubash#2282: the descriptor slots the ordered walk has
+        // already bound, counted as occupied by every allocation
+        // below (see apply_dynamic_fd_var_redirects).
+        occupied_slots: &std::collections::HashSet<u32>,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -5547,7 +5587,7 @@ impl Executor {
                     if !self.fd_table.is_open(source_fd) {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd() else {
+                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -5582,7 +5622,7 @@ impl Executor {
                     if !self.fd_table.is_open(source_fd) {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd() else {
+                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -5629,14 +5669,14 @@ impl Executor {
                     // plumbed into this entry, so the child's diagnostic
                     // frame starts from the body's own text.)
                     let mut bound_fd = None;
-                    if let Some(fd) = self.allocate_dynamic_fd() {
+                    if let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) {
                         if self.bind_input_process_substitution_child(fd, source, None) {
                             bound_fd = Some(fd);
                         }
                     }
                     if bound_fd.is_none() {
                         if let Some(input) = self.process_substitution_output(source) {
-                            let Some(fd) = self.allocate_dynamic_fd() else {
+                            let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                                 return Err(ExecuteError::IoError(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     self.fd_dup_error_payload(&target),
@@ -5682,7 +5722,7 @@ impl Executor {
                 if redirect.kind == crate::parser::RedirectKind::Input {
                     if let Some(source_fd) = redirect_target_fd(&target) {
                         if self.fd_table.is_open_for_read(source_fd) {
-                            let Some(fd) = self.allocate_dynamic_fd() else {
+                            let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                                 return Err(ExecuteError::IoError(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     self.fd_dup_error_payload(&target),
@@ -5716,7 +5756,7 @@ impl Executor {
                         (file.clone(), file)
                     };
                 let file = read_file;
-                let Some(fd) = self.allocate_dynamic_fd() else {
+                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
@@ -5744,7 +5784,7 @@ impl Executor {
             crate::parser::RedirectKind::Output
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
-                let Some(fd) = self.allocate_dynamic_fd() else {
+                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
@@ -5955,6 +5995,19 @@ impl Executor {
     pub(in crate::executor) fn allocate_dynamic_fd(&mut self) -> Option<u32> {
         let limit = self.open_files_limit();
         self.fd_table.allocate_dynamic_with_limit(limit)
+    }
+
+    /// rubash#2282: allocate a dynamic fd counting `avoid` — the owning
+    /// command's own numbered redirect slots — as occupied, the same
+    /// caliber the spawn-delivery helper (fd_var_delivery_fd) already
+    /// uses when it computes the child's descriptor for a {var} entry.
+    pub(in crate::executor) fn allocate_dynamic_fd_avoiding(
+        &mut self,
+        avoid: &std::collections::HashSet<u32>,
+    ) -> Option<u32> {
+        let limit = self.open_files_limit();
+        self.fd_table
+            .allocate_dynamic_with_limit_avoiding(limit, avoid)
     }
 
     /// GNU redir.c:940-946 (REDIR_VARASSIGN): a failed
@@ -6309,6 +6362,31 @@ pub(crate) fn signal_trap_name(signal: i32) -> Option<String> {
         return None;
     }
     crate::builtins::kill::translate_signal(&signal.to_string()).map(|name| format!("SIG{name}"))
+}
+
+/// rubash#2282: the full set of descriptor slots a command's own
+/// numbered redirect entries (in `redirects` and `heredoc_redirects`)
+/// will bind. The applier faces that walk the list in order carry a
+/// running prefix of this set (only the entries before the allocation
+/// point count — GNU's one ordered walk, redir.c:237); faces that
+/// apply entries only after the whole plain list (the heredoc arms)
+/// count the full set. The spawn-delivery helper (fd_var_delivery_fd)
+/// likewise avoids the full set when it computes the child's
+/// descriptor.
+pub(in crate::executor) fn command_own_numbered_slots(
+    cmd: &CommandNode,
+) -> std::collections::HashSet<u32> {
+    let mut slots: std::collections::HashSet<u32> = cmd
+        .redirects
+        .iter()
+        .filter_map(|redirect| redirect.fd)
+        .collect();
+    slots.extend(
+        cmd.heredoc_redirects
+            .iter()
+            .filter_map(|redirect| redirect.fd),
+    );
+    slots
 }
 
 fn exec_has_only_redirects(cmd: &CommandNode) -> bool {

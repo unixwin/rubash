@@ -524,6 +524,59 @@ impl FdTable {
         Some(candidate as u32)
     }
 
+    /// rubash#2282: the same lowest-free walk, with extra slots counted
+    /// as occupied even though they are not fd-table entries — the
+    /// numbered redirect slots the command's ordered walk has already
+    /// bound (or, on faces that apply after the whole list, will bind).
+    /// GNU's do_redirections is one ordered walk over one descriptor
+    /// space (redir.c:237): a numbered entry binds its slot in the same
+    /// space the REDIR_VARASSIGN F_DUPFD allocation (redir.c:940)
+    /// searches, so `cmd 10<f2 {v}<f1` allocates v=11, never the
+    /// pending 10. The spawn-delivery helper (fd_var_delivery_fd)
+    /// already avoids these slots when it computes the child's
+    /// descriptor; the applier's allocation is the same computation on
+    /// the parent's side of the fork.
+    pub(crate) fn allocate_dynamic_with_limit_avoiding(
+        &mut self,
+        limit: Option<u32>,
+        avoid: &std::collections::HashSet<u32>,
+    ) -> Option<u32> {
+        if avoid.is_empty() {
+            return self.allocate_dynamic_with_limit(limit);
+        }
+        let upper = limit.unwrap_or(Self::UNLIMITED_OPEN_FILES_CEILING) as usize;
+        if upper <= 10 {
+            return None;
+        }
+        // Merge the avoided slots into the occupied walk in descriptor
+        // order and stop at the first gap, exactly as the base walk
+        // does over table entries alone.
+        let mut occupied: Vec<u32> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| Self::occupied(entry))
+            .map(|(fd, _)| *fd)
+            .collect();
+        occupied.extend(avoid.iter().copied());
+        occupied.sort_unstable();
+        occupied.dedup();
+        let mut candidate: usize = 10;
+        for fd in occupied {
+            if (fd as usize) < candidate {
+                continue;
+            }
+            if fd as usize == candidate {
+                candidate += 1;
+            } else {
+                break;
+            }
+        }
+        if candidate >= upper {
+            return None;
+        }
+        Some(candidate as u32)
+    }
+
     pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
         let entry = self.entry_mut(fd, dynamic);
         entry.read = Some(endpoint);
