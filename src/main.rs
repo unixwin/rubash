@@ -1470,12 +1470,21 @@ fn run_command_string_with_init(
     // install unit by unit while armed). Ordinary `-c` strings carry
     // no install and the re-seed is a no-op for them.
     executor.set_root_line_span_run_armed(true);
+    // shell.c run_one_command executes the -c string through
+    // parse_and_execute (builtins/evalstring.c), whose DISCARD arm
+    // folds the pre-set status to EXECUTION_FAILURE and continues the
+    // string (evalstring.c:425-442) — unlike the script reader_loop
+    // (eval.c:111-118), which preserves the pre-set status. Enter the
+    // frame for the run so the discard catches fold the same way
+    // (rubash#2369: `bash -c 'echo ${BASH_SOURCE:=X}'` exits 1).
+    let saved_frame = executor.enter_parse_and_execute_frame();
     let status =
         if script_uses_history(&command) || script_uses_aliases(&command, alias_live_at_start) {
             run_script_with_history(executor, &command, None)
         } else {
             run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
         };
+    executor.exit_parse_and_execute_frame(saved_frame);
     executor.set_root_line_span_run_armed(false);
     executor.set_command_string_mode(false);
     finish_shell(executor, status, interactive)

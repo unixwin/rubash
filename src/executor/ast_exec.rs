@@ -524,10 +524,14 @@ impl Executor {
             // executes (execute_cmd.c:914) — adjudication below and inside
             // dispatch consults the sample, so a trap this command installs
             // (e.g. in a function body) cannot fire for the command itself.
-            self.err_trap_armed_sample.set(Some(matches!(
-                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "ERR"),
-                Some(ref action) if !action.is_empty()
-            )));
+            // rubash#349: this sample runs once per command; the borrowing
+            // probe is the allocation-free form of the same verdict
+            // (get_trap_action + non-empty guard) — no reset-set build, no
+            // key format, no action clone on the floor path.
+            self.err_trap_armed_sample.set(Some(
+                crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "ERR")
+                    .is_some(),
+            ));
             // issue #485: the comsub $? overlay (word_expansion_comsub_exit)
             // belongs to ONE command's word expansion, exactly like GNU's
             // last_command_exit_value write in subst.c command_substitute —
@@ -1957,6 +1961,38 @@ impl Executor {
                     // SIGPIPE, reports the failed write with status 1 and
                     // keeps executing the list.
                     self.report_io_error_routed(command, &error)?;
+                    // rubash#2359: the group is fully handled here. Falling
+                    // through to the simple-pipeline dispatch below
+                    // re-dispatched the same group, and the re-dispatch's
+                    // bookkeeping reset the recorded failure status to 0 —
+                    // a brace group whose redirection open GNU refuses
+                    // (redir.c do_redirections, reached from
+                    // execute_cmd.c's brace-group execution) reported
+                    // status 0, ran the && right-hand side, skipped the
+                    // || right-hand side, and ignored set -e. Consume the
+                    // command like the Ok(true) arm, with the
+                    // ExpansionFailure arm's errexit promotion.
+                    if self.errexit_enabled()
+                        && self.errexit_is_active()
+                        && self.suppress_errexit == 0
+                        && self.exit_code != 0
+                        && !command.inverted
+                        && command.and_or().is_none()
+                    {
+                        self.debugger_note_exception_site(
+                            crate::debugger::ExceptionKind::Errexit,
+                            self.exit_code,
+                            None,
+                        )?;
+                        return Err(ExecuteError::ExitCode(self.exit_code));
+                    }
+                    if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
+                        index = next_index;
+                    } else {
+                        index += 1;
+                    }
+                    close_subshell_region_if_ended!(command);
+                    continue;
                 }
                 Err(ExecuteError::ExitCode(code)) => {
                     handle_exit_code!(code, command)

@@ -202,12 +202,19 @@ impl Executor {
         // come from the pump-fed zero source; /dev/zero writes go to
         // the null sink; /dev/full writes bind the FullDevice
         // endpoint, whose faces fail ENOSPC through sh_chkwrite
-        // exactly like the direct redirect faces.
+        // exactly like the direct redirect faces. The entropy
+        // devices (niubash#758) bind the same way: reads from the
+        // pump-fed CSPRNG source, writes to the null sink.
         if crate::special_paths::is_zero_device(target)
             || crate::special_paths::is_full_device(target)
+            || crate::special_paths::is_random_device(target)
         {
             let full = crate::special_paths::is_full_device(target);
-            let read_file = Self::zero_device_file(&target)?;
+            let read_file = if crate::special_paths::is_random_device(target) {
+                Self::random_device_file(&target)?
+            } else {
+                Self::zero_device_file(&target)?
+            };
             let read_fd = FileFd::from_file(read_file, target.into());
             self.set_fd_input_file(fd, read_fd, dynamic);
             if full {
@@ -379,8 +386,11 @@ impl Executor {
         // rubash#1898: device write binds — /dev/zero discards
         // through the null sink; /dev/full binds the FullDevice
         // endpoint (its writes fail ENOSPC through sh_chkwrite).
+        // The entropy devices discard writes through the same null
+        // sink (niubash#758).
         if crate::special_paths::is_zero_device(&target)
             || crate::special_paths::is_full_device(&target)
+            || crate::special_paths::is_random_device(&target)
         {
             if crate::special_paths::is_full_device(&target) {
                 self.fd_table
@@ -1636,9 +1646,71 @@ impl Executor {
         if !self.termsig_death_armed(signal) {
             return false;
         }
+        // rubash#2352: capture the EXIT trap's entry status BEFORE
+        // the 128+sig overwrite — at every drain that reaches here,
+        // exit_code is still the last completed command's status
+        // (trap.c:1036 trap_saved_exit_value). The boundary dispatch
+        // may replace the capture for an ancestor-lane delivery with
+        // the entry's sender snapshot (the pre-carrier value).
+        self.termsig_death_trap_status = Some(self.exit_code);
         self.exit_code = 128 + signal;
         self.termsig_death_pending = Some(signal);
         true
+    }
+
+    /// rubash#2353: the ancestor lane's complementary verdict. A
+    /// #1654 routed delivery is synthetic — no kernel disposition
+    /// ever fires for it — so the boundary dispatch must enact the
+    /// addressed shell's verdict itself. Where GNU catches an
+    /// untrapped terminating delivery (termsig_death_armed: an EXIT
+    /// trap is armed, or an interactive SIGHUP), note_untrapped_
+    /// termsig above settles it. In the complementary cell — no
+    /// EXIT trap, non-interactive — GNU installs NO terminating-
+    /// signal handler at all (sig.c:230-236: for non-interactive
+    /// shells initialize_terminating_signals runs only when an EXIT
+    /// trap is defined), so the delivery stays at SIG_DFL and the
+    /// kernel kills the shell in place, BY the signal. Arm the same
+    /// termsig-death mark so finish_shell performs that death.
+    /// Exclusions, each load-bearing:
+    ///   * SIGINT: while a script shell waits for a foreground job,
+    ///     GNU's wait_sigint_handler (jobs.c:2908) records the
+    ///     delivery and otherwise ignores it — the shell dies of it
+    ///     only when the job itself died of SIGINT (jobs.c:4384,
+    ///     4410 child_caught_sigint), a cooperative path the
+    ///     ancestor lane is not (the carrier completed normally by
+    ///     construction). The dispatch absorbs that cell instead.
+    ///   * a contained in-process child (direct-child route armed):
+    ///     its death is simulated — the adjudicated record carries
+    ///     the signaled form to the parent's wait and the hosting
+    ///     process must not die (rubash#2236).
+    ///   * an interactive shell: untrapped deliveries there take
+    ///     the DISCARD classification the dispatch already records
+    ///     (rubash#1662); an interactive shell also ignores SIGTERM
+    ///     outright (sig.c:337-341).
+    /// The signal universe is the same terminating set as
+    /// exit_reroutes: the default-ignore pair (URG/WINCH), the stop
+    /// class, SIGCONT and the realtime block have no SIG_DFL death
+    /// to enact; SIGQUIT never reaches here (the dispatch drops it
+    /// above — bash ignores QUIT for itself, sig.c:333).
+    #[cfg(unix)]
+    pub(crate) fn note_routed_untrapped_termsig(&mut self, signal: i32) -> bool {
+        if signal == libc::SIGINT as i32
+            || self.invocation_interactive()
+            || crate::builtins::kill::direct_child_route_active()
+            || !crate::builtins::kill::exit_reroutes(signal)
+        {
+            return false;
+        }
+        self.exit_code = 128 + signal;
+        self.termsig_death_pending = Some(signal);
+        true
+    }
+
+    /// Non-unix: no routed lane exists (the ancestor queue is a unix
+    /// mechanism), so there is no routed verdict to record.
+    #[cfg(not(unix))]
+    pub(crate) fn note_routed_untrapped_termsig(&mut self, _signal: i32) -> bool {
+        false
     }
 
     /// Non-unix shells have no signal death to settle (the Windows
@@ -1693,6 +1765,10 @@ impl Executor {
             crate::builtins::kill::requeue_pending_signals(rest);
         }
         if found {
+            // rubash#2352: same trap-entry capture as
+            // note_untrapped_termsig — the reader's exit_code here
+            // is still the last completed command's status.
+            self.termsig_death_trap_status = Some(self.exit_code);
             self.exit_code = 128 + libc::SIGHUP as i32;
             self.termsig_death_pending = Some(libc::SIGHUP as i32);
         }
@@ -1811,15 +1887,17 @@ impl Executor {
         // even when no delivery is pending (the common case); Vec::new()
         // defers the allocation to the first push — identical growth
         // semantics, one malloc/free per command removed from the floor.
-        let mut queue: Vec<(i32, bool)> = Vec::new();
+        // The third element is the ancestor entry's sender-status
+        // snapshot (rubash#2352; kernel-lane entries carry None).
+        let mut queue: Vec<(i32, bool, Option<i32>)> = Vec::new();
         #[cfg(unix)]
         queue.extend(
             crate::builtins::kill::take_ancestor_signals()
                 .into_iter()
-                .map(|signal| (signal, false)),
+                .map(|(signal, sender_status)| (signal, false, Some(sender_status))),
         );
-        queue.extend(signals.into_iter().map(|signal| (signal, true)));
-        for (signal, stale_check) in queue {
+        queue.extend(signals.into_iter().map(|signal| (signal, true, None)));
+        for (signal, stale_check, sender_status) in queue {
             // Stale registry flag from a disposition flip (trap cleared while
             // a delivery raced): a signal the kernel no longer routes here
             // cannot be a legitimate pending trap.
@@ -1862,12 +1940,58 @@ impl Executor {
                 // shell dies BY the signal. The helper records the
                 // mark and the exit status; unwind exit-class.
                 if self.note_untrapped_termsig(signal) {
+                    // rubash#2352: for an ancestor-lane delivery the
+                    // trap's entry status is the entry's sender
+                    // snapshot, not this layer's exit_code — the
+                    // carrier construct already committed its own
+                    // status here, but GNU's addressed shell was
+                    // still waiting for it, so its last_command_
+                    // exit_value is the pre-carrier one (trap.c:1036;
+                    // the wait is preempted, never completed).
+                    if let Some(sender_status) = sender_status {
+                        self.termsig_death_trap_status = Some(sender_status);
+                    }
                     // rubash#2236: record the death so an in-process
                     // child's exit boundary can queue the parent's
                     // job-death notice for it (a real child's wait(2)
                     // status carries the same fact).
                     crate::builtins::kill::note_adjudicated_signal_death(signal);
                     return Err(ExecuteError::ExitCode(128 + signal));
+                }
+                // rubash#2353: a routed (ancestor-lane) delivery in
+                // the complementary cell — no EXIT trap caught it
+                // above, non-interactive — is a SIG_DFL death GNU
+                // never runs a handler for (sig.c:230-236), enacted
+                // here by arming the same termsig mark. Kernel-lane
+                // entries keep the plain path below: their stale
+                // check already proved a handler story this lane
+                // never has, and a contained child's routed entries
+                // are excluded inside the helper (its death is the
+                // simulated plain path below, rubash#2236).
+                if !stale_check && self.note_routed_untrapped_termsig(signal) {
+                    crate::builtins::kill::note_adjudicated_signal_death(signal);
+                    return Err(ExecuteError::ExitCode(128 + signal));
+                }
+                // rubash#2353 (SIGINT cell): a routed SIGINT the
+                // verdicts above did not take is absorbed. GNU's
+                // script shell waiting on the carrier — this lane's
+                // only posture, since the entry surfaces after the
+                // carrier completed — records an untrapped SIGINT
+                // and otherwise ignores it (jobs.c:2908
+                // wait_sigint_handler); it dies of SIGINT only when
+                // the foreground job itself died of it (jobs.c:4384,
+                // 4410), which a completed carrier did not. Drop the
+                // entry: the carrier's status stands and the script
+                // continues. A contained child's entries keep the
+                // plain path (its simulated death is adjudicated
+                // below), as do interactive shells (DISCARD, #1662).
+                #[cfg(unix)]
+                if !stale_check
+                    && signal == libc::SIGINT as i32
+                    && !self.invocation_interactive()
+                    && !crate::builtins::kill::direct_child_route_active()
+                {
+                    continue;
                 }
                 self.exit_code = 128 + signal;
                 // rubash#2236: record the death so an in-process
@@ -3806,11 +3930,20 @@ impl Executor {
         };
         let mut child = Command::new(&exe);
         child.arg("-c").arg(source);
+        // rubash#2356: gather the respawn environment into a Vec
+        // first (a Command's env cannot be read back), so the
+        // state-channel spill can move oversized entries onto the
+        // state-file transport before anything is applied — the
+        // fork-context stamp scales with the function table and a
+        // single entry past MAX_ARG_STRLEN fails the execve. Entry
+        // order is preserved exactly; spill + apply happen just
+        // before the spawn below.
+        let mut env_entries: Vec<(String, String)> = Vec::new();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_")
                 || super::compound_exec::rubash_spawn_inherited_state(key)
             {
-                child.env(key, value);
+                env_entries.push((key.clone(), value.clone()));
             }
         }
         for (name, body) in &self.shell_state.functions {
@@ -3823,10 +3956,10 @@ impl Executor {
                 .get(name)
                 .map(|info| info.def_redirects.as_slice())
                 .unwrap_or(&[]);
-            child.env(
+            env_entries.push((
                 exported_function_env_name(name),
                 exported_function_env_value(&body.commands, def_redirects),
-            );
+            ));
         }
         // rubash#1184 f4: seed the child's line frame from the
         // constructing `exec` command's line, the `&` respawn's protocol
@@ -3840,50 +3973,63 @@ impl Executor {
         // the marker the child init requires before it keeps
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
-        child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        env_entries.push(("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string()));
         // rubash#2136: the provenance stamp the child's init validates
         // against its actual parent (init.rs).
-        child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+        env_entries.push((
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        ));
         // subst.c:6362 process_substitute: the producer is a forked
         // child one subshell level deeper than its parent, like the
         // consumer form (external_setup.rs) — this builder never
         // stamped the depth, so the child's $BASH_SUBSHELL read 0
         // where GNU reads parent + 1.
-        child.env(
-            "__RUBASH_SUBSHELL_DEPTH",
+        env_entries.push((
+            "__RUBASH_SUBSHELL_DEPTH".to_string(),
             (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
+        ));
         // rubash#1582: the same fork makes the producer's own pid the
         // pid of the seeded level (variables.c:1511 get_bashpid =
         // getpid), so the BASHPID origin base rides with the depth —
         // the consumer form (external_setup.rs) stamps the pair, and
         // without the base this child's $BASHPID read its real pid + 1
         // while its own children observed the real pid as $PPID.
-        child.env(
-            "__RUBASH_BG_BASHPID_BASE",
+        env_entries.push((
+            "__RUBASH_BG_BASHPID_BASE".to_string(),
             (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
+        ));
         // rubash#2032: process_substitute's producer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
         // the body saw $# = 0 and `"$@"` collapsed to one empty word —
         // the bats zero-test-execution regression.
-        child.env(
-            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
+        env_entries.push((
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
             self.positional_params_transport_value(),
-        );
+        ));
         // rubash#2058: the fork-context stamp (call-stack views,
         // PIPESTATUS cell, ARGV bottom state) — same fork, same
         // transport set (see fork_context_transport_entries).
         for (key, value) in self.fork_context_transport_entries() {
-            child.env(key, value);
+            env_entries.push((key, value));
         }
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
-            child.env("__RUBASH_SCRIPT_NAME", script_name);
+            env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone()));
         }
         if let Some(line) = line {
-            child.env("__RUBASH_CURRENT_LINE", line.to_string());
-            child.env("__RUBASH_LINE_OFFSET", line.saturating_sub(1).to_string());
+            env_entries.push(("__RUBASH_CURRENT_LINE".to_string(), line.to_string()));
+            env_entries.push((
+                "__RUBASH_LINE_OFFSET".to_string(),
+                line.saturating_sub(1).to_string(),
+            ));
+        }
+        // rubash#2356: spill + apply the gathered environment (see
+        // the gather above).
+        let argv_bytes = exe.as_os_str().len() + source.len() + 8;
+        let (env_entries, state_temp) = self.spill_respawn_env_entries(env_entries, argv_bytes);
+        for (key, value) in env_entries {
+            child.env(key, value);
         }
         child.stdin(Stdio::inherit());
         child.stdout(writer);
@@ -3904,7 +4050,12 @@ impl Executor {
                 let file = crate::fd::handle_to_file(crate::fd::into_handle(reader));
                 Some(FileFd::from_file(file, format!("<({source})").into()))
             }
-            Err(_) => None,
+            Err(_) => {
+                if let Some(path) = &state_temp {
+                    let _ = std::fs::remove_file(path);
+                }
+                None
+            }
         }
     }
 
@@ -4053,6 +4204,7 @@ impl Executor {
                     false,
                     false,
                     &occupied_slots,
+                    &std::collections::HashSet::new(),
                     0,
                 ) {
                     Ok(_) => {}
@@ -4330,6 +4482,15 @@ impl Executor {
                         // pump-fed source handle (a real handle, so
                         // the descriptor behaves like the device).
                         let file = Self::zero_device_file(&target)
+                            .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                        let file_fd = FileFd::from_file(file, target.clone().into());
+                        self.set_fd_input_file(fd, file_fd, fd != 0);
+                    } else if crate::special_paths::is_random_device(&target) {
+                        // niubash#758: the entropy devices read as
+                        // an unbounded CSPRNG stream — the pump-fed
+                        // random source, the zero arm's construction
+                        // with a different byte source.
+                        let file = Self::random_device_file(&target)
                             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
                         let file_fd = FileFd::from_file(file, target.clone().into());
                         self.set_fd_input_file(fd, file_fd, fd != 0);
@@ -5292,11 +5453,56 @@ impl Executor {
         // not fd-table entries on this path, so carry the running set
         // of slots bound so far in the walk and count them as occupied.
         let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#2322: descriptors an earlier entry of THIS list has
+        // closed at the current walk position. GNU's do_redirections
+        // is one ordered walk (redir.c:246): a close at position p
+        // poisons its descriptor for every later entry, and a bind
+        // after the close revives it. The deferred-close design only
+        // RECORDS `{var}` closes (fd_var_pending_closes), so without
+        // this overlay a later `{w}<&N` dup resolved its source
+        // against the still-open ambient table, bound `w`, and left
+        // the assignment (and a copied descriptor) behind when the
+        // redirect gate rejected the command — GNU never binds the
+        // variable of a dup whose own entry fails (redir.c
+        // do_redirection_internal dup arm assigns only after the
+        // dup succeeds), while an EARLIER entry's successful bind
+        // survives the rejection. Folded incrementally below from
+        // the pending-close records plus the list's fixed entries.
+        let mut list_closed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut folded_closes = 0usize;
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
             let Some(name) = redirect.fd_var.as_deref() else {
+                // A fixed entry still moves the walk state: a close
+                // poisons its descriptor, any other bind revives it.
+                let effective_fd =
+                    redirect
+                        .fd
+                        .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::CloseOutput
+                ) {
+                    list_closed.insert(effective_fd);
+                } else if redirect.fd.is_some()
+                    || matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Input
+                            | crate::parser::RedirectKind::Output
+                            | crate::parser::RedirectKind::Append
+                            | crate::parser::RedirectKind::ClobberOutput
+                            | crate::parser::RedirectKind::ReadWrite
+                            | crate::parser::RedirectKind::DuplicateInput
+                            | crate::parser::RedirectKind::DuplicateOutput
+                            | crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                    )
+                {
+                    list_closed.remove(&effective_fd);
+                }
                 continue;
             };
             // Record the variable's prior value so commands that fork
@@ -5315,8 +5521,19 @@ impl Executor {
                 auto_close,
                 true,
                 &occupied_slots,
+                &list_closed,
                 position,
             );
+            // rubash#2322: fold the closes THIS entry recorded
+            // (close forms and move-form dup sources, stamped with
+            // their positions) into the walk overlay, and let a
+            // descriptor this entry bound revive its slot.
+            while folded_closes < self.fd_var_pending_closes.len()
+                && self.fd_var_pending_closes[folded_closes].0 <= position
+            {
+                list_closed.insert(self.fd_var_pending_closes[folded_closes].1);
+                folded_closes += 1;
+            }
             // rubash#2281: remember the descriptor THIS entry bound
             // (read back from the variable after a successful apply)
             // so the undo closes exactly that one. A pure close entry
@@ -5336,6 +5553,12 @@ impl Executor {
                 }
                 _ => None,
             };
+            // rubash#2322: a descriptor this entry bound is open
+            // again for later entries (a same-list rebind after a
+            // close revives the slot, redir.c:246 ordered walk).
+            if let Some(fd) = bound_fd {
+                list_closed.remove(&fd);
+            }
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed, bound_fd));
             match outcome {
@@ -5538,13 +5761,21 @@ impl Executor {
     /// applies that entry's child-visible effect
     /// (apply_script_fd_var_entry) at its list position, so at each
     /// such entry the fd table holds exactly the bindings GNU's
-    /// walk would have produced by then. The numbered output binds
-    /// keep their own pass afterwards, as before.
+    /// walk would have produced by then. rubash#2322: the numbered
+    /// output binds ride the same segments (see the saved_outputs
+    /// accumulator in the body); before, they landed in a later
+    /// pass and the output side of the walk was never at-position.
     pub(in crate::executor) fn bind_script_numbered_inputs_and_fd_vars(
         &mut self,
         cmd: &CommandNode,
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
-    ) -> Result<Vec<super::command_input_scope::SavedNumberedFd>, ExecuteError> {
+    ) -> Result<
+        (
+            Vec<super::command_input_scope::SavedNumberedFd>,
+            Vec<super::command_input_scope::SavedOutputFd>,
+        ),
+        ExecuteError,
+    > {
         // The applier's deferred-close records belong to THIS
         // command; the script face consumes them here (performed at
         // their positions below). The spawn delivery prologue is the
@@ -5555,18 +5786,31 @@ impl Executor {
         let mut pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let mut performed_closes: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut saved: Vec<super::command_input_scope::SavedNumberedFd> = Vec::new();
+        // rubash#2322: the numbered OUTPUT binds join the same
+        // segmented walk (they used to land in one later pass,
+        // open_compound_output_redirects, after every `{var}` entry
+        // was already serviced — so an output-side `{var}` dup kept
+        // the applier's ambient copy and an output-side close was
+        // silently overwritten by the later output bind:
+        // `obs.sh 9>o1 {w}>&9 {v}>&-` gave the child fd 10 = the
+        // ambient binding and fd 9 still open). Within one segment
+        // inputs bind before outputs, as the passes were ordered
+        // before; across segments the walk is exact.
+        let mut saved_outputs: Vec<super::command_input_scope::SavedOutputFd> = Vec::new();
         let mut start = 0usize;
         for position in 0..cmd.redirects.len() {
             if cmd.redirects[position].fd_var.is_none() {
                 continue;
             }
             self.open_compound_numbered_input_redirects_in(cmd, start, position, &mut saved)?;
+            self.open_compound_output_redirects_in(cmd, start, position, &mut saved_outputs)?;
             self.apply_script_fd_var_entry(
                 cmd,
                 position,
                 &mut pending_closes,
                 &mut performed_closes,
                 &saved,
+                &saved_outputs,
                 heredoc_saved,
             )?;
             start = position + 1;
@@ -5577,18 +5821,33 @@ impl Executor {
             cmd.redirects.len(),
             &mut saved,
         )?;
-        Ok(saved)
+        self.open_compound_output_redirects_in(
+            cmd,
+            start,
+            cmd.redirects.len(),
+            &mut saved_outputs,
+        )?;
+        Ok((saved, saved_outputs))
     }
 
     /// rubash#2310: whether an entry of the command's OWN list
-    /// before `position` binds `fd` on the input side (a numbered
-    /// input/read-write/dup/close entry, or a numbered heredoc) —
-    /// i.e. whether the fd table's state for `fd` at that walk
-    /// position is governed by the list rather than the ambient
-    /// table. `{var}` entries do not count: the applier binds them
-    /// into the same table in list order, so its own resolution
-    /// already sees them at their positions.
-    fn script_own_input_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
+    /// before `position` binds `fd` (a numbered input, output,
+    /// append, read-write or dup entry in either spelling, or a
+    /// numbered heredoc) — i.e. whether the fd table's state for
+    /// `fd` at that walk position is governed by the list rather
+    /// than the ambient table. The test is direction-agnostic:
+    /// GNU's walk holds one table entry per descriptor, so an
+    /// input bind governs a later output-spelled dup and vice
+    /// versa (`{v}<&- 9<f9 {w}>&9` reads the f9 binding through
+    /// the `>&` dup). `{var}` entries do not count: the applier
+    /// binds them into the same table in list order, so its own
+    /// resolution already sees them at their positions. A CLOSE
+    /// entry does not count either: it is not a bind — the close
+    /// machinery (performed / pending closes) governs that state.
+    /// Note the entry test uses `fd.unwrap_or(0)`: a bare `>file`
+    /// entry defaults to fd 1, so it never governs a dup source
+    /// >= 3 either way.
+    fn script_own_binding_before(&self, cmd: &CommandNode, position: usize, fd: u32) -> bool {
         if cmd
             .heredoc_redirects
             .iter()
@@ -5602,9 +5861,12 @@ impl Executor {
                 && matches!(
                     entry.kind,
                     crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
                         | crate::parser::RedirectKind::ReadWrite
                         | crate::parser::RedirectKind::DuplicateInput
-                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::DuplicateOutput
                 )
         })
     }
@@ -5632,11 +5894,17 @@ impl Executor {
         fd: u32,
         performed: &mut std::collections::HashSet<u32>,
         saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        saved_outputs: &[super::command_input_scope::SavedOutputFd],
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
     ) {
         if !performed.insert(fd) {
             return;
         }
+        // rubash#2322: a slot bound by an earlier output segment
+        // (saved_outputs) holds its pre-command state there, like
+        // an input-bound slot in saved_inputs — the current entry
+        // is the child's own output binding, not the parent's.
+        let output_saved = saved_outputs.iter().find(|saved| saved.fd() == fd);
         let (entry, marker) = match saved_inputs.iter().find(|saved| saved.fd() == fd) {
             Some(saved) => (
                 saved.saved_entry().cloned(),
@@ -5647,10 +5915,16 @@ impl Executor {
                     saved_entry.clone(),
                     self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
                 ),
-                None => (
-                    self.fd_table.entries.get(&fd).cloned(),
-                    self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
-                ),
+                None => match output_saved {
+                    Some(saved) => (
+                        saved.saved_entry().cloned(),
+                        saved.saved_fd_closed().cloned(),
+                    ),
+                    None => (
+                        self.fd_table.entries.get(&fd).cloned(),
+                        self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+                    ),
+                },
             },
         };
         self.fd_var_close_restore.push((fd, entry, marker));
@@ -5688,6 +5962,7 @@ impl Executor {
         pending_closes: &mut Vec<(usize, u32)>,
         performed_closes: &mut std::collections::HashSet<u32>,
         saved_inputs: &[super::command_input_scope::SavedNumberedFd],
+        saved_outputs: &[super::command_input_scope::SavedOutputFd],
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
     ) -> Result<(), ExecuteError> {
         let redirect = &cmd.redirects[position];
@@ -5704,6 +5979,7 @@ impl Executor {
                         fd,
                         performed_closes,
                         saved_inputs,
+                        saved_outputs,
                         heredoc_saved,
                     );
                     if let Some(index) = pending_closes.iter().position(|pending| pending.1 == fd) {
@@ -5719,7 +5995,7 @@ impl Executor {
                     return Ok(());
                 };
                 let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
-                if self.script_own_input_binding_before(cmd, position, source_fd) {
+                if self.script_own_binding_before(cmd, position, source_fd) {
                     match self.dynamic_fd_variable_value(name) {
                         Some(var_fd) => {
                             // Replace the applier's ambient copy
@@ -5783,6 +6059,7 @@ impl Executor {
                             source_fd,
                             performed_closes,
                             saved_inputs,
+                            saved_outputs,
                             heredoc_saved,
                         );
                     }
@@ -5813,6 +6090,14 @@ impl Executor {
         // already bound, counted as occupied by every allocation
         // below (see apply_dynamic_fd_var_redirects).
         occupied_slots: &std::collections::HashSet<u32>,
+        // rubash#2322: descriptors an earlier entry of the owning
+        // list has closed at this walk position (see
+        // apply_dynamic_fd_var_redirects). A dup whose source is in
+        // this set fails at its own position, exactly like a source
+        // the ambient table never had open — the variable stays
+        // unbound. The immediate faces (defer_closes=false) perform
+        // their closes in the table, so they pass an empty set.
+        list_closed: &std::collections::HashSet<u32>,
         // rubash#2281: this entry's index in the owning command's
         // redirects list, stamped on every close record the entry
         // produces so consumers can apply the close at its walk
@@ -5923,8 +6208,12 @@ impl Executor {
                     // GNU redir.c do_redirection_internal dup/move case:
                     // the descriptor is copied wholesale — the </> letter
                     // never gates on the source's direction, only on it
-                    // being open at all (rubash#1591).
-                    if !self.fd_table.is_open(source_fd) {
+                    // being open at all (rubash#1591). rubash#2322:
+                    // "open" is judged at this entry's walk position —
+                    // a same-list close recorded earlier poisons the
+                    // source even though the deferred close has not
+                    // touched the table.
+                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
@@ -5959,7 +6248,9 @@ impl Executor {
             }
             crate::parser::RedirectKind::DuplicateOutput => {
                 if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                    if !self.fd_table.is_open(source_fd) {
+                    // rubash#2322: at-position judgment, as in the
+                    // DuplicateInput arm above.
+                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
@@ -6636,6 +6927,16 @@ impl Executor {
     /// names assign through assign_array_element. Returns false when the
     /// binding was rejected.
     fn set_dynamic_fd_variable(&mut self, name: &str, fd: u32) -> bool {
+        // GNU redir.c:1477 (redir_varassign): ASSIGN_DISALLOWED refuses
+        // the fd bind — for an att_noassign target with only the bare
+        // "cannot assign fd to variable" diagnostic (no err_readonly
+        // line), after the redirection target itself was set up. The
+        // funnel swallows noassign binds as success, so the verdict is
+        // taken here; every caller already turns a false into that
+        // diagnostic (rubash#2369).
+        if self.assignment_target_is_noassign(name) {
+            return false;
+        }
         self.apply_shell_assignment(name, fd.to_string())
     }
 
