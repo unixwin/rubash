@@ -61,6 +61,33 @@ pub struct DebugCliPreset {
     pub startup_file: Option<String>,
 }
 
+/// The word this run presents in its prompt and diagnostics,
+/// derived from the executable the host launched. `niu` (the
+/// niubash host) gets `(niu-dbg)` / `niu: …`; the engine's own
+/// binary keeps `rubash`, and the `bash`/`sh` GNU faces keep
+/// their invocation name.
+fn host_name() -> String {
+    let stem = std::env::current_exe().ok().and_then(|path| {
+        path.file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+    });
+    host_name_from(stem.as_deref())
+}
+
+/// The pure half of [`host_name`], pinned by the unit tests: a
+/// login marker (`-niu`) is stripped, unknown stems fall back to
+/// the engine word so test binaries and embedders are stable.
+pub(crate) fn host_name_from(stem: Option<&str>) -> String {
+    let Some(stem) = stem else {
+        return "rubash".to_string();
+    };
+    let stem = stem.strip_prefix('-').unwrap_or(stem).to_ascii_lowercase();
+    match stem.as_str() {
+        "niu" | "niubash" | "rubash" | "bash" | "sh" => stem,
+        _ => "rubash".to_string(),
+    }
+}
+
 /// Run a `--debug` session on the controlling terminal.
 ///
 /// The command stream is the terminal device (`/dev/tty`, resp.
@@ -69,14 +96,15 @@ pub struct DebugCliPreset {
 /// to start and says why (design section 2) — batch driving is
 /// the `source`-file form, not a piped debugger.
 pub fn run_debug_cli(preset: DebugCliPreset) -> i32 {
+    let name = host_name();
     let Some(input) = terminal_command_stream() else {
         eprintln!(
-            "rubash: --debug: no controlling terminal for the debugger \
+            "{name}: --debug: no controlling terminal for the debugger \
              command stream (batch driving is source-file based)"
         );
         return 2;
     };
-    run_debug_cli_with_stream(preset, input, Box::new(std::io::stderr()))
+    run_debug_cli_with_stream_as(preset, input, Box::new(std::io::stderr()), &name)
 }
 
 /// Run a `--debug` session over an injected command stream —
@@ -88,9 +116,23 @@ pub fn run_debug_cli_with_stream(
     input: Box<dyn BufRead>,
     output: Box<dyn Write>,
 ) -> i32 {
+    let name = host_name();
+    run_debug_cli_with_stream_as(preset, input, output, &name)
+}
+
+/// The injected-stream form with the host word named. Kept
+/// crate-visible: the binary derives it from its executable
+/// (`niu`), and the transcript harness pins it explicitly.
+pub(crate) fn run_debug_cli_with_stream_as(
+    preset: DebugCliPreset,
+    input: Box<dyn BufRead>,
+    output: Box<dyn Write>,
+    name: &str,
+) -> i32 {
+    let name = name.to_string();
     let Some(program) = preset.program.clone() else {
         let mut output = output;
-        let _ = writeln!(output, "rubash: --debug: a script operand is required");
+        let _ = writeln!(output, "{name}: --debug: a script operand is required");
         return 2;
     };
     // The program's canonical identity: the one key the session
@@ -98,7 +140,7 @@ pub fn run_debug_cli_with_stream(
     let identity = super::file_identity(&program);
     if !std::path::Path::new(&identity).is_file() {
         let mut output = output;
-        let _ = writeln!(output, "rubash: --debug: cannot open program '{program}'");
+        let _ = writeln!(output, "{name}: --debug: cannot open program '{program}'");
         return 2;
     }
 
@@ -112,7 +154,7 @@ pub fn run_debug_cli_with_stream(
         session.register_syntax_view(crate::api::syntax::SyntaxView::from_ast(&identity, &ast));
     }
 
-    let stop_loop = CliStopLoop::new(input, output, identity.clone());
+    let stop_loop = CliStopLoop::new(input, output, identity.clone(), name);
     let driver = SessionDriver::new(session, Box::new(stop_loop));
     let mut executor = Executor::new();
     executor.install_debug_session(driver);
@@ -197,6 +239,8 @@ struct CliStopLoop {
     /// The program's canonical identity (the entry stop carries
     /// no location; `break` with no file means this file).
     program: String,
+    /// The host product word shown in the prompt (`<name>-dbg`).
+    shell_name: String,
     /// The selected frame index into the stop's snapshot.
     frame: usize,
     /// `list` window size (`show`/`set listsize`).
@@ -216,11 +260,17 @@ struct CliStopLoop {
 }
 
 impl CliStopLoop {
-    fn new(input: Box<dyn BufRead>, out: Box<dyn Write>, program: String) -> Self {
+    fn new(
+        input: Box<dyn BufRead>,
+        out: Box<dyn Write>,
+        program: String,
+        shell_name: String,
+    ) -> Self {
         Self {
             input,
             out,
             program,
+            shell_name,
             frame: 0,
             listsize: 10,
             pending_eval: None,
@@ -462,7 +512,7 @@ commands (design section 10, M1):
 impl CliStopLoop {
     fn command_loop(&mut self, session: &mut DebugSession) -> StopLoopOutcome {
         loop {
-            let _ = write!(self.out, "(rubash-dbg) ");
+            let _ = write!(self.out, "({}-dbg) ", self.shell_name);
             let _ = self.out.flush();
             // `source`d lines are served before the terminal
             // stream (design 9.5/10 batch driving).

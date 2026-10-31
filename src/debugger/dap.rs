@@ -1798,8 +1798,40 @@ impl<W: Write + 'static> DapStopLoop<W> {
                     let mut eval_text = expression.clone();
                     let mode = match context {
                         // Implicit faces: the strict checker
-                        // (design sections 5.3/7.5).
-                        "hover" | "clipboard" => PowerMode::Implicit,
+                        // (design sections 5.3/7.5). An editor
+                        // hovers the identifier under the cursor,
+                        // not its `$`-form, so a bare name renders
+                        // from the stop's snapshot exactly like
+                        // `print` and watch do (arrays whole,
+                        // unset named) instead of evaluating to
+                        // its own literal text.
+                        "hover" | "clipboard" => {
+                            let bare = expression.trim();
+                            if is_identifier(bare) {
+                                if let Some(snapshot) = session.inspection() {
+                                    if let Some(variable) = snapshot.variable(bare) {
+                                        let rendered = super::inspect::render_watch_value(variable)
+                                            .unwrap_or_else(|| "unset".to_string());
+                                        self.respond(
+                                            seq,
+                                            "evaluate",
+                                            Some(Json::obj(vec![
+                                                ("result", Json::from(rendered)),
+                                                ("variablesReference", Json::Int(0)),
+                                            ])),
+                                        );
+                                        continue;
+                                    }
+                                }
+                                eval_text = format!("${bare}");
+                            } else {
+                                let (kind, stored) = watch_registration_form(bare);
+                                if kind == BreakpointKind::WatchExpression {
+                                    eval_text = stored;
+                                }
+                            }
+                            PowerMode::Implicit
+                        }
                         "watch" => {
                             self.register_watch(session, &expression);
                             // The watch face evaluates the
