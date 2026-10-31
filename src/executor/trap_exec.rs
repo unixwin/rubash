@@ -5671,7 +5671,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         position: usize,
-        pending_closes: &mut Vec<u32>,
+        pending_closes: &mut Vec<(usize, u32)>,
         performed_closes: &mut std::collections::HashSet<u32>,
         saved_inputs: &[super::command_input_scope::SavedNumberedFd],
         heredoc_saved: &[(u32, Option<crate::executor::fd_table::FdEntry>)],
@@ -5692,7 +5692,7 @@ impl Executor {
                         saved_inputs,
                         heredoc_saved,
                     );
-                    if let Some(index) = pending_closes.iter().position(|pending| *pending == fd) {
+                    if let Some(index) = pending_closes.iter().position(|pending| pending.1 == fd) {
                         pending_closes.remove(index);
                     }
                 }
@@ -5762,7 +5762,7 @@ impl Executor {
                     // move applies from that binding instead.
                     let recorded = pending_closes
                         .iter()
-                        .position(|pending| *pending == source_fd)
+                        .position(|pending| pending.1 == source_fd)
                         .map(|index| pending_closes.remove(index));
                     if recorded.is_some() || self.dynamic_fd_variable_value(name).is_some() {
                         self.perform_script_fd_var_close(
