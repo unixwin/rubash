@@ -2429,36 +2429,28 @@ impl Executor {
                     .to_string();
             }
         }
-        // The canonical ladder steps this quick-read ladder used to
-        // skip (vfs audit §3.3; rubash#1904): the special classes
-        // resolve through the registry before the plain filesystem
-        // read, in the input ladder's order. A net target connects
-        // and reads to EOF — the bytes GNU's read_comsub (subst.c)
-        // collects from the descriptor the netopen produced; before,
-        // the mapped pseudo-path simply failed to open and the
-        // substitution came back empty with a spurious diagnostic.
-        if crate::special_paths::is_net_redirect_target(file_word) {
-            // Read through the native socket form, not the
-            // handle-adopted File: std File reads on an adopted
-            // overlapped socket fail on Windows
-            // (ERROR_INVALID_PARAMETER). See connect_net_stream.
-            return match self.connect_net_stream(file_word) {
-                Ok(mut stream) => {
-                    use std::io::Read as _;
-                    let mut buf = Vec::new();
-                    match stream.read_to_end(&mut buf) {
-                        Ok(_) => {
-                            self.last_command_substitution_status.set(Some(0));
-                            bytes_to_shell_text(&buf)
-                                .trim_capture_terminator()
-                                .to_string()
-                        }
-                        Err(error) => fail(file_word, error),
-                    }
-                }
-                Err(error) => fail(file_word, error),
-            };
-        }
+        // rubash#2359: there is deliberately NO net arm in this
+        // ladder. GNU's $(<file) shortcut is optimize_cat_file
+        // (subst.c:6666), reached from command_substitute
+        // (subst.c:7165-7168), over open_redir_file
+        // (builtins/evalstring.c:759) — a plain open(fn, O_RDONLY)
+        // (evalstring.c:781) that never consults redir.c's
+        // special-filename table, so a /dev/tcp|udp spelling fails
+        // here ENOENT ("No such file or directory", substitution
+        // status 1) even while a server answers on the port;
+        // netopen (redir.c:611) belongs only to the redirection
+        // faces proper. The #1904 ladder step this removes claimed
+        // read_comsub collects "from the descriptor the netopen
+        // produced" — its descriptor comes from open_redir_file,
+        // and no netopen is involved; the arm made rubash CONNECT
+        // where GNU errors (and block reading a UDP peer forever).
+        // The spelling falls through to the plain filesystem read
+        // below and fails there like any other unopenable name.
+        // The remaining special classes in this ladder (the fd
+        // table above, the null device, synthetic /proc content)
+        // are plain-open-faithful: the OS open behind GNU's call
+        // resolves those spellings itself on a HAVE_DEV_FD /
+        // HAVE_DEV_STDIN build.
         // The null device reads as immediate EOF: empty, rc 0.
         if is_null_device(file_word) {
             self.last_command_substitution_status.set(Some(0));
