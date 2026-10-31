@@ -502,12 +502,33 @@ impl Executor {
         raw: Option<&str>,
         suppress_glob: bool,
     ) -> Result<Vec<String>, String> {
-        let mut expanded = self.expand_word(word);
-        if expanded.contains("<(") || expanded.contains(">(") {
-            expanded = self
-                .materialize_assignment_process_substitutions(&expanded)
-                .unwrap_or(expanded);
-        }
+        // rubash#2390: materialize the word's process substitutions
+        // from the parser's scan of the raw word BEFORE the cooked
+        // expansion, and never re-scan the cooked text (see
+        // materialize_for_list_process_substitutions for the GNU
+        // ground). The scan is the parser's own (value, raw)
+        // computation — the same one that fills
+        // WordMetadata::process_substitutions at parse time — so
+        // quoting and body bytes are judged on the raw word: a
+        // quoted span stays literal, a body keeps its backslashes,
+        // and `<(...)` text that only appears in an expansion result
+        // (a variable's value) is data, never a substitution.
+        let substitutions = crate::parser::WordMetadata::new(
+            0,
+            word.to_string(),
+            raw.unwrap_or(word).to_string(),
+        )
+        .process_substitutions;
+        let materialized;
+        let expand_input = if substitutions.is_empty() {
+            word
+        } else {
+            materialized = self
+                .materialize_for_list_process_substitutions(word, &substitutions)
+                .unwrap_or_else(|_| word.to_string());
+            &materialized
+        };
+        let expanded = self.expand_word(expand_input);
         if for_word_has_unquoted_expansion(word, raw) {
             // Field splitting follows $IFS (builtins/eval.def word_list /
             // word_expand: split on IFS whitespace and delimiters), not on
