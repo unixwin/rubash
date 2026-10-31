@@ -67,6 +67,15 @@ fn open_redirect_input_file(path: &std::path::Path) -> io::Result<File> {
 }
 
 fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
+    // rubash#2359: an EMPTY service segment (`/dev/tcp/127.0.0.1/`)
+    // still engages GNU's netopen — _netopen6 (lib/sh/netopen.c)
+    // hands the empty string to getaddrinfo, which resolves it to
+    // port 0, so the failure surfaces at connect time
+    // (`connect: Connection refused` on the oracle, bash 5.3.20)
+    // rather than as an unknown-service error.
+    if port_text.is_empty() {
+        return Some(0);
+    }
     if let Ok(port) = port_text.parse::<u16>() {
         return Some(port);
     }
@@ -645,7 +654,9 @@ impl Executor {
     /// write-only file fd's target re-opens for reading too — the
     /// #1963 fallback in the stream serve below relies on that).
     /// fd 0's inherited endpoint has no FileFd, so the process
-    /// stdin's own disk path answers when stdin is a regular file.
+    /// stdin's own disk path answers when stdin is a regular file;
+    /// the inherited stdout/stderr endpoints (fd 1/2) answer the
+    /// same way through their process handles (rubash#2359).
     /// Every other endpoint kind (pipe, socket, device, byte
     /// channel) cannot be re-opened and yields None: the alias open
     /// keeps the dup/stream serve.
@@ -667,6 +678,44 @@ impl Executor {
             )
         {
             let path = crate::fd::disk_file_path(crate::fd::process_std_handle(0))?;
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(path);
+            }
+        }
+        // rubash#2359: the fd-1/fd-2 twins of the fd-0 arm above.
+        // The inherited process stdout/stderr endpoints carry no
+        // FileFd either, so without these arms `/dev/stdout`,
+        // `/dev/stderr`, `/dev/fd/1` and `/dev/fd/2` never resolved
+        // to their target file: every gated fresh-open face fell
+        // back to the shared-description serve, and the noclobber
+        // refusal GNU applies to the resolved regular file
+        // (redir.c:676 noclobber_open's stat gate, reached because
+        // the stdio spellings take redir_open's plain open on a
+        // HAVE_DEV_STDIN build) never fired for them — `set -C;
+        // echo x > /dev/stdout` with stdout a regular file clobbered
+        // where GNU refuses (bash 5.3.20 oracle probes). The
+        // routing walk had a private copy of this resolution
+        // (open_command_output_target's stdio fallback) without
+        // the gate; the resolver is the one home, so the gate now
+        // rides every face that asks it.
+        if fd == 1
+            && matches!(
+                self.fd_table.write_endpoint(1),
+                Some(FdWriteEndpoint::Stdout)
+            )
+        {
+            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(1))?;
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(path);
+            }
+        }
+        if fd == 2
+            && matches!(
+                self.fd_table.write_endpoint(2),
+                Some(FdWriteEndpoint::Stderr)
+            )
+        {
+            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(2))?;
             if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
                 return Some(path);
             }

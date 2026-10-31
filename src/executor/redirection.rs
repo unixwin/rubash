@@ -300,6 +300,15 @@ struct OutputFdState {
     /// are flushed by the routing caller, never written by the
     /// element through a delivered descriptor).
     resolve_only_numbered: bool,
+    /// Pipeline-stage preflight mode (pipeline_stage_output_redirect_
+    /// fails): the walk stands in for the element's do_redirections,
+    /// which GNU runs AFTER execute_pipeline bound the element's
+    /// stdio fds (fd 1 is the stage pipe). A spelling naming a stdio
+    /// fd (source fd 0/1/2) is therefore judged against the stage
+    /// binding — dup semantics, never a reopen of whatever the
+    /// shell's ambient stdio points at — while numbered fds keep the
+    /// ambient resolver judgment (rubash#2359).
+    preflight_stage_stdio: bool,
     first_open_error: std::cell::RefCell<Option<(std::io::ErrorKind, String)>>,
     /// rubash#2121: dup/clone aliasing recorded by the ordered walk —
     /// alias fd → the fd whose binding it cloned (`2>&1` after
@@ -1578,7 +1587,40 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
+        self.command_output_redirect_fails_impl(cmd, false)
+    }
+
+    /// Pipeline-stage twin of [`Self::command_output_redirect_fails`]:
+    /// GNU binds the element's fd 1 to the stage pipe BEFORE its
+    /// do_redirections run (execute_cmd.c execute_pipeline; the dup2
+    /// order redir.c:1169-1170), so a `/dev/fd/1` / `/dev/stdout`
+    /// spelling inside an element names the PIPE, never the shell's
+    /// ambient stdout. The stage routing walks
+    /// (pipeline_stage_stdio_targets, route_pipeline_stage_streams)
+    /// model that binding with defer_stdout_writes; the preflight
+    /// must judge by the same binding — resolving the spelling
+    /// against the ambient process stdout refused a redirect GNU
+    /// allows whenever the shell's own stdout is a regular file
+    /// (rubash#2359). Numbered-fd spellings keep the ambient
+    /// judgment: their bindings are the shell's in both contexts,
+    /// and their verdicts ride the stage's serve/plan faces exactly
+    /// like the routing walks' defer leaves them.
+    pub(in crate::executor) fn pipeline_stage_output_redirect_fails(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        self.command_output_redirect_fails_impl(cmd, true)
+    }
+
+    fn command_output_redirect_fails_impl(
+        &mut self,
+        cmd: &CommandNode,
+        pipeline_stage: bool,
+    ) -> Result<bool, ExecuteError> {
         let mut state = self.command_output_fd_state();
+        if pipeline_stage {
+            state.defer_stdout_writes = true;
+        }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             return Ok(false);
         }
@@ -1592,7 +1634,14 @@ impl Executor {
     /// input side (rubash#940: `cmd 2>cap.txt > /missing` reports through
     /// the fd-2 binding `2>cap.txt` already established). Pure fd-dup
     /// (`>&N`), closed (`>&-`) and fd-var entries cannot be the failing
-    /// open and are skipped.
+    /// open and are skipped. An fd-alias PATH spelling (`/dev/fd/N`,
+    /// `/dev/stdout`, `/proc/self/fd/N`) CAN be the failing open: GNU
+    /// services it with redir_open over the filename, not a dup (the
+    /// #1963 shape distinction), so its open fails like a plain path's
+    /// (ENOENT for a closed fd, the noclobber refusal for a regular
+    /// file) and the entry must match here — skipping it made the
+    /// routing walk below re-apply the failing redirect and print the
+    /// verdict a second time (rubash#2359).
     pub(in crate::executor) fn failing_open_redirect_index(
         &mut self,
         cmd: &CommandNode,
@@ -1618,7 +1667,7 @@ impl Executor {
             }
             let target = self.expand_redirect_target(redirect);
             if super::execution_misc::is_closed_redirect_target(&target)
-                || redirect_target_fd(&target).is_some()
+                || super::execution_misc::redirect_target_is_dup_spelling(&target)
             {
                 return false;
             }
@@ -1898,6 +1947,7 @@ impl Executor {
             diagnostics_muted: false,
             open_failure_via_error: false,
             resolve_only_numbered: false,
+            preflight_stage_stdio: false,
             first_open_error: std::cell::RefCell::new(None),
             shared_with: HashMap::new(),
             path_handle_cache: std::cell::RefCell::new(HashMap::new()),
@@ -2316,6 +2366,14 @@ impl Executor {
         let Some(source_fd) = crate::executor::execution_misc::dev_stdio_redirect_fd(target) else {
             return false;
         };
+        // rubash#2359: a pipeline-stage preflight judges a stdio
+        // spelling (source fd 0/1/2) against the stage's bindings —
+        // the element's fd 1 is its pipe — never against the ambient
+        // process stdio the fd table describes; the dup shortcut
+        // below is the stage's service for those spellings.
+        if state.preflight_stage_stdio && source_fd <= 2 {
+            return false;
+        }
         // rubash#2256 (wave 2): the alias-layer resolver is the
         // authority — it also sees a source bound READ-ONLY to a
         // regular file, which has no write endpoint at all: the

@@ -1284,11 +1284,20 @@ impl Executor {
                                 )
                                 && !Self::noclobber_target_is_device_like(&path)
                             {
+                                // The io payload is the bare reason:
+                                // path_error adds the `{target}: ` head.
+                                // Pre-formatting the head into the
+                                // payload as well printed the spelling
+                                // twice (rubash#2359) — the sibling
+                                // faces (the routing walk's gate, the
+                                // fresh-open serves) carry the
+                                // pre-formatted shape only where the
+                                // renderer writes the error verbatim.
                                 return Err(ExecuteError::from(crate::posix_errors::path_error(
                                     &target,
                                     std::io::Error::new(
                                         std::io::ErrorKind::AlreadyExists,
-                                        format!("{target}: cannot overwrite existing file"),
+                                        "cannot overwrite existing file",
                                     ),
                                 )));
                             }
