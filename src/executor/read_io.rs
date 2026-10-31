@@ -320,8 +320,8 @@ impl Executor {
             // shadow the effective own binding, and a self-dup is
             // GNU's no-op (redir.c:1128 `redir_fd != redirector`), so
             // it keeps the ambient serve.
-            match self.own_input_binding(cmd, fd) {
-                Some(super::read_redirected_fd::OwnInputBinding::Heredoc) => {
+            match self.own_input_binding_scan(cmd, fd, None) {
+                Some((_position, super::read_redirected_fd::OwnInputBinding::Heredoc)) => {
                     return self.read_heredoc_fd_input(
                         cmd,
                         fd,
@@ -332,12 +332,14 @@ impl Executor {
                         raw,
                     );
                 }
-                Some(super::read_redirected_fd::OwnInputBinding::Duplicate(source))
-                    if source != fd =>
-                {
+                Some((
+                    dup_position,
+                    super::read_redirected_fd::OwnInputBinding::Duplicate(source),
+                )) if source != fd => {
                     return self.read_dup_fd_input(
                         cmd,
                         source,
+                        dup_position,
                         delimiter,
                         char_limit,
                         exact_char_limit,
@@ -345,7 +347,9 @@ impl Executor {
                         raw,
                     );
                 }
-                Some(super::read_redirected_fd::OwnInputBinding::Close) => return None,
+                Some((_position, super::read_redirected_fd::OwnInputBinding::Close)) => {
+                    return None
+                }
                 _ => {}
             }
             if let Some(line) = self.read_redirected_fd(
