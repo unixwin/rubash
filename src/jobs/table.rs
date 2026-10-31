@@ -668,6 +668,45 @@ impl JobTable {
         }
     }
 
+    /// jobs.c:3434-3437 (wait_for_job) and jobs.c:2776-2779
+    /// (wait_for_single_pid): a job whose wait just completed is marked
+    /// notified but NOT deleted — POSIX.2 permits removing it, and bash
+    /// instead keeps the entry until the next cleanup_dead_jobs pass
+    /// (inside a later wait's notify_and_cleanup, a `jobs` listing, or a
+    /// job creation). rubash#2340.
+    pub fn mark_job_notified_by_pid(&mut self, pid: u32) {
+        if let Some(job_id) = self.pid_to_job.get(&pid).copied() {
+            if let Some(job) = self.jobs.get_mut(&job_id) {
+                job.notified = true;
+            }
+        }
+    }
+
+    /// The bare-`wait` endgame: jobs.c:2863 wait_for_background_pids calls
+    /// mark_dead_jobs_as_notified(1) and then cleanup_dead_jobs. The force
+    /// pass (jobs.c:5192-5201) marks every dead job notified EXCEPT — in a
+    /// non-interactive shell — the job whose last pid is
+    /// last_asynchronous_pid ($!): that entry survives the wait and stays
+    /// listed until the next notification point. Interactive shells mark
+    /// all dead jobs (force_all). rubash#2340.
+    pub fn settle_bare_wait(&mut self, last_asynchronous_pid: Option<u32>, force_all: bool) {
+        let exempt = if force_all {
+            None
+        } else {
+            last_asynchronous_pid
+        };
+        for job in self.jobs.values_mut() {
+            if job.state != ProcessState::Completed {
+                continue;
+            }
+            if exempt.is_some() && job.pids.last().copied() == exempt {
+                continue;
+            }
+            job.notified = true;
+        }
+        self.cleanup_dead_jobs();
+    }
+
     /// jobs.c:3652 reap_dead_jobs — non-interactive shells (and shells
     /// without job control) remove dead jobs without printing:
     /// mark_dead_jobs_as_notified + cleanup_dead_jobs. GNU calls this via
