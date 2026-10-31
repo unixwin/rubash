@@ -262,8 +262,17 @@ impl Executor {
         // prefix alike — is the resolved path. `program` here IS that
         // find_user_command result. A word carrying a slash is never
         // PATH-searched (findcmd.c:385), so its typed spelling stands.
+        // rubash#2317: the resolved name GNU records is the walk's own
+        // string — the as-written join of the winning PATH element
+        // (find_in_path_element's sh_makepath (xpath, name, 0)) — so for
+        // a relative element it records `./name` / `sub/name`, not the
+        // session-cwd anchor rubash spawns through. Take the join from
+        // the same scoped walk; fall back to the program rendering if
+        // the walk no longer resolves the word.
         let script = if script.contains('/') {
             script
+        } else if let Some(as_written) = self.find_scoped_user_command_as_written(&script) {
+            shell_display_path(&as_written)
         } else {
             shell_display_path(&program.to_string_lossy())
         };

@@ -267,6 +267,28 @@ impl Executor {
         }
     }
 
+    /// rubash#2317: the recorded name for the same scoped lookup as
+    /// find_scoped_user_command — the as-written PATH-element join
+    /// (findcmd.c:623 via find_in_path_element's sh_makepath), under the
+    /// identical standard-path scoping. Used for the reader-name seeding
+    /// (BASH_SOURCE / $0 / diagnostics), never for the spawn itself.
+    pub(in crate::executor) fn find_scoped_user_command_as_written(
+        &self,
+        name: &str,
+    ) -> Option<String> {
+        match &self.standard_path_scope {
+            Some(standard) => {
+                let mut env_vars = self.shell_state.env_vars.clone();
+                env_vars.insert("PATH".to_string(), standard.clone());
+                crate::executor::path::find_user_command_as_written(name, &env_vars)
+            }
+            None => crate::executor::path::find_user_command_as_written(
+                name,
+                &self.shell_state.env_vars,
+            ),
+        }
+    }
+
     pub(in crate::executor) fn execute_env_command(
         &mut self,
         cmd: &CommandNode,

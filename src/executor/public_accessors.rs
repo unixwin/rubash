@@ -1210,6 +1210,16 @@ impl Executor {
         crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
     }
 
+    /// rubash#2317: the recorded name for the find_script_on_path search —
+    /// the as-written `<elem>/<name>` join of the winning PATH element
+    /// (findcmd.c:623 via sh_makepath), which is what GNU's
+    /// open_shell_script records via push_source after replacing filename
+    /// with the find (shell.c:1595-1597, shell.c:1640). The anchored path
+    /// find_script_on_path returns stays the open/spawn form.
+    pub fn find_script_recorded_name(&self, name: &str) -> Option<String> {
+        crate::executor::path::find_user_command_as_written(name, &self.shell_state.env_vars)
+    }
+
     pub fn is_shell_option(&self, name: &str) -> bool {
         crate::builtins::set::is_shell_option(name)
     }
