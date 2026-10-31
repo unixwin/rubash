@@ -158,6 +158,143 @@ impl Executor {
         }
     }
 
+    /// GNU's `interactive` gate for the exit path (shell.c: the C
+    /// global is 1 only for a reader-phase interactive shell),
+    /// projected onto the engine's established faces — the same
+    /// condition set as the exit banner echo (printf_path_builtins):
+    /// the session is invocation-interactive, the host's
+    /// not-really-interactive flag is off, no startup/sourced file is
+    /// running (GNU reads interactive == 0 while startup files run),
+    /// and this is not a `( )` subshell environment (rubash#2397).
+    pub(in crate::executor) fn exit_job_check_applies(&self) -> bool {
+        self.invocation_interactive()
+            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+            && self.get_env("__RUBASH_IN_SOURCE").is_none()
+            && self.shell_state.subshell_depth.get() == 0
+    }
+
+    /// builtins/exit.def `exit_or_logout`'s `exit_immediate_okay`:
+    /// the exit proceeds without a job scan when the previously
+    /// dispatched builtin was exit, logout or jobs (the roll at this
+    /// dispatch has already moved that class into last_builtin_class).
+    pub(in crate::executor) fn exit_is_immediate(&self) -> bool {
+        matches!(
+            self.shell_state.last_builtin_class,
+            crate::shell::BuiltinDispatchClass::Exit
+                | crate::shell::BuiltinDispatchClass::Logout
+                | crate::shell::BuiltinDispatchClass::Jobs
+        )
+    }
+
+    /// The job scan of builtins/exit.def `exit_or_logout`: any STOPPED
+    /// job blocks (whether or not checkjobs is set); otherwise, with
+    /// checkjobs set, any RUNNING job blocks. Returns the message
+    /// noun ("stopped" / "running") when the exit must defer. The
+    /// table is refreshed first — the engine's reap-observation point,
+    /// the same one the `jobs` builtin uses (GNU's table is kept
+    /// current by waitchld at reader/notification points).
+    pub(in crate::executor) fn jobs_exit_block(
+        &mut self,
+    ) -> Result<Option<&'static str>, ExecuteError> {
+        self.refresh_background_jobs()?;
+        let mut any_running = false;
+        for job in self.shell_state.job_table.jobs.values() {
+            match job.state {
+                crate::jobs::ProcessState::Stopped => return Ok(Some("stopped")),
+                crate::jobs::ProcessState::Running => any_running = true,
+                crate::jobs::ProcessState::Completed => {}
+            }
+        }
+        if any_running
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "checkjobs")
+        {
+            return Ok(Some("running"));
+        }
+        Ok(None)
+    }
+
+    /// The `list_all_jobs (JLIST_STANDARD)` half of the deferral:
+    /// rendered only when checkjobs is set (exit.def: the listing is
+    /// gated on check_jobs_at_exit even for the stopped message).
+    fn jobs_exit_listing(&mut self) -> Result<String, ExecuteError> {
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "checkjobs") {
+            return Ok(String::new());
+        }
+        let mut listing_stderr = Vec::new();
+        let (listing, _status) = self.background_jobs_output(
+            crate::builtins::jobs::JobsListOptions::default(),
+            &[],
+            &mut listing_stderr,
+        )?;
+        Ok(listing)
+    }
+
+    /// The typed `exit`/`logout` deferral (builtins/exit.def
+    /// exit_or_logout): on block, print the banner (the caller passes
+    /// the same text execute_exit's echo would print; exit.def prints
+    /// it before the check), the `There are ... jobs.` line to stderr
+    /// and the job listing to stdout — all through the command's
+    /// buffered-output route so its redirections apply — then pin
+    /// this/last to the current builtin's class (exit.def pins
+    /// exit_builtin) so the NEXT exit is immediate, and report the
+    /// deferral. The exit argument is never parsed and no exit trap
+    /// runs; the caller leaves exit_code = 1.
+    pub(in crate::executor) fn defer_exit_for_jobs(
+        &mut self,
+        cmd: &CommandNode,
+        class: crate::shell::BuiltinDispatchClass,
+        banner: Option<&str>,
+    ) -> Result<bool, ExecuteError> {
+        if !self.exit_job_check_applies() || self.exit_is_immediate() {
+            return Ok(false);
+        }
+        let Some(kind) = self.jobs_exit_block()? else {
+            return Ok(false);
+        };
+        let listing = self.jobs_exit_listing()?;
+        let mut stderr = Vec::new();
+        if let Some(banner) = banner {
+            writeln!(stderr, "{banner}")?;
+        }
+        writeln!(stderr, "There are {kind} jobs.")?;
+        self.write_buffered_builtin_output(cmd, listing.as_bytes(), &stderr)?;
+        self.shell_state.last_builtin_class = class;
+        self.shell_state.this_builtin_class = class;
+        Ok(true)
+    }
+
+    /// The reader-EOF deferral: parse.y `handle_eof_input_unit` rolls
+    /// this/last with exit_builtin and runs the same exit_builtin, so
+    /// an interactive EOF can be deferred by the same job check. The
+    /// driver has already printed the banner echo; on block this
+    /// prints the message (stderr) and the listing (stdout) directly
+    /// and returns true — the driver then keeps reading, and the next
+    /// EOF is immediate because the deferral pins this = Exit. The
+    /// shell's exit status is untouched (an EOF deferral does not set
+    /// last_command_exit_value in GNU).
+    pub(crate) fn defer_interactive_eof_for_jobs(&mut self) -> bool {
+        self.shell_state.last_builtin_class = std::mem::replace(
+            &mut self.shell_state.this_builtin_class,
+            crate::shell::BuiltinDispatchClass::Exit,
+        );
+        if !self.exit_job_check_applies() || self.exit_is_immediate() {
+            return false;
+        }
+        let Ok(Some(kind)) = self.jobs_exit_block() else {
+            return false;
+        };
+        eprintln!("There are {kind} jobs.");
+        if let Ok(listing) = self.jobs_exit_listing() {
+            if !listing.is_empty() {
+                print!("{listing}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        self.shell_state.last_builtin_class = crate::shell::BuiltinDispatchClass::Exit;
+        self.shell_state.this_builtin_class = crate::shell::BuiltinDispatchClass::Exit;
+        true
+    }
+
     fn expand_jobs_x_words(
         &self,
         words: Vec<String>,

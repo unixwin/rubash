@@ -20,6 +20,9 @@ impl Executor {
                 Ok(())
             }
             Some(CmdLateSlot::Jobs) => {
+                // rubash#2397: inner roll (execute_cmd.c:4810-4813);
+                // the outer `command` dispatch already rolled `Other`.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Jobs);
                 self.exit_code = self.execute_jobs(cmd)?;
                 Ok(())
             }

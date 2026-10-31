@@ -206,6 +206,15 @@ impl Executor {
             return Ok(status);
         }
 
+        // builtins/exit.def `exit_or_logout`: the interactive job
+        // check runs before bash_logout — a blocked logout defers
+        // with status 1 and ~/.bash_logout is not sourced
+        // (rubash#2397). No banner: the typed-logout farewell echo is
+        // not part of this path's current surface.
+        if self.defer_exit_for_jobs(cmd, crate::shell::BuiltinDispatchClass::Logout, None)? {
+            return Ok(1);
+        }
+
         // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
         // shell sources ~/.bash_logout once before exiting.
         self.source_bash_logout_once()?;

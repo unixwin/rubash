@@ -92,8 +92,15 @@ impl Executor {
             // builtins/command.def execute_builtin -> execute_cmd.c: `command`
             // suppresses only functions and aliases; `exit` stays a builtin
             // (modernish calls `command exit "$status"` in _Msh_exit).
-            Some(CmdPrimarySlot::Exit) => self.execute_exit_command_word(cmd)?,
+            Some(CmdPrimarySlot::Exit) => {
+                // rubash#2397: inner roll (execute_cmd.c:4810-4813);
+                // the outer `command` dispatch already rolled `Other`.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Exit);
+                self.execute_exit_command_word(cmd)?
+            }
             Some(CmdPrimarySlot::Logout) => {
+                // rubash#2397: inner roll, as at the Exit arm above.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Logout);
                 self.exit_code = self.execute_logout(cmd)?;
                 Ok(())
             }
