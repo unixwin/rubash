@@ -2901,6 +2901,18 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     if open_idx > 0 && chars[open_idx - 1] == '(' {
         return None;
     }
+    // rubash#2342: the same `$((` arithmetic root with every inner paren
+    // already closed — only the `$` frame of the digraph is left on the
+    // stack (e.g. `$(( (2))`). Contiguous `$((` IS the arithmetic opener
+    // in GNU's lexer; the comsub+subshell reading requires `$( (` with a
+    // space, whose frame is followed by a blank and stays a ComsubEof.
+    // This frame is therefore not a ComsubEof either: defer to the
+    // generic close-char scan, which reports the arithmetic construct
+    // at its open line (GNU parse.y:3912 start_lineno) instead of the
+    // comsub EOF line.
+    if open_kind == OpenerKind::Comsub && chars.get(open_idx + 1) == Some(&'(') {
+        return None;
+    }
 
     // EOF shapes. A comsub anywhere in the enclosing chain keeps the
     // comsub EOF wording (probe m8: `$( (` is a matched-pair EOF inside the
