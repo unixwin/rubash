@@ -884,6 +884,16 @@ impl Executor {
         } else {
             None
         };
+        // rubash#2352: the trap-entry status captured with the mark
+        // (see Executor::termsig_death_trap_status) parks with it —
+        // same discipline, same reason: the child's own verdicts
+        // record the child's capture, the boundary below drops it,
+        // and the parent's capture is handed back untouched.
+        let saved_termsig_trap_status = if contain_child_signals {
+            self.termsig_death_trap_status.take()
+        } else {
+            None
+        };
         let saved_shell_pid = self.shell_pid;
         if contain_child_signals {
             self.shell_pid = std::process::id();
@@ -993,6 +1003,7 @@ impl Executor {
         // hand the parent back its parked mark.
         if contain_child_signals {
             self.termsig_death_pending = saved_termsig_death;
+            self.termsig_death_trap_status = saved_termsig_trap_status;
         }
         self.shell_pid = saved_shell_pid;
 
