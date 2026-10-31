@@ -3838,6 +3838,9 @@ impl Executor {
         // them at entry, performs them inside the wraps, and
         // replays their snapshots before the wraps unwind.
         self.defer_fd_var_closes_for_function_call();
+        // rubash#2397: execute_cmd.c:4810-4813 — a function dispatch
+        // rolls this/last with this = NULL (the `Other` projection).
+        self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],

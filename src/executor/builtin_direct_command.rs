@@ -207,7 +207,13 @@ impl Executor {
             // builtin.def calls the named builtin's function directly,
             // so `builtin exit` IS exit_builtin (same argument shape,
             // same jump), and `builtin builtin ...` recurses.
-            "exit" => self.execute_exit_command_word(&builtin_cmd)?,
+            "exit" => {
+                // rubash#2397: the inner dispatch rolls like GNU's
+                // direct builtin call (execute_cmd.c:4810-4813); the
+                // outer `builtin` dispatch already rolled `Other`.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Exit);
+                self.execute_exit_command_word(&builtin_cmd)?
+            }
             "builtin" => {
                 self.builtin_wrapper_depth += 1;
                 let result = self.execute_builtin_direct_command(&builtin_cmd);
@@ -215,6 +221,8 @@ impl Executor {
                 result
             }
             "logout" => {
+                // rubash#2397: inner roll, as at the "exit" arm above.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Logout);
                 self.exit_code = self.execute_logout(&builtin_cmd)?;
                 Ok(())
             }
@@ -280,6 +288,8 @@ impl Executor {
                 Ok(())
             }
             "jobs" => {
+                // rubash#2397: inner roll, as at the "exit" arm above.
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Jobs);
                 self.exit_code = self.execute_jobs(&builtin_cmd)?;
                 Ok(())
             }

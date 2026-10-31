@@ -175,6 +175,43 @@ impl Executor {
         cmd: &CommandNode,
         word: &str,
     ) -> Result<(), ExecuteError> {
+        // rubash#2397: execute_cmd.c:4810-4813 roll, mirroring the
+        // match below arm for arm. An ordinary late slot is a builtin
+        // dispatch (this caller is reached only after the funnel's
+        // is_disabled pre-check, so a slotted name really runs its
+        // builtin); the function guard arm rolls `Other` (GNU's NULL)
+        // when it is the arm that fires — for an unslotted name, or
+        // ahead of the hidden fast-path slots; `(( ))`, `[[ ]]` and
+        // the `time` node are not builtins in GNU (no roll), and the
+        // emulated-external fast paths (dirname/basename/uname/arch/
+        // stty) are disk commands (no roll).
+        {
+            let slot = late_dispatch_slot(word);
+            let function_fires = self.shell_state.functions.contains_key(word)
+                && !(self.posix_mode_enabled() && word.contains('/'))
+                && (slot.is_none()
+                    || matches!(
+                        slot,
+                        Some(LateSlot::Uname) | Some(LateSlot::Arch) | Some(LateSlot::Stty)
+                    ));
+            if function_fires {
+                self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
+            } else if let Some(slot) = slot {
+                if !matches!(
+                    slot,
+                    LateSlot::Arithmetic
+                        | LateSlot::Conditional
+                        | LateSlot::Time
+                        | LateSlot::Dirname
+                        | LateSlot::Basename
+                        | LateSlot::Uname
+                        | LateSlot::Arch
+                        | LateSlot::Stty
+                ) {
+                    self.note_builtin_dispatch(Self::builtin_dispatch_class(word));
+                }
+            }
+        }
         // rubash#2036 S3: the name set is the registry's SimpLate
         // projection (command_registry::LATE_DISPATCH); the slot
         // match carries the historical per-name bodies verbatim and

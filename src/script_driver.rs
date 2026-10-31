@@ -4949,8 +4949,17 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if !hangup && executor.invocation_interactive() {
                     let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
+                    // parse.y handle_eof_input_unit: the EOF-synthesized
+                    // exit runs the same exit_builtin, so the job check
+                    // can defer it (rubash#2397) — keep reading instead
+                    // of folding; the next EOF is immediate because the
+                    // deferral pinned this_shell_builtin = exit_builtin.
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
                 }
-                eof = true;
             }
             Ok(_) => {}
             Err(err) => {
@@ -4981,8 +4990,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if !hangup && executor.invocation_interactive() {
                     let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
+                    // rubash#2397: same EOF job-check deferral as the
+                    // Ok(0) arm above (parse.y handle_eof_input_unit).
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
                 }
-                eof = true;
             }
         }
         // readline's echo of the accepted line: the dumb-terminal

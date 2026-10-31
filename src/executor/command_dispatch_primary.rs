@@ -26,6 +26,13 @@ impl Executor {
             };
             return Ok(Some(result));
         }
+        // rubash#2397: execute_cmd.c:4810-4813 roll — a confirmed
+        // primary slot is a builtin dispatch (the sudo host-capability
+        // arm above is not a GNU builtin and never rolls; an unclaimed
+        // name falls through at the None arm and does not roll either).
+        if primary_dispatch_slot(word).is_some() {
+            self.note_builtin_dispatch(Self::builtin_dispatch_class(word));
+        }
         // rubash#2036 S3: the name set is the registry's SimpPrimary
         // projection (command_registry::PRIMARY_DISPATCH); the slot
         // match carries the historical per-name bodies verbatim.
@@ -310,6 +317,25 @@ impl Executor {
         // `exit -- --help` is the numeric error on `--help` (the `--` skip
         // happens inside get_exitstat, after CHECK_HELPOPT).
         if raw.first() != Some(&"--help") {
+            // builtins/exit.def `exit_or_logout`: the interactive job
+            // check runs BEFORE get_exitstat parses the argument — a
+            // blocked exit reports the jobs, sets status 1, and the
+            // shell continues (rubash#2397). The banner text mirrors
+            // execute_exit's echo (exit.def:59-62 prints it before
+            // exit_or_logout runs).
+            let banner = if self.invocation_login() {
+                "logout"
+            } else {
+                "exit"
+            };
+            if self.defer_exit_for_jobs(
+                cmd,
+                crate::shell::BuiltinDispatchClass::Exit,
+                Some(banner),
+            )? {
+                self.exit_code = 1;
+                return Ok(Ok(()));
+            }
             let arg_index = if raw.first() == Some(&"--") { 1 } else { 0 };
             let rest = &raw[arg_index.min(raw.len())..];
             // get_exitstat order: the FIRST status word's numeric validity is
