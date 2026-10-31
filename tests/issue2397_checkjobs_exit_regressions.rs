@@ -19,6 +19,18 @@
 //! same exit_builtin for an interactive EOF, so EOF defers too
 //! (without touching the last exit status).
 //!
+//! Status mechanics, pinned down against the oracle (GNU bash
+//! 5.3.20, driven over pipes exactly like this harness): a deferred
+//! TYPED exit sets $? = 1 — read it immediately with an echo and it
+//! prints 1. The session's FINAL exit code is whatever $? holds
+//! when the immediate exit fires: an intervening successful command
+//! overwrites the deferral's 1 with its own 0, and an EOF deferral
+//! leaves $? alone (handle_eof_input_unit, parse.y:6973-6992,
+//! discards exit_builtin's return). So the seed shape below ends
+//! with code 0 on GNU, not 1 — an earlier draft of these pins
+//! asserted 1 for the final code and was wrong; the deferral's own
+//! status is asserted where it is observable, in DEFER_STATUS.
+//!
 //! Harness: `rubash -i` over pipes (same shape as
 //! tests/issue2214_job_start_notice_regressions.rs), with the
 //! session's final status captured. The running-job expectations
@@ -129,12 +141,18 @@ fn seed_running_job_defers_exit_with_checkjobs() {
             "shopt -s checkjobs",
             "sleep 30 >/dev/null 2>&1 &",
             "exit",
+            "echo DEFER_STATUS=$?",
             "echo still",
         ],
     );
     assert!(
         stderr.contains("There are running jobs."),
         "first exit must defer:\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("DEFER_STATUS=1"),
+        "the deferred exit's own status is EXECUTION_FAILURE (1), \
+         read before anything overwrites it:\nstdout={stdout}"
     );
     assert!(
         stdout.contains("still"),
@@ -144,14 +162,18 @@ fn seed_running_job_defers_exit_with_checkjobs() {
         stdout.contains("Running"),
         "the deferral lists the jobs on stdout:\nstdout={stdout}"
     );
-    // The trailing EOF defers once more (echo still rolled the
-    // tracker), then the next EOF exits with the deferred status 1.
+    // The trailing EOF defers once more (the echoes rolled the
+    // tracker), then the next EOF exits. The final code is 0, NOT
+    // the deferral's 1: `echo still` succeeded after the deferral,
+    // and the EOF deferral does not touch the status, so the
+    // immediate EOF exit leaves with the echo's 0. GNU bash 5.3.20
+    // driven the same way ends this exact session with 0 too.
     assert_eq!(
         count(&stderr, "There are running jobs."),
         2,
         "typed exit + EOF each defer once:\nstderr={stderr}"
     );
-    assert_eq!(code, 1, "session keeps the deferred exit's status");
+    assert_eq!(code, 0, "final status is the intervening echo's, per GNU");
 }
 
 #[test]
@@ -246,6 +268,7 @@ fn deferred_exit_never_parses_its_argument() {
             "shopt -s checkjobs",
             "sleep 30 >/dev/null 2>&1 &",
             "exit 5",
+            "echo DEFER_STATUS=$?",
             "echo still",
         ],
     );
@@ -254,10 +277,17 @@ fn deferred_exit_never_parses_its_argument() {
         "stderr={stderr}"
     );
     assert!(
+        stdout.contains("DEFER_STATUS=1"),
+        "the deferral's status is 1, not the argument 5 — the \
+         argument is never parsed on the deferral path:\nstdout={stdout}"
+    );
+    assert!(
         stdout.contains("still"),
         "`exit 5` deferred, so the shell continues:\nstdout={stdout}"
     );
-    assert_eq!(code, 1, "deferral status is 1, not the argument 5");
+    // Final code is the intervening echo's 0, exactly as GNU ends
+    // this session (see the header note on status mechanics).
+    assert_eq!(code, 0, "final status is the intervening echo's, per GNU");
 }
 
 #[test]
