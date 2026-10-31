@@ -87,6 +87,61 @@ pub(crate) fn shift_trap_action_lines(commands: &mut [CommandNode], delta: i64) 
     }
 }
 
+/// The stderr destination for an `exec` spawn's diagnostics — and, on
+/// the execute_with_io arms, for the child's own piped stderr
+/// (rubash#2395). GNU has exactly one fd 2: execute_cmd.c:4244/4268
+/// performs the command's redirections, then exec_builtin
+/// (builtins/exec.def:231) hands the image the shell's descriptors as
+/// bound. When the executing executor's fd-2 stream is being collected
+/// (a pipeline stage's or substitution's clone arms `stderr_capture`
+/// so the driver can route the bytes through the stage's own
+/// redirections), bytes written straight to the process stderr bypass
+/// both the capture and that routing — `printf '' | exec bash -c
+/// 'echo e >&2' 2>/dev/null` printed `e` to the terminal. With no
+/// capture armed this is the process stderr, the historical
+/// destination, unchanged.
+enum ExecDiagStderr<'a> {
+    Capture(&'a mut Vec<u8>),
+    Process(std::io::Stderr),
+}
+
+impl std::io::Write for ExecDiagStderr<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            ExecDiagStderr::Capture(capture) => capture.write(buf),
+            ExecDiagStderr::Process(stderr) => stderr.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            ExecDiagStderr::Capture(capture) => capture.flush(),
+            ExecDiagStderr::Process(stderr) => stderr.flush(),
+        }
+    }
+}
+
+/// Run `body` with the exec spawn's stderr destination bound (see
+/// ExecDiagStderr). The capture slot is taken out for the call so the
+/// destination can borrow the buffer while the body also borrows the
+/// rest of the executor, then restored — including on the body's
+/// error path, so a failed spawn cannot orphan the capture.
+fn with_exec_diag_stderr<R>(
+    capture_slot: &mut Option<Vec<u8>>,
+    body: impl FnOnce(&mut ExecDiagStderr<'_>) -> Result<R, ExecuteError>,
+) -> Result<R, ExecuteError> {
+    let mut capture = capture_slot.take();
+    let result = {
+        let mut target = match capture.as_mut() {
+            Some(buffer) => ExecDiagStderr::Capture(buffer),
+            None => ExecDiagStderr::Process(std::io::stderr()),
+        };
+        body(&mut target)
+    };
+    *capture_slot = capture;
+    result
+}
+
 impl Executor {
     pub(in crate::executor) fn set_fd_input_text(&mut self, fd: u32, input: String, dynamic: bool) {
         // input is shell text: decode marker pairs back to the raw bytes
@@ -3487,16 +3542,20 @@ impl Executor {
                     &self.shell_state.env_vars,
                 )),
             );
-            let status = crate::builtins::exec::execute_with_child_stdio(
-                &exec_args,
-                &self.shell_state.env_vars,
-                &self.shell_state.cwd,
-                &mut file,
-                &mut std::io::stderr().lock(),
-                child_stdout,
-                Stdio::inherit(),
-                self.exec_inherited_stdin()?,
-            )?;
+            let child_stdin = self.exec_inherited_stdin()?;
+            let status = with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    &mut file,
+                    diag,
+                    child_stdout,
+                    Stdio::inherit(),
+                    child_stdin,
+                )
+                .map_err(ExecuteError::from)
+            })?;
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
         }
@@ -3526,16 +3585,20 @@ impl Executor {
                     &self.shell_state.env_vars,
                 )),
             );
-            let status = crate::builtins::exec::execute_with_child_stdio(
-                &exec_args,
-                &self.shell_state.env_vars,
-                &self.shell_state.cwd,
-                &mut file,
-                &mut std::io::stderr().lock(),
-                child_stdout,
-                Stdio::inherit(),
-                self.exec_inherited_stdin()?,
-            )?;
+            let child_stdin = self.exec_inherited_stdin()?;
+            let status = with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    &mut file,
+                    diag,
+                    child_stdout,
+                    Stdio::inherit(),
+                    child_stdin,
+                )
+                .map_err(ExecuteError::from)
+            })?;
             self.finish_dev_fd_operands(dev_ops);
             return Ok(status);
         }
@@ -3579,20 +3642,28 @@ impl Executor {
                         &mut crate::executor::GlobalStdout,
                         self.exec_inherited_stdin()?,
                     )?,
-                    _ => crate::builtins::exec::execute_with_child_stdio(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut crate::executor::GlobalStdout,
-                        &mut std::io::stderr().lock(),
-                        self.exec_inherited_stdio(1)?,
-                        dup_fd
+                    _ => {
+                        let child_stdout = self.exec_inherited_stdio(1)?;
+                        let dup_stdio = dup_fd
                             .parse::<u32>()
                             .ok()
                             .and_then(|fd| self.exec_inherited_stdio(fd).ok())
-                            .unwrap_or_else(Stdio::inherit),
-                        self.exec_inherited_stdin()?,
-                    )?,
+                            .unwrap_or_else(Stdio::inherit);
+                        let child_stdin = self.exec_inherited_stdin()?;
+                        with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                            crate::builtins::exec::execute_with_child_stdio(
+                                &exec_args,
+                                &self.shell_state.env_vars,
+                                &self.shell_state.cwd,
+                                &mut crate::executor::GlobalStdout,
+                                diag,
+                                child_stdout,
+                                dup_stdio,
+                                child_stdin,
+                            )
+                            .map_err(ExecuteError::from)
+                        })?
+                    }
                 };
                 self.finish_dev_fd_operands(dev_ops);
                 return Ok(status);
@@ -3778,14 +3849,24 @@ impl Executor {
                     self.exec_inherited_stdin()?,
                 )?
             } else {
-                crate::builtins::exec::execute_with_io(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut crate::executor::GlobalStdout,
-                    &mut std::io::stderr().lock(),
-                    self.exec_inherited_stdin()?,
-                )?
+                // rubash#2395: the child's piped stderr belongs to the
+                // executor's fd-2 stream — under an armed stderr
+                // capture that is the capture, not the process stderr
+                // (the pipeline driver's redirect application owns
+                // those bytes; writing them to the terminal dropped
+                // the stage's `2>/dev/null` on the floor).
+                let child_stdin = self.exec_inherited_stdin()?;
+                with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                    crate::builtins::exec::execute_with_io(
+                        &exec_args,
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        &mut crate::executor::GlobalStdout,
+                        diag,
+                        child_stdin,
+                    )
+                    .map_err(ExecuteError::from)
+                })?
             }
         } else {
             // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
@@ -3797,16 +3878,20 @@ impl Executor {
             // run-test gate).
             let child_stdout = self.exec_inherited_stdio(1)?;
             let child_stderr = self.exec_inherited_stdio(2)?;
-            crate::builtins::exec::execute_with_child_stdio(
-                &exec_args,
-                &self.shell_state.env_vars,
-                &self.shell_state.cwd,
-                &mut crate::executor::GlobalStdout,
-                &mut std::io::stderr().lock(),
-                child_stdout,
-                child_stderr,
-                self.exec_inherited_stdin()?,
-            )?
+            let child_stdin = self.exec_inherited_stdin()?;
+            with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                crate::builtins::exec::execute_with_child_stdio(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    &mut crate::executor::GlobalStdout,
+                    diag,
+                    child_stdout,
+                    child_stderr,
+                    child_stdin,
+                )
+                .map_err(ExecuteError::from)
+            })?
         };
         self.finish_dev_fd_operands(dev_ops);
         Ok(status)
@@ -3878,6 +3963,19 @@ impl Executor {
     /// Write `bytes` to a fresh temp file and open it for the child.
     /// process_substitution_temp_path names are unique per call. An empty
     /// payload spawns nothing — Stdio::null() yields the same EOF.
+    ///
+    /// rubash#2395: the carrier must not outlive the descriptor that
+    /// owns it. The write-then-open form left the named file in $TMPDIR
+    /// forever — no exec arm knows the path, so nobody could reap it,
+    /// and every `exec` over a virtual fd 0 (pipeline-stage text,
+    /// heredoc, here-string) leaked one. The carrier is therefore
+    /// anonymous from birth, the same shape as GNU's here-document
+    /// temp (redir.c:423 here_document_to_fd, an unnamed fd): on Unix
+    /// the name is unlinked while the descriptor is open; on Windows
+    /// the handle carries FILE_FLAG_DELETE_ON_CLOSE (the
+    /// synthetic_proc_write_sink discipline, shell_options.rs). The
+    /// file dies with the last descriptor — the spawn's wait, or the
+    /// replacement image's own lifetime.
     fn materialize_exec_stdin_bytes(
         &self,
         bytes: &[u8],
@@ -3886,8 +3984,25 @@ impl Executor {
             return Ok(None);
         }
         let path = self.process_substitution_temp_path()?;
-        std::fs::write(&path, bytes).map_err(ExecuteError::IoError)?;
-        Ok(std::fs::File::open(&path).ok())
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let mut file = options.open(&path).map_err(ExecuteError::IoError)?;
+        #[cfg(unix)]
+        {
+            // The descriptor stays valid after the name is unlinked.
+            let _ = std::fs::remove_file(&path);
+        }
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        file.write_all(bytes).map_err(ExecuteError::IoError)?;
+        file.seek(SeekFrom::Start(0))
+            .map_err(ExecuteError::IoError)?;
+        Ok(Some(file))
     }
 
     fn exec_stdio_for_endpoint(&self, fd: u32, depth: u32) -> Result<Stdio, ExecuteError> {
