@@ -387,6 +387,15 @@ impl Executor {
         self.termsig_death_pending.take()
     }
 
+    /// rubash#2352: take-style read of the EXIT-trap entry status
+    /// captured alongside the termsig-death mark (see
+    /// Executor::termsig_death_trap_status); finish_shell takes it
+    /// with the mark and runs the trap with this status instead of
+    /// the 128+sig unwind status.
+    pub(crate) fn take_termsig_death_trap_status(&mut self) -> Option<i32> {
+        self.termsig_death_trap_status.take()
+    }
+
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
     /// 11, M-3): queue `signal` for this process through the
     /// engine's own delivery machinery — the same queue the

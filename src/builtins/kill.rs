@@ -1217,13 +1217,17 @@ fn take_self_signals() -> Vec<i32> {
 /// top-level table (trap_exec::run_pending_signal_traps): trapped ->
 /// run the action, ignored -> drop, untrapped -> the 128+sig death —
 /// exactly the verdicts the addressed process would have produced.
-static ANCESTOR_SIGNALS: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
+/// Each entry also carries the sender exit status (rubash#2352, see
+/// ANCESTOR_SENDER_STATUS): the last status completed before the
+/// delivering kill builtin started, which is the addressed shell's
+/// last_command_exit_value at the moment GNU's wait is preempted.
+static ANCESTOR_SIGNALS: std::sync::Mutex<Vec<(i32, i32)>> = std::sync::Mutex::new(Vec::new());
 
 pub(crate) fn queue_ancestor_signal(signal: i32) {
     ANCESTOR_SIGNALS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(signal);
+        .push((signal, ancestor_sender_status()));
     #[cfg(unix)]
     {
         PENDING_ANY.store(true, std::sync::atomic::Ordering::Release);
@@ -1233,11 +1237,52 @@ pub(crate) fn queue_ancestor_signal(signal: i32) {
     }
 }
 
-pub(crate) fn take_ancestor_signals() -> Vec<i32> {
+/// The queued ancestor deliveries: (signal, sender exit status) — see
+/// ANCESTOR_SIGNALS for the status half's contract (rubash#2352).
+pub(crate) fn take_ancestor_signals() -> Vec<(i32, i32)> {
     let mut queue = ANCESTOR_SIGNALS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::mem::take(&mut *queue)
+}
+
+thread_local! {
+    /// The exit status the queueing layer presents for the in-flight
+    /// kill builtin (rubash#2352): Executor::execute_kill snapshots
+    /// its exit_code — the last command completed BEFORE the builtin
+    /// started — for the span of the dispatch, and queue_ancestor_
+    /// signal stamps it onto the entry. The boundary dispatch needs
+    /// it because GNU preempts the carrier command: the addressed
+    /// shell is still WAITING for the delivering layer's construct,
+    /// whose own status is therefore never committed to the parent's
+    /// last_command_exit_value before the termsig verdict reads it
+    /// (trap.c:1036). A plain Cell (no guard object) suffices next to
+    /// ANCESTOR_ROUTE: execute_kill saves and restores it around the
+    /// same span that arms the routes, so nested kill invocations
+    /// cannot leak a stale snapshot.
+    static ANCESTOR_SENDER_STATUS: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+fn ancestor_sender_status() -> i32 {
+    ANCESTOR_SENDER_STATUS.with(|cell| cell.get())
+}
+
+/// RAII arm for the sender-status snapshot (rubash#2352), the same
+/// save/replace discipline as AncestorRouteGuard: nested kill
+/// invocations restore the outer dispatch's snapshot on drop.
+pub(crate) struct AncestorSenderStatusGuard {
+    previous: i32,
+}
+
+pub(crate) fn arm_ancestor_sender_status(status: i32) -> AncestorSenderStatusGuard {
+    let previous = ANCESTOR_SENDER_STATUS.with(|cell| cell.replace(status));
+    AncestorSenderStatusGuard { previous }
+}
+
+impl Drop for AncestorSenderStatusGuard {
+    fn drop(&mut self) {
+        ANCESTOR_SENDER_STATUS.with(|cell| cell.set(self.previous));
+    }
 }
 
 thread_local! {
