@@ -2000,7 +2000,7 @@ impl Executor {
                         continue;
                     }
                     match self.materialize_async_stdin_body(command, index) {
-                        Some(file) => {
+                        Some((file, _path)) => {
                             let value = BackgroundStdio::File(file);
                             stdio[fd as usize] = value.clone();
                             slot_writes[fd as usize].push((index, value, None, true));
@@ -2390,11 +2390,11 @@ impl Executor {
     /// entry correlates by fd, here-string flag, and ordinal among the
     /// matching `redirects` entries, with the fd-0 legacy fields
     /// (`heredoc`/`here_string` and their carriers) as fallback.
-    fn materialize_async_stdin_body(
+    pub(in crate::executor) fn materialize_async_stdin_body(
         &mut self,
         command: &CommandNode,
         index: usize,
-    ) -> Option<std::fs::File> {
+    ) -> Option<(std::fs::File, std::path::PathBuf)> {
         use crate::parser::RedirectKind;
         let redirect = &command.redirects[index];
         let want_string = matches!(redirect.kind, RedirectKind::HereString);
@@ -2432,7 +2432,7 @@ impl Executor {
             })?;
         let path = self.process_substitution_temp_path().ok()?;
         fs::write(&path, expanded.as_bytes()).ok()?;
-        std::fs::File::open(&path).ok()
+        std::fs::File::open(&path).ok().map(|file| (file, path))
     }
 
     fn background_command_source(&self, command: &CommandNode) -> String {

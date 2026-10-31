@@ -1354,6 +1354,17 @@ pub struct Executor {
     /// walk re-opens `>f` and would truncate the bytes the child already
     /// wrote live through the shared description (niubash#144).
     pipeline_stage_fds_pre_wired: Cell<bool>,
+    /// rubash#2293: payloads a sequential pipeline stage's numbered
+    /// output dups wrote into their own carrier pipes — a dup of fd 1
+    /// or 2 whose source slot a later list entry rebinds (`3>&1
+    /// 1>f.txt`) keeps the stage channel, which the child's single
+    /// per-slot capture cannot represent (the routing walk places
+    /// that capture whole at the source's FINAL target). The stage
+    /// spawner drains the carriers and stashes the payloads here,
+    /// keyed by the dup's target fd; route_pipeline_stage_streams
+    /// takes the stash and places each payload at the target the
+    /// ordered walk resolved for that fd at its own position.
+    stage_dup_channel_payloads: std::cell::RefCell<Vec<(u32, String)>>,
     /// rubash#1454: set by the sequential pipeline driver around the LAST
     /// stage's dispatch only. The stage spawner may then hand an external
     /// final member the shell's own stdout (Stdio::inherit) instead of a
