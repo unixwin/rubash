@@ -273,6 +273,12 @@ impl Executor {
                     "No such file or directory",
                 ));
             }
+            // rubash#2276: a socket endpoint's spelling-open fails
+            // ENXIO (see fd_alias_spelling_open_error) — the dup pair
+            // below is the pipe rule, not the socket rule.
+            if let Some(error) = self.fd_alias_spelling_open_error(alias_fd) {
+                return Err(error);
+            }
             if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
                 // One O_RDWR description of the target serves both
                 // directions (the open_readwrite_pair contract); the

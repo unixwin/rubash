@@ -719,6 +719,13 @@ impl Executor {
             // open's ENOENT is GNU's dangling-alias error.
             if let Some(alias_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
                 if self.fd_table.read_endpoint(alias_fd).is_some() {
+                    // rubash#2276: a socket endpoint's spelling-open
+                    // fails ENXIO (see fd_alias_spelling_open_error) —
+                    // the dup fallback below is the pipe rule, not the
+                    // socket rule.
+                    if let Some(error) = self.fd_alias_spelling_open_error(alias_fd) {
+                        return Err(crate::posix_errors::path_error(&target, error).into());
+                    }
                     // rubash#2256: the alias spelling is an open, not a
                     // dup instruction — a regular-file endpoint binds a
                     // FRESH open of its target (new description, offset
@@ -1080,6 +1087,15 @@ impl Executor {
                     // DuplicateOutput arm uses for a source with no
                     // fd-table entry (rubash#170 nest4).
                     if let Some(source_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                        // rubash#2276: a socket endpoint's
+                        // spelling-open fails ENXIO (see
+                        // fd_alias_spelling_open_error) — the dup
+                        // below is the pipe rule, not the socket rule.
+                        if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                            return Err(ExecuteError::from(crate::posix_errors::path_error(
+                                &target, error,
+                            )));
+                        }
                         // rubash#2256: the alias spelling is an open —
                         // a regular-file endpoint (either direction: a
                         // read-bound fd's file truncates/appends exactly

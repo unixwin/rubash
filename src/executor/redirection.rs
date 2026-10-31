@@ -2323,6 +2323,26 @@ impl Executor {
             // path (GNU's open carries O_EXCL under `set -C`), reported
             // through this walk's open-failure protocol like the plain
             // arm's create_redirect_output refusal.
+            // rubash#2276: a socket endpoint's spelling-open fails
+            // ENXIO before any of the serves below (the shared clone
+            // is the pipe rule, not the socket rule), reported
+            // through the same open-failure protocol.
+            if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                let error = crate::posix_errors::path_error(target, error);
+                if state.open_failure_via_error {
+                    let mut slot = state.first_open_error.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some((error.kind(), error.to_string()));
+                    }
+                } else {
+                    let mut stderr = Vec::new();
+                    writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                    state.write_to_fd(self, 2, &stderr)?;
+                }
+                self.exit_code = 1;
+                state.redirect_failed = true;
+                return Ok(());
+            }
             if let Some(path) = self.fd_alias_reopen_path(source_fd) {
                 // Routing resolution (OutputFdState::resolve_only_
                 // numbered): the element's setup already performed
