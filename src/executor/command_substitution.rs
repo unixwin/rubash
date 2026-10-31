@@ -1873,6 +1873,7 @@ impl Executor {
             parse_error_occurred: false,
             signal_discard_pending: false,
             termsig_death_pending: None,
+            termsig_death_trap_status: None,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
