@@ -1686,7 +1686,27 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, false)
+    }
+
+    /// Post-external variant of the buffered route: the child already
+    /// executed with every numbered binding realized by its own spawn
+    /// delivery (apply_external_fd_delivery handed it real descriptors),
+    /// so this walk only routes the drained fd-1/fd-2 bytes — numbered
+    /// entries resolve to their target records with NO filesystem open.
+    /// Re-opening one here (the plain arm's create/truncate validation
+    /// open) truncates the file the child just wrote through the
+    /// descriptor and silently drops its bytes: the rubash#2368 face of
+    /// the disease route_pipeline_stage_streams guards with the same
+    /// flag (rubash#2255). Fds 1/2 keep full apply semantics — this
+    /// walk IS their realization for the drained streams.
+    pub(in crate::executor) fn route_builtin_buffered_output_resolve_only_numbered(
+        &mut self,
+        cmd: &CommandNode,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<bool, ExecuteError> {
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, true)
     }
 
     /// `stderr_first` swaps the final ordered walk: printf's GNU model
@@ -1699,6 +1719,7 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
         stderr_first: bool,
+        resolve_only_numbered: bool,
     ) -> Result<bool, ExecuteError> {
         self.last_builtin_write_failed.set(false);
         let mut state = self.command_output_fd_state();
@@ -1706,6 +1727,11 @@ impl Executor {
         // move-close whose target was closed persists past the command
         // (GNU redir.c add_undo_redirect; rubash#1235).
         state.persist_move_closes = true;
+        // Post-external routing only (see
+        // route_builtin_buffered_output_resolve_only_numbered): the
+        // numbered bindings were the child's real descriptors, so the
+        // walk resolves them without re-opening (rubash#2368).
+        state.resolve_only_numbered = resolve_only_numbered;
         // A failed open in THIS route keeps its historical channel:
         // the error returns as ExecuteError::IoError and the top-level
         // handler renders/routes it (rubash#1844 keeps the walk's

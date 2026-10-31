@@ -116,7 +116,7 @@ impl Executor {
         // marker-free and non-UTF-8 slices pass through untouched.
         let stdout = decode_raw_byte_marker_bytes(stdout);
         let stderr = decode_raw_byte_marker_bytes(stderr);
-        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, stderr_first)? {
+        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, stderr_first, false)? {
             return Ok(());
         }
         if stderr_first {
