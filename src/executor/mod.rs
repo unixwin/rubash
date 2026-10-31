@@ -1612,13 +1612,26 @@ pub struct Executor {
     /// do_redirections in the child — the `{var}` bind never reaches the
     /// parent environment. The generic fd_var application in
     /// execute_command records (resolved name, prior env_vars entry, prior
-    /// typed-store entry) here so execute_external can undo the binding and
-    /// release the descriptor after the child finishes.
+    /// typed-store entry, applier-bound descriptor) here so
+    /// execute_external can undo the binding and release the descriptor
+    /// after the child finishes. The descriptor element is the one the
+    /// applier itself installed for the variable — None for a pure
+    /// close record (`{var}<&-`), whose variable still names the
+    /// CALLER's descriptor: undo must close the former, never the
+    /// latter (rubash#2281).
     fd_var_external_undo: Vec<(
         String,
         Option<String>,
         Option<crate::shell::variables::Variable>,
+        Option<u32>,
     )>,
+    /// rubash#2281: `{var}` close records deferred by the function
+    /// fast path (see trap_exec::defer_fd_var_closes_for_function_call):
+    /// (list position, descriptor) pairs the next execute_function on
+    /// this executor applies once the call's own redirect binds are
+    /// installed, so a bind-then-close list (`f 3<f {v}<&-`, v=3)
+    /// observes GNU's single-walk order. Empty outside that window.
+    fd_var_deferred_closes: Vec<(usize, u32)>,
     /// rubash#2272: descriptors a `{var}` redirection asks to close
     /// for the duration of one command — the targets of `{var}<&-` /
     /// `{var}>&-` and the sources of move-form dups (`{var}<&N-`).

@@ -3808,19 +3808,22 @@ impl Executor {
             }
         }
         // rubash#2280: this fast path bypasses
-        // execute_materialized_command, so perform the call's
-        // recorded {var} closes for the duration of the function
-        // execution here (the funnel hook's twin) and replay their
-        // snapshots as soon as the body returns.
-        let in_process_close_snapshots = self.apply_fd_var_closes_for_in_process(true);
+        // execute_materialized_command, so the call's recorded
+        // {var} closes are this hook's charge (the funnel hook's
+        // twin). rubash#2281: they are DEFERRED, not performed here —
+        // execute_function installs the call's own redirect binds
+        // inside its wraps, and a close recorded after a bind of
+        // the same descriptor (`f 3<f {v}<&-`) must land on that
+        // bind, which does not exist yet at this point. The records
+        // move to fd_var_deferred_closes; execute_function drains
+        // them at entry, performs them inside the wraps, and
+        // replays their snapshots before the wraps unwind.
+        self.defer_fd_var_closes_for_function_call();
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],
             &materialized_cmd,
         );
-        if !in_process_close_snapshots.is_empty() {
-            self.restore_fd_var_close_snapshots(in_process_close_snapshots);
-        }
         // GNU execute_cmd.c:4746/4943 — the CALL's expanded last word is
         // bound to `$_` at return_result AFTER execute_function returns, so a
         // body command's own `$_` write is overwritten by the call's last

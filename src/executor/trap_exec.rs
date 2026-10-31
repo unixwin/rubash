@@ -5296,15 +5296,35 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            self.fd_var_external_undo
-                .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_redirect(
+            let outcome = self.execute_dynamic_fd_var_redirect(
                 redirect,
                 auto_close,
                 true,
                 &occupied_slots,
                 position,
-            ) {
+            );
+            // rubash#2281: remember the descriptor THIS entry bound
+            // (read back from the variable after a successful apply)
+            // so the undo closes exactly that one. A pure close entry
+            // binds nothing — the variable still names the caller's
+            // own descriptor, and recording it here is what let the
+            // old value-based undo close the parent's binding when a
+            // gate-rejected command's closes were never delivered.
+            let bound_fd = match &outcome {
+                Ok(_)
+                    if !matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::CloseInput
+                            | crate::parser::RedirectKind::CloseOutput
+                    ) =>
+                {
+                    self.dynamic_fd_variable_value(&resolved)
+                }
+                _ => None,
+            };
+            self.fd_var_external_undo
+                .push((resolved, prior, prior_typed, bound_fd));
+            match outcome {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5340,9 +5360,17 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            let outcome =
+                self.execute_dynamic_fd_var_heredoc(redirect, auto_close, &occupied_slots);
+            // rubash#2281: the applier-bound descriptor, as at the
+            // plain-list site above (a heredoc entry always binds).
+            let bound_fd = match &outcome {
+                Ok(_) => self.dynamic_fd_variable_value(&resolved),
+                _ => None,
+            };
             self.fd_var_external_undo
-                .push((resolved, prior, prior_typed));
-            match self.execute_dynamic_fd_var_heredoc(redirect, auto_close, &occupied_slots) {
+                .push((resolved, prior, prior_typed, bound_fd));
+            match outcome {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -5431,8 +5459,19 @@ impl Executor {
     /// for the just-finished command.
     pub(in crate::executor) fn undo_child_fd_var_redirects(&mut self) {
         let undo = std::mem::take(&mut self.fd_var_external_undo);
-        for (name, prior, prior_typed) in undo {
-            if let Some(fd) = self.dynamic_fd_variable_value(&name) {
+        for (name, prior, prior_typed, bound_fd) in undo {
+            // rubash#2281: close exactly the descriptor the applier
+            // bound for this variable — never the descriptor the
+            // variable merely NAMES. A pure close record ({v}<&-)
+            // bound nothing: the variable still names the parent's
+            // own descriptor (v=9 after `exec 9<file`), and the old
+            // value-based close destroyed that parent binding
+            // whenever no delivery consumed the record — a
+            // gate-rejected external command
+            // (`cmd {v}<&- {w}<&9`) left the parent with fd 9 gone,
+            // where GNU's parent keeps it (the close ran only in
+            // the forked child, execute_cmd.c do_redirections).
+            if let Some(fd) = bound_fd {
                 let _ = self.close_persistent_fd(fd);
             }
             match prior {
@@ -6163,6 +6202,71 @@ impl Executor {
             .iter()
             .map(|&(_, fd)| self.perform_fd_var_pending_close(fd))
             .collect()
+    }
+
+    /// rubash#2281: the function fast path's variant of the close
+    /// application above. GNU applies a function call's WHOLE
+    /// redirect list in one ordered walk before the body runs
+    /// (execute_cmd.c:5606 execute_builtin_or_function's
+    /// do_redirections), so a close that FOLLOWS a bind of the same
+    /// descriptor in the list (`f 3<f {v}<&-`, v=3) revokes the
+    /// bind. The fast path's pre-application (the twin hook in
+    /// execute_function_command_invocation) ran before
+    /// execute_function installed the call's binds, so the bind
+    /// landed after the close and the body read the descriptor
+    /// open. Defer instead: move this command's records into
+    /// fd_var_deferred_closes, and execute_function performs them
+    /// (apply_deferred_fd_var_closes) once its redirect wraps have
+    /// installed the call's binds.
+    pub(in crate::executor) fn defer_fd_var_closes_for_function_call(&mut self) {
+        if self.fd_var_pending_closes.is_empty()
+            || self.fd_var_pending_close_generation != self.fd_var_close_generation
+        {
+            return;
+        }
+        self.fd_var_deferred_closes = std::mem::take(&mut self.fd_var_pending_closes);
+    }
+
+    /// Perform closes deferred by defer_fd_var_closes_for_function_call
+    /// against the call's installed binds, honoring list order: a
+    /// close is skipped when a LATER entry of the call's own list
+    /// re-decides the descriptor (a numbered bind or heredoc bind —
+    /// the walk applies it after the close, so it wins, and the
+    /// close's effect on the pre-bind state is moot). Returns the
+    /// restore snapshots; the caller replays them when the body
+    /// finishes, BEFORE the redirect wraps unwind their own
+    /// restores (the snapshots hold the call's bind entries, which
+    /// the wraps' restores then displace with the ambient ones —
+    /// GNU's undo stack order, redir.c undo_redirections).
+    pub(in crate::executor) fn apply_deferred_fd_var_closes(
+        &mut self,
+        closes: &[(usize, u32)],
+        call_cmd: &CommandNode,
+    ) -> Vec<(
+        u32,
+        Option<crate::executor::fd_table::FdEntry>,
+        Option<String>,
+    )> {
+        let mut snapshots = Vec::new();
+        for &(position, fd) in closes {
+            let later_entry_decides =
+                call_cmd
+                    .redirects
+                    .iter()
+                    .enumerate()
+                    .any(|(index, redirect)| {
+                        index > position && redirect.fd_var.is_none() && redirect.fd == Some(fd)
+                    })
+                    || call_cmd
+                        .heredoc_redirects
+                        .iter()
+                        .any(|redirect| redirect.fd == Some(fd));
+            if later_entry_decides {
+                continue;
+            }
+            snapshots.push(self.perform_fd_var_pending_close(fd));
+        }
+        snapshots
     }
 
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {
