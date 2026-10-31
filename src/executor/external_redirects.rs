@@ -1101,7 +1101,8 @@ impl Executor {
         stderr: &[u8],
     ) -> Result<(), ExecuteError> {
         if self.external_output_fds_closed(cmd) {
-            let _ = self.route_builtin_buffered_output(cmd, stdout, stderr)?;
+            let _ =
+                self.route_builtin_buffered_output_resolve_only_numbered(cmd, stdout, stderr)?;
             return Ok(());
         }
         // rubash#370: the piped-fallback bytes belong wherever the command's
@@ -1115,7 +1116,11 @@ impl Executor {
         // (no output redirects) the previous default routing stands. This
         // restores the drain contract ba69f0d9's deleted ordered-replay
         // family carried (its write_ordered_command_output call site).
-        if self.route_builtin_buffered_output(cmd, stdout, stderr)? {
+        // The walk runs in resolve-only-numbered mode: the child held
+        // real descriptors for its numbered bindings, so re-opening a
+        // numbered target here would truncate what it wrote
+        // (rubash#2368).
+        if self.route_builtin_buffered_output_resolve_only_numbered(cmd, stdout, stderr)? {
             return Ok(());
         }
         if !stdout.is_empty() {

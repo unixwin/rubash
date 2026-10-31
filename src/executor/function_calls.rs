@@ -684,8 +684,11 @@ impl Executor {
         // body; a trap the body installs is global and last-set-wins, so a
         // nested inner install still fires at the OUTER return (rubash#1105:
         // outer return runs B, not A or nothing).
+        // rubash#349: the _fast form returns the identical Option<String>
+        // (same reset-list verdict) without building the reset BTreeSet on
+        // every function call.
         let saved_return_action =
-            crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "RETURN");
+            crate::builtins::trap::get_trap_action_fast(&self.shell_state.env_vars, "RETURN");
         let return_trap_removed =
             saved_return_action.is_some() && (!function_traced || self.debug_trap_running);
         if return_trap_removed {

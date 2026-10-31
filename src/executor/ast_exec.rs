@@ -524,10 +524,14 @@ impl Executor {
             // executes (execute_cmd.c:914) — adjudication below and inside
             // dispatch consults the sample, so a trap this command installs
             // (e.g. in a function body) cannot fire for the command itself.
-            self.err_trap_armed_sample.set(Some(matches!(
-                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "ERR"),
-                Some(ref action) if !action.is_empty()
-            )));
+            // rubash#349: this sample runs once per command; the borrowing
+            // probe is the allocation-free form of the same verdict
+            // (get_trap_action + non-empty guard) — no reset-set build, no
+            // key format, no action clone on the floor path.
+            self.err_trap_armed_sample.set(Some(
+                crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "ERR")
+                    .is_some(),
+            ));
             // issue #485: the comsub $? overlay (word_expansion_comsub_exit)
             // belongs to ONE command's word expansion, exactly like GNU's
             // last_command_exit_value write in subst.c command_substitute —
