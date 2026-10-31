@@ -4486,6 +4486,12 @@ impl Executor {
         // (execute_lastpipe_stage deliberately does NOT come through
         // here: the lastpipe element runs in the current shell.)
         let saved_dispatch_tracker = self.shell_state.last_dispatch_was_eval_or_source;
+        // rubash#2397: same isolation for the this/last builtin pair —
+        // a stage's rolls stay inside the element (builtins/common.c:70).
+        let saved_builtin_classes = (
+            self.shell_state.this_builtin_class,
+            self.shell_state.last_builtin_class,
+        );
         // `|&` → trailing `2>&1` (parse.y:1470-1487; normalize_pipeerr_stage).
         // execute_simple_pipeline already normalized every gathered stage;
         // this idempotent pass covers the recursion entry points that bypass
@@ -4806,6 +4812,8 @@ impl Executor {
         self.shell_state.random_state.restore_state(&saved_random);
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
+        self.shell_state.this_builtin_class = saved_builtin_classes.0;
+        self.shell_state.last_builtin_class = saved_builtin_classes.1;
         // rubash#1540: harvest the DISCARD latches this stage raised
         // (they were cleared at entry), then restore the entry state so
         // nothing leaks to the parent. The arithmetic verdict delta is
@@ -5072,7 +5080,8 @@ impl Executor {
                 1,
             )));
         }
-        let stage_output_redirect_failed = match self.pipeline_stage_output_redirect_fails(command) {
+        let stage_output_redirect_failed = match self.pipeline_stage_output_redirect_fails(command)
+        {
             Ok(failed) => failed,
             Err(error) => {
                 crate::executor::shell_options::restore_stdout_capture(saved_capture);

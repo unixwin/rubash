@@ -661,6 +661,40 @@ impl Executor {
             && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word);
     }
 
+    /// execute_cmd.c:4810-4813 (`run_builtin`): `last_shell_builtin =
+    /// this_shell_builtin; this_shell_builtin = builtin;` — the roll
+    /// happens when a simple command RESOLVES to a builtin (this =
+    /// that builtin) or to a function (this = NULL, projected here as
+    /// `Other`); a disk command never reaches run_builtin and never
+    /// rolls. The note points are the resolution-confirmed dispatch
+    /// sites: the primary/late funnel entries, the function fast path,
+    /// the `%` jobspec fg/bg dispatch, and the exit/logout/jobs arms
+    /// of the `command`/`builtin` re-dispatch tables (whose outer
+    /// dispatch already rolled `Other`, so only the classes the exit
+    /// check distinguishes need an inner roll there). Read solely by
+    /// the interactive exit/logout job check (builtins/exit.def
+    /// `exit_or_logout`, rubash#2397).
+    pub(in crate::executor) fn note_builtin_dispatch(
+        &mut self,
+        class: crate::shell::BuiltinDispatchClass,
+    ) {
+        self.shell_state.last_builtin_class = self.shell_state.this_builtin_class;
+        self.shell_state.this_builtin_class = class;
+    }
+
+    /// The exit.def-distinguished class of a builtin name; every other
+    /// builtin (and every function call) projects to `Other`.
+    pub(in crate::executor) fn builtin_dispatch_class(
+        word: &str,
+    ) -> crate::shell::BuiltinDispatchClass {
+        match word {
+            "exit" => crate::shell::BuiltinDispatchClass::Exit,
+            "logout" => crate::shell::BuiltinDispatchClass::Logout,
+            "jobs" => crate::shell::BuiltinDispatchClass::Jobs,
+            _ => crate::shell::BuiltinDispatchClass::Other,
+        }
+    }
+
     /// GNU shell.c reader_loop under `-n`/`set -n` (noexec): the reader
     /// still parses every command, so all parse-time diagnostics —
     /// `syntax error near ...`, unclosed-compound/cond `unexpected end of

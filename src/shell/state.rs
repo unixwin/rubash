@@ -68,6 +68,23 @@ pub(crate) struct InheritedForkFrames {
     pub(crate) has_main_frame: bool,
 }
 
+/// The projection of GNU's `this_shell_builtin` / `last_shell_builtin`
+/// pair (builtins/common.c:69-70) that the interactive exit path reads:
+/// execute_cmd.c:4810-4813 (`run_builtin`) rolls `last = this; this =
+/// builtin` at every builtin dispatch, a function call rolls with
+/// `this = NULL`, and a disk (external) command never rolls. Only the
+/// classes builtins/exit.def `exit_or_logout` distinguishes are named —
+/// its `exit_immediate_okay` set is {exit, logout, jobs} — every other
+/// builtin and every function call is `Other` (rubash#2397).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuiltinDispatchClass {
+    None,
+    Exit,
+    Logout,
+    Jobs,
+    Other,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -245,6 +262,14 @@ pub struct ShellState {
     /// pipeline stages additionally snapshot/restore this bit around
     /// the stage (execute_pipeline_stage).
     pub(crate) last_dispatch_was_eval_or_source: bool,
+    /// GNU builtins/common.c:69-70 `this_shell_builtin` /
+    /// `last_shell_builtin`, rolled at builtin dispatch
+    /// (execute_cmd.c:4810-4813) and read only by the interactive
+    /// exit/logout job check (builtins/exit.def `exit_or_logout`,
+    /// rubash#2397). Forked contexts clone the state wholesale, like
+    /// the eval/source tracker above.
+    pub(crate) this_builtin_class: BuiltinDispatchClass,
+    pub(crate) last_builtin_class: BuiltinDispatchClass,
     /// lib/sh/random.c RANDOM/SRANDOM generator state.
     pub(crate) random_state: RandomGen,
     /// execute_cmd.c subshell_level.
@@ -709,6 +734,8 @@ impl Clone for ShellState {
             function_depth: self.function_depth,
             dollar_vars_changed_by_set: self.dollar_vars_changed_by_set,
             last_dispatch_was_eval_or_source: self.last_dispatch_was_eval_or_source,
+            this_builtin_class: self.this_builtin_class,
+            last_builtin_class: self.last_builtin_class,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
             subshell_source_text: self.subshell_source_text.clone(),
