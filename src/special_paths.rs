@@ -393,6 +393,55 @@ mod tests {
         }
     }
 
+    /// rubash#1917: the P1 /proc spellings classify into the classes
+    /// the design (docs/design/proc-vfs-and-mkfifo.md §3.0) assigns
+    /// them — content faces SyntheticProc, exe/cwd SyntheticLink, the
+    /// fd spellings FdAlias on every platform — and off Windows every
+    /// synthetic class is empty, so the spellings fall through to the
+    /// real procfs as plain filesystem paths (the platform rule: the
+    /// simulation must never shadow a real procfs). A dead pid's
+    /// entries classify as filesystem paths on Windows too, so the
+    /// failure is a loud ENOENT from the fs face, exactly like a
+    /// vanished procfs directory.
+    #[test]
+    fn issue1917_proc_spelling_classification() {
+        use SpecialPathClass::*;
+        // Content faces (top-level + per-pid).
+        for spelling in [
+            "/proc/version",
+            "/proc/meminfo",
+            "/proc/self/status",
+            "/proc/self/cmdline",
+        ] {
+            assert_eq!(
+                classify_special_path(spelling),
+                expected_proc(),
+                "{spelling}"
+            );
+        }
+        // Link faces.
+        for spelling in ["/proc/self/exe", "/proc/self/cwd"] {
+            assert_eq!(
+                classify_special_path(spelling),
+                expected_link(),
+                "{spelling}"
+            );
+        }
+        // The fd face is an alias on every platform and wins over the
+        // synthetic classes for its spellings.
+        assert_eq!(
+            classify_special_path("/proc/self/fd/0"),
+            FdAlias(0),
+            "fd alias wins over synthetic content"
+        );
+        // A pid that cannot exist: not synthetic anywhere.
+        assert_eq!(
+            classify_special_path("/proc/3141592653/status"),
+            Filesystem,
+            "dead-pid entries fall through loudly"
+        );
+    }
+
     #[test]
     fn classify_battery_matches_legacy_judgments() {
         use SpecialPathClass::*;
