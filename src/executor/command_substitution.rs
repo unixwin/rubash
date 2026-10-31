@@ -1474,6 +1474,44 @@ impl Executor {
         } else {
             &alias_spliced
         };
+        // rubash#1184 f6, layer 2: a backquote body that is itself
+        // unclosed — the verdict scan over the extracted body reports
+        // a pending matched-pair construct — is a BODY-parse error in
+        // GNU, not a lenient execution. The body is parsed as its own
+        // input (parse.y parse_comsub over the extracted text), so
+        // its EOF verdict is the one the reader would give the body
+        // standalone, reported through the `command substitution:`
+        // diagnostic family (subst.c:7413 command_substitute's
+        // parse_and_execute child): the substitution yields empty
+        // with status 2 and the enclosing command line runs on. The
+        // diagnostic line composes exactly like the reader path's
+        // rendering (script_driver): the construct's open line when
+        // the pair reports start_lineno (report_open), else the EOF
+        // line, offset by the body's start line in the enclosing
+        // script. Keyword pendings (`if` without `fi`) carry no
+        // matched-pair verdict and fall through to the body's own
+        // parser diagnostic below. Only old-style backquote bodies
+        // carry the diagnostic flag; `$(` bodies are not gated here.
+        if self.backtick_body_diagnostic.get() {
+            if let Some(v) =
+                crate::lexer::unclosed_input_close_char_posix(source, self.posix_mode_enabled())
+            {
+                let verdict_line = if v.report_open {
+                    v.open_line
+                } else {
+                    v.eof_line
+                };
+                let line = body_start_line + verdict_line - 1;
+                eprintln!(
+                    "{}unexpected EOF while looking for matching `{}'",
+                    self.comsub_eof_error_diagnostic(line),
+                    v.close
+                );
+                self.latch_command_substitution_parse_error();
+                self.last_command_substitution_status.set(Some(2));
+                return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
+            }
+        }
         let tokens = crate::lexer::tokenize_comsub_body(
             source,
             self.posix_mode_enabled(),

@@ -607,6 +607,35 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // rubash#1184 f6, layer 1 (authorized captain-file change): GNU
+        // delimits a backquote body atomically. The reader hands a
+        // backquote to parse_matched_pair with open == close == '`'
+        // (parse.y:4159), whose grouping branch runs only when
+        // open != close (parse.y:4039-4042 — "Could also check
+        // open == '`' if we want to parse grouping constructs inside
+        // old-style command substitution", i.e. it deliberately does
+        // not): quotes and `$` constructs inside the body are ordinary
+        // characters that neither nest nor close anything, a bare
+        // backtick ends the body (the loop-top close arm — parse.y:
+        // 3974-3975 `ch == close` precedes the nested-begin branches),
+        // and an escape pair is consumed by the loop-top escape arm.
+        // Gate every push arm below while a backquote holds the stack
+        // top, by shadowing the scrutinee with a sentinel that lands
+        // in the inert `_` arm. The body bytes still flow through
+        // every loop-top tracker above (case machine, heredoc
+        // opacity, comment/word state) and the line counter, so no
+        // tracker diverges; and since nothing can stack above it, a
+        // pending backquote is automatically the verdict's stack top
+        // (parse.y:3908-3912 reports it at its start_lineno). The
+        // extracted body is parsed as its own input by the executor —
+        // body-internal balance is that layer's question, not this
+        // scan's (the mirror gate in close_char_residuals_advance
+        // keeps the two scans in lockstep).
+        let ch = if top.is_some_and(|d| d.close == '`') {
+            '\0'
+        } else {
+            ch
+        };
         match ch {
             '\'' if !in_double => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.
@@ -4593,6 +4622,22 @@ pub(crate) fn close_char_residuals_advance(
             }
         }
         let in_double = top.is_some_and(|d| d.close == '"');
+        // rubash#1184 f6, layer 1 — mirror of the gate in
+        // unclosed_input_close_char_posix above: while a backquote
+        // holds the stack top, every push arm below is gated (the
+        // scrutinee is shadowed with the inert `_` sentinel), because
+        // GNU delimits the body atomically (parse.y:4039-4042,
+        // 4159). The gate is a position-local, backward-looking
+        // decision (it reads only the stack top), so it is orthogonal
+        // to the K1–K4 park discipline: a `$` or `\` inside a pending
+        // backquote body needs no park, since its dispatch cannot
+        // depend on the following character while the gate holds, and
+        // a resumed scan re-derives the same state byte for byte.
+        let ch = if top.is_some_and(|d| d.close == '`') {
+            '\0'
+        } else {
+            ch
+        };
         match ch {
             '\'' if !in_double => {
                 // POSIX + Interp 221: `'` inside `"${...}"` is literal.

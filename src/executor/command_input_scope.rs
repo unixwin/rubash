@@ -1353,7 +1353,24 @@ impl Executor {
         // must not expand to `1`; GNU reports `command substitution:
         // unexpected EOF while looking for matching `)'` and leaves foo empty.
         // Detect unclosed `$(` in the raw body before expansion.
-        if crate::lexer::has_unclosed_command_substitution(body) {
+        //
+        // rubash#1184 f6, layer 2: has_unclosed_command_substitution's
+        // residual DFA also counts quote state INSIDE a delimited
+        // backquote span, so a body like `x=`echo 'a`` reads "unclosed"
+        // there even though the span itself is delimited. GNU delimits
+        // a backquote body atomically (parse.y:4039-4042, 4159) and
+        // hands the extracted body to the body-parse layer, whose
+        // diagnostic is the one that must surface. Gate this early
+        // return on the reader-level verdict scan also finding a
+        // pending construct: the genuine eof6 shape (`$(seq 10`) has
+        // one and keeps this branch byte-for-byte; a residuals-only
+        // verdict means the pending construct lives inside a delimited
+        // body, so expansion runs and the executor's body-parse
+        // diagnostic fires instead.
+        if crate::lexer::has_unclosed_command_substitution(body)
+            && crate::lexer::unclosed_input_close_char_posix(body, self.posix_mode_enabled())
+                .is_some()
+        {
             // GNU error.c:300 parser_error with yy_input_name()=="command
             // substitution": `script: command substitution: line N:` — N is
             // the inherited script line when the comsub string runs out

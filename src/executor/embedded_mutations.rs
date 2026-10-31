@@ -911,11 +911,18 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
-                    let expanded = substitution_result_visible_text(
-                        &self
-                            .expand_command_substitution_mut_typed_with_context(&source, context)
-                            .text_lossy(),
-                    );
+                    // rubash#1184 f6, layer 2: same ambient backtick window
+                    // as the whole-word entries (issue #515) — this arm
+                    // cuts and dispatches the backquote body itself, so it
+                    // opens the window here. The heredoc route reaches the
+                    // typed funnel's unclosed-body pre-check through this
+                    // dispatch (context HereDocument).
+                    let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+                    let substitution_output =
+                        self.expand_command_substitution_mut_typed_with_context(&source, context);
+                    self.backtick_body_diagnostic.set(saved_backtick_context);
+                    let expanded =
+                        substitution_result_visible_text(&substitution_output.text_lossy());
                     let protected = protect_command_substitution_output(&expanded);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         let value = mark_expansion_whitespace(&protected, preserve_quotes);

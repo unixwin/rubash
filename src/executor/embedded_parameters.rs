@@ -524,10 +524,22 @@ impl Executor {
                     source.push(source_ch);
                 }
                 if closed {
+                    // rubash#1184 f6, layer 2: this arm cuts and dispatches
+                    // an old-style backquote body itself, so it opens the
+                    // same ambient backtick window the whole-word entries
+                    // open (command_substitution_values.rs, issue #515).
+                    // Without the window the body parsed outside it — no
+                    // newline termination, and the typed funnel's
+                    // unclosed-body pre-check stayed dark — so an unclosed
+                    // body executed leniently instead of taking the
+                    // body-parse `command substitution:` diagnostic GNU's
+                    // parse_and_execute child reports (subst.c:7413).
+                    let saved_backtick_context = self.backtick_body_diagnostic.replace(true);
+                    let expanded = self
+                        .expand_command_substitution(&decode_backtick_substitution_source(&source));
+                    self.backtick_body_diagnostic.set(saved_backtick_context);
                     let value = protect_command_substitution_output(
-                        &substitution_result_visible_text(&self.expand_command_substitution(
-                            &decode_backtick_substitution_source(&source),
-                        )),
+                        &substitution_result_visible_text(&expanded),
                     );
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
