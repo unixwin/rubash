@@ -779,6 +779,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         // GNU prints bind/subscript diagnostics (`a[]: bad array
         // subscript`, `` `a[]': not a valid identifier ``) while the
         // evaluation continues — they surface even when the expression
@@ -962,6 +963,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         self.flush_arith_diags(None);
         sync_arith_writes_to_shell_state(self);
         if let Some(key) = memo_key {
@@ -1203,6 +1205,7 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_readonly_error();
+        self.report_arithmetic_noassign_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
         self.flush_arith_diags(None);
@@ -1216,6 +1219,26 @@ impl Executor {
         sync_arith_writes_to_shell_state(self);
 
         value
+    }
+
+    /// GNU expr.c:350: an att_noassign bind inside arithmetic fails
+    /// the evaluation (the (( ))/let status becomes 1) with NO
+    /// diagnostic — bind_variable_internal prints only for readonly.
+    /// Drain the marker the bind paths left and latch the same
+    /// "bind failure accounted" pair the readonly reporter uses, so
+    /// the command reporters fail the command without synthesizing
+    /// an evalerror after it (rubash#2369).
+    fn report_arithmetic_noassign_error(&mut self) {
+        if self
+            .shell_state
+            .env_vars
+            .remove("__RUBASH_ARITH_NOASSIGN_ERROR")
+            .is_none()
+        {
+            return;
+        }
+        self.shell_state.arithmetic_readonly_error.set(true);
+        let _ = self.shell_state.arithmetic_expansion_error.replace(true);
     }
 
     fn report_arithmetic_readonly_error(&mut self) {

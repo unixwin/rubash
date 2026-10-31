@@ -572,6 +572,20 @@ pub struct Executor {
     /// and USR1 took the plain-exit path instead — same funnel, so the
     /// mark now carries the signal number.)
     termsig_death_pending: Option<i32>,
+    /// rubash#2352: the exit status the EXIT trap must observe when
+    /// the termsig-death mark above is consumed — GNU trap.c:1036
+    /// run_exit_trap: `trap_saved_exit_value = last_command_exit_value`,
+    /// and nothing on the sig.c:590 termsig path overwrites that
+    /// value with 128+sig before the trap runs. Captured at every
+    /// site that sets the mark, from the pre-overwrite exit_code (at
+    /// a boundary or blocked-wait drain that IS the last completed
+    /// command's status; for an ancestor-lane delivery the dispatch
+    /// replaces it with the entry's sender-status snapshot, the
+    /// pre-carrier value GNU's preempted wait never overwrites).
+    /// Taken alongside the mark by script_driver::finish_shell, its
+    /// sole consumer; parked with the mark across contained-child
+    /// spans (executor/external_finish.rs).
+    termsig_death_trap_status: Option<i32>,
     /// GNU exit.def:52 (sourced_logout): ~/.bash_logout runs at most once
     /// per shell process (bash_logout, exit.def:156-166).
     bash_logout_sourced: bool,

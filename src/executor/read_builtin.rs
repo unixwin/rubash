@@ -2426,6 +2426,12 @@ impl Executor {
                     );
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
+                // GNU read.def:960-966 (builtin_find_indexed_array with
+                // the assignment flag): an att_noassign -a target fails
+                // the same way but silently (rubash#2369).
+                if !invalid_name && self.assignment_target_is_noassign(&name) {
+                    return self.finish_read_error(cmd, &stderr, 1);
+                }
                 if !invalid_name {
                     let _ = replace_typed_indexed_array(
                         &mut self.shell_state.variables,
@@ -2497,6 +2503,11 @@ impl Executor {
                     "{}{name}: readonly variable",
                     self.diagnostic_prefix()
                 );
+                return self.finish_read_error(cmd, &stderr, 1);
+            }
+            // GNU read.def:960-966: an att_noassign -a target fails the
+            // same way but silently (rubash#2369).
+            if !invalid_name && self.assignment_target_is_noassign(&name) {
                 return self.finish_read_error(cmd, &stderr, 1);
             }
             let final_line = match (&line, &initial_text) {
