@@ -6636,6 +6636,16 @@ impl Executor {
     /// names assign through assign_array_element. Returns false when the
     /// binding was rejected.
     fn set_dynamic_fd_variable(&mut self, name: &str, fd: u32) -> bool {
+        // GNU redir.c:1477 (redir_varassign): ASSIGN_DISALLOWED refuses
+        // the fd bind — for an att_noassign target with only the bare
+        // "cannot assign fd to variable" diagnostic (no err_readonly
+        // line), after the redirection target itself was set up. The
+        // funnel swallows noassign binds as success, so the verdict is
+        // taken here; every caller already turns a false into that
+        // diagnostic (rubash#2369).
+        if self.assignment_target_is_noassign(name) {
+            return false;
+        }
         self.apply_shell_assignment(name, fd.to_string())
     }
 
