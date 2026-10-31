@@ -1636,6 +1636,13 @@ impl Executor {
         if !self.termsig_death_armed(signal) {
             return false;
         }
+        // rubash#2352: capture the EXIT trap's entry status BEFORE
+        // the 128+sig overwrite — at every drain that reaches here,
+        // exit_code is still the last completed command's status
+        // (trap.c:1036 trap_saved_exit_value). The boundary dispatch
+        // may replace the capture for an ancestor-lane delivery with
+        // the entry's sender snapshot (the pre-carrier value).
+        self.termsig_death_trap_status = Some(self.exit_code);
         self.exit_code = 128 + signal;
         self.termsig_death_pending = Some(signal);
         true
@@ -1693,6 +1700,10 @@ impl Executor {
             crate::builtins::kill::requeue_pending_signals(rest);
         }
         if found {
+            // rubash#2352: same trap-entry capture as
+            // note_untrapped_termsig — the reader's exit_code here
+            // is still the last completed command's status.
+            self.termsig_death_trap_status = Some(self.exit_code);
             self.exit_code = 128 + libc::SIGHUP as i32;
             self.termsig_death_pending = Some(libc::SIGHUP as i32);
         }
@@ -1811,15 +1822,17 @@ impl Executor {
         // even when no delivery is pending (the common case); Vec::new()
         // defers the allocation to the first push — identical growth
         // semantics, one malloc/free per command removed from the floor.
-        let mut queue: Vec<(i32, bool)> = Vec::new();
+        // The third element is the ancestor entry's sender-status
+        // snapshot (rubash#2352; kernel-lane entries carry None).
+        let mut queue: Vec<(i32, bool, Option<i32>)> = Vec::new();
         #[cfg(unix)]
         queue.extend(
             crate::builtins::kill::take_ancestor_signals()
                 .into_iter()
-                .map(|signal| (signal, false)),
+                .map(|(signal, sender_status)| (signal, false, Some(sender_status))),
         );
-        queue.extend(signals.into_iter().map(|signal| (signal, true)));
-        for (signal, stale_check) in queue {
+        queue.extend(signals.into_iter().map(|signal| (signal, true, None)));
+        for (signal, stale_check, sender_status) in queue {
             // Stale registry flag from a disposition flip (trap cleared while
             // a delivery raced): a signal the kernel no longer routes here
             // cannot be a legitimate pending trap.
@@ -1862,6 +1875,17 @@ impl Executor {
                 // shell dies BY the signal. The helper records the
                 // mark and the exit status; unwind exit-class.
                 if self.note_untrapped_termsig(signal) {
+                    // rubash#2352: for an ancestor-lane delivery the
+                    // trap's entry status is the entry's sender
+                    // snapshot, not this layer's exit_code — the
+                    // carrier construct already committed its own
+                    // status here, but GNU's addressed shell was
+                    // still waiting for it, so its last_command_
+                    // exit_value is the pre-carrier one (trap.c:1036;
+                    // the wait is preempted, never completed).
+                    if let Some(sender_status) = sender_status {
+                        self.termsig_death_trap_status = Some(sender_status);
+                    }
                     // rubash#2236: record the death so an in-process
                     // child's exit boundary can queue the parent's
                     // job-death notice for it (a real child's wait(2)
