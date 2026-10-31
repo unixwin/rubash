@@ -5072,7 +5072,7 @@ impl Executor {
                 1,
             )));
         }
-        let stage_output_redirect_failed = match self.command_output_redirect_fails(command) {
+        let stage_output_redirect_failed = match self.pipeline_stage_output_redirect_fails(command) {
             Ok(failed) => failed,
             Err(error) => {
                 crate::executor::shell_options::restore_stdout_capture(saved_capture);

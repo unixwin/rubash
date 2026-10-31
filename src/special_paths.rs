@@ -147,8 +147,30 @@ pub fn classify_special_path(target: &str) -> SpecialPathClass {
 /// succeeds even with no listener). Host may be a name (resolved by
 /// the OS) or an address; the port may be numeric or a service name
 /// resolved through /etc/services (getservbyname).
+///
+/// rubash#2359: the claim is the FULL two-segment shape, not the
+/// bare prefix. GNU's table (redir.c:611-612
+/// `_redir_special_filenames`) holds the patterns
+/// `/dev/tcp/*/*` and `/dev/udp/*/*`; `redir_open` (redir.c:725)
+/// consults the table first and a spelling that does not match the
+/// pattern takes the plain open() below it. A host-only spelling
+/// (`/dev/tcp/127.0.0.1`, `/dev/udp/127.0.0.1`, the bare
+/// `/dev/tcp/`) therefore fails ENOENT as a literal path on the
+/// oracle (bash 5.3.20 probes), while either segment may be EMPTY
+/// (`/dev/tcp//18741` engages netopen and fails on the host;
+/// `/dev/tcp/127.0.0.1/` engages it and fails on the service) —
+/// the glob's `*` matches an empty segment but the separating
+/// slash must be present. The pre-#2359 prefix-only judgment
+/// claimed the host-only family and reported EINVAL from the net
+/// parser instead of GNU's ENOENT.
 pub fn is_net_redirect_target(target: &str) -> bool {
-    target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+    let rest = target
+        .strip_prefix("/dev/tcp/")
+        .or_else(|| target.strip_prefix("/dev/udp/"));
+    match rest {
+        Some(rest) => rest.contains('/'),
+        None => false,
+    }
 }
 
 /// Whether `path` spells the null device: the POSIX spelling (with
@@ -368,7 +390,20 @@ mod tests {
     /// this module; this reference copy lives only in the test so a
     /// future edit to one side trips the comparison.)
     fn legacy_is_net(target: &str) -> bool {
-        target.starts_with("/dev/tcp/") || target.starts_with("/dev/udp/")
+        // Issue rubash#2359: the pre-registry body was the bare
+        // prefix (`starts_with("/dev/tcp/")`), which claimed
+        // host-only spellings GNU's pattern table does not match
+        // (redir.c:611-612 vs redir_open's fall-through at
+        // redir.c:725); the mirror carries the corrected
+        // two-segment judgment so the battery keeps tripping on
+        // drift.
+        let rest = target
+            .strip_prefix("/dev/tcp/")
+            .or_else(|| target.strip_prefix("/dev/udp/"));
+        match rest {
+            Some(rest) => rest.contains('/'),
+            None => false,
+        }
     }
 
     fn legacy_is_null(path: &str) -> bool {
@@ -474,11 +509,16 @@ mod tests {
     fn classify_battery_matches_legacy_judgments() {
         use SpecialPathClass::*;
         let battery: &[(&str, SpecialPathClass)] = &[
-            // Net (netopen spellings; the bare prefix already counts,
-            // exactly as the legacy starts_with judgment answered).
+            // Net (netopen spellings; the full two-segment shape
+            // counts, either segment may be empty — rubash#2359,
+            // GNU redir.c:611-612 pattern table).
             ("/dev/tcp/127.0.0.1/80", NetRedirect),
             ("/dev/udp/example.com/53", NetRedirect),
-            ("/dev/tcp/", NetRedirect),
+            ("/dev/tcp//80", NetRedirect),
+            ("/dev/tcp/127.0.0.1/", NetRedirect),
+            ("/dev/tcp/", Filesystem),
+            ("/dev/tcp/127.0.0.1", Filesystem),
+            ("/dev/udp/127.0.0.1", Filesystem),
             ("/dev/tcp", Filesystem),
             ("/dev/udp", Filesystem),
             ("/dev/tcpx/1", Filesystem),

@@ -4228,15 +4228,25 @@ mod errors10_posix_fatal {
 }
 
 /// rubash#1904 (vfs audit D11): the command-substitution quick-read
-/// ladder behind `$(<file)` skipped the synthetic-/proc and net steps
-/// the input redirect ladder has, so `$(</proc/meminfo)` read a
-/// mapped pseudo-path that does not exist on Windows (silently
-/// empty) and `$(</dev/tcp/…)` failed the same way. GNU read_comsub
-/// (subst.c) collects the bytes from the descriptor the redirect
-/// open produced, whatever class the target belongs to. Expectations
-/// below are GNU's; the proc pin's Windows face is the point (on
-/// Linux the real procfs file answers), and the net pin fails
-/// pre-fix on every platform.
+/// ladder behind `$(<file)` skipped the synthetic-/proc step the
+/// input redirect ladder has, so `$(</proc/meminfo)` read a mapped
+/// pseudo-path that does not exist on Windows (silently empty).
+/// Expectations below are GNU's; the proc pin's Windows face is the
+/// point (on Linux the real procfs file answers).
+///
+/// rubash#2359 CORRECTION to the net half of the #1904 theory: the
+/// quick read is optimize_cat_file (subst.c:6666) over
+/// open_redir_file (builtins/evalstring.c:759) — a plain
+/// open(fn, O_RDONLY) (evalstring.c:781) that never consults
+/// redir.c's special-filename table, so `$(</dev/tcp/…)` does NOT
+/// collect bytes "from the descriptor the redirect open produced":
+/// no redirect open and no netopen happen on this face at all, and
+/// the spelling fails ENOENT even with a live server (oracle-verified
+/// against GNU bash 5.3.20, script-file probes). The proc and
+/// null-device steps stay: the OS open behind GNU's call resolves
+/// those spellings itself. The tcp pin below pins the corrected
+/// contract; it failed against the #1904-era net arm, which
+/// connected (and blocked forever on a UDP peer).
 mod issue_1904 {
     use super::*;
 
@@ -4271,18 +4281,28 @@ mod issue_1904 {
     #[test]
     fn issue1904_comsub_quick_read_dev_tcp_loopback() {
         use std::io::Write as _;
+        // A live listener proves the point: GNU's plain open fails
+        // ENOENT without ever connecting, so nothing here accepts —
+        // the accept thread is detached and dies with the test
+        // process (joining it would hang on the corrected behavior).
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().expect("local addr").port();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            stream.write_all(b"hello1904\n").expect("write payload");
+        let _server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.write_all(b"hello1904\n");
+            }
         });
         let dir = case_scratch("1904-tcp");
-        let code = format!("x=$(</dev/tcp/127.0.0.1/{port}); echo \"GOT:$x\"");
+        let code = format!("x=$(</dev/tcp/127.0.0.1/{port}); echo \"rc=$? GOT:[$x]\"");
         let (stdout, stderr, status) = run(&dir, &code);
-        server.join().expect("server thread");
         assert_eq!(status, Some(0), "stderr:\n{stderr}");
-        assert_eq!(stdout, "GOT:hello1904", "stderr:\n{stderr}");
+        assert_eq!(stdout, "rc=1 GOT:[]", "stderr:\n{stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "/dev/tcp/127.0.0.1/{port}: No such file or directory"
+            )),
+            "the plain open's ENOENT is the diagnostic, stderr:\n{stderr}"
+        );
     }
 }
 
