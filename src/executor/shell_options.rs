@@ -659,7 +659,10 @@ impl Executor {
     /// same way through their process handles (rubash#2359).
     /// Every other endpoint kind (pipe, socket, device, byte
     /// channel) cannot be re-opened and yields None: the alias open
-    /// keeps the dup/stream serve.
+    /// keeps the dup/stream serve. The inherited-stdin arm below is
+    /// the one exception for devices: fd 0's own disk path answers
+    /// for a character device as well as a regular file (rubash#2359),
+    /// because the process handle names the device path directly.
     pub(in crate::executor) fn fd_alias_reopen_path(&self, fd: u32) -> Option<PathBuf> {
         if let Some(FdReadEndpoint::File(file_fd)) = self.fd_table.read_endpoint(fd) {
             if file_fd.reopens_fresh() {
@@ -671,14 +674,58 @@ impl Executor {
                 return Some(file_fd.path.clone());
             }
         }
-        if fd == 0
-            && matches!(
-                self.fd_table.read_endpoint(0),
-                Some(FdReadEndpoint::InheritedProcessStdin)
-            )
-        {
-            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(0))?;
-            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+        // The inherited-stdin arm: fd 0 itself, and every dup of it
+        // (`exec 3<&0`) — the dup names the same open file
+        // description, so the alias open resolves through the
+        // process stdin handle whatever number carries it
+        // (rubash#2359: `exec 3<&0; echo x > /dev/fd/3` with stdin a
+        // regular file failed EBADF where GNU opens the file fresh).
+        if matches!(
+            self.fd_table.read_endpoint(fd),
+            Some(FdReadEndpoint::InheritedProcessStdin)
+        ) {
+            // rubash#2359: a character device answers too, but
+            // disk_file_path cannot name one — it answers regular
+            // files only, by design (fd/unix.rs: its is_disk_file
+            // gate returns None for devices). GNU's open of
+            // /dev/stdin with stdin a device (/dev/null, a tty)
+            // opens the device fresh — `echo x > /dev/stdin` with
+            // stdin /dev/null succeeds and the bytes are discarded —
+            // while the dup serve this resolver feeds cannot write
+            // through a read endpoint at all (the builtin's flush
+            // failed EBADF). The device path comes from the magic
+            // link itself on unix; pipes and sockets earn no path
+            // here because their link text is the kernel's
+            // pipe:[ino] / socket:[ino] form, whose metadata lookup
+            // fails below, so the complementary-end shapes keep the
+            // dup serve (the engine's remaining model gap — the
+            // pipe's other end exists only in the kernel).
+            let path =
+                crate::fd::disk_file_path(crate::fd::process_std_handle(0)).or_else(|| {
+                    #[cfg(unix)]
+                    {
+                        std::fs::read_link("/proc/self/fd/0").ok()
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        None
+                    }
+                })?;
+            let stdin_reopens = std::fs::metadata(&path).is_ok_and(|meta| {
+                if meta.is_file() {
+                    return true;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    return meta.file_type().is_char_device();
+                }
+                #[cfg(not(unix))]
+                {
+                    return false;
+                }
+            });
+            if stdin_reopens {
                 return Some(path);
             }
         }
@@ -698,23 +745,28 @@ impl Executor {
         // (open_command_output_target's stdio fallback) without
         // the gate; the resolver is the one home, so the gate now
         // rides every face that asks it.
-        if fd == 1
-            && matches!(
-                self.fd_table.write_endpoint(1),
-                Some(FdWriteEndpoint::Stdout)
-            )
-        {
+        // Any fd whose write endpoint IS the process stdout/stderr
+        // resolves the same way — fds 1 and 2 themselves, and every
+        // dup of them (`exec 3>&1`): the alias open names the dup'd
+        // open file description, not the descriptor number, so a
+        // numbered spelling of a stdout-bound fd re-opens stdout's
+        // file (and takes the noclobber refusal under `set -C`)
+        // exactly like /dev/stdout itself (rubash#2359: the stage
+        // shape `echo x > /dev/fd/3 | cat` with `3>&1` and stdout a
+        // regular file wrote through where GNU refuses).
+        if matches!(
+            self.fd_table.write_endpoint(fd),
+            Some(FdWriteEndpoint::Stdout)
+        ) {
             let path = crate::fd::disk_file_path(crate::fd::process_std_handle(1))?;
             if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
                 return Some(path);
             }
         }
-        if fd == 2
-            && matches!(
-                self.fd_table.write_endpoint(2),
-                Some(FdWriteEndpoint::Stderr)
-            )
-        {
+        if matches!(
+            self.fd_table.write_endpoint(fd),
+            Some(FdWriteEndpoint::Stderr)
+        ) {
             let path = crate::fd::disk_file_path(crate::fd::process_std_handle(2))?;
             if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
                 return Some(path);
