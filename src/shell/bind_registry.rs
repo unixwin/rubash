@@ -92,6 +92,12 @@ pub struct BindRegistry {
     /// unbind_keyseq only acts when the sequence resolves to a
     /// function). Registering the sequence again clears its removal.
     pub removals: Vec<(String, Option<String>)>,
+    /// The readline kill ring (lib/readline/kill.c): text killed by
+    /// the line editor, newest entry last, shared by every editor
+    /// session in the process (the `read -e` editor today; C-k in one
+    /// `read` can be yanked by C-y in the next, exactly as two
+    /// readline sessions share the ring).
+    pub kill_ring: Vec<String>,
 }
 
 impl Default for BindRegistry {
@@ -106,6 +112,7 @@ impl Default for BindRegistry {
                 .collect(),
             readline_initialized: false,
             removals: Vec::new(),
+            kill_ring: Vec::new(),
         }
     }
 }

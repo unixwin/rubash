@@ -1740,6 +1740,25 @@ pub struct Executor {
     /// set only by read_inherited_process_stdin's EOF-with-nothing
     /// return, never by a timeout/interrupt break.
     pub(crate) read_process_stdin_eof: bool,
+    /// rubash#2339: `read -e`/`-E` was given (builtins/read.def:321-328:
+    /// both set `edit`; -E adds bash's completion flavor). Derived from
+    /// the option words in execute_read beside the `silent` derivation
+    /// and consulted by the editor hook in read_input_for_command_inner:
+    /// the editor engages only when the read descriptor is a real
+    /// terminal, mirroring read.def:489-497 (on a non-terminal, edit is
+    /// cleared and the plain scanner runs).
+    pub(crate) read_edit_armed: bool,
+    /// The `-i` text for the armed editor (read.def:334 itext, inserted
+    /// by edit_line's startup hook). Captured in execute_read BEFORE
+    /// the legacy `initial_text = None` discipline, which the plain
+    /// scanner paths must keep: without an editor the text never
+    /// reaches the variable (rubash#270).
+    pub(crate) read_edit_initial_text: Option<String>,
+    /// The expanded `-p` prompt for the armed editor's repaints
+    /// (edit_line receives the prompt, read.def:697; when editing, the
+    /// prompt is the editor's to show — read.def:670 prints it directly
+    /// only when edit == 0).
+    pub(crate) read_edit_prompt: Option<String>,
     /// rubash#1141: production timing of the input currently staged on
     /// FUNCTION_STDIN (a pipeline stage's captured producer output), so
     /// `read`/`select` can judge an armed deadline against the stream's
