@@ -446,7 +446,7 @@ impl Executor {
             }
         };
 
-        for redirect in &cmd.redirects {
+        for (position, redirect) in cmd.redirects.iter().enumerate() {
             match redirect.kind {
                 RedirectKind::CombinedOutput | RedirectKind::CombinedAppend => {}
                 RedirectKind::Output
@@ -592,7 +592,13 @@ impl Executor {
                     // belongs to the spawn delivery walk
                     // (apply_external_fd_delivery, rubash#2295).
                     if fd <= 2 {
-                        if let Some(opened) = self.open_alias_spelling_fresh_output(
+                        // rubash#2329: positional — an in-list
+                        // binding of the aliased fd at this entry's
+                        // position is what GNU's walk opens
+                        // (redir.c:237).
+                        if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                            cmd,
+                            position,
                             &target,
                             redirect.append,
                             redirect.clobber,
@@ -603,6 +609,18 @@ impl Executor {
                         }
                     }
                     if let Some(source_fd) = redirect_target_fd(&target) {
+                        // rubash#2329: when this command's own list
+                        // binds the spelled fd at this position
+                        // (redir.c:237), the ambient dup resolution
+                        // below must not speak for it — decline to
+                        // the legacy route, whose walks resolve the
+                        // binding positionally.
+                        if !matches!(
+                            self.in_list_binding(cmd, position, source_fd),
+                            crate::executor::external_setup::InListBinding::NotBound
+                        ) {
+                            return Ok(None);
+                        }
                         // Self-dup: no-op (rubash#1236).
                         if source_fd == fd {
                             continue;
@@ -819,6 +837,36 @@ impl Executor {
         Ok(false)
     }
 
+    /// rubash#2329: the list position of the output entry a mirror
+    /// field projects — the last output-side entry for `fd` whose
+    /// expanded target is `target` — or one past the end when the
+    /// field has no list twin (synthesized commands). The alias
+    /// resolvers judge an in-list binding at the spelling's own
+    /// position (redir.c:237 do_redirections).
+    pub(in crate::executor) fn output_entry_position(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+        target: &str,
+    ) -> usize {
+        cmd.redirects
+            .iter()
+            .rposition(|entry| {
+                entry.fd_var.is_none()
+                    && matches!(
+                        entry.kind,
+                        crate::parser::RedirectKind::Output
+                            | crate::parser::RedirectKind::Append
+                            | crate::parser::RedirectKind::ClobberOutput
+                            | crate::parser::RedirectKind::CombinedOutput
+                            | crate::parser::RedirectKind::CombinedAppend
+                    )
+                    && entry.fd.unwrap_or(1) == fd
+                    && self.expand_redirect_target(entry) == target
+            })
+            .unwrap_or(cmd.redirects.len())
+    }
+
     fn apply_external_stdout_redirect(
         &mut self,
         cmd: &CommandNode,
@@ -835,7 +883,7 @@ impl Executor {
             if redirected {
                 return Ok(());
             }
-            self.apply_external_stdout_target(process, &target, redirect.clobber)?;
+            self.apply_external_stdout_target(cmd, process, &target, redirect.clobber)?;
             redirected = true;
         }
 
@@ -861,9 +909,13 @@ impl Executor {
                     process.stdout(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stdout(&target) {
-                } else if let Some(opened) =
-                    self.open_alias_spelling_fresh_output(&target, true, true)
-                {
+                } else if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                    cmd,
+                    self.output_entry_position(cmd, 1, &target),
+                    &target,
+                    true,
+                    true,
+                ) {
                     // rubash#2285: append form of the alias arm in
                     // apply_external_stdout_target — a fresh
                     // O_APPEND open of the resolved regular file.
@@ -919,6 +971,7 @@ impl Executor {
 
     fn apply_external_stdout_target(
         &mut self,
+        cmd: &CommandNode,
         process: &mut Command,
         target: &str,
         clobber: bool,
@@ -931,7 +984,13 @@ impl Executor {
             process.stdout(Stdio::piped());
             self.external_stdio_piped_fallback = true;
         } else if self.output_fd_redirects_to_stdout(target) {
-        } else if let Some(opened) = self.open_alias_spelling_fresh_output(target, false, clobber) {
+        } else if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+            cmd,
+            self.output_entry_position(cmd, 1, target),
+            target,
+            false,
+            clobber,
+        ) {
             // rubash#2285: fd-alias PATH spelling resolving to a
             // regular file — fresh open (see the stdio plan's alias
             // arm); a read-bound source has no write endpoint, so
@@ -971,9 +1030,13 @@ impl Executor {
                 process.stderr(Stdio::piped());
                 self.external_stdio_piped_fallback = true;
             } else if self.output_fd_redirects_to_stderr(&target) {
-            } else if let Some(opened) =
-                self.open_alias_spelling_fresh_output(&target, false, redirect.clobber)
-            {
+            } else if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                cmd,
+                self.output_entry_position(cmd, 2, &target),
+                &target,
+                false,
+                redirect.clobber,
+            ) {
                 // rubash#2285: fd-2 form of the alias arm in
                 // apply_external_stdout_target.
                 process.stderr(Stdio::from(opened?));
@@ -1008,9 +1071,13 @@ impl Executor {
                     process.stderr(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
                 } else if self.output_fd_redirects_to_stderr(&target) {
-                } else if let Some(opened) =
-                    self.open_alias_spelling_fresh_output(&target, true, true)
-                {
+                } else if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                    cmd,
+                    self.output_entry_position(cmd, 2, &target),
+                    &target,
+                    true,
+                    true,
+                ) {
                     // rubash#2285: append form of the fd-2 alias arm
                     // above.
                     process.stderr(Stdio::from(opened?));

@@ -1,5 +1,31 @@
 use super::*;
 
+/// rubash#2329: the verdict of `Executor::in_list_binding` — what
+/// one fd is bound to by a command's own redirect list at a given
+/// position (GNU's single ordered walk, redir.c:237
+/// do_redirections).
+#[derive(Debug)]
+pub(in crate::executor) enum InListBinding {
+    /// Bound to a plain on-disk file at this session path; a
+    /// `/dev/fd/N` spelling open is a FRESH open of that path.
+    File(PathBuf),
+    /// Bound, but not to a plain file (heredoc body, process
+    /// substitution, socket, or a dup chain ending at a non-file
+    /// endpoint): the ambient table must NOT be consulted for
+    /// this fd — it holds a different binding.
+    Other,
+    /// Bound by a close entry: the descriptor dangles at this
+    /// position and a spelling open fails like an open of a
+    /// closed descriptor.
+    Closed,
+    /// Bound by a dup/spelling chain that ends at this fd, which
+    /// the list itself does not bind: resolve against the
+    /// ambient table for THAT fd.
+    AmbientOf(u32),
+    /// No list entry binds the fd: the ambient table governs.
+    NotBound,
+}
+
 #[derive(Debug, Default)]
 pub(in crate::executor) struct ProcessSubstitutionFiles {
     inputs: Vec<PathBuf>,
@@ -377,6 +403,118 @@ impl Executor {
     /// this scan replays the entries preceding the dup and opens
     /// the winning input binding. The opened description is stashed
     /// in `own_input_bindings` so the spawn stamps/pins the SAME
+    /// rubash#2329: what an fd is bound to by the entries of THIS
+    /// command's own redirect list before a given position. GNU
+    /// resolves a `/dev/fd/N` path spelling against the descriptor
+    /// as bound AT THAT LIST POSITION: do_redirections
+    /// (redir.c:237) is one ordered walk, and the spelling's
+    /// r_instruction performs an open of the aliased descriptor
+    /// (the RF_DEVFD spelling class, redir.c:603; the
+    /// non-HAVE_DEV_FD dup special case, redir.c:629). Appliers
+    /// that resolve a spelling must therefore consult the list
+    /// before the ambient fd table — the ambient table only knows
+    /// bindings installed by EARLIER commands.
+    pub(in crate::executor) fn in_list_binding(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+    ) -> InListBinding {
+        self.in_list_binding_depth(cmd, before, fd, 0)
+    }
+
+    fn in_list_binding_depth(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+        depth: u32,
+    ) -> InListBinding {
+        if depth > 32 {
+            return InListBinding::Other;
+        }
+        for position in (0..before).rev() {
+            let entry = &cmd.redirects[position];
+            // {var} bindings land in the fd table before dispatch;
+            // the ambient table is their service face.
+            if entry.fd_var.is_some() {
+                continue;
+            }
+            let binds_fd = match entry.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => matches!(fd, 1 | 2),
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString
+                | crate::parser::RedirectKind::ReadWrite => entry.fd.unwrap_or(0) == fd,
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => entry.fd.unwrap_or(1) == fd,
+                _ => false,
+            };
+            if !binds_fd {
+                continue;
+            }
+            match entry.kind {
+                crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::CloseOutput => return InListBinding::Closed,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    return InListBinding::Other
+                }
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target) {
+                        return InListBinding::Closed;
+                    }
+                    let Some((source_fd, _)) = redirect_target_fd_and_move(&target) else {
+                        return InListBinding::Other;
+                    };
+                    if source_fd == fd {
+                        return InListBinding::Other;
+                    }
+                    return match self.in_list_binding_depth(cmd, position, source_fd, depth + 1) {
+                        InListBinding::NotBound => InListBinding::AmbientOf(source_fd),
+                        verdict => verdict,
+                    };
+                }
+                _ => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target) {
+                        return InListBinding::Closed;
+                    }
+                    if let Some(alias_fd) = redirect_target_fd(&target) {
+                        // This entry itself spells another fd: the
+                        // binding is that fd's binding at THIS
+                        // entry's position.
+                        if alias_fd == fd {
+                            return InListBinding::Other;
+                        }
+                        return match self.in_list_binding_depth(cmd, position, alias_fd, depth + 1)
+                        {
+                            InListBinding::NotBound => InListBinding::AmbientOf(alias_fd),
+                            verdict => verdict,
+                        };
+                    }
+                    if crate::special_paths::is_net_redirect_target(&target)
+                        || target.starts_with("<(")
+                        || target.starts_with(">(")
+                    {
+                        return InListBinding::Other;
+                    }
+                    let path = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    return InListBinding::File(path);
+                }
+            }
+        }
+        InListBinding::NotBound
+    }
+
     /// description at N — one description, shared offset, like
     /// GNU's dup2. Returns None when no earlier entry binds N
     /// readably (the caller keeps its EBADF error).
@@ -459,14 +597,41 @@ impl Executor {
                         // the spawn stamps this one description at
                         // N and a same-list `<&N` dup shares it,
                         // exactly GNU's open-then-dup2 shape.
-                        if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
+                        //
+                        // rubash#2329: the descriptor GNU opens is
+                        // the one bound AT THIS LIST POSITION
+                        // (redir.c:237) — when this command's own
+                        // earlier entries bound M, the in-list
+                        // binding decides and the ambient table
+                        // (which holds other commands' bindings)
+                        // must not be consulted for M.
+                        let ambient_fd = match self.in_list_binding(cmd, position, alias_fd) {
+                            InListBinding::File(path) => {
+                                if let Ok(fresh) = FileFd::open_read(path) {
+                                    self.own_input_bindings.insert(fd, fresh.clone());
+                                    return Some(fresh);
+                                }
+                                return None;
+                            }
+                            InListBinding::Closed => return None,
+                            InListBinding::Other => {
+                                // Bound in-list to a materialized
+                                // endpoint (heredoc body, procsub):
+                                // the replay resolves it directly.
+                                return self.own_input_binding_before(cmd, alias_fd, position);
+                            }
+                            InListBinding::AmbientOf(source_fd) => source_fd,
+                            InListBinding::NotBound => alias_fd,
+                        };
+                        if let Some(path) = self.fd_alias_reopen_path(ambient_fd) {
                             if let Ok(fresh) = FileFd::open_read(path) {
                                 self.own_input_bindings.insert(fd, fresh.clone());
                                 return Some(fresh);
                             }
                         }
-                        let endpoint = self.fd_table.read_endpoint(alias_fd)?;
-                        return self.endpoint_as_own_input_binding(fd, alias_fd, endpoint, &target);
+                        let endpoint = self.fd_table.read_endpoint(ambient_fd)?;
+                        return self
+                            .endpoint_as_own_input_binding(fd, ambient_fd, endpoint, &target);
                     }
                     let path = self
                         .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));

@@ -61,7 +61,11 @@ impl Executor {
                     && redirect_target_fd_and_move(&target).is_none()
                     && !target.starts_with("<(")
                 {
-                    if let Err(error) = self.probe_input_redirect(&target) {
+                    // rubash#2329: positional — the spelling's
+                    // source may be bound by this command's own
+                    // list (redir.c:237).
+                    if let Err(error) = self.probe_input_redirect_positional(cmd, redirect, &target)
+                    {
                         let mut line = Vec::new();
                         let _ = writeln!(
                             &mut line,
