@@ -1648,6 +1648,61 @@ impl Executor {
         true
     }
 
+    /// rubash#2353: the ancestor lane's complementary verdict. A
+    /// #1654 routed delivery is synthetic — no kernel disposition
+    /// ever fires for it — so the boundary dispatch must enact the
+    /// addressed shell's verdict itself. Where GNU catches an
+    /// untrapped terminating delivery (termsig_death_armed: an EXIT
+    /// trap is armed, or an interactive SIGHUP), note_untrapped_
+    /// termsig above settles it. In the complementary cell — no
+    /// EXIT trap, non-interactive — GNU installs NO terminating-
+    /// signal handler at all (sig.c:230-236: for non-interactive
+    /// shells initialize_terminating_signals runs only when an EXIT
+    /// trap is defined), so the delivery stays at SIG_DFL and the
+    /// kernel kills the shell in place, BY the signal. Arm the same
+    /// termsig-death mark so finish_shell performs that death.
+    /// Exclusions, each load-bearing:
+    ///   * SIGINT: while a script shell waits for a foreground job,
+    ///     GNU's wait_sigint_handler (jobs.c:2908) records the
+    ///     delivery and otherwise ignores it — the shell dies of it
+    ///     only when the job itself died of SIGINT (jobs.c:4384,
+    ///     4410 child_caught_sigint), a cooperative path the
+    ///     ancestor lane is not (the carrier completed normally by
+    ///     construction). The dispatch absorbs that cell instead.
+    ///   * a contained in-process child (direct-child route armed):
+    ///     its death is simulated — the adjudicated record carries
+    ///     the signaled form to the parent's wait and the hosting
+    ///     process must not die (rubash#2236).
+    ///   * an interactive shell: untrapped deliveries there take
+    ///     the DISCARD classification the dispatch already records
+    ///     (rubash#1662); an interactive shell also ignores SIGTERM
+    ///     outright (sig.c:337-341).
+    /// The signal universe is the same terminating set as
+    /// exit_reroutes: the default-ignore pair (URG/WINCH), the stop
+    /// class, SIGCONT and the realtime block have no SIG_DFL death
+    /// to enact; SIGQUIT never reaches here (the dispatch drops it
+    /// above — bash ignores QUIT for itself, sig.c:333).
+    #[cfg(unix)]
+    pub(crate) fn note_routed_untrapped_termsig(&mut self, signal: i32) -> bool {
+        if signal == libc::SIGINT as i32
+            || self.invocation_interactive()
+            || crate::builtins::kill::direct_child_route_active()
+            || !crate::builtins::kill::exit_reroutes(signal)
+        {
+            return false;
+        }
+        self.exit_code = 128 + signal;
+        self.termsig_death_pending = Some(signal);
+        true
+    }
+
+    /// Non-unix: no routed lane exists (the ancestor queue is a unix
+    /// mechanism), so there is no routed verdict to record.
+    #[cfg(not(unix))]
+    pub(crate) fn note_routed_untrapped_termsig(&mut self, _signal: i32) -> bool {
+        false
+    }
+
     /// Non-unix shells have no signal death to settle (the Windows
     /// console hangup face is a different mechanism); the drains'
     /// untrapped classification is unchanged there.
@@ -1892,6 +1947,41 @@ impl Executor {
                     // status carries the same fact).
                     crate::builtins::kill::note_adjudicated_signal_death(signal);
                     return Err(ExecuteError::ExitCode(128 + signal));
+                }
+                // rubash#2353: a routed (ancestor-lane) delivery in
+                // the complementary cell — no EXIT trap caught it
+                // above, non-interactive — is a SIG_DFL death GNU
+                // never runs a handler for (sig.c:230-236), enacted
+                // here by arming the same termsig mark. Kernel-lane
+                // entries keep the plain path below: their stale
+                // check already proved a handler story this lane
+                // never has, and a contained child's routed entries
+                // are excluded inside the helper (its death is the
+                // simulated plain path below, rubash#2236).
+                if !stale_check && self.note_routed_untrapped_termsig(signal) {
+                    crate::builtins::kill::note_adjudicated_signal_death(signal);
+                    return Err(ExecuteError::ExitCode(128 + signal));
+                }
+                // rubash#2353 (SIGINT cell): a routed SIGINT the
+                // verdicts above did not take is absorbed. GNU's
+                // script shell waiting on the carrier — this lane's
+                // only posture, since the entry surfaces after the
+                // carrier completed — records an untrapped SIGINT
+                // and otherwise ignores it (jobs.c:2908
+                // wait_sigint_handler); it dies of SIGINT only when
+                // the foreground job itself died of it (jobs.c:4384,
+                // 4410), which a completed carrier did not. Drop the
+                // entry: the carrier's status stands and the script
+                // continues. A contained child's entries keep the
+                // plain path (its simulated death is adjudicated
+                // below), as do interactive shells (DISCARD, #1662).
+                #[cfg(unix)]
+                if !stale_check
+                    && signal == libc::SIGINT as i32
+                    && !self.invocation_interactive()
+                    && !crate::builtins::kill::direct_child_route_active()
+                {
+                    continue;
                 }
                 self.exit_code = 128 + signal;
                 // rubash#2236: record the death so an in-process
