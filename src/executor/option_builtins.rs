@@ -69,12 +69,27 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        let umask_before = self.shell_state.env_vars.get("__RUBASH_UMASK").cloned();
         let status = crate::builtins::umask::execute_with_io(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
         )?;
+        // rubash#2084: journal a session-set umask so the root
+        // executor's Drop can restore the host's birth value when the
+        // process still carries this session's setting (the builtin
+        // moves the process-global mask; the session must not leak it
+        // into the embedding host).
+        if status == 0 {
+            if let Some(after) = self.shell_state.env_vars.get("__RUBASH_UMASK") {
+                if Some(after) != umask_before.as_ref() {
+                    if let Ok(value) = u32::from_str_radix(after, 8) {
+                        self.session_set_umask = Some(value);
+                    }
+                }
+            }
+        }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
