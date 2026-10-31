@@ -3743,11 +3743,11 @@ impl Executor {
                     // instead of deep-cloning the whole command node for
                     // every subshell execution.
                     let trap_redirect_arg = if !executor.exec_replaced
-                        && crate::builtins::trap::get_trap_action(
+                        && crate::builtins::trap::active_trap_action_ref(
                             &executor.shell_state.env_vars,
                             "EXIT",
                         )
-                        .is_some_and(|action| !action.is_empty())
+                        .is_some()
                     {
                         trap_stdio_redirect_cmd = Some(subshell_stdio_redirect_cmd(redirect_cmd));
                         trap_stdio_redirect_cmd.as_ref()

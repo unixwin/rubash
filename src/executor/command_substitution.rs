@@ -617,8 +617,8 @@ impl Executor {
     /// captured — behavior only the real executor path provides.
     pub(in crate::executor) fn err_trap_inherited_into_comsub(&self) -> bool {
         crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "errtrace")
-            && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "ERR")
-                .is_some_and(|action| !action.is_empty())
+            && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "ERR")
+                .is_some()
     }
 
     pub(in crate::executor) fn expand_command_substitution_with_context(
@@ -803,8 +803,8 @@ impl Executor {
         // and route the body through the real parser/executor, matching
         // subst.c:7143 command_substitute -> parse_and_execute.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "functrace")
-            && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                .is_some_and(|action| !action.is_empty())
+            && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                .is_some()
         {
             if let Some(output) = self.command_list_substitution_output(source, context) {
                 return output;
