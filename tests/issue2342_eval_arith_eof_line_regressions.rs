@@ -107,14 +107,18 @@ fn construct_on_string_line_two_reports_caller_plus_one() {
     );
 }
 
-/// Inside a function, GNU line numbers are function-relative: the
-/// eval on the body's first line reports line 1.
+/// Inside a function, GNU line numbers are function-relative — but
+/// the frame's first counted line is the `{` line, so the eval on the
+/// body's first statement line reports line 2, not 1. Oracle-checked
+/// against GNU bash 5.3.20 with this exact script (stderr: "eval:
+/// line 2: unexpected EOF while looking for matching `)'"); the
+/// original expectation of 1 was a wrong pin.
 #[test]
 fn function_body_eval_reports_function_relative_line() {
     expect_eval_error(
         "f() {\n  eval 'echo $(( (2))'\n}\nf\necho rc=$?\n",
         "rc=2\n",
-        1,
+        2,
     );
 }
 
