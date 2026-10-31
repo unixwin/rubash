@@ -1945,8 +1945,8 @@ impl Executor {
         // (execute_cmd.c:4506); this fast path bypasses the stage loop, so
         // bail out and let it own the fires.
         if self.debug_trap_in_scope()
-            && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                .is_some_and(|action| !action.is_empty())
+            && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                .is_some()
         {
             return Ok(None);
         }
@@ -2258,8 +2258,8 @@ impl Executor {
             // members directly and would bypass those fires, so a live DEBUG
             // trap takes the sequential stage path which fires per element.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty()))
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
             // run concurrently with real OS pipes between stages (GNU bash
@@ -2454,8 +2454,8 @@ impl Executor {
             // Same DEBUG-trap bail-out as the concurrent external paths: the
             // sequential loop owns the per-element run_debug_trap fires.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty()))
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
             || commands[0].inverted
             || commands[0].inverted_command.is_some()
         {
@@ -3584,8 +3584,8 @@ impl Executor {
             // A live DEBUG trap fires per element inside the forked child
             // (execute_cmd.c:4506); this fast path would bypass those fires.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty()))
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
         {
             return Ok(None);
         }
@@ -3846,8 +3846,8 @@ impl Executor {
             // Same DEBUG-trap bail-out as the all-external path: the
             // sequential loop owns per-element run_debug_trap fires.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty()))
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
             || commands.first().is_some_and(|command| command.time_command.is_some())
         {
             return Ok(None);
@@ -3921,8 +3921,8 @@ impl Executor {
             // members directly and would bypass those fires, so a live DEBUG
             // trap takes the sequential stage path which fires per element.
             || (self.debug_trap_in_scope()
-                && crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "DEBUG")
-                    .is_some_and(|action| !action.is_empty()))
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
             // NOTE: stdout_capture (command substitution) is intentionally NOT a
             // bail-out here. External-only pipelines inside `$(...)` must still
             // run concurrently with real OS pipes between stages (GNU bash
