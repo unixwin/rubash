@@ -221,6 +221,23 @@ impl Executor {
                 self.undo_child_fd_var_redirects();
             }
         }
+        // rubash#2280: for an in-process dispatch (builtin/function —
+        // the same classification as the rejected arm above), perform
+        // the command's recorded {var} closes in the table for the
+        // duration of the dispatch; the snapshots are replayed right
+        // after it, below. An external dispatch leaves the records
+        // for its delivery (rubash#2281). A builtin name that turns
+        // out external after all (disabled builtin) is safe too: the
+        // delivery then finds the records consumed but the table
+        // already closed, and execute_external's own undo cannot
+        // see these local snapshots — the replay below restores
+        // them exactly once.
+        let in_process_dispatch = !redirect_rejected
+            && cmd.words.first().is_some_and(|word| {
+                is_shell_builtin_name(word) || self.function_name_for_command_word(word).is_some()
+            });
+        let in_process_close_snapshots =
+            self.apply_fd_var_closes_for_in_process(in_process_dispatch);
         let result = if redirect_rejected {
             Ok(())
         } else {
@@ -239,6 +256,12 @@ impl Executor {
                 Err(()) => Ok(()),
             }
         };
+        // rubash#2280: the in-process {var} closes end with the
+        // dispatch — restore the parent's bindings from the
+        // snapshots taken above.
+        if !in_process_close_snapshots.is_empty() {
+            self.restore_fd_var_close_snapshots(in_process_close_snapshots);
+        }
         // rubash#2174: GNU flushes its stdio stdout after EVERY builtin
         // or function executed in the current shell context
         // (execute_cmd.c:5648 execute_builtin_or_function:

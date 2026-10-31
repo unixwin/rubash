@@ -2255,11 +2255,17 @@ impl Executor {
                         None => {
                             // GNU cat.c reports its own errors bare, with
                             // no shell diagnostic prefix (rubash#1309).
-                            writeln!(
-                                &mut diagnostics,
-                                "cat: {}: No such file or directory",
-                                target
-                            )?;
+                            // rubash#2276: when the alias layer refuses
+                            // the spelling-open (a socket endpoint), the
+                            // reason is its ENXIO, not ENOENT.
+                            let reason =
+                                match crate::executor::dev_fd_operands::dev_operand_fd(&target)
+                                    .and_then(|fd| self.fd_alias_spelling_open_error(fd))
+                                {
+                                    Some(error) => crate::posix_errors::message(&error),
+                                    None => "No such file or directory".to_string(),
+                                };
+                            writeln!(&mut diagnostics, "cat: {}: {}", target, reason)?;
                             status = 1;
                         }
                     }

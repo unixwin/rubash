@@ -569,6 +569,14 @@ impl Executor {
                 // `read x < /dev/fd/6` re-reads the first record
                 // instead of walking the shared offset.
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    // rubash#2276: a socket endpoint's spelling-open
+                    // fails ENXIO in GNU — decline the serve (the
+                    // read reports no input, its failure shape; the
+                    // dup machinery below is the `<&N` descriptor
+                    // face and must keep streaming sockets).
+                    if self.fd_alias_spelling_open_error(fd).is_some() {
+                        return None;
+                    }
                     if let Some(path) = self.fd_alias_reopen_path(fd) {
                         if let Ok(fresh) = FileFd::open_read(path) {
                             if let Some(scratch) = self.allocate_dynamic_fd() {

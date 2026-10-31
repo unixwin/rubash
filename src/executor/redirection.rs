@@ -643,6 +643,10 @@ impl Executor {
         // carries the ambient state; `opened` overlays the fds this
         // command's earlier redirects opened/closed/duped for the scan.
         let mut opened: HashMap<u32, bool> = HashMap::new();
+        // rubash#2281: how many of fd_var_pending_closes the scan has
+        // folded into `opened` so far (the records are stored in walk
+        // order; see the fold at the top of the candidate loop).
+        let mut folded_closes = 0usize;
 
         // rubash#2098: for each candidate, whether a LATER candidate
         // also supplies fd 0 (the fd0_stdin_redirect_winner predicate:
@@ -713,6 +717,29 @@ impl Executor {
             later_binds.iter().map(|binds| binds.contains(&0)).collect();
 
         for (index, redirect) in candidates.iter().enumerate() {
+            // rubash#2281: fold this command's recorded {var} closes
+            // into the scan at their walk positions. The applier only
+            // RECORDED a `{v}<&-` close (rubash#2272); without the
+            // fold the entry is invisible here (the fd_var non-dup arm
+            // below skips it), so a later dup of the closed descriptor
+            // validated against the still-open ambient table entry —
+            // `cmd {v}<&- {w}<&9` (v=9) delivered a dup GNU rejects
+            // with EBADF (redir.c:237: the walk's close at position p
+            // poisons every source check after p). Each record folds
+            // exactly once, at the first candidate past its position,
+            // so a same-list rebind of the descriptor after the close
+            // still wins for later entries. The generation stamp
+            // confines the fold to the records of THIS command's
+            // applier run.
+            if self.fd_var_pending_close_generation == self.fd_var_close_generation {
+                while folded_closes < self.fd_var_pending_closes.len()
+                    && self.fd_var_pending_closes[folded_closes].0 < index
+                {
+                    let closed_fd = self.fd_var_pending_closes[folded_closes].1;
+                    opened.insert(closed_fd, false);
+                    folded_closes += 1;
+                }
+            }
             if matches!(redirect.kind, crate::parser::RedirectKind::HereString) {
                 // rubash#2292: a here-string DOES bind its redirector
                 // for the ordered-effects scan — GNU stages the body
@@ -1160,6 +1187,37 @@ impl Executor {
                                 index,
                                 &format!("{target}: No such file or directory"),
                             )
+                            .map(|_| Some(RedirectRejection::Command));
+                    }
+                    // rubash#2276: the alias is OPEN (the judgment
+                    // above), but the spelling is an open() of the
+                    // magic link (redir.c's r_input/r_output arms via
+                    // redir_open), and a socket's magic link refuses
+                    // the open with ENXIO — the dup faces the #1963
+                    // judgment models are not this face, and the
+                    // serve ladders that resolve the spelling per
+                    // face (the text stdin channel, the stdio plan)
+                    // cannot be relied on to refuse it. The endpoint
+                    // judged is the one the ordered walk would open
+                    // at this entry: the ambient table entry, or a
+                    // socket an earlier entry of THIS list bound
+                    // from a net target (the walk's connect precedes
+                    // the spelling's open in GNU's walk too).
+                    let socket = self.fd_alias_spelling_open_error(fd).is_some()
+                        || cmd.redirects[..index].iter().any(|earlier| {
+                            earlier.fd == Some(fd)
+                                && crate::special_paths::is_net_redirect_target(
+                                    &self.expand_redirect_target(earlier),
+                                )
+                        });
+                    if socket {
+                        let message = crate::posix_errors::path_error(
+                            &target,
+                            super::shell_options::enxio_error(),
+                        );
+                        let text = crate::posix_errors::message(&message);
+                        return self
+                            .reject_redirect_at(cmd, index, &text)
                             .map(|_| Some(RedirectRejection::Command));
                     }
                 }
@@ -2296,6 +2354,26 @@ impl Executor {
             // path (GNU's open carries O_EXCL under `set -C`), reported
             // through this walk's open-failure protocol like the plain
             // arm's create_redirect_output refusal.
+            // rubash#2276: a socket endpoint's spelling-open fails
+            // ENXIO before any of the serves below (the shared clone
+            // is the pipe rule, not the socket rule), reported
+            // through the same open-failure protocol.
+            if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                let error = crate::posix_errors::path_error(target, error);
+                if state.open_failure_via_error {
+                    let mut slot = state.first_open_error.borrow_mut();
+                    if slot.is_none() {
+                        *slot = Some((error.kind(), error.to_string()));
+                    }
+                } else {
+                    let mut stderr = Vec::new();
+                    writeln!(&mut stderr, "{}{error}", self.error_prefix())?;
+                    state.write_to_fd(self, 2, &stderr)?;
+                }
+                self.exit_code = 1;
+                state.redirect_failed = true;
+                return Ok(());
+            }
             if let Some(path) = self.fd_alias_reopen_path(source_fd) {
                 // Routing resolution (OutputFdState::resolve_only_
                 // numbered): the element's setup already performed
