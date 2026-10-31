@@ -237,6 +237,22 @@ impl Executor {
             return None;
         };
 
+        // rubash#2305: same own-list discipline as the `read -u`
+        // serve — the command's own list is authoritative for the
+        // descriptor (redir.c:237 do_redirections), so a heredoc or
+        // dup own binding serves BEFORE the ambient table entry;
+        // the historic order (own file, ambient, own heredoc last)
+        // let an ambient same-fd binding shadow the effective one.
+        match self.own_input_binding(cmd, fd) {
+            Some(super::read_redirected_fd::OwnInputBinding::Heredoc) => {
+                return self.mapfile_heredoc_fd_input(cmd, fd);
+            }
+            Some(super::read_redirected_fd::OwnInputBinding::Duplicate(source)) if source != fd => {
+                return self.mapfile_dup_fd_input(cmd, source);
+            }
+            Some(super::read_redirected_fd::OwnInputBinding::Close) => return None,
+            _ => {}
+        }
         if let Some(input) = self.mapfile_redirected_fd_input(cmd, fd) {
             return Some(input);
         }
@@ -246,7 +262,42 @@ impl Executor {
         self.mapfile_heredoc_fd_input(cmd, fd)
     }
 
+    /// Slurp counterpart of read_dup_fd_input (rubash#2305): a
+    /// Duplicate own binding copies the source's binding as of the
+    /// dup's position — follow the source through the own list
+    /// first, then to the ambient descriptor state.
+    fn mapfile_dup_fd_input(&mut self, cmd: &CommandNode, source: u32) -> Option<String> {
+        let mut current = source;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            match self.own_input_binding(cmd, current) {
+                Some(super::read_redirected_fd::OwnInputBinding::File) => {
+                    return self.mapfile_redirected_fd_input(cmd, current);
+                }
+                Some(super::read_redirected_fd::OwnInputBinding::Heredoc) => {
+                    return self.mapfile_heredoc_fd_input(cmd, current);
+                }
+                Some(super::read_redirected_fd::OwnInputBinding::Duplicate(next)) => {
+                    current = next;
+                }
+                Some(super::read_redirected_fd::OwnInputBinding::Close) => return None,
+                None => break,
+            }
+        }
+        self.mapfile_virtual_fd_input(current)
+    }
+
     pub(in crate::executor) fn mapfile_fd_is_available(&self, cmd: &CommandNode, fd: u32) -> bool {
+        // rubash#2305: same own-list walk as the `read` gate — an
+        // own close makes the fd invalid even over an ambient open
+        // entry (GNU mapfile.def validates the redirected
+        // descriptor), an own dup defers to its source's state.
+        if let Some(available) = self.own_input_binding_availability(cmd, fd) {
+            return available;
+        }
         if self.fd_table.is_open_for_read(fd) {
             return true;
         }

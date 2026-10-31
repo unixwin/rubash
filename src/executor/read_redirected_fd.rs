@@ -300,3 +300,201 @@ impl Executor {
         ))
     }
 }
+
+/// Which source a command's OWN redirect list effectively binds on an
+/// fd, for the in-process `read -u` serve (rubash#2305). GNU applies
+/// the list in order before the builtin runs (redir.c:237
+/// do_redirections; redir.c:423 here_document_to_fd materializes a
+/// heredoc node's own body), so the LAST input-side entry naming the
+/// fd is the descriptor the builtin reads — across kinds, not per
+/// kind: `3<file 3<<EOF` reads the body, `3<<EOF 3<file` reads the
+/// file, `3<<EOF` under an ambient `3<outer` reads the body. The
+/// per-kind serves historically consulted each store in a fixed
+/// order (own files, then the ambient table entry, then own heredocs
+/// as a last resort), which let an ambient binding — or an earlier
+/// own entry of a luckier kind — shadow the effective one.
+pub(in crate::executor) enum OwnInputBinding {
+    /// Input / ReadWrite entry: served by read_redirected_fd.
+    File,
+    /// HereDoc / HereString entry: served by read_heredoc_fd_input.
+    Heredoc,
+    /// DuplicateInput entry: serve the source fd's binding.
+    Duplicate(u32),
+    /// CloseInput entry: the command closed the fd for itself.
+    Close,
+}
+
+impl Executor {
+    /// The effective own-list binding for `fd`, or None when the
+    /// command's own list does not bind it (the ambient descriptor
+    /// state then governs, as before). `redirect_in` is consulted
+    /// only when the ordered list carries no entry for the fd — it
+    /// mirrors a list entry, and the ordered list is authoritative
+    /// when both speak (read_redirected_fd's dual-store rule).
+    pub(in crate::executor) fn own_input_binding(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+    ) -> Option<OwnInputBinding> {
+        let mut binding: Option<OwnInputBinding> = None;
+        for redirect in &cmd.redirects {
+            if redirect.fd != Some(fd) || redirect.fd_var.is_some() {
+                continue;
+            }
+            binding = match redirect.kind {
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                    Some(OwnInputBinding::File)
+                }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    Some(OwnInputBinding::Heredoc)
+                }
+                crate::parser::RedirectKind::DuplicateInput => {
+                    let target = self.expand_redirect_target(redirect);
+                    redirect_target_fd_and_move(&target)
+                        .map(|(source, _move)| OwnInputBinding::Duplicate(source))
+                }
+                crate::parser::RedirectKind::CloseInput => Some(OwnInputBinding::Close),
+                _ => continue,
+            };
+        }
+        if binding.is_none() {
+            if let Some(redirect) = cmd
+                .redirect_in
+                .as_deref()
+                .filter(|redirect| redirect.fd == Some(fd) && redirect.fd_var.is_none())
+            {
+                binding = match redirect.kind {
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                        Some(OwnInputBinding::File)
+                    }
+                    crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString => Some(OwnInputBinding::Heredoc),
+                    crate::parser::RedirectKind::DuplicateInput => {
+                        let target = self.expand_redirect_target(redirect);
+                        redirect_target_fd_and_move(&target)
+                            .map(|(source, _move)| OwnInputBinding::Duplicate(source))
+                    }
+                    crate::parser::RedirectKind::CloseInput => Some(OwnInputBinding::Close),
+                    _ => None,
+                };
+            }
+        }
+        binding
+    }
+
+    /// Whether `read -u fd` can be served at all under the command's
+    /// own list: a Close makes the descriptor invalid (GNU
+    /// read.def:377-381 sh_validfd on the REDIRECTED state), a
+    /// Duplicate defers to its source's availability, other bindings
+    /// are available by construction. None (no own binding) defers to
+    /// the caller's ambient checks.
+    pub(in crate::executor) fn own_input_binding_availability(
+        &self,
+        cmd: &CommandNode,
+        fd: u32,
+    ) -> Option<bool> {
+        match self.own_input_binding(cmd, fd) {
+            Some(OwnInputBinding::Close) => Some(false),
+            Some(OwnInputBinding::Duplicate(source)) => {
+                let mut current = source;
+                let mut seen = std::collections::HashSet::new();
+                loop {
+                    if !seen.insert(current) {
+                        return Some(false);
+                    }
+                    match self.own_input_binding(cmd, current) {
+                        Some(OwnInputBinding::Close) => return Some(false),
+                        Some(OwnInputBinding::Duplicate(next)) => current = next,
+                        Some(OwnInputBinding::File) | Some(OwnInputBinding::Heredoc) => {
+                            return Some(true)
+                        }
+                        None => return Some(self.fd_table.is_open_for_read(current)),
+                    }
+                }
+            }
+            Some(OwnInputBinding::File) | Some(OwnInputBinding::Heredoc) => Some(true),
+            None => None,
+        }
+    }
+
+    /// Serve one record for a Duplicate own binding (`read -u 3 x
+    /// 3<&4`): the dup copies the source's binding as of the dup's
+    /// position in the list, so follow the source through the own
+    /// list first and only then to the ambient descriptor state —
+    /// never the target fd's own ambient entry (rubash#2305).
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::executor) fn read_dup_fd_input(
+        &mut self,
+        cmd: &CommandNode,
+        source: u32,
+        delimiter: char,
+        char_limit: Option<usize>,
+        exact_char_limit: bool,
+        escape_aware: bool,
+        raw: bool,
+    ) -> Option<String> {
+        let mut current = source;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            if !seen.insert(current) {
+                return None;
+            }
+            match self.own_input_binding(cmd, current) {
+                Some(OwnInputBinding::File) => {
+                    return self.read_redirected_fd(
+                        cmd,
+                        current,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
+                Some(OwnInputBinding::Heredoc) => {
+                    return self.read_heredoc_fd_input(
+                        cmd,
+                        current,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
+                Some(OwnInputBinding::Duplicate(next)) => current = next,
+                Some(OwnInputBinding::Close) => return None,
+                None => break,
+            }
+        }
+        if let Some(line) = self.read_virtual_fd_stdin(
+            current,
+            false,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+            escape_aware,
+            raw,
+        ) {
+            return Some(line);
+        }
+        self.read_coproc_stdout(
+            current,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+            escape_aware,
+            raw,
+        )
+        .map(|output| {
+            trim_read_input(
+                output,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+                escape_aware,
+                raw,
+            )
+        })
+    }
+}

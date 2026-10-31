@@ -310,6 +310,44 @@ impl Executor {
         // report EOF where a pipeline stage parks its input on the
         // FUNCTION_STDIN mirror (rubash#938).
         if let Some(fd) = read_fd.filter(|fd| *fd != 0) {
+            // rubash#2305: the command's OWN redirect list is
+            // authoritative for the descriptor — GNU applies it over
+            // the ambient state before the builtin runs (redir.c:237
+            // do_redirections). A heredoc or dup own binding therefore
+            // serves BEFORE the ambient transports below; the historic
+            // per-kind order (own file, coproc, ambient table entry,
+            // own heredoc as a last resort) let an ambient entry
+            // shadow the effective own binding, and a self-dup is
+            // GNU's no-op (redir.c:1128 `redir_fd != redirector`), so
+            // it keeps the ambient serve.
+            match self.own_input_binding(cmd, fd) {
+                Some(super::read_redirected_fd::OwnInputBinding::Heredoc) => {
+                    return self.read_heredoc_fd_input(
+                        cmd,
+                        fd,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
+                Some(super::read_redirected_fd::OwnInputBinding::Duplicate(source))
+                    if source != fd =>
+                {
+                    return self.read_dup_fd_input(
+                        cmd,
+                        source,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    );
+                }
+                Some(super::read_redirected_fd::OwnInputBinding::Close) => return None,
+                _ => {}
+            }
             if let Some(line) = self.read_redirected_fd(
                 cmd,
                 fd,
@@ -1187,7 +1225,7 @@ impl Executor {
         }
     }
 
-    fn read_coproc_stdout(
+    pub(in crate::executor) fn read_coproc_stdout(
         &mut self,
         fd: u32,
         delimiter: char,
