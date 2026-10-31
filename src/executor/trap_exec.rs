@@ -2306,7 +2306,15 @@ impl Executor {
             let abort = pending.iter().copied().find(|&signal| {
                 #[cfg(unix)]
                 {
-                    crate::builtins::kill::kernel_handler_installed(signal)
+                    // rubash#2344: a stop-class signal never KILLS a
+                    // real foreground child (it stops it), so the death
+                    // model below cannot fire for one — the delivery
+                    // defers to the sleep's completion like any other
+                    // trapped arrival. Before the stop class joined
+                    // the managed set no such delivery could be pending
+                    // here at all; the exclusion keeps that invariant.
+                    !crate::builtins::kill::kernel_is_stop_class(signal)
+                        && crate::builtins::kill::kernel_handler_installed(signal)
                         // Kernel-caused (terminal ^C): the real child
                         // dies, rubash#1034. Kill(2)-caused: the real
                         // child dies only when the delivery addressed
