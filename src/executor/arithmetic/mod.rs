@@ -808,21 +808,31 @@ impl Executor {
     pub(in crate::executor) fn flush_arith_diags(&self, label: Option<&str>) {
         let mut printed = false;
         for diag in take_arith_eval_diags() {
+            // Diag payloads are built from parser-input text, and on the
+            // EXP_EXPANDED entries (`let`, `[[`) that input carries the
+            // subscript carrier encoding (`a[<0x1e><hex>]`) from the
+            // indexed-subscript rewrite. GNU echoes the lvalue token as
+            // written (expr.c:1526-1535), so decode the carrier spans at
+            // this single rendering point — every producer (plain and
+            // compound binds, read and bind diagnostics) is covered
+            // (rubash#2341's `let` bind line leaked the raw encoding).
             match (&diag, label) {
                 (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => eprintln!(
                     "{}{}: `{}': not a valid identifier",
                     self.diagnostic_prefix(),
                     label,
-                    display
+                    parser::de_carrier_arith_text(display)
                 ),
                 (ArithEvalDiag::InvalidIdentifier(display), None) => eprintln!(
                     "{}`{}': not a valid identifier",
                     self.diagnostic_prefix(),
-                    display
+                    parser::de_carrier_arith_text(display)
                 ),
-                (ArithEvalDiag::BadSubscript(display), _) => {
-                    eprintln!("{}{}: bad array subscript", self.error_prefix(), display)
-                }
+                (ArithEvalDiag::BadSubscript(display), _) => eprintln!(
+                    "{}{}: bad array subscript",
+                    self.error_prefix(),
+                    parser::de_carrier_arith_text(display)
+                ),
             }
             printed = true;
         }
