@@ -36,6 +36,7 @@ fn run_script(dir: &Path, name: &str, body: &str) -> std::process::Output {
     let script = dir.join(name);
     fs::write(&script, body).expect("write script");
     rubash_command()
+        .current_dir(dir)
         .arg(shell_test_path(&script))
         .output()
         .expect("run script")
@@ -86,15 +87,21 @@ fn issue2212_01_nounset_indirect_positional_index() {
 // INIT_DYNAMIC_VAR over the live call stack), so an in-range element
 // is bound. The nounset adjudication must consult the same live
 // stack view the read path renders, not the env mirror.
+//
+// Shape note (collector adjudication, oracle-verified): this pin
+// runs a SCRIPT FILE, not a `-c` string. In the `-c` shape GNU
+// 5.3.20 itself reports `FUNCNAME[1]: unbound variable` — the
+// `main` frame only exists for a script process — so a `-c` pin
+// would assert non-GNU behavior. In the script shape GNU prints
+// `fn=main src0=<path> ln=3` and rubash matches byte-for-byte.
 #[test]
 fn issue2212_02_nounset_stack_array_elements() {
-    let output = rubash_command()
-        .args([
-            "-c",
-            "set -u; f() { echo \"fn=${FUNCNAME[1]} src0=${BASH_SOURCE[0]} ln=${BASH_LINENO[0]}\"; }; f",
-        ])
-        .output()
-        .expect("run rubash");
+    let dir = test_dir("02");
+    let output = run_script(
+        &dir,
+        "main.sh",
+        "set -u\nf() { echo \"fn=${FUNCNAME[1]} src0=${BASH_SOURCE[0]} ln=${BASH_LINENO[0]}\"; }\nf\n",
+    );
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -103,18 +110,18 @@ fn issue2212_02_nounset_stack_array_elements() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("fn=main"), "stdout: {stdout}");
     assert!(stdout.contains("src0="), "stdout: {stdout}");
+    assert!(stdout.contains("ln=3"), "stdout: {stdout}");
 
-    // Out-of-range elements stay unbound under nounset (GNU reports).
-    let output = rubash_command()
-        .args(["-c", "set -u; echo \"${BASH_SOURCE[9]}\""])
-        .output()
-        .expect("run rubash");
+    // Out-of-range elements stay unbound under nounset (GNU reports;
+    // verified in this same script shape against the oracle).
+    let output = run_script(&dir, "oob.sh", "set -u\necho \"${BASH_SOURCE[9]}\"\n");
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("unbound variable"),
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let _ = fs::remove_dir_all(&dir);
 }
 
 // 02b — the bats#385 shape reduced: in a fresh script process, a
@@ -252,9 +259,13 @@ fn issue2212_05_lowercase_env_import_stays_exported() {
         String::from_utf8_lossy(&output.stdout)
     );
 
+    // The export attribute is observed via `declare -p`:
+    // `declare -x <name>` prints nothing on GNU 5.3.20 either
+    // (oracle-verified), while master prints
+    // `declare -- issue2212_lower="kept"` here (no -x: the bug).
     let output = rubash_command()
         .env("issue2212_lower", "kept")
-        .args(["-c", "declare -x issue2212_lower"])
+        .args(["-c", "declare -p issue2212_lower"])
         .output()
         .expect("run rubash");
     assert!(
