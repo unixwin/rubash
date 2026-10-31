@@ -1093,12 +1093,54 @@ impl Executor {
     ///   a foreground TERM death lands);
     /// - background TERM/INT/PIPE or trapped deaths: silent.
     pub(crate) fn report_pending_signal_notices(&mut self) -> Result<(), ExecuteError> {
+        // rubash#2398: stop notices first — GNU's notify_of_job_status
+        // reports the stop at this same boundary, and a stop the
+        // job-control wait just observed belongs ahead of any death
+        // notices the same command queued.
+        let stopped = std::mem::take(&mut *self.pending_stopped_job_notices.borrow_mut());
+        let mut out = self.format_stopped_job_notices(&stopped);
         let notices = std::mem::take(&mut *self.pending_signal_notices.borrow_mut());
-        let out = self.format_signal_notices(notices);
+        out.push_str(&self.format_signal_notices(notices));
         if !out.is_empty() {
             crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
         }
         Ok(())
+    }
+
+    /// Render queued stop notices (rubash#2398) in the notification
+    /// shape GNU uses for a freshly stopped job — the `jobs` short
+    /// line (jobs.c:2207 pretty_print_job: `[%d]%c `, state padded to
+    /// LONGEST_SIGNAL_DESC 27): `[1]+  Stopped                  sleep 30`.
+    /// A job that already left the Stopped state before the boundary
+    /// (resumed and reaped by the same command line) prints nothing.
+    fn format_stopped_job_notices(&self, pids: &[u32]) -> String {
+        let mut out = String::new();
+        for &pid in pids {
+            let Some(job) = self
+                .shell_state
+                .job_table
+                .pid_to_job
+                .get(&pid)
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+            else {
+                continue;
+            };
+            if job.state != crate::jobs::ProcessState::Stopped {
+                continue;
+            }
+            let marker = if self.shell_state.job_table.current_job() == Some(job.id) {
+                '+'
+            } else if self.shell_state.job_table.previous_job() == Some(job.id) {
+                '-'
+            } else {
+                ' '
+            };
+            out.push_str(&format!(
+                "[{}]{}  {:<27}{}\n",
+                job.id, marker, "Stopped", job.command
+            ));
+        }
+        out
     }
 
     /// End-of-stream notification step (rubash#1853). The per-command
@@ -1799,6 +1841,110 @@ impl Executor {
         self.run_sigchld_trap_for_reaped_child()?;
         // Remove the visible job after any wait, while retaining the exit
         // status for repeated explicit PID waits.
+        self.shell_state
+            .job_table
+            .remove_job_by_pid_preserve_status(pid);
+        self.forget_background_runtime(pid);
+        Ok(WaitPidOutcome::Status(status))
+    }
+
+    /// rubash#2398: fg's wait while the job-control channel is live —
+    /// the twin of wait_for_background_pid with GNU wait_for's
+    /// WUNTRACED semantics (jobs.c:3064 via waitchld, jobs.c:4077).
+    /// The caller (execute_fg_jobs) already handed the terminal to
+    /// the job's pgrp and SIGCONT'd it, so the blocking waitpid needs
+    /// no signal forwarding: terminal signals address the job's group
+    /// alone, and a signal delivered to the SHELL surfaces as EINTR
+    /// and is adjudicated through the same pending-signal drain
+    /// wait_for_background_pid uses (trap.c:604-611 — the signal wins
+    /// the race, the job stays live and waitable). A re-stop is a
+    /// first-class outcome: the job goes back to Stopped in the
+    /// table, its handle returns to background_children, the boundary
+    /// stop notice is queued, and the caller maps the outcome to
+    /// 128 + stop-signal.
+    #[cfg(unix)]
+    fn wait_for_fg_job_control(&mut self, pid: u32) -> Result<WaitPidOutcome, ExecuteError> {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(interrupt) = self.wait_pending_signal_status()? {
+            return Ok(WaitPidOutcome::Interrupted(interrupt));
+        }
+        let Some(mut child) = self.background_children.remove(&pid) else {
+            // No live handle (a recorded completion, a procsub
+            // placeholder, ...): the poll-based wait owns those
+            // shapes exactly as before.
+            return self.wait_for_background_pid(pid, false);
+        };
+        self.procsub_stream_children.remove(&pid);
+        let raw = loop {
+            let mut raw_status: libc::c_int = 0;
+            let waited = unsafe { libc::waitpid(pid as i32, &mut raw_status, libc::WUNTRACED) };
+            if waited == pid as i32 {
+                break raw_status;
+            }
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::EINTR) => match self.wait_pending_signal_status() {
+                        Ok(Some(interrupt)) => {
+                            self.background_children.insert(pid, child);
+                            return Ok(WaitPidOutcome::Interrupted(interrupt));
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            self.background_children.insert(pid, child);
+                            return Err(error);
+                        }
+                    },
+                    Some(libc::ECHILD) => match child.try_wait()? {
+                        Some(done) => break done.into_raw(),
+                        None => {
+                            self.background_children.insert(pid, child);
+                            return Ok(WaitPidOutcome::NotFound);
+                        }
+                    },
+                    _ => return Err(ExecuteError::IoError(error)),
+                }
+            }
+        };
+        if libc::WIFSTOPPED(raw) {
+            let stop_signal = libc::WSTOPSIG(raw);
+            let job_id = self.shell_state.job_table.job_id_for_pid(pid).unwrap_or(0);
+            self.shell_state
+                .job_table
+                .mark_stopped(pid, Some(stop_signal));
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+            self.queue_stopped_job_notice(pid);
+            self.background_children.insert(pid, child);
+            return Ok(WaitPidOutcome::Stopped {
+                job_id,
+                stop_signal,
+            });
+        }
+        let status = std::process::ExitStatus::from_raw(raw);
+        // The reap bookkeeping mirrors wait_for_background_pid's tail:
+        // signal-death notice while the job entry still exists, then
+        // completion, SIGCHLD trap, and status-preserving removal.
+        // (The Windows CHILDREN CPU sampling in the twin has no unix
+        // counterpart to mirror.)
+        if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status) {
+            let command = self
+                .shell_state
+                .job_table
+                .pid_to_job
+                .get(&pid)
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                .map(|job| job.command.clone())
+                .unwrap_or_default();
+            self.note_child_signal_death(pid, signal, command, false);
+        }
+        let status = crate::executor::wait_status::process_exit_status(&status);
+        self.join_coproc_stderr_forwarder(pid)?;
+        self.shell_state.job_table.mark_completed(pid, status);
+        self.flush_timed_coproc_report(pid);
+        self.run_sigchld_trap_for_reaped_child()?;
         self.shell_state
             .job_table
             .remove_job_by_pid_preserve_status(pid);
@@ -2535,6 +2681,29 @@ impl Executor {
             .map(|entry| (entry.command.clone(), entry.pids.clone()))
             .unwrap_or_default();
         writeln!(stdout, "{command}")?;
+        // rubash#2398: GNU start_job hands the terminal to the job's
+        // pgrp BEFORE the SIGCONT (jobs.c:3918 give_terminal_to, then
+        // jobs.c:3926-3928), and wait_for reclaims it for the shell
+        // when the wait ends (jobs.c:3253) — the reclaim below runs on
+        // every wait outcome. Only with the job-control channel live;
+        // otherwise fg keeps the shared-group delivery model.
+        #[cfg(unix)]
+        let fg_tty = if self.job_control_channel_active() {
+            let pgrp = self
+                .shell_state
+                .job_table
+                .jobs
+                .get(&job_id)
+                .map(|entry| entry.pgrp)
+                .unwrap_or(pid);
+            let tty = super::job_control_wait::controlling_tty();
+            if let Some(tty) = &tty {
+                super::job_control_wait::give_terminal_to(tty, pgrp);
+            }
+            tty
+        } else {
+            None
+        };
         // SIGCONT follows the target numbering (18 Linux / 19 Darwin) via
         // kill::SIGCONT_NUMBER — jobs.c:3928 `killpg (..., SIGCONT)` uses
         // the platform's own number, not a Linux literal.
@@ -2561,7 +2730,26 @@ impl Executor {
             super::external_inner::ForegroundBuiltinSigintGuard::hold_if_interactive_untrapped(
                 self,
             );
-        let wait_outcome = match self.wait_for_background_pid(pid, false) {
+        // rubash#2398: with the terminal handed over, the wait is the
+        // WUNTRACED one (wait_for_fg_job_control) — a re-stop of the
+        // job is a wait outcome, and the terminal ^C reaches the job's
+        // group alone, so the wait needs no SIGINT forwarding. The
+        // ExitCode conversion below is shared by both waits.
+        #[cfg(unix)]
+        let wait_result = if fg_tty.is_some() {
+            self.wait_for_fg_job_control(pid)
+        } else {
+            self.wait_for_background_pid(pid, false)
+        };
+        #[cfg(not(unix))]
+        let wait_result = self.wait_for_background_pid(pid, false);
+        // jobs.c:3253: the shell takes its terminal back on every way
+        // out of the wait.
+        #[cfg(unix)]
+        if let Some(tty) = &fg_tty {
+            super::job_control_wait::give_terminal_to(tty, super::job_control_wait::shell_pgrp());
+        }
+        let wait_outcome = match wait_result {
             Ok(outcome) => Ok(outcome),
             Err(ExecuteError::ExitCode(code)) if code > 128 => {
                 Ok(WaitPidOutcome::Interrupted(code))

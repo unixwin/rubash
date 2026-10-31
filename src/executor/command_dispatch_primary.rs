@@ -152,6 +152,14 @@ impl Executor {
             }
             Some(PrimarySlot::Sleep) => {
                 if !self.emulated_external_stands_down("sleep")
+                    // rubash#2398: with the job-control channel live,
+                    // GNU's sleep is a real job-controlled child
+                    // (jobs.c waitchld's WUNTRACED face) — the
+                    // in-process emulation has no process group to
+                    // stop, hand the terminal to, or resume with
+                    // fg/bg, so it stands down to the real spawn for
+                    // exactly the channel's lifetime.
+                    && !(cfg!(unix) && self.job_control_channel_active())
                     && crate::builtins::sleep::can_execute_fast_path(&cmd.words[1..])
                     // rubash#1497: a stamped -c tail command must reach
                     // the spawn site so it can exec-replace the process

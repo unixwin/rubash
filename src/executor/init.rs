@@ -1100,6 +1100,7 @@ impl Executor {
             source_nest_depth: 0,
             sigchld_notifications_pending: std::cell::Cell::new(0),
             pending_signal_notices: std::cell::RefCell::new(Vec::new()),
+            pending_stopped_job_notices: std::cell::RefCell::new(Vec::new()),
             host_internal_depth: std::cell::Cell::new(0),
             debug_trap_function_line: None,
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),

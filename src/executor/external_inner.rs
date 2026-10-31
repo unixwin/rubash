@@ -1762,6 +1762,141 @@ impl Executor {
         }
     }
 
+    /// rubash#2398: the interactive foreground wait with job control
+    /// live (see job_control_wait for the gate). GNU's shape: the
+    /// child was made a process-group leader at spawn (jobs.c:2390),
+    /// wait_for operates on a registered job (jobs.c:3064), the
+    /// terminal belongs to the child's pgrp for the whole wait
+    /// (give_terminal_to, jobs.c:4999 — handed over at jobs.c:2400
+    /// for a fresh job, reclaimed for shell_pgrp at jobs.c:3253), and
+    /// waitchld waits with WUNTRACED (jobs.c:4077), so a stop is a
+    /// wait outcome, not a hang: the job is marked Stopped, becomes
+    /// current, and the wait's verdict is 128 + the stop signal
+    /// (jobs.c:3243). A completed foreground job is deleted from the
+    /// table at once; a stopped one stays — listed by `jobs`,
+    /// resumable by fg/bg — with its child handle parked in
+    /// background_children, the same runtime slot background jobs use.
+    #[cfg(unix)]
+    fn wait_fg_child_job_control(
+        &mut self,
+        mut child: std::process::Child,
+        command: String,
+        stage_commands: Vec<String>,
+    ) -> Result<std::process::ExitStatus, ExecuteError> {
+        use std::os::unix::process::ExitStatusExt;
+        let pid = child.id();
+        self.shell_state.job_table.register_process_with_stages(
+            pid,
+            command,
+            false,
+            pid,
+            stage_commands,
+        );
+        self.shell_state.job_table.set_job_control(pid, true);
+        self.note_foreground_wait();
+        let Some(tty) = super::job_control_wait::controlling_tty() else {
+            // The gate saw a tty a moment ago; if it is gone, degrade
+            // to the plain wait rather than stranding the child.
+            let status = child.wait().map_err(ExecuteError::IoError)?;
+            self.shell_state.job_table.remove_job_by_pid(pid);
+            return Ok(status);
+        };
+        super::job_control_wait::give_terminal_to(&tty, pid as i32);
+        // GNU wait_for installs the recording SIGINT handler for the
+        // wait (jobs.c:3086-3102, see wait_external_child): with the
+        // terminal handed over, a terminal ^C reaches only the job,
+        // so a shell-side SIGINT arrival during the wait is forwarded
+        // to the job's group by the poll below, once — the
+        // wait_fg_child_sliced discipline (rubash#1990).
+        let sigint_guard = ForegroundWaitSigintGuard::hold_if_interactive_untrapped(self);
+        enum FgWaitOutcome {
+            Exited(std::process::ExitStatus),
+            Stopped(i32),
+        }
+        let mut forwarded = false;
+        let outcome: Result<FgWaitOutcome, std::io::Error> = loop {
+            let mut raw: libc::c_int = 0;
+            let waited =
+                unsafe { libc::waitpid(pid as i32, &mut raw, libc::WUNTRACED | libc::WNOHANG) };
+            if waited == pid as i32 {
+                if libc::WIFSTOPPED(raw) {
+                    break Ok(FgWaitOutcome::Stopped(libc::WSTOPSIG(raw)));
+                }
+                break Ok(FgWaitOutcome::Exited(std::process::ExitStatus::from_raw(
+                    raw,
+                )));
+            }
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::EINTR) => {}
+                    Some(libc::ECHILD) => {
+                        // Nobody else waits on this child; an ECHILD
+                        // here means its state was already collected
+                        // through the handle — take the handle's word.
+                        match child.wait() {
+                            Ok(status) => break Ok(FgWaitOutcome::Exited(status)),
+                            Err(error) => break Err(error),
+                        }
+                    }
+                    _ => break Err(error),
+                }
+            }
+            if sigint_guard.is_armed() && !forwarded && fg_forward_drain(&sigint_guard) {
+                forward_sigint_to_fg_child(pid as i32);
+                forwarded = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        // jobs.c:3253: the shell takes its terminal back on every way
+        // out of the wait — exit, signal death, stop, or error.
+        super::job_control_wait::give_terminal_to(&tty, super::job_control_wait::shell_pgrp());
+        match outcome {
+            Ok(FgWaitOutcome::Exited(status)) => {
+                self.shell_state.job_table.remove_job_by_pid(pid);
+                // rubash#1639, as in wait_external_child: a foreground
+                // job's SIGINT death unwinds the executing list. Under
+                // job control the verdict is the job's own death —
+                // the terminal delivery never reached the shell.
+                if sigint_guard.is_armed()
+                    && crate::executor::wait_status::exit_status_signal(&status)
+                        == Some(libc::SIGINT)
+                {
+                    self.fg_sigint_unwind = true;
+                }
+                Ok(status)
+            }
+            Ok(FgWaitOutcome::Stopped(stop_signal)) => {
+                // waitchld's stop bookkeeping (jobs.c:4057): the
+                // process and job go Stopped and the job becomes
+                // current (the table's mark_stopped does all three);
+                // flipping it to a background-listed job is what lets
+                // jobs/fg/bg/wait resolve it from here on.
+                self.shell_state
+                    .job_table
+                    .mark_stopped(pid, Some(stop_signal));
+                if let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pid) {
+                    if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                        entry.foreground = false;
+                        entry.background = true;
+                    }
+                }
+                self.queue_stopped_job_notice(pid);
+                self.background_children
+                    .insert(pid, crate::fd::SpawnedChild::from(child));
+                // jobs.c:3243: the wait's verdict for a stopped job
+                // is 128 + the stop signal, encoded as a plain exit
+                // status so the shared post-wait handling records
+                // exactly that $? and no signal-death notice.
+                Ok(std::process::ExitStatus::from_raw((128 + stop_signal) << 8))
+            }
+            Err(error) => {
+                self.shell_state.job_table.remove_job_by_pid(pid);
+                Err(ExecuteError::IoError(error))
+            }
+        }
+    }
+
     /// rubash#1497: execution-time gates for tail exec replacement,
     /// mirroring GNU builtins/evalstring.c:106 should_optimize_fork as
     /// re-checked when the command runs (a trap armed by an earlier
@@ -3289,6 +3424,19 @@ impl Executor {
         // registration) is shared with the sequential pipeline stage
         // spawner — see apply_external_fd_delivery.
         let parent_side_dups = self.apply_external_fd_delivery(cmd, &mut process, None);
+        // rubash#2398: the job-control channel (see job_control_wait)
+        // claims a plain interactive foreground spawn end to end —
+        // the child leads its own process group (pre_exec below), the
+        // parent repeats the setpgid after the fork (jobs.c:2455),
+        // and the wait below registers the job and hands it the
+        // terminal. Capture-shaped spawns keep the existing waits:
+        // their readers own the child's output, and GNU's comsub
+        // children share the shell's group (no WUNTRACED wait,
+        // jobs.c:4077 subshell_environment condition).
+        #[cfg(unix)]
+        let fg_job_control = self.job_control_channel_active()
+            && self.external_stdio_outcome.is_none()
+            && !self.external_needs_fd_copy_capture(cmd);
         // rubash#229: restore GNU's child signal dispositions between fork
         // and exec (trap.c:1489 restore_original_signals) — without this a
         // policy/trap SIG_IGN in the shell survives exec and makes children
@@ -3297,6 +3445,19 @@ impl Executor {
         unsafe {
             use std::os::unix::process::CommandExt;
             process.pre_exec(crate::builtins::kill::child_pre_exec_reset);
+        }
+        // rubash#2398: a job-control foreground child leads its own
+        // process group (jobs.c:2390 make_child setpgid; a one-process
+        // job's pipeline_pgrp is the child's own pid, jobs.c:2446) so
+        // the terminal can be handed to its group and a ^Z stops the
+        // child alone instead of the shell's whole group. Registered
+        // after the signal reset; both run in the child before exec.
+        #[cfg(unix)]
+        if fg_job_control {
+            unsafe {
+                use std::os::unix::process::CommandExt;
+                process.pre_exec(crate::builtins::kill::child_pre_exec_setpgid);
+            }
         }
 
         // rubash#438: pin the buffered process-substitution pipe read ends at
@@ -3384,6 +3545,15 @@ impl Executor {
         match spawned {
             Ok(mut child) => {
                 adopt_orphan_console(child.id());
+                // rubash#2398: jobs.c:2455 — the parent repeats the
+                // setpgid after the fork, closing the race where the
+                // terminal handoff (or a group signal) targets the
+                // child's new group before the child's own pre_exec
+                // setpgid has run.
+                #[cfg(unix)]
+                if fg_job_control {
+                    crate::builtins::kill::group_spawned_child(child.id());
+                }
                 for dup in parent_side_dups {
                     crate::fd::close_handle(dup);
                 }
@@ -3587,7 +3757,28 @@ impl Executor {
                     }
                 } else {
                     let foreground_pid = child.id();
-                    match self.wait_external_child(&mut child) {
+                    // rubash#2398: with the job-control channel live,
+                    // the wait is the WUNTRACED one — it registers the
+                    // job, hands over the terminal, and returns 128 +
+                    // stop-signal for a stopped child (jobs.c:3243),
+                    // parking the child handle in background_children
+                    // for fg/bg/wait. The post-wait handling below
+                    // (signal-death note, exit code, SIGCHLD trap) is
+                    // shared: a stopped status carries no signal, so
+                    // only the exit code moves.
+                    #[cfg(unix)]
+                    let wait_result = if fg_job_control {
+                        self.wait_fg_child_job_control(
+                            child,
+                            self.signal_notice_command_text(cmd),
+                            bash_job_stage_commands(cmd),
+                        )
+                    } else {
+                        self.wait_external_child(&mut child)
+                    };
+                    #[cfg(not(unix))]
+                    let wait_result = self.wait_external_child(&mut child);
+                    match wait_result {
                         Ok(status) => {
                             // rubash#229: queue the signal-death notice for
                             // the reader boundary.
@@ -3869,6 +4060,41 @@ impl ForegroundWaitSigintGuard {
     }
 }
 
+/// Drain the kernel pending queue the way the foreground waits
+/// consume it (shared by wait_fg_child_sliced and the rubash#2398
+/// job-control wait): arrivals move from the kernel backend into the
+/// pending queues (a kernel SIGINT advances the epoch). Everything is
+/// requeued for the command boundary EXCEPT the SIGINT that advanced
+/// the epoch: that arrival is THIS wait's interrupt, and the wait
+/// consumes it the way the builtin guard does — leaving it queued
+/// would re-adjudicate it against the NEXT input line (discarding
+/// that line as if it were the interrupted one). If the child
+/// survives the forward and exits normally, the consumed interrupt is
+/// forgotten with it, matching the child_caught_sigint outcome (see
+/// wait_fg_child_sliced). Returns true when the SIGINT epoch moved
+/// past the guard's arm snapshot, i.e. the caller should forward.
+#[cfg(unix)]
+fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintGuard) -> bool {
+    let pending =
+        crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
+    let epoch_moved =
+        crate::builtins::kill::sigint_kernel_epoch() != sigint_guard.sigint_epoch_at_arm();
+    if !pending.is_empty() {
+        let rest: Vec<i32> = if epoch_moved {
+            pending
+                .into_iter()
+                .filter(|&signal| signal != libc::SIGINT)
+                .collect()
+        } else {
+            pending
+        };
+        if !rest.is_empty() {
+            crate::builtins::kill::requeue_pending_signals(rest);
+        }
+    }
+    epoch_moved
+}
+
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
 /// needs to forward: its children lead their own process groups and
 /// the terminal's group delivery reaches them directly, so wait_for
@@ -3900,40 +4126,9 @@ fn wait_fg_child_sliced(
         if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
             return Ok(status);
         }
-        if !forwarded {
-            // Drain like ForegroundBuiltinSigintGuard::take_sigint_abort:
-            // arrivals move from the kernel backend into the pending
-            // queues (a kernel SIGINT advances the epoch). Everything
-            // is requeued for the command boundary EXCEPT the SIGINT
-            // that advanced the epoch: that arrival is THIS wait's
-            // interrupt, and the wait consumes it the way the builtin
-            // guard does — leaving it queued would re-adjudicate it
-            // against the NEXT input line (discarding that line as if
-            // it were the interrupted one). If the child survives the
-            // forward and exits normally, the consumed interrupt is
-            // forgotten with it, matching the child_caught_sigint
-            // outcome (see the fn comment).
-            let pending = crate::builtins::kill::take_pending_signals_now(std::process::id())
-                .unwrap_or_default();
-            let epoch_moved =
-                crate::builtins::kill::sigint_kernel_epoch() != sigint_guard.sigint_epoch_at_arm();
-            if !pending.is_empty() {
-                let rest: Vec<i32> = if epoch_moved {
-                    pending
-                        .into_iter()
-                        .filter(|&signal| signal != libc::SIGINT)
-                        .collect()
-                } else {
-                    pending
-                };
-                if !rest.is_empty() {
-                    crate::builtins::kill::requeue_pending_signals(rest);
-                }
-            }
-            if epoch_moved {
-                forward_sigint_to_fg_child(child_pid);
-                forwarded = true;
-            }
+        if !forwarded && fg_forward_drain(sigint_guard) {
+            forward_sigint_to_fg_child(child_pid);
+            forwarded = true;
         }
         std::thread::sleep(SLICE);
     }
