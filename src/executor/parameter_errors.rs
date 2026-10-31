@@ -592,6 +592,14 @@ impl Executor {
             }
             return Some(values.join(" "));
         }
+        // GNU subst.c:10131: for the five dynamic stack arrays the
+        // operator fetch is element 0 of the live ARRAY object — NULL
+        // when the array has no element 0 (all five under `bash -c`
+        // before any function call), never a stored mirror's
+        // fabricated empty scalar (rubash#2334).
+        if let Some(fetch) = self.dynamic_stack_array_scalar(name) {
+            return fetch;
+        }
         if is_shell_name(name) {
             return self
                 .dynamic_parameter_value(name)
@@ -3289,6 +3297,13 @@ impl Executor {
             "-" => Some(self.shell_option_flags()),
             "0" => Some(self.script_name_value()),
             _ => {
+                // GNU subst.c:10131: the five dynamic stack arrays
+                // fetch element 0 of the live ARRAY object for the
+                // operator tests — NULL when it has no element 0
+                // (rubash#2334; see dynamic_stack_array_scalar).
+                if let Some(fetch) = self.dynamic_stack_array_scalar(name) {
+                    return fetch;
+                }
                 if let Some(value) = self.dynamic_parameter_value(name) {
                     return Some(value);
                 }

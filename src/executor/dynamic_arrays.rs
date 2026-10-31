@@ -329,13 +329,16 @@ impl Executor {
             // bats' DEBUG trap argument "$BASH_SOURCE" stuck at the
             // loader's file for the whole run). Read the composed view,
             // exactly like the element/storage arms below.
-            "BASH_SOURCE" => Some(
-                self.dynamic_stack_array_values("BASH_SOURCE")
-                    .unwrap_or_default()
-                    .into_iter()
-                    .next()
-                    .unwrap_or_default(),
-            ),
+            // GNU subst.c:10131 (parameter_brace_expand): a bare array
+            // name's scalar fetch is element 0 (get_string_value) — NULL
+            // when the array has no element 0. Under `-c` the array is
+            // empty, so the name is UNSET for the operator tests, not
+            // set-but-empty: fabricating Some("") here made
+            // `${BASH_SOURCE-word}` keep the empty value and
+            // `${BASH_SOURCE?err}` pass silently (rubash#2334).
+            "BASH_SOURCE" => self
+                .dynamic_stack_array_scalar("BASH_SOURCE")
+                .unwrap_or_default(),
             "GROUPS" => self.group_value_at(0),
             "LINENO" => Some(
                 self.shell_state
@@ -1077,6 +1080,43 @@ impl Executor {
             _ => return None,
         };
         Some(values)
+    }
+
+    /// The scalar an operator test fetches for a bare dynamic stack
+    /// array name: element 0 of the composed view, or None when the
+    /// view has no element 0. GNU subst.c:10131 (parameter_brace_expand)
+    /// sets var_is_set = (temp != NULL) where temp is the
+    /// get_string_value fetch — element 0 of the ARRAY object
+    /// (variables.c:1892 init_dynamic_array_var) — so an empty array
+    /// (all five stack arrays under `bash -c` before any function call)
+    /// is UNSET for `-`/`+`/`?`, never set-but-empty (rubash#2334).
+    /// This is the same bound-ness `nounset_variable_bound` already
+    /// applies for the nounset scan. PIPESTATUS is excluded: its sparse
+    /// cell keeps its own element-0-by-index fetch (rubash#1364).
+    /// A lifetime `unset` (variables.c:3839 unbind_variable) also
+    /// reads as absent. The outer Option is the applicability verdict:
+    /// None means the name is not one of the five stack arrays (the
+    /// caller falls through to the generic fetches); Some(fetch)
+    /// means the stack-array fetch DECIDES the value — fetch itself
+    /// is None when element 0 is absent.
+    pub(in crate::executor) fn dynamic_stack_array_scalar(
+        &self,
+        name: &str,
+    ) -> Option<Option<String>> {
+        let resolved = self.resolved_variable_name(name)?;
+        if !matches!(
+            resolved.as_str(),
+            "BASH_SOURCE" | "BASH_LINENO" | "FUNCNAME" | "BASH_ARGV" | "BASH_ARGC"
+        ) {
+            return None;
+        }
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &resolved) {
+            return Some(None);
+        }
+        Some(
+            self.dynamic_stack_array_values(&resolved)
+                .and_then(|values| values.into_iter().next()),
+        )
     }
 
     /// Indexed element read of a dynamic stack array,
