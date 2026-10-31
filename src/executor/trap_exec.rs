@@ -3806,11 +3806,20 @@ impl Executor {
         };
         let mut child = Command::new(&exe);
         child.arg("-c").arg(source);
+        // rubash#2356: gather the respawn environment into a Vec
+        // first (a Command's env cannot be read back), so the
+        // state-channel spill can move oversized entries onto the
+        // state-file transport before anything is applied — the
+        // fork-context stamp scales with the function table and a
+        // single entry past MAX_ARG_STRLEN fails the execve. Entry
+        // order is preserved exactly; spill + apply happen just
+        // before the spawn below.
+        let mut env_entries: Vec<(String, String)> = Vec::new();
         for (key, value) in &self.shell_state.env_vars {
             if !key.starts_with("__RUBASH_")
                 || super::compound_exec::rubash_spawn_inherited_state(key)
             {
-                child.env(key, value);
+                env_entries.push((key.clone(), value.clone()));
             }
         }
         for (name, body) in &self.shell_state.functions {
@@ -3823,10 +3832,10 @@ impl Executor {
                 .get(name)
                 .map(|info| info.def_redirects.as_slice())
                 .unwrap_or(&[]);
-            child.env(
+            env_entries.push((
                 exported_function_env_name(name),
                 exported_function_env_value(&body.commands, def_redirects),
-            );
+            ));
         }
         // rubash#1184 f4: seed the child's line frame from the
         // constructing `exec` command's line, the `&` respawn's protocol
@@ -3840,50 +3849,63 @@ impl Executor {
         // the marker the child init requires before it keeps
         // __RUBASH_SCRIPT_NAME at all (init.rs), the same stamp the
         // output-substitution spawn carries.
-        child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+        env_entries.push(("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string()));
         // rubash#2136: the provenance stamp the child's init validates
         // against its actual parent (init.rs).
-        child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+        env_entries.push((
+            super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+            super::spawner_stamp_value(),
+        ));
         // subst.c:6362 process_substitute: the producer is a forked
         // child one subshell level deeper than its parent, like the
         // consumer form (external_setup.rs) — this builder never
         // stamped the depth, so the child's $BASH_SUBSHELL read 0
         // where GNU reads parent + 1.
-        child.env(
-            "__RUBASH_SUBSHELL_DEPTH",
+        env_entries.push((
+            "__RUBASH_SUBSHELL_DEPTH".to_string(),
             (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
+        ));
         // rubash#1582: the same fork makes the producer's own pid the
         // pid of the seeded level (variables.c:1511 get_bashpid =
         // getpid), so the BASHPID origin base rides with the depth —
         // the consumer form (external_setup.rs) stamps the pair, and
         // without the base this child's $BASHPID read its real pid + 1
         // while its own children observed the real pid as $PPID.
-        child.env(
-            "__RUBASH_BG_BASHPID_BASE",
+        env_entries.push((
+            "__RUBASH_BG_BASHPID_BASE".to_string(),
             (self.shell_state.subshell_depth.get() + 1).to_string(),
-        );
+        ));
         // rubash#2032: process_substitute's producer is a forked child
         // (subst.c:6362), so it inherits the parent's positional
         // parameters (POSITIONAL_PARAMS_TRANSPORT). Before this stamp
         // the body saw $# = 0 and `"$@"` collapsed to one empty word —
         // the bats zero-test-execution regression.
-        child.env(
-            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT,
+        env_entries.push((
+            super::compound_exec::POSITIONAL_PARAMS_TRANSPORT.to_string(),
             self.positional_params_transport_value(),
-        );
+        ));
         // rubash#2058: the fork-context stamp (call-stack views,
         // PIPESTATUS cell, ARGV bottom state) — same fork, same
         // transport set (see fork_context_transport_entries).
         for (key, value) in self.fork_context_transport_entries() {
-            child.env(key, value);
+            env_entries.push((key, value));
         }
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
-            child.env("__RUBASH_SCRIPT_NAME", script_name);
+            env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone()));
         }
         if let Some(line) = line {
-            child.env("__RUBASH_CURRENT_LINE", line.to_string());
-            child.env("__RUBASH_LINE_OFFSET", line.saturating_sub(1).to_string());
+            env_entries.push(("__RUBASH_CURRENT_LINE".to_string(), line.to_string()));
+            env_entries.push((
+                "__RUBASH_LINE_OFFSET".to_string(),
+                line.saturating_sub(1).to_string(),
+            ));
+        }
+        // rubash#2356: spill + apply the gathered environment (see
+        // the gather above).
+        let argv_bytes = exe.as_os_str().len() + source.len() + 8;
+        let (env_entries, state_temp) = self.spill_respawn_env_entries(env_entries, argv_bytes);
+        for (key, value) in env_entries {
+            child.env(key, value);
         }
         child.stdin(Stdio::inherit());
         child.stdout(writer);
@@ -3904,7 +3926,12 @@ impl Executor {
                 let file = crate::fd::handle_to_file(crate::fd::into_handle(reader));
                 Some(FileFd::from_file(file, format!("<({source})").into()))
             }
-            Err(_) => None,
+            Err(_) => {
+                if let Some(path) = &state_temp {
+                    let _ = std::fs::remove_file(path);
+                }
+                None
+            }
         }
     }
 
