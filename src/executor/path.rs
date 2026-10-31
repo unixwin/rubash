@@ -1161,24 +1161,8 @@ fn find_user_command_uncached(
     // 126), not not-found (127). Windows has no execute bit, so the
     // preference tier collapses to the first-existing-file behavior.
     #[cfg(unix)]
-    {
-        let mut file_to_lose_on: Option<PathBuf> = None;
-        for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
-            let candidate =
-                anchor_at_session_cwd(shell_path_to_windows(&dir, env_vars).join(name), env_vars);
-            if !candidate.is_file() {
-                continue;
-            }
-            if file_is_executable(&candidate) {
-                return Some(candidate);
-            }
-            if file_to_lose_on.is_none() {
-                file_to_lose_on = Some(candidate);
-            }
-        }
-        if let Some(fallback) = file_to_lose_on {
-            return Some(fallback);
-        }
+    if let Some((found, _as_written)) = find_in_path_walk_unix(name, env_vars) {
+        return Some(found);
     }
     // rubash#159: the Windows branch replaces GNU's per-element
     // find_in_path_element -> file_status (findcmd.c:113) stat walk with a
@@ -1209,6 +1193,68 @@ fn find_user_command_uncached(
     }
 
     None
+}
+
+/// The unix PATH-element walk behind `find_user_command_uncached`,
+/// returning the winning candidate in two forms: the session-cwd-anchored
+/// path the executor opens/spawns, and the as-written join of the PATH
+/// element and the name. GNU's walk builds ONE string — `full_path =
+/// sh_makepath (xpath, name, 0)` in find_in_path_element (findcmd.c,
+/// called from find_user_command_in_path, findcmd.c:623) — with the
+/// element verbatim as written, and that single string is what gets
+/// executed AND recorded (push_source / $0 / diagnostics). rubash anchors
+/// a copy for its filesystem probes and child spawns (the session cwd is
+/// not always the process cwd), but the recorded name must be the join
+/// itself: for a relative element GNU records `./name`, `sub/name`, never
+/// the anchored absolute form (rubash#2317; absolute elements anchor to
+/// themselves, so the two forms coincide there — the #2302 behavior).
+#[cfg(unix)]
+fn find_in_path_walk_unix(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<(PathBuf, String)> {
+    let mut file_to_lose_on: Option<(PathBuf, String)> = None;
+    for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
+        let joined = shell_path_to_windows(&dir, env_vars).join(name);
+        let candidate = anchor_at_session_cwd(joined.clone(), env_vars);
+        if !candidate.is_file() {
+            continue;
+        }
+        if file_is_executable(&candidate) {
+            return Some((candidate, joined.to_string_lossy().into_owned()));
+        }
+        if file_to_lose_on.is_none() {
+            file_to_lose_on = Some((candidate, joined.to_string_lossy().into_owned()));
+        }
+    }
+    file_to_lose_on
+}
+
+/// rubash#2317: the name a PATH search RECORDS for `name` — the as-written
+/// `<elem>/<name>` join of the winning element (see find_in_path_walk_unix).
+/// This is the reader name GNU seeds from a search: BASH_SOURCE via
+/// push_source (shell.c:1640, with the program face's filename replaced by
+/// the find at shell.c:1595-1597) and, on the command face, $0 itself
+/// (execute_cmd.c:6237-6260). A name carrying a path separator is never
+/// PATH-searched (findcmd.c:385), so it has no recorded join: None.
+/// On non-unix the walk's recorded form is the resolved path's existing
+/// rendering (the #2302 status quo; Windows display forms are the
+/// Windows-runner surface).
+pub fn find_user_command_as_written(
+    name: &str,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if name.is_empty() || has_path_separator(name) {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        find_in_path_walk_unix(name, env_vars).map(|(_, as_written)| as_written)
+    }
+    #[cfg(not(unix))]
+    {
+        find_user_command(name, env_vars).map(|found| found.to_string_lossy().into_owned())
+    }
 }
 
 pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
