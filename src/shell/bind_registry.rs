@@ -78,6 +78,26 @@ pub struct BindRegistry {
     /// first prompt read (y.tab.c:4024). Whichever comes first wins; the
     /// inputrc must not be read twice.
     pub readline_initialized: bool,
+    /// Sequences removed by `bind -r` / `bind -u` (keyseq, keymap).
+    /// GNU's keymaps are single mutable maps: unbinding deletes the
+    /// slot from the map itself, DEFAULT bindings included
+    /// (bind.def:375-388 unbind_command → rl_unbind_function_in_map;
+    /// bind.def:390-427 unbind_keyseq → rl_bind_keyseq(seq, NULL)).
+    /// rubash keeps the defaults in static tables, so a removal is
+    /// recorded here and queries subtract it (rubash#2337); hosts
+    /// mirror the removals through the same accessor the snapshot
+    /// uses. A removal names one exact sequence in one keymap — GNU
+    /// does NOT delete a subtree when a bare keymap prefix is named
+    /// (oracle: `bind -r "\C-x"` leaves `\C-x\C-?` bound, because
+    /// unbind_keyseq only acts when the sequence resolves to a
+    /// function). Registering the sequence again clears its removal.
+    pub removals: Vec<(String, Option<String>)>,
+    /// The readline kill ring (lib/readline/kill.c): text killed by
+    /// the line editor, newest entry last, shared by every editor
+    /// session in the process (the `read -e` editor today; C-k in one
+    /// `read` can be yanked by C-y in the next, exactly as two
+    /// readline sessions share the ring).
+    pub kill_ring: Vec<String>,
 }
 
 impl Default for BindRegistry {
@@ -91,6 +111,8 @@ impl Default for BindRegistry {
                 .map(|(name, value)| (name.to_string(), value.to_string()))
                 .collect(),
             readline_initialized: false,
+            removals: Vec::new(),
+            kill_ring: Vec::new(),
         }
     }
 }
@@ -131,7 +153,15 @@ impl BindRegistry {
 
     /// Insert or replace the binding for `(keyseq, keymap)`. GNU's
     /// rl_generic_bind replaces any previous binding of the same sequence.
+    /// Registering also revives a sequence a `bind -r`/`-u` removed:
+    /// the removal record for `(keyseq, keymap)` is cleared.
     pub fn register(&mut self, entry: BindEntry) {
+        let wanted =
+            normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard")).to_string();
+        self.removals.retain(|(seq, keymap)| {
+            !(seq == &entry.keyseq
+                && normalize_keymap_name(keymap.as_deref().unwrap_or("emacs-standard")) == wanted)
+        });
         match self
             .entries
             .iter_mut()
@@ -143,8 +173,40 @@ impl BindRegistry {
         self.generation += 1;
     }
 
+    /// Record one `bind -r`/`-u` removal of an exact sequence in one
+    /// keymap (see the `removals` field: GNU mutates the map itself,
+    /// defaults included). Idempotent.
+    fn record_removal(&mut self, keyseq: &str, keymap: Option<&str>) {
+        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let exists = self.removals.iter().any(|(seq, bound)| {
+            seq == keyseq
+                && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
+        });
+        if !exists {
+            self.removals
+                .push((keyseq.to_string(), keymap.map(str::to_string)));
+            self.generation += 1;
+        }
+    }
+
+    /// Is `keyseq` removed in `keymap` (a `bind -r`/`-u` record)?
+    fn is_removed(&self, keyseq: &str, keymap: Option<&str>) -> bool {
+        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        self.removals.iter().any(|(seq, bound)| {
+            seq == keyseq
+                && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
+        })
+    }
+
+    /// The recorded removals, for hosts mirroring the keymaps.
+    pub fn removals(&self) -> Vec<(String, Option<String>)> {
+        self.removals.clone()
+    }
+
     /// Remove any binding for `keyseq` (bind -r; GNU's unbind_keyseq,
     /// bind.def:395-421, succeeds silently when nothing is bound).
+    /// The removal is recorded for every keymap whose default table
+    /// binds the sequence, so defaults stay removed too (rubash#2337).
     /// Returns true when an entry was removed.
     pub fn unbind_keyseq(&mut self, keyseq: &str) -> bool {
         let before = self.entries.len();
@@ -153,12 +215,23 @@ impl BindRegistry {
         if removed {
             self.generation += 1;
         }
+        for keymap in KEYMAP_TABLE_SELECTORS {
+            if crate::builtins::bind::default_bindings_for_keymap(keymap)
+                .iter()
+                .any(|(seq, _)| *seq == keyseq)
+            {
+                self.record_removal(keyseq, keymap);
+            }
+        }
         removed
     }
 
     /// Remove every binding for the named function (bind -u,
-    /// bind.def:375-393 unbind_command → rl_unbind_function_in_map).
-    /// Returns how many entries went away.
+    /// bind.def:375-393 unbind_command → rl_unbind_function_in_map):
+    /// the session entries go away AND the function's default
+    /// sequences are recorded as removed in every keymap
+    /// (rubash#2337 — GNU mutates the maps themselves).
+    /// Returns how many session entries went away.
     pub fn unbind_function(&mut self, name: &str) -> usize {
         let before = self.entries.len();
         self.entries.retain(
@@ -168,7 +241,33 @@ impl BindRegistry {
         if removed > 0 {
             self.generation += 1;
         }
+        for keymap in KEYMAP_TABLE_SELECTORS {
+            for (seq, bound) in crate::builtins::bind::default_bindings_for_keymap(keymap) {
+                if *bound == name {
+                    self.record_removal(seq, keymap);
+                }
+            }
+        }
         removed
+    }
+
+    /// `bind -u` scoped to one keymap: unbind_command removes the
+    /// bindings in the CURRENT keymap only (bind.def:375-393). The
+    /// session entries for the function in that keymap go away and the
+    /// keymap's default sequences for the function are recorded as
+    /// removed (rubash#2337).
+    pub fn unbind_function_for_keymap(&mut self, name: &str, keymap: Option<&str>) {
+        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        self.entries.retain(|entry| {
+            !(matches!(&entry.kind, BindKind::Function { name: bound } if bound == name)
+                && normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard"))
+                    == wanted)
+        });
+        for (seq, bound) in crate::builtins::bind::default_bindings_for_keymap(keymap) {
+            if *bound == name {
+                self.record_removal(seq, keymap);
+            }
+        }
     }
 
     /// Bindings restricted to one keymap (`None` keymap counts as
@@ -189,8 +288,10 @@ impl BindRegistry {
     /// Remove any binding for `keyseq` within one keymap (`None` =
     /// emacs-standard). GNU's `bind -r` unbinds in the current keymap
     /// only (bind.def:395-421 unbind_keyseq), so a vi-insert binding for
-    /// the same sequence survives an emacs-standard removal. Returns
-    /// true when an entry went away.
+    /// the same sequence survives an emacs-standard removal. The
+    /// removal is recorded even when no session entry existed — the
+    /// sequence may be a DEFAULT binding, and GNU deletes those too
+    /// (rubash#2337). Returns true when an entry went away.
     pub fn unbind_keyseq_for_keymap(&mut self, keyseq: &str, keymap: Option<&str>) -> bool {
         let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
         let before = self.entries.len();
@@ -205,13 +306,65 @@ impl BindRegistry {
         if removed {
             self.generation += 1;
         }
+        self.record_removal(keyseq, keymap);
         removed
+    }
+
+    /// The key sequences that invoke `function` in one keymap, in
+    /// readline's listing order — GNU's rl_invoking_keyseqs_in_map over
+    /// the effective map (bind.def query_bindings and
+    /// rl_print_keybinding consume exactly this). The effective map is
+    /// the keymap's default table (see
+    /// [`crate::builtins::bind::default_bindings_for_keymap`]) with
+    /// session registrations applied: a registered sequence shadows the
+    /// default binding of the same sequence (rl_generic_bind replaces
+    /// the slot, whatever kind the new binding is), and the session's
+    /// own function bindings join the list. The merged list is sorted
+    /// by translated key bytes, which is the C scan's order.
+    pub fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
+        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let mut seqs: Vec<String> = crate::builtins::bind::default_bindings_for_keymap(keymap)
+            .iter()
+            .filter(|(_, bound)| *bound == function)
+            .map(|(seq, _)| seq.to_string())
+            .filter(|seq| {
+                !self.is_removed(seq, keymap)
+                    && !self.entries.iter().any(|entry| {
+                        entry.keyseq == *seq
+                            && normalize_keymap_name(
+                                entry.keymap.as_deref().unwrap_or("emacs-standard"),
+                            ) == wanted
+                    })
+            })
+            .collect();
+        for entry in self.entries_for_keymap(keymap) {
+            if let BindKind::Function { name } = &entry.kind {
+                if name == function {
+                    seqs.push(entry.keyseq.clone());
+                }
+            }
+        }
+        seqs.sort_by(|a, b| {
+            crate::builtins::bind::keyseq_bytes(a).cmp(&crate::builtins::bind::keyseq_bytes(b))
+        });
+        seqs.dedup();
+        seqs
     }
 
     pub fn snapshot(&self) -> Vec<BindEntry> {
         self.entries.clone()
     }
 }
+
+/// The five keymaps with default tables, as selectors for
+/// [`crate::builtins::bind::default_bindings_for_keymap`].
+const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
+    None,
+    Some("emacs-meta"),
+    Some("emacs-ctlx"),
+    Some("vi-insert"),
+    Some("vi-movement"),
+];
 
 /// Keymap aliases that are the same readline map (bind.def:37-40: vi,
 /// vi-move and vi-command name the movement keymap; emacs and
@@ -320,6 +473,109 @@ mod tests {
             .map(|entry| entry.keyseq.as_str())
             .collect();
         assert_eq!(viins_names, vec!["\\C-i"]);
+    }
+
+    #[test]
+    fn invoking_keyseqs_reports_gnu_defaults_in_scan_order() {
+        // rubash#2338: the oracle's `bind -q backward-char` answer,
+        // per keymap (hunt cases bd01/bd27/bd28).
+        let registry = BindRegistry::default();
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\C-b", r"\eOD", r"\e[D"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-insert")),
+            vec![r"\eOD", r"\e[D"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-command")),
+            vec![r"\C-h", r"\eOD", r"\e[D", "h"]
+        );
+        assert_eq!(registry.invoking_keyseqs("yank", None), vec![r"\C-y"]);
+        assert_eq!(
+            registry.invoking_keyseqs("complete", None),
+            vec![r"\C-i", r"\e\e"]
+        );
+    }
+
+    #[test]
+    fn invoking_keyseqs_merges_session_bindings_in_scan_order() {
+        // A session binding joins the list at its byte position; a
+        // session binding for an existing default sequence shadows the
+        // default (the sequence leaves the old function's list).
+        let mut registry = BindRegistry::default();
+        registry.register(BindEntry {
+            keyseq: r"\ez".to_string(),
+            kind: BindKind::Function {
+                name: "backward-char".to_string(),
+            },
+            keymap: None,
+        });
+        registry.register(BindEntry {
+            keyseq: r"\C-b".to_string(),
+            kind: BindKind::Function {
+                name: "forward-char".to_string(),
+            },
+            keymap: None,
+        });
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\eOD", r"\e[D", r"\ez"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("forward-char", None),
+            vec![r"\C-b", r"\C-f", r"\eOC", r"\e[C"]
+        );
+    }
+
+    #[test]
+    fn unbind_keyseq_removes_default_bindings_too() {
+        // rubash#2337 (hunt bd07): `bind -r "\C-b"` must delete the
+        // DEFAULT binding, not just session entries — GNU's maps are
+        // mutable (bind.def:390-427).
+        let mut registry = BindRegistry::default();
+        registry.unbind_keyseq_for_keymap(r"\C-b", None);
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\eOD", r"\e[D"]
+        );
+        // Other keymaps are untouched.
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-command")),
+            vec![r"\C-h", r"\eOD", r"\e[D", "h"]
+        );
+        // Rebinding the sequence revives it.
+        registry.register(BindEntry {
+            keyseq: r"\C-b".to_string(),
+            kind: BindKind::Function {
+                name: "backward-char".to_string(),
+            },
+            keymap: None,
+        });
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\C-b", r"\eOD", r"\e[D"]
+        );
+    }
+
+    #[test]
+    fn unbind_function_removes_defaults_in_that_keymap_only() {
+        // rubash#2337: `bind -u backward-char` deletes every default
+        // sequence for the function in the current keymap
+        // (bind.def:375-388); the vi-insert map keeps its own.
+        let mut registry = BindRegistry::default();
+        registry.unbind_function_for_keymap("backward-char", None);
+        assert!(registry.invoking_keyseqs("backward-char", None).is_empty());
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", Some("vi-insert")),
+            vec![r"\eOD", r"\e[D"]
+        );
+        // Scoped to vi: `bind -m vi-command -u backward-char`.
+        registry.unbind_function_for_keymap("backward-char", Some("vi-command"));
+        assert!(registry
+            .invoking_keyseqs("backward-char", Some("vi"))
+            .is_empty());
     }
 
     #[test]

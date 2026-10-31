@@ -57,6 +57,22 @@ pub(in crate::executor) struct CommandFd0InputGuard {
     procsub_stream_path: Option<std::path::PathBuf>,
 }
 
+impl SavedOutputFd {
+    pub(in crate::executor) fn fd(&self) -> u32 {
+        self.fd
+    }
+
+    /// The pre-command fd-table entry this snapshot restores.
+    pub(in crate::executor) fn saved_entry(&self) -> Option<&FdEntry> {
+        self.entry.as_ref()
+    }
+
+    /// The pre-command fd-closed marker this snapshot restores.
+    pub(in crate::executor) fn saved_fd_closed(&self) -> Option<&String> {
+        self.fd_closed.as_ref()
+    }
+}
+
 /// Saved descriptor state for an fd rebound by a compound command's
 /// output redirection (see open_compound_output_redirects).
 pub(in crate::executor) struct SavedOutputFd {
@@ -244,6 +260,7 @@ impl Executor {
                     false,
                     false,
                     &occupied_slots,
+                    &std::collections::HashSet::new(),
                     0,
                 )?;
             }
@@ -930,6 +947,14 @@ impl Executor {
                     .map_err(|error| crate::posix_errors::path_error(&target, error))?;
                 let file_fd = FileFd::from_file(file, target.clone().into());
                 self.set_fd_input_file(fd, file_fd, true);
+            } else if crate::special_paths::is_random_device(&target) {
+                // niubash#758: the entropy devices read as an
+                // unbounded CSPRNG stream — bind the pump-fed
+                // random source.
+                let file = Self::random_device_file(&target)
+                    .map_err(|error| crate::posix_errors::path_error(&target, error))?;
+                let file_fd = FileFd::from_file(file, target.clone().into());
+                self.set_fd_input_file(fd, file_fd, true);
             } else if let Some(bytes) = crate::special_paths::synthetic_proc_content(&target) {
                 // Registry first (rubash#1917, same ladder-skip family
                 // as the exec-fd face): synthetic /proc content has no
@@ -1044,7 +1069,9 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedOutputFd>, ExecuteError> {
         let mut saved: Vec<SavedOutputFd> = Vec::new();
-        if let Err(error) = self.open_compound_output_redirects_inner(cmd, &mut saved) {
+        if let Err(error) =
+            self.open_compound_output_redirects_in(cmd, 0, cmd.redirects.len(), &mut saved)
+        {
             self.restore_compound_output_redirects(saved);
             return Err(error);
         }
@@ -1069,12 +1096,20 @@ impl Executor {
         });
     }
 
-    fn open_compound_output_redirects_inner(
+    /// Range-scoped twin of open_compound_output_redirects (the
+    /// full-range call above): binds only the numbered output
+    /// entries in `cmd.redirects[start..end]`. rubash#2322: the
+    /// same-exe script face's segmented walk binds outputs segment
+    /// by segment so an output-side `{var}` entry observes the
+    /// command's own earlier output binds at its list position.
+    pub(in crate::executor) fn open_compound_output_redirects_in(
         &mut self,
         cmd: &CommandNode,
+        start: usize,
+        end: usize,
         saved: &mut Vec<SavedOutputFd>,
     ) -> Result<(), ExecuteError> {
-        for redirect in &cmd.redirects {
+        for redirect in &cmd.redirects[start..end] {
             // `{var}`-targeted redirections allocate a persistent dynamic fd
             // (redir.c: the variable keeps the descriptor after the command)
             // and are handled by execute_dynamic_fd_var_redirect above.
@@ -1284,11 +1319,20 @@ impl Executor {
                                 )
                                 && !Self::noclobber_target_is_device_like(&path)
                             {
+                                // The io payload is the bare reason:
+                                // path_error adds the `{target}: ` head.
+                                // Pre-formatting the head into the
+                                // payload as well printed the spelling
+                                // twice (rubash#2359) — the sibling
+                                // faces (the routing walk's gate, the
+                                // fresh-open serves) carry the
+                                // pre-formatted shape only where the
+                                // renderer writes the error verbatim.
                                 return Err(ExecuteError::from(crate::posix_errors::path_error(
                                     &target,
                                     std::io::Error::new(
                                         std::io::ErrorKind::AlreadyExists,
-                                        format!("{target}: cannot overwrite existing file"),
+                                        "cannot overwrite existing file",
                                     ),
                                 )));
                             }

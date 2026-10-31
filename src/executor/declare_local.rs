@@ -878,6 +878,26 @@ impl Executor {
                     .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
             });
         }
+        // GNU variables.c:2654-2665 (make_local_variable): an
+        // att_noassign operand may not be made local either — same
+        // drop + any_failed handling as the readonly block above, with
+        // the "variable may not be assigned value" diagnostic
+        // (rubash#2369).
+        let noassign_blocked: Vec<(String, String)> = if self.shell_state.function_depth > 0
+            && !declare_args_force_global(&args)
+            && !declare_args_request_print(&args)
+        {
+            self.global_noassign_local_blocks(&args)
+        } else {
+            Vec::new()
+        };
+        if !noassign_blocked.is_empty() {
+            args.retain(|arg| {
+                local_assignment_name(arg).map_or(true, |name| {
+                    !noassign_blocked.iter().any(|(b, _)| b == name)
+                })
+            });
+        }
         // Names that were already local at this frame BEFORE this command's
         // save_local_names ran -- the `var->context == variable_context` test
         // in declare.def:655/850. Empty at global scope.
@@ -969,6 +989,13 @@ impl Executor {
                     self.diagnostic_prefix()
                 )?;
             }
+            for (_, display) in &noassign_blocked {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {display}: variable may not be assigned value",
+                    self.diagnostic_prefix()
+                )?;
+            }
             // variables.c:2938-2944: the evalerror diagnostic carries the
             // builtin's command name (`declare: 8+2x: value too great for
             // base (error token is "2x")`), and the DISCARD abort is armed
@@ -981,7 +1008,9 @@ impl Executor {
             }
             // Every operand blocked: GNU skips the operand loop entirely —
             // no list-mode output even though only option args remain.
-            let status = if !local_blocked.is_empty() && local_names(&args).is_empty() {
+            let status = if (!local_blocked.is_empty() || !noassign_blocked.is_empty())
+                && local_names(&args).is_empty()
+            {
                 1
             } else {
                 // rubash#183: GNU's FUNCNAME is a real dynamic array
@@ -1135,7 +1164,7 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(1);
                 }
-                if local_blocked.is_empty() {
+                if local_blocked.is_empty() && noassign_blocked.is_empty() {
                     status
                 } else {
                     status.max(1)
@@ -1412,6 +1441,27 @@ impl Executor {
                         .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
                 });
             }
+            // GNU variables.c:2654-2665 (make_local_variable): an
+            // att_noassign operand may not be made local — dropped
+            // with the "variable may not be assigned value" diagnostic
+            // and any_failed status, like the readonly block above.
+            // Unlike the readonly twin this IS gated on -g: with -g no
+            // local is made and the global bind is a silent swallow in
+            // GNU, while a readonly -g bind still prints err_readonly
+            // (rubash#2369).
+            let noassign_blocked: Vec<(String, String)> =
+                if !declare_args_request_print(&args) && !declare_args_force_global(&args) {
+                    self.global_noassign_local_blocks(&args)
+                } else {
+                    Vec::new()
+                };
+            if !noassign_blocked.is_empty() {
+                args.retain(|arg| {
+                    local_assignment_name(arg).map_or(true, |name| {
+                        !noassign_blocked.iter().any(|(b, _)| b == name)
+                    })
+                });
+            }
             // GNU builtins/declare.def (local is declare with
             // variable_context forced): `-g` suppresses the local creation
             // and makes the builtin operate on the global variable
@@ -1467,6 +1517,13 @@ impl Executor {
                     self.diagnostic_prefix()
                 )?;
             }
+            for (_, display) in &noassign_blocked {
+                writeln!(
+                    stderr,
+                    "{}local: {display}: variable may not be assigned value",
+                    self.diagnostic_prefix()
+                )?;
+            }
             // rubash#1471: under -g, unshadow same-named outer locals for
             // the duration of the builtin call (the declare path's
             // begin/finish pair); a no-op vec when -g is absent.
@@ -1475,10 +1532,14 @@ impl Executor {
                 && (had_dash_operand
                     || dash_printed
                     || !local_blocked.is_empty()
+                    || !noassign_blocked.is_empty()
                     || !print_missing.is_empty())
             {
                 (
-                    if local_blocked.is_empty() && print_missing.is_empty() {
+                    if local_blocked.is_empty()
+                        && noassign_blocked.is_empty()
+                        && print_missing.is_empty()
+                    {
                         0
                     } else {
                         1
@@ -1525,7 +1586,10 @@ impl Executor {
                     &underlay,
                     &mut oob_word,
                 )?;
-                let status = if local_blocked.is_empty() && print_missing.is_empty() {
+                let status = if local_blocked.is_empty()
+                    && noassign_blocked.is_empty()
+                    && print_missing.is_empty()
+                {
                     builtin_status
                 } else {
                     builtin_status.max(1)
@@ -1815,6 +1879,28 @@ impl Executor {
     /// tempenv (context == variable_context) may still be shadowed. Returns
     /// the operand names to drop; declare.def:669-673 counts each as a
     /// failure and skips the operand entirely.
+    /// GNU variables.c:2654-2665 (make_local_variable): a variable with
+    /// the noassign attribute may not be made local — builtin_error
+    /// "%s: variable may not be assigned value" and the operand is
+    /// dropped (declare.def:669-673 any_failed + NEXT_VARIABLE). The
+    /// name tested (and printed) is the nameref-transformed one
+    /// (declare.def:667 passes newname), so resolve before testing.
+    /// Returns (written base, display base) pairs: callers drop
+    /// operands by the written name and diagnose by the resolved one
+    /// (rubash#2369).
+    fn global_noassign_local_blocks(&self, args: &[String]) -> Vec<(String, String)> {
+        local_names(args)
+            .into_iter()
+            .filter_map(|name| {
+                let resolved = self
+                    .nameref_target_name(&name)
+                    .unwrap_or_else(|| name.clone());
+                let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
+                is_noassign_bash_array(resolved_base).then(|| (name, resolved_base.to_string()))
+            })
+            .collect()
+    }
+
     fn global_readonly_local_blocks(&self, args: &[String]) -> Vec<String> {
         local_names(args)
             .into_iter()

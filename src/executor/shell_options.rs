@@ -67,6 +67,15 @@ fn open_redirect_input_file(path: &std::path::Path) -> io::Result<File> {
 }
 
 fn resolve_net_service_port(port_text: &str, udp: bool) -> Option<u16> {
+    // rubash#2359: an EMPTY service segment (`/dev/tcp/127.0.0.1/`)
+    // still engages GNU's netopen — _netopen6 (lib/sh/netopen.c)
+    // hands the empty string to getaddrinfo, which resolves it to
+    // port 0, so the failure surfaces at connect time
+    // (`connect: Connection refused` on the oracle, bash 5.3.20)
+    // rather than as an unknown-service error.
+    if port_text.is_empty() {
+        return Some(0);
+    }
     if let Ok(port) = port_text.parse::<u16>() {
         return Some(port);
     }
@@ -125,6 +134,39 @@ impl io::Read for NetStream {
             // descriptor).
             NetStream::Udp(socket) => socket.recv(buf),
         }
+    }
+}
+
+/// The byte source behind a pump-fed simulated stream device
+/// (niubash#758 generalizes rubash#1898's zero pump): a constant
+/// zero stream, or the OS CSPRNG.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::executor) enum PumpSource {
+    Zeros,
+    Random,
+}
+
+/// Fill `buffer` from the Windows CSPRNG (BCryptGenRandom with the
+/// system-preferred RNG — no algorithm handle to open or leak). The
+/// entropy source behind the simulated /dev/random read face.
+#[cfg(windows)]
+pub(in crate::executor) fn fill_random_bytes(buffer: &mut [u8]) -> io::Result<()> {
+    use windows_sys::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    if status == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::from_raw_os_error(status))
     }
 }
 
@@ -217,6 +259,10 @@ impl Executor {
             // stand-in carries the write side of the bind contract).
             SpecialPathClass::ZeroDevice => return Self::zero_device_file(&target),
             SpecialPathClass::FullDevice => return Self::synthetic_proc_write_sink(false),
+            // niubash#758: <> on an entropy device reads the CSPRNG
+            // stream and discards writes (the probe's File is dropped
+            // by every caller, exactly like the zero arm above).
+            SpecialPathClass::RandomDevice => return Self::random_device_file(&target),
             SpecialPathClass::FdAlias(fd) => {
                 if super::redirection::dup_source_fd_open(
                     &self.fd_table,
@@ -454,6 +500,13 @@ impl Executor {
         {
             return Some(Self::zero_device_file(&target));
         }
+        // niubash#758: the entropy devices read as an unbounded
+        // CSPRNG stream — the pump-fed random source (a real handle,
+        // like the zero source). On Unix the construction is
+        // equivalent to opening the real device.
+        if crate::special_paths::is_random_device(target) {
+            return Some(Self::random_device_file(&target));
+        }
         // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
         // the OS fd-alias layer — an open of fd N's target, not a
         // filesystem path open of the spelling. Windows has no /dev, so
@@ -582,16 +635,52 @@ impl Executor {
         #[cfg(windows)]
         {
             let _ = target;
-            use std::io::Write as _;
-            let (reader, mut writer) = std::io::pipe()?;
-            std::thread::spawn(move || {
+            Self::pump_device_file(PumpSource::Zeros)
+        }
+    }
+
+    /// niubash#758: a readable File that yields an unbounded stream
+    /// of CSPRNG bytes — the /dev/random and /dev/urandom read face.
+    /// The zero device's construction with a different byte source:
+    /// on Unix the real device opens; on Windows a pump thread feeds
+    /// a pipe from BCryptGenRandom (the OS CSPRNG — the same source
+    /// the platform's own runtimes seed from). If the CSPRNG call
+    /// fails the pump ends and the reader sees EOF rather than
+    /// fabricated bytes: an entropy face that invents its bytes is
+    /// worse than a short stream.
+    pub(in crate::executor) fn random_device_file(target: &str) -> io::Result<File> {
+        #[cfg(unix)]
+        {
+            File::open(target)
+        }
+        #[cfg(windows)]
+        {
+            let _ = target;
+            Self::pump_device_file(PumpSource::Random)
+        }
+    }
+
+    /// The pump-fed pipe behind the simulated stream devices
+    /// (rubash#1898's precedent, generalized by niubash#758): a
+    /// writer thread fills the pipe from `source` until the last
+    /// reader closes (broken pipe ends the thread).
+    #[cfg(windows)]
+    fn pump_device_file(source: PumpSource) -> io::Result<File> {
+        use std::io::Write as _;
+        let (reader, mut writer) = std::io::pipe()?;
+        std::thread::spawn(move || match source {
+            PumpSource::Zeros => {
                 const ZEROS: [u8; 8192] = [0u8; 8192];
                 while writer.write_all(&ZEROS).is_ok() {}
-            });
-            use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
-            let handle = reader.into_raw_handle();
-            Ok(unsafe { File::from_raw_handle(handle) })
-        }
+            }
+            PumpSource::Random => {
+                let mut chunk = [0u8; 8192];
+                while fill_random_bytes(&mut chunk).is_ok() && writer.write_all(&chunk).is_ok() {}
+            }
+        });
+        use std::os::windows::io::{FromRawHandle as _, IntoRawHandle as _};
+        let handle = reader.into_raw_handle();
+        Ok(unsafe { File::from_raw_handle(handle) })
     }
 
     fn open_input_redirect_impl(&self, target: &str, consume: bool) -> io::Result<File> {
@@ -694,10 +783,15 @@ impl Executor {
     /// write-only file fd's target re-opens for reading too — the
     /// #1963 fallback in the stream serve below relies on that).
     /// fd 0's inherited endpoint has no FileFd, so the process
-    /// stdin's own disk path answers when stdin is a regular file.
+    /// stdin's own disk path answers when stdin is a regular file;
+    /// the inherited stdout/stderr endpoints (fd 1/2) answer the
+    /// same way through their process handles (rubash#2359).
     /// Every other endpoint kind (pipe, socket, device, byte
     /// channel) cannot be re-opened and yields None: the alias open
-    /// keeps the dup/stream serve.
+    /// keeps the dup/stream serve. The inherited-stdin arm below is
+    /// the one exception for devices: fd 0's own disk path answers
+    /// for a character device as well as a regular file (rubash#2359),
+    /// because the process handle names the device path directly.
     pub(in crate::executor) fn fd_alias_reopen_path(&self, fd: u32) -> Option<PathBuf> {
         if let Some(FdReadEndpoint::File(file_fd)) = self.fd_table.read_endpoint(fd) {
             if file_fd.reopens_fresh() {
@@ -709,13 +803,100 @@ impl Executor {
                 return Some(file_fd.path.clone());
             }
         }
-        if fd == 0
-            && matches!(
-                self.fd_table.read_endpoint(0),
-                Some(FdReadEndpoint::InheritedProcessStdin)
-            )
-        {
-            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(0))?;
+        // The inherited-stdin arm: fd 0 itself, and every dup of it
+        // (`exec 3<&0`) — the dup names the same open file
+        // description, so the alias open resolves through the
+        // process stdin handle whatever number carries it
+        // (rubash#2359: `exec 3<&0; echo x > /dev/fd/3` with stdin a
+        // regular file failed EBADF where GNU opens the file fresh).
+        if matches!(
+            self.fd_table.read_endpoint(fd),
+            Some(FdReadEndpoint::InheritedProcessStdin)
+        ) {
+            // rubash#2359: a character device answers too, but
+            // disk_file_path cannot name one — it answers regular
+            // files only, by design (fd/unix.rs: its is_disk_file
+            // gate returns None for devices). GNU's open of
+            // /dev/stdin with stdin a device (/dev/null, a tty)
+            // opens the device fresh — `echo x > /dev/stdin` with
+            // stdin /dev/null succeeds and the bytes are discarded —
+            // while the dup serve this resolver feeds cannot write
+            // through a read endpoint at all (the builtin's flush
+            // failed EBADF). The device path comes from the magic
+            // link itself on unix; pipes and sockets earn no path
+            // here because their link text is the kernel's
+            // pipe:[ino] / socket:[ino] form, whose metadata lookup
+            // fails below, so the complementary-end shapes keep the
+            // dup serve (the engine's remaining model gap — the
+            // pipe's other end exists only in the kernel).
+            let path =
+                crate::fd::disk_file_path(crate::fd::process_std_handle(0)).or_else(|| {
+                    #[cfg(unix)]
+                    {
+                        std::fs::read_link("/proc/self/fd/0").ok()
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        None
+                    }
+                })?;
+            let stdin_reopens = std::fs::metadata(&path).is_ok_and(|meta| {
+                if meta.is_file() {
+                    return true;
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    return meta.file_type().is_char_device();
+                }
+                #[cfg(not(unix))]
+                {
+                    return false;
+                }
+            });
+            if stdin_reopens {
+                return Some(path);
+            }
+        }
+        // rubash#2359: the fd-1/fd-2 twins of the fd-0 arm above.
+        // The inherited process stdout/stderr endpoints carry no
+        // FileFd either, so without these arms `/dev/stdout`,
+        // `/dev/stderr`, `/dev/fd/1` and `/dev/fd/2` never resolved
+        // to their target file: every gated fresh-open face fell
+        // back to the shared-description serve, and the noclobber
+        // refusal GNU applies to the resolved regular file
+        // (redir.c:676 noclobber_open's stat gate, reached because
+        // the stdio spellings take redir_open's plain open on a
+        // HAVE_DEV_STDIN build) never fired for them — `set -C;
+        // echo x > /dev/stdout` with stdout a regular file clobbered
+        // where GNU refuses (bash 5.3.20 oracle probes). The
+        // routing walk had a private copy of this resolution
+        // (open_command_output_target's stdio fallback) without
+        // the gate; the resolver is the one home, so the gate now
+        // rides every face that asks it.
+        // Any fd whose write endpoint IS the process stdout/stderr
+        // resolves the same way — fds 1 and 2 themselves, and every
+        // dup of them (`exec 3>&1`): the alias open names the dup'd
+        // open file description, not the descriptor number, so a
+        // numbered spelling of a stdout-bound fd re-opens stdout's
+        // file (and takes the noclobber refusal under `set -C`)
+        // exactly like /dev/stdout itself (rubash#2359: the stage
+        // shape `echo x > /dev/fd/3 | cat` with `3>&1` and stdout a
+        // regular file wrote through where GNU refuses).
+        if matches!(
+            self.fd_table.write_endpoint(fd),
+            Some(FdWriteEndpoint::Stdout)
+        ) {
+            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(1))?;
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(path);
+            }
+        }
+        if matches!(
+            self.fd_table.write_endpoint(fd),
+            Some(FdWriteEndpoint::Stderr)
+        ) {
+            let path = crate::fd::disk_file_path(crate::fd::process_std_handle(2))?;
             if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
                 return Some(path);
             }
@@ -1666,11 +1847,13 @@ impl Executor {
         if is_null_device(target)
             || crate::special_paths::is_zero_device(target)
             || crate::special_paths::is_full_device(target)
+            || crate::special_paths::is_random_device(target)
         {
             // /dev/null classifies as a char device (crw-rw-rw-) on
-            // every platform; the binds answer zero/full with the
-            // same 'n' inode (the DOS-device judgment, the symbolic
-            // FullDevice endpoint, rubash#1898).
+            // every platform; the binds answer zero/full — and the
+            // entropy devices (niubash#758) — with the same 'n' inode
+            // (the DOS-device judgment, the symbolic FullDevice
+            // endpoint, rubash#1898).
             return FdFactMark::Access("nrw".to_string());
         }
         if crate::special_paths::is_net_redirect_target(target) {
@@ -1892,8 +2075,12 @@ impl Executor {
             ));
         }
         // rubash#1898: /dev/zero discards writes exactly like the
-        // null device; opens route to the same sink.
-        if crate::special_paths::is_zero_device(target) {
+        // null device; opens route to the same sink. The entropy
+        // devices discard writes the same way (niubash#758: into the
+        // pool on Linux — observably a sink).
+        if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_random_device(target)
+        {
             return OpenOptions::new().write(true).open(shell_path_to_windows(
                 "/dev/null",
                 &self.shell_state.env_vars,
@@ -2191,6 +2378,17 @@ impl Executor {
             // open succeeds — GNU fails only the write; the direct
             // builtin faces own that shape via OutputTarget).
             SpecialPathClass::ZeroDevice => {
+                OpenOptions::new()
+                    .write(true)
+                    .append(true)
+                    .open(shell_path_to_windows(
+                        "/dev/null",
+                        &self.shell_state.env_vars,
+                    ))
+            }
+            // niubash#758: entropy-device appends discard like the
+            // null device — the write side of every random face.
+            SpecialPathClass::RandomDevice => {
                 OpenOptions::new()
                     .write(true)
                     .append(true)

@@ -614,6 +614,14 @@ impl Executor {
             let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
             for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
                 let (base_name, append) = assignment_name_and_append(var_name);
+                // GNU variables.c:3589 assign_in_env: an
+                // ASSIGN_DISALLOWED (att_noassign) prefix target
+                // returns 0 — the binding never enters the temporary
+                // environment, so no env entry is composed for it
+                // (rubash#2369).
+                if self.assignment_target_is_noassign(base_name) {
+                    continue;
+                }
                 let Some(env_name) = self.tempenv_export_name(base_name) else {
                     continue;
                 };
@@ -1165,6 +1173,13 @@ impl Executor {
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
+            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
+            // (att_noassign) prefix target never enters the temporary
+            // environment — no env entry is composed for it
+            // (rubash#2369).
+            if self.assignment_target_is_noassign(base_name) {
+                continue;
+            }
             // GNU variables.c:3564-3578 assign_in_env -> bind_variable: a
             // prefix assignment to a nameref binds the referenced variable,
             // so the child env carries the TARGET name and the nameref's
@@ -1371,6 +1386,13 @@ impl Executor {
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
+            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
+            // (att_noassign) prefix target never enters the temporary
+            // environment — no env entry is composed for it
+            // (rubash#2369).
+            if self.assignment_target_is_noassign(base_name) {
+                continue;
+            }
             if append {
                 // execute_cmd.c: prefix assignment words are applied to the
                 // shell variable table before the command runs; the child
@@ -1441,6 +1463,13 @@ impl Executor {
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
+            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
+            // (att_noassign) prefix target never enters the temporary
+            // environment — no env entry is composed for it
+            // (rubash#2369).
+            if self.assignment_target_is_noassign(base_name) {
+                continue;
+            }
             if append {
                 // Same skip as apply_external_environment: the
                 // dispatch seam already composed the append into the

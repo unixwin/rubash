@@ -788,6 +788,89 @@ pub fn materialize_command_file(args: &mut Vec<String>) {
     }
 }
 
+/// rubash#2356: environment key naming the out-of-band respawn STATE
+/// file — the sibling transport of `__RUBASH_CMD_FILE` above, for
+/// environment entries instead of the `-c` script.
+///
+/// A realized (respawned) child receives the parent's shell state
+/// through its process environment: the fork-context stamp
+/// (`__RUBASH_FORK_*`, rubash#2058), the positional-parameter window
+/// (rubash#2032), the attribute name lists, exported values. Those
+/// payloads scale with the parent's state — the per-function
+/// source-span stamp grows ~34 bytes per function definition — but
+/// execve caps EVERY single argv/env string at MAX_ARG_STRLEN
+/// (128 KiB on Linux; CreateProcessW caps the whole command line and
+/// environment block at 32767 units on Windows). A shell carrying
+/// ~6000 function definitions stamped a 205 KB
+/// `__RUBASH_FORK_FN_SPANS` entry and the background spawn died with
+/// E2BIG ("Argument list too long") before the child ran anything,
+/// even though the `-c` script itself already rode the temp-file
+/// transport. GNU has no such cap because its forked child inherits
+/// the variable table in memory (execute_cmd.c execute_in_subshell).
+///
+/// The spawn side therefore moves oversized entries (and, past an
+/// aggregate budget, the largest remaining ones) into a temp file in
+/// the same length-prefixed framing [`encode_respawn_state_entries`]
+/// produces, and the child environment carries only this pointer.
+/// `Executor::new` splices the entries back into the child's variable
+/// table at import — before provenance validation and before any
+/// transport consumer reads the table — and removes both the key and
+/// the file, exactly the `__RUBASH_CMD_FILE` contract. The key is
+/// never in the spawn-inherited whitelist, so it cannot ride onward
+/// to a grandchild.
+pub const RESPAWN_STATE_FILE_ENV_KEY: &str = "__RUBASH_STATE_FILE";
+
+/// Length-prefixed framing for the respawn state file: a u32le entry
+/// count, then per entry a u32le key length, a u32le value length,
+/// the key bytes and the value bytes. Env values are arbitrary text
+/// (newlines, `=`, leading digits), so no separator-based format can
+/// round-trip them; explicit lengths can.
+pub fn encode_respawn_state_entries(entries: &[(String, String)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    for (key, value) in entries {
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(key.as_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    out
+}
+
+/// Decode a respawn state file. All-or-nothing: any truncation,
+/// inconsistent length or non-UTF-8 payload yields `None` and the
+/// caller applies nothing — a half-restored state table is worse
+/// than the (spawn-side impossible) absence of the entries.
+pub fn decode_respawn_state_entries(bytes: &[u8]) -> Option<Vec<(String, String)>> {
+    fn take_u32(bytes: &[u8], pos: &mut usize) -> Option<usize> {
+        let end = pos.checked_add(4)?;
+        let value = u32::from_le_bytes(bytes.get(*pos..end)?.try_into().ok()?) as usize;
+        *pos = end;
+        Some(value)
+    }
+    let mut pos = 0usize;
+    let count = take_u32(bytes, &mut pos)?;
+    let mut entries = Vec::with_capacity(count.min(1 << 20));
+    for _ in 0..count {
+        let key_len = take_u32(bytes, &mut pos)?;
+        let value_len = take_u32(bytes, &mut pos)?;
+        let key_end = pos.checked_add(key_len)?;
+        let key = std::str::from_utf8(bytes.get(pos..key_end)?)
+            .ok()?
+            .to_string();
+        let value_end = key_end.checked_add(value_len)?;
+        let value = std::str::from_utf8(bytes.get(key_end..value_end)?)
+            .ok()?
+            .to_string();
+        pos = value_end;
+        entries.push((key, value));
+    }
+    if pos != bytes.len() {
+        return None;
+    }
+    Some(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,5 +1305,49 @@ mod command_file_tests {
         materialize_command_file(&mut args);
         assert_eq!(args, vec!["niu", "-c", "echo hi"]);
         assert!(std::env::var_os("__RUBASH_CMD_FILE").is_none());
+    }
+
+    #[test]
+    fn respawn_state_entries_round_trip_arbitrary_values() {
+        // Values carry every separator a naive format would split on:
+        // newlines, '=', NUL-adjacent control bytes short of NUL,
+        // leading digits, and a payload far past MAX_ARG_STRLEN.
+        let entries = vec![
+            ("PLAIN".to_string(), "value".to_string()),
+            ("WITH_EQUALS".to_string(), "a=b=c".to_string()),
+            ("WITH_NEWLINES".to_string(), "one\ntwo\n".to_string()),
+            ("EMPTY".to_string(), String::new()),
+            ("9LEADING".to_string(), "12345".to_string()),
+            ("HUGE".to_string(), "x".repeat(300_000)),
+        ];
+        let bytes = encode_respawn_state_entries(&entries);
+        assert_eq!(decode_respawn_state_entries(&bytes), Some(entries));
+    }
+
+    #[test]
+    fn respawn_state_entries_decode_is_all_or_nothing() {
+        let entries = vec![("K".to_string(), "V".to_string())];
+        let bytes = encode_respawn_state_entries(&entries);
+        // Truncations at every structural boundary are rejected.
+        for cut in [0, 3, 5, 9, bytes.len() - 1] {
+            assert_eq!(
+                decode_respawn_state_entries(&bytes[..cut]),
+                None,
+                "cut {cut}"
+            );
+        }
+        // Trailing garbage is rejected.
+        let mut padded = bytes.clone();
+        padded.push(0);
+        assert_eq!(decode_respawn_state_entries(&padded), None);
+        // A corrupt length prefix is rejected.
+        let mut corrupt = bytes.clone();
+        corrupt[4] = 0xFF;
+        assert_eq!(decode_respawn_state_entries(&corrupt), None);
+        // The empty entry list is a valid file.
+        assert_eq!(
+            decode_respawn_state_entries(&encode_respawn_state_entries(&[])),
+            Some(Vec::new())
+        );
     }
 }

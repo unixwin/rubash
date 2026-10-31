@@ -300,6 +300,15 @@ struct OutputFdState {
     /// are flushed by the routing caller, never written by the
     /// element through a delivered descriptor).
     resolve_only_numbered: bool,
+    /// Pipeline-stage preflight mode (pipeline_stage_output_redirect_
+    /// fails): the walk stands in for the element's do_redirections,
+    /// which GNU runs AFTER execute_pipeline bound the element's
+    /// stdio fds (fd 1 is the stage pipe). A spelling naming a stdio
+    /// fd (source fd 0/1/2) is therefore judged against the stage
+    /// binding — dup semantics, never a reopen of whatever the
+    /// shell's ambient stdio points at — while numbered fds keep the
+    /// ambient resolver judgment (rubash#2359).
+    preflight_stage_stdio: bool,
     first_open_error: std::cell::RefCell<Option<(std::io::ErrorKind, String)>>,
     /// rubash#2121: dup/clone aliasing recorded by the ordered walk —
     /// alias fd → the fd whose binding it cloned (`2>&1` after
@@ -1357,6 +1366,7 @@ impl Executor {
                 && !crate::special_paths::is_synthetic_link_path(&target)
                 && !crate::special_paths::is_zero_device(&target)
                 && !crate::special_paths::is_full_device(&target)
+                && !crate::special_paths::is_random_device(&target)
             {
                 // rubash#2240: anchor like the Input probe below —
                 // this probe's open CREATES the file (the `<>` open
@@ -1416,8 +1426,11 @@ impl Executor {
                 // The zero/full devices (rubash#1898): same skip —
                 // the classified input ladder owns their outcome;
                 // their mapped name is the /dev capability sentinel.
+                // The entropy devices (niubash#758) are the same
+                // shape and skip the same way.
                 && !crate::special_paths::is_zero_device(&target)
                 && !crate::special_paths::is_full_device(&target)
+                && !crate::special_paths::is_random_device(&target)
             {
                 let path = self.session_path(crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
@@ -1578,7 +1591,45 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
+        self.command_output_redirect_fails_impl(cmd, false)
+    }
+
+    /// Pipeline-stage twin of [`Self::command_output_redirect_fails`]:
+    /// GNU binds the element's fd 1 to the stage pipe BEFORE its
+    /// do_redirections run (execute_cmd.c execute_pipeline; the dup2
+    /// order redir.c:1169-1170), so a `/dev/fd/1` / `/dev/stdout`
+    /// spelling inside an element names the PIPE, never the shell's
+    /// ambient stdout. The stage routing walks
+    /// (pipeline_stage_stdio_targets, route_pipeline_stage_streams)
+    /// model that binding with defer_stdout_writes; the preflight
+    /// must judge by the same binding — resolving the spelling
+    /// against the ambient process stdout refused a redirect GNU
+    /// allows whenever the shell's own stdout is a regular file
+    /// (rubash#2359). Numbered-fd spellings keep the ambient
+    /// judgment: their bindings are the shell's in both contexts,
+    /// and their verdicts ride the stage's serve/plan faces exactly
+    /// like the routing walks' defer leaves them.
+    pub(in crate::executor) fn pipeline_stage_output_redirect_fails(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        self.command_output_redirect_fails_impl(cmd, true)
+    }
+
+    fn command_output_redirect_fails_impl(
+        &mut self,
+        cmd: &CommandNode,
+        pipeline_stage: bool,
+    ) -> Result<bool, ExecuteError> {
         let mut state = self.command_output_fd_state();
+        if pipeline_stage {
+            state.defer_stdout_writes = true;
+            // rubash#2359: arm the stage judgment in
+            // dev_stdio_target_reopens_disk — without this the flag
+            // stayed at its constructor default and the gate's
+            // preflight arm was dead code (see the gate).
+            state.preflight_stage_stdio = true;
+        }
         if !self.apply_ordered_output_redirects(cmd, &mut state)? {
             return Ok(false);
         }
@@ -1592,7 +1643,14 @@ impl Executor {
     /// input side (rubash#940: `cmd 2>cap.txt > /missing` reports through
     /// the fd-2 binding `2>cap.txt` already established). Pure fd-dup
     /// (`>&N`), closed (`>&-`) and fd-var entries cannot be the failing
-    /// open and are skipped.
+    /// open and are skipped. An fd-alias PATH spelling (`/dev/fd/N`,
+    /// `/dev/stdout`, `/proc/self/fd/N`) CAN be the failing open: GNU
+    /// services it with redir_open over the filename, not a dup (the
+    /// #1963 shape distinction), so its open fails like a plain path's
+    /// (ENOENT for a closed fd, the noclobber refusal for a regular
+    /// file) and the entry must match here — skipping it made the
+    /// routing walk below re-apply the failing redirect and print the
+    /// verdict a second time (rubash#2359).
     pub(in crate::executor) fn failing_open_redirect_index(
         &mut self,
         cmd: &CommandNode,
@@ -1618,7 +1676,7 @@ impl Executor {
             }
             let target = self.expand_redirect_target(redirect);
             if super::execution_misc::is_closed_redirect_target(&target)
-                || redirect_target_fd(&target).is_some()
+                || super::execution_misc::redirect_target_is_dup_spelling(&target)
             {
                 return false;
             }
@@ -1686,7 +1744,27 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, false)
+    }
+
+    /// Post-external variant of the buffered route: the child already
+    /// executed with every numbered binding realized by its own spawn
+    /// delivery (apply_external_fd_delivery handed it real descriptors),
+    /// so this walk only routes the drained fd-1/fd-2 bytes — numbered
+    /// entries resolve to their target records with NO filesystem open.
+    /// Re-opening one here (the plain arm's create/truncate validation
+    /// open) truncates the file the child just wrote through the
+    /// descriptor and silently drops its bytes: the rubash#2368 face of
+    /// the disease route_pipeline_stage_streams guards with the same
+    /// flag (rubash#2255). Fds 1/2 keep full apply semantics — this
+    /// walk IS their realization for the drained streams.
+    pub(in crate::executor) fn route_builtin_buffered_output_resolve_only_numbered(
+        &mut self,
+        cmd: &CommandNode,
+        stdout: &[u8],
+        stderr: &[u8],
+    ) -> Result<bool, ExecuteError> {
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, true)
     }
 
     /// `stderr_first` swaps the final ordered walk: printf's GNU model
@@ -1699,6 +1777,7 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
         stderr_first: bool,
+        resolve_only_numbered: bool,
     ) -> Result<bool, ExecuteError> {
         self.last_builtin_write_failed.set(false);
         let mut state = self.command_output_fd_state();
@@ -1706,6 +1785,11 @@ impl Executor {
         // move-close whose target was closed persists past the command
         // (GNU redir.c add_undo_redirect; rubash#1235).
         state.persist_move_closes = true;
+        // Post-external routing only (see
+        // route_builtin_buffered_output_resolve_only_numbered): the
+        // numbered bindings were the child's real descriptors, so the
+        // walk resolves them without re-opening (rubash#2368).
+        state.resolve_only_numbered = resolve_only_numbered;
         // A failed open in THIS route keeps its historical channel:
         // the error returns as ExecuteError::IoError and the top-level
         // handler renders/routes it (rubash#1844 keeps the walk's
@@ -1898,6 +1982,7 @@ impl Executor {
             diagnostics_muted: false,
             open_failure_via_error: false,
             resolve_only_numbered: false,
+            preflight_stage_stdio: false,
             first_open_error: std::cell::RefCell::new(None),
             shared_with: HashMap::new(),
             path_handle_cache: std::cell::RefCell::new(HashMap::new()),
@@ -2319,12 +2404,33 @@ impl Executor {
         target: &str,
         state: &OutputFdState,
     ) -> bool {
-        if state.defer_stdout_writes {
-            return false;
-        }
         let Some(source_fd) = crate::executor::execution_misc::dev_stdio_redirect_fd(target) else {
             return false;
         };
+        // rubash#2359: a pipeline-stage preflight judges a stdio
+        // spelling (source fd 0/1/2) against the stage's bindings —
+        // the element's fd 1 is its pipe — never against the ambient
+        // process stdio the fd table describes; the dup shortcut
+        // below is the stage's service for those spellings. A
+        // NUMBERED source fd names an ambient binding the stage
+        // inherits unchanged, so the preflight judges it by the
+        // same ambient rule as every other face (the resolver).
+        // The defer_stdout_writes blanket below exists to keep the
+        // ROUTING walks off the reopen judgment; it must not reach
+        // the preflight's numbered-fd judgment — with it in front,
+        // `echo x > /dev/fd/3 | cat` (fd 3 a regular file, set -C)
+        // wrote through the shared handle where GNU's stage child
+        // refuses the fresh open (redir.c:676 noclobber_open over
+        // redir_open's plain open, redir.c:725).
+        if state.preflight_stage_stdio {
+            if source_fd <= 2 {
+                return false;
+            }
+            return self.fd_alias_reopen_path(source_fd).is_some();
+        }
+        if state.defer_stdout_writes {
+            return false;
+        }
         // rubash#2329: an in-list binding of the source fd at this
         // position decides before the ambient table (redir.c:237
         // do_redirections): a plain file bound earlier in THIS list
@@ -2383,9 +2489,12 @@ impl Executor {
             // sentinel on Windows); every write fails ENOSPC through
             // OutputTarget::FullDevice.
             state.fds.insert(fd, OutputTarget::FullDevice);
-        } else if crate::special_paths::is_zero_device(target) {
+        } else if crate::special_paths::is_zero_device(target)
+            || crate::special_paths::is_random_device(target)
+        {
             // rubash#1898: /dev/zero discards writes exactly like the
-            // null device.
+            // null device. The entropy devices discard writes the
+            // same way (niubash#758).
             state.fds.insert(fd, OutputTarget::Null);
         } else if let Some(source_fd) =
             crate::executor::execution_misc::dev_stdio_redirect_fd(target)
