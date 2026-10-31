@@ -3807,11 +3807,20 @@ impl Executor {
                 self.xtrace_write(&xtrace_output);
             }
         }
+        // rubash#2280: this fast path bypasses
+        // execute_materialized_command, so perform the call's
+        // recorded {var} closes for the duration of the function
+        // execution here (the funnel hook's twin) and replay their
+        // snapshots as soon as the body returns.
+        let in_process_close_snapshots = self.apply_fd_var_closes_for_in_process(true);
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],
             &materialized_cmd,
         );
+        if !in_process_close_snapshots.is_empty() {
+            self.restore_fd_var_close_snapshots(in_process_close_snapshots);
+        }
         // GNU execute_cmd.c:4746/4943 — the CALL's expanded last word is
         // bound to `$_` at return_result AFTER execute_function returns, so a
         // body command's own `$_` write is overwritten by the call's last

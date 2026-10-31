@@ -5450,29 +5450,14 @@ impl Executor {
         // (fd_var_pending_closes) were performed in the table by
         // apply_external_fd_delivery for the spawn; restore the
         // parent's bindings from its snapshots now that the command
-        // has completed. Closes no delivery consumed (in-process and
-        // force-fork null faces) are dropped unapplied — GNU scopes
-        // them to the command as well.
+        // has completed. Closes no delivery consumed (force-fork
+        // null faces) are dropped unapplied — GNU scopes them to
+        // the command as well. (In-process commands consume their
+        // records at dispatch and restore their own snapshots,
+        // rubash#2280.)
         self.fd_var_pending_closes.clear();
         let close_restore = std::mem::take(&mut self.fd_var_close_restore);
-        for (fd, entry, marker) in close_restore {
-            match entry {
-                Some(entry) => {
-                    self.fd_table.entries.insert(fd, entry);
-                }
-                None => {
-                    self.fd_table.entries.remove(&fd);
-                }
-            }
-            match marker {
-                Some(value) => {
-                    self.shell_state.env_vars.insert(fd_closed_key(fd), value);
-                }
-                None => {
-                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
-                }
-            }
-        }
+        self.restore_fd_var_close_snapshots(close_restore);
     }
 
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
@@ -6072,20 +6057,106 @@ impl Executor {
     /// at command completion), mark the entry closed, and set the
     /// marker. Only the closed flag changes: the endpoints stay in
     /// place so a {var} dup resolution can still read a source
-    /// description from the slot. Shared by the spawn delivery (which
-    /// applies the records at their walk positions) and the
-    /// in-process application for builtin/function commands
-    /// (rubash#2280).
+    /// description from the slot.
     pub(in crate::executor) fn apply_fd_var_pending_close(&mut self, fd: u32) {
+        let snapshot = self.perform_fd_var_pending_close(fd);
+        self.fd_var_close_restore.push(snapshot);
+    }
+
+    /// The table step of a pending close, returning the restore
+    /// snapshot instead of queueing it: the in-process application
+    /// (rubash#2280) keeps its snapshots locally, because a command
+    /// the body runs can clear the shared fd_var_close_restore list
+    /// (the applier resets it on entry) before the owning command
+    /// completes.
+    pub(in crate::executor) fn perform_fd_var_pending_close(
+        &mut self,
+        fd: u32,
+    ) -> (
+        u32,
+        Option<crate::executor::fd_table::FdEntry>,
+        Option<String>,
+    ) {
         let entry = self.fd_table.entries.get(&fd).cloned();
         let marker = self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned();
-        self.fd_var_close_restore.push((fd, entry, marker));
         if let Some(entry) = self.fd_table.entries.get_mut(&fd) {
             entry.closed = true;
         }
         self.shell_state
             .env_vars
             .insert(fd_closed_key(fd), "1".to_string());
+        (fd, entry, marker)
+    }
+
+    /// Replay close snapshots back into the table: reinsert each
+    /// snapshotted entry (or remove the slot when the snapshot found
+    /// none) and restore each fd-closed marker. The replay runs in
+    /// REVERSE order — the snapshots are a stack: a descriptor a
+    /// command closed twice must end at its oldest snapshot, the
+    /// binding the parent held before the command.
+    pub(in crate::executor) fn restore_fd_var_close_snapshots(
+        &mut self,
+        snapshots: Vec<(
+            u32,
+            Option<crate::executor::fd_table::FdEntry>,
+            Option<String>,
+        )>,
+    ) {
+        for (fd, entry, marker) in snapshots.into_iter().rev() {
+            match entry {
+                Some(entry) => {
+                    self.fd_table.entries.insert(fd, entry);
+                }
+                None => {
+                    self.fd_table.entries.remove(&fd);
+                }
+            }
+            match marker {
+                Some(value) => {
+                    self.shell_state.env_vars.insert(fd_closed_key(fd), value);
+                }
+                None => {
+                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                }
+            }
+        }
+    }
+
+    /// rubash#2280: for a command that will execute IN-PROCESS (a
+    /// builtin or a function), perform its recorded pending closes
+    /// in the table now and return the restore snapshots; the caller
+    /// replays them (restore_fd_var_close_snapshots) when the
+    /// command completes. GNU runs a builtin/function's
+    /// do_redirections in the shell's own context
+    /// (execute_cmd.c:5648 execute_builtin_or_function), so the
+    /// close is visible for the whole execution — a body reading
+    /// the just-closed descriptor fails — and undo_redirections
+    /// restores the binding at command end. Before this, the
+    /// records were only ever consumed by the spawn delivery, so an
+    /// in-process command observed the descriptor still open (and
+    /// the parent binding survived only by the records being
+    /// dropped unapplied at undo). External commands pass
+    /// in_process=false: their delivery consumes the records
+    /// positionally instead (rubash#2281).
+    pub(in crate::executor) fn apply_fd_var_closes_for_in_process(
+        &mut self,
+        in_process: bool,
+    ) -> Vec<(
+        u32,
+        Option<crate::executor::fd_table::FdEntry>,
+        Option<String>,
+    )> {
+        if !in_process
+            || self.fd_var_pending_closes.is_empty()
+            || self.fd_var_pending_close_generation != self.fd_var_close_generation
+        {
+            return Vec::new();
+        }
+        let pending = std::mem::take(&mut self.fd_var_pending_closes);
+        pending
+            .iter()
+            .map(|&(_, fd)| self.perform_fd_var_pending_close(fd))
+            .collect()
     }
 
     pub(in crate::executor) fn close_dynamic_fd(&mut self, name: &str) -> Result<(), ExecuteError> {
