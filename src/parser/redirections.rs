@@ -46,15 +46,17 @@ pub(super) fn collect_trailing_redirections(
         }
 
         if token.kind == TokenKind::HereDocBody {
-            if fill_pending_heredoc_body(
-                command,
-                &token.value,
-                token.position,
-                token.heredoc_end_line,
-            ) {
-                *index += 1;
-                continue;
-            }
+            // rubash#2305: never fill a body from here. Bodies pair
+            // with `<<` operators in global token-stream order (GNU
+            // parse.y gather_here_documents), and when this runs the
+            // earliest still-pending operator may belong to an EARLIER
+            // sibling subtree that is already complete — filling this
+            // command's subtree would steal that sibling's body (the
+            // two-groups-on-a-line crossing). A command's trailing
+            // redirects all precede the newline that releases the
+            // bodies, so nothing of this command follows a body token:
+            // stop collecting and let the token loop's
+            // assign_heredoc_body pair every body globally.
             break;
         }
 
@@ -714,10 +716,17 @@ fn fill_pending_heredoc_body_recursive(
     gather_line: usize,
     end_line: Option<usize>,
 ) -> bool {
-    if fill_pending_heredoc_body(cmd, body, gather_line, end_line) {
-        return true;
-    }
-
+    // rubash#2305: pending slots are filled in TOKEN-STREAM OPERATOR
+    // ORDER, not node-before-children order. GNU gathers bodies in the
+    // order the `<<` operators were read (parse.y gather_here_documents)
+    // and each body belongs to its own REDIRECT node from creation
+    // (make_cmd.c make_here_document; redir.c:423 here_document_to_fd
+    // materializes the node's own redirectee). A compound's own
+    // redirects are written after its closing delimiter, so every
+    // member's `<<` precedes the compound's own `<<` in the stream:
+    // nested commands must claim pending bodies BEFORE this node's own
+    // heredoc_redirects, or the outer entry steals the first body and
+    // the members' bodies shift by one (the nested-group crossing).
     if let Some(pipeline) = &mut cmd.pipeline_command {
         if fill_pending_heredoc_body_in_commands(&mut pipeline.stages, body, gather_line, end_line)
         {
@@ -836,7 +845,9 @@ fn fill_pending_heredoc_body_recursive(
         }
     }
 
-    false
+    // This node's own entries claim a body only after every nested
+    // command has had its turn (see the operator-order note above).
+    fill_pending_heredoc_body(cmd, body, gather_line, end_line)
 }
 
 fn fill_pending_heredoc_body_in_commands(
