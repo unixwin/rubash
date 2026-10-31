@@ -2611,6 +2611,91 @@ impl Executor {
         Ok(word)
     }
 
+    /// Materialize a for/select list word's process substitutions
+    /// from the substitutions the PARSER recorded for the word (the
+    /// quote-aware scan of the raw word text), splicing each span's
+    /// produced pathname into the word BEFORE any cooked expansion
+    /// runs on it.
+    ///
+    /// GNU subst.c:12582 expand_words expands each parser word on
+    /// its own, and expand_word_internal's `<`/`>` case
+    /// (subst.c:11369-11391) extracts the body verbatim
+    /// (extract_process_subst) and materializes it during that one
+    /// scan — a span inside double quotes never materializes, and a
+    /// span that only appears in an expansion RESULT (a variable's
+    /// value) is data, never a substitution. The for-list path used
+    /// to run expand_word FIRST and then re-scan the cooked string
+    /// with materialize_assignment_process_substitutions: quote
+    /// removal had already stripped the span's quoting (a quoted
+    /// `"<(...)"` materialized), the re-scan re-lexed the body and
+    /// joined its de-escaped token values (backslashes eaten), and
+    /// value-borne `<(...)` text materialized (rubash#2390). Splicing
+    /// the recorded spans up front makes the word an opaque produced
+    /// word for the cooked pass: its spans are already pathnames.
+    ///
+    /// Registration discipline mirrors
+    /// materialize_assignment_process_substitutions_from_raw
+    /// (rubash#1523): a span is registered and run only when its
+    /// splice lands in THIS word — a recorded span whose text is not
+    /// present (a brace-expansion sibling piece carries the other
+    /// spans of the original word) is skipped untouched, and a
+    /// duplicate record of an already-spliced span misses from the
+    /// advanced cursor and is skipped, so no body ever runs twice.
+    pub(in crate::executor) fn materialize_for_list_process_substitutions(
+        &mut self,
+        word: &str,
+        substitutions: &[crate::parser::ProcessSubstitution],
+    ) -> Result<String, ExecuteError> {
+        let mut word = word.to_string();
+        let mut cursor = 0usize;
+        for substitution in substitutions {
+            let Some((start, end)) = Self::assignment_procsub_splice_range(
+                &word,
+                cursor,
+                &substitution.target,
+                &substitution.operator,
+                &substitution.source,
+            ) else {
+                continue;
+            };
+            if substitution.output {
+                let path = self.empty_process_substitution_temp()?;
+                let word_form = self.process_substitution_output_fd_word(&path);
+                self.insert_assignment_output_process_substitution(
+                    word_form.clone(),
+                    substitution.source.clone(),
+                );
+                word.replace_range(start..end, &word_form);
+                cursor = start + word_form.len();
+            } else {
+                // rubash#1952: stream first (see
+                // materialize_process_substitution_word); the
+                // collected form below is the spawn-failure fallback.
+                if let Some(word_form) =
+                    self.process_substitution_child_fd_word(&substitution.source, None)
+                {
+                    word.replace_range(start..end, &word_form);
+                    cursor = start + word_form.len();
+                    continue;
+                }
+                let Some(output) = self.process_substitution_output_bytes(&substitution.source)
+                else {
+                    continue;
+                };
+                // rubash#1691: keep the carrier path — the per-command
+                // finish removes it (see the field docs); discarding
+                // it here leaked the file in $TMPDIR for good.
+                let carrier = self.write_process_substitution_temp_bytes(&output)?;
+                self.assignment_input_process_substitution_files
+                    .push(carrier);
+                let word_form = self.process_substitution_fd_word(&output);
+                word.replace_range(start..end, &word_form);
+                cursor = start + word_form.len();
+            }
+        }
+        Ok(word)
+    }
+
     fn apply_default_external_stdin_file(
         &mut self,
         rewritten: &mut CommandNode,
