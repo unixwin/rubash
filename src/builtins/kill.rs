@@ -1091,6 +1091,23 @@ pub fn capture_entry_policy_without_mailbox() {
     kernel_signals::capture_entry_and_policy();
 }
 
+/// rubash#2084: root executors take a share of the process signal
+/// policy at birth (see kernel_signals::acquire_session_policy); the
+/// paired release restores the pre-session dispositions when the
+/// last root executor of the era drops. Non-unix processes have no
+/// kernel dispositions to scope: no-ops keep the executor call sites
+/// platform-uniform.
+pub fn session_dispositions_acquire() {
+    #[cfg(unix)]
+    kernel_signals::acquire_session_policy();
+}
+
+/// Pair of [`session_dispositions_acquire`].
+pub fn session_dispositions_release() {
+    #[cfg(unix)]
+    kernel_signals::release_session_policy();
+}
+
 #[cfg(not(unix))]
 fn parse_signal_lines(content: &str) -> Vec<i32> {
     content
@@ -2809,6 +2826,17 @@ mod kernel_signals {
 
     static ENTRY_CAPTURED: std::sync::Once = std::sync::Once::new();
 
+    /// rubash#2084: whether the entry *policy* (SIGPIPE reset, SIGQUIT
+    /// ignore, fatal-handler install) is currently applied to this
+    /// process. Split from `ENTRY_CAPTURED`: the entry *facts*
+    /// (`ENTRY_IGNORED`) are birth facts, captured once — but the
+    /// policy installs are a session resource. The last root
+    /// executor's drop restores the pre-session dispositions and
+    /// clears this flag; the next root birth re-applies.
+    /// Re-application is consistent because `install_fatal_handlers`
+    /// re-reads the then-current dispositions as its chain targets.
+    static ENTRY_POLICY_APPLIED: AtomicBool = AtomicBool::new(false);
+
     /// The fd-free part of startup (rubash#1027): capture entry
     /// dispositions and apply the SIGQUIT policy ignore. Neither needs
     /// the signal_hook self-pipe, so this runs at shell startup without
@@ -2820,40 +2848,140 @@ mod kernel_signals {
         ENTRY_CAPTURED.call_once(|| {
             // Capture entry dispositions BEFORE changing anything:
             // signals ignored on entry must stay ignored (POSIX 2.11,
-            // GNU sig.c:273).
+            // GNU sig.c:273). SIGPIPE is not recorded: rubash#1333 —
+            // its entry disposition is unobservable (the Rust runtime
+            // sets SIG_IGN before main() on every process, whatever
+            // the parent did).
             for &sig in managed_signals() {
                 if sig == libc::SIGPIPE as i32 {
-                    // rubash#1333: SIGPIPE's entry disposition is
-                    // unobservable — the Rust runtime sets SIG_IGN before
-                    // main() on every process, whatever the parent did.
-                    // GNU's script shell runs with SIGPIPE at SIG_DFL
-                    // (sig.c initialize_signals never ignores it), so
-                    // reset it: an untrapped delivery (self `kill -PIPE`,
-                    // EPIPE on a closed pipe) must kill the shell with
-                    // 141 and a PIPE trap must be installable. This
-                    // supersedes the rubash#440 rationale for keeping the
-                    // runtime ignore: write errors now surface as the
-                    // signal, exactly as under GNU.
-                    set_kernel_handler(sig, libc::SIG_DFL);
-                    store_state(sig, 0);
                     continue;
                 }
                 if current_disposition_is_ignored(sig) {
                     ENTRY_IGNORED.fetch_or(bit(sig), Ordering::SeqCst);
                 }
             }
-            // sig.c:102 initialize_signals -> sig.c:333: every shell
-            // ignores SIGQUIT (script shells do not die on ^\).
-            if ENTRY_IGNORED.load(Ordering::Relaxed) & bit(libc::SIGQUIT as i32) == 0
-                && !current_disposition_is_ignored(libc::SIGQUIT as i32)
-            {
-                set_kernel_handler(libc::SIGQUIT as i32, libc::SIG_IGN);
-            }
-            store_state(libc::SIGQUIT as i32, 1);
-            // rubash#1475: replace the runtime's SIGSEGV/SIGBUS handlers
-            // with the fatal-pair handler (see install_fatal_handlers).
-            install_fatal_handlers();
         });
+        apply_entry_policy();
+    }
+
+    fn apply_entry_policy() {
+        if ENTRY_POLICY_APPLIED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        // rubash#1333: SIGPIPE's entry disposition is unobservable —
+        // the Rust runtime sets SIG_IGN before main() on every
+        // process, whatever the parent did. GNU's script shell runs
+        // with SIGPIPE at SIG_DFL (sig.c initialize_signals never
+        // ignores it), so reset it: an untrapped delivery (self
+        // `kill -PIPE`, EPIPE on a closed pipe) must kill the shell
+        // with 141 and a PIPE trap must be installable. This
+        // supersedes the rubash#440 rationale for keeping the runtime
+        // ignore: write errors now surface as the signal, exactly as
+        // under GNU. Applied here rather than in the capture so the
+        // entry *facts* stay one-shot while the policy is restorable.
+        set_kernel_handler(libc::SIGPIPE as i32, libc::SIG_DFL);
+        store_state(libc::SIGPIPE as i32, 0);
+        // sig.c:102 initialize_signals -> sig.c:333: every shell
+        // ignores SIGQUIT (script shells do not die on ^\).
+        if ENTRY_IGNORED.load(Ordering::Relaxed) & bit(libc::SIGQUIT as i32) == 0
+            && !current_disposition_is_ignored(libc::SIGQUIT as i32)
+        {
+            set_kernel_handler(libc::SIGQUIT as i32, libc::SIG_IGN);
+        }
+        store_state(libc::SIGQUIT as i32, 1);
+        // rubash#1475: replace the runtime's SIGSEGV/SIGBUS handlers
+        // with the fatal-pair handler (see install_fatal_handlers).
+        install_fatal_handlers();
+    }
+
+    /// rubash#2084: root-executor ownership of the process signal
+    /// policy, behind the one process-state critical section (the
+    /// same lock the reconcile slow path and the env mirror use), so
+    /// acquire/snapshot and release/restore are atomic against
+    /// disposition reconciles and env writes of concurrent sessions.
+    /// `(live root count, pre-policy snapshot)`.
+    static SESSION_POLICY: Mutex<(u64, Option<Vec<(i32, libc::sigaction)>>)> =
+        Mutex::new((0, None));
+
+    fn current_sigaction(sig: i32) -> libc::sigaction {
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        // SAFETY: querying this process's own disposition; the
+        // out-pointer is a valid stack slot.
+        unsafe {
+            libc::sigaction(sig, std::ptr::null(), &mut current);
+        }
+        current
+    }
+
+    /// Take a share of the process signal policy. The first share of
+    /// an era snapshots the full `sigaction` structs of every managed
+    /// signal and every fatal signal — taken before any policy of
+    /// this era is applied (the caller acquires before the mailbox
+    /// registration that applies it), so the snapshot is exactly the
+    /// dispositions the host had.
+    pub(super) fn acquire_session_policy() {
+        let _process_state = crate::executor::local_helpers::acquire_process_state();
+        let mut slot = SESSION_POLICY.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.0 == 0 {
+            let mut snapshot = Vec::new();
+            for &sig in managed_signals() {
+                snapshot.push((sig, current_sigaction(sig)));
+            }
+            for &sig in FATAL.iter() {
+                snapshot.push((sig, current_sigaction(sig)));
+            }
+            slot.1 = Some(snapshot);
+        }
+        slot.0 += 1;
+    }
+
+    /// Drop one share; the last drop reinstalls the snapshot verbatim
+    /// and rewinds the recorded-state words to match it, so the host
+    /// process is exactly as it was before the session era (the #2084
+    /// evidence: a child spawned after an in-process Session inherited
+    /// an ignored SIGQUIT and showed `trap -- '' SIGQUIT`). A snapshot
+    /// handler that is neither SIG_DFL nor SIG_IGN records state 3
+    /// ("foreign"): it never equals a reconcile target, so a later
+    /// era's reconciles always re-apply, and `at_default_state` stays
+    /// honestly false.
+    pub(super) fn release_session_policy() {
+        let _process_state = crate::executor::local_helpers::acquire_process_state();
+        let mut slot = SESSION_POLICY.lock().unwrap_or_else(|e| e.into_inner());
+        slot.0 = slot.0.saturating_sub(1);
+        if slot.0 > 0 {
+            return;
+        }
+        let Some(snapshot) = slot.1.take() else {
+            return;
+        };
+        for (sig, action) in &snapshot {
+            // SAFETY: reinstalling a disposition this process itself
+            // queried earlier; `sig` is a managed or fatal signal.
+            unsafe {
+                libc::sigaction(*sig, action, std::ptr::null_mut());
+            }
+            if let Some(idx) = fatal_index(*sig) {
+                FATAL_STATE[idx].store(
+                    if action.sa_sigaction == libc::SIG_IGN {
+                        1
+                    } else {
+                        0
+                    },
+                    Ordering::SeqCst,
+                );
+            } else {
+                store_state(
+                    *sig,
+                    match action.sa_sigaction {
+                        libc::SIG_DFL => 0,
+                        libc::SIG_IGN => 1,
+                        _ => 3,
+                    },
+                );
+                HANDLER_SET.fetch_and(!bit(*sig), Ordering::SeqCst);
+            }
+        }
+        ENTRY_POLICY_APPLIED.store(false, Ordering::SeqCst);
     }
 
     /// RAII guard: SIGPIPE blocked on the current thread while alive.
