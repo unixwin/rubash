@@ -3363,7 +3363,12 @@ fn apply_respawn_root_line_spans(executor: &mut Executor, commands: &mut [Comman
         crate::parser::collect_command_line_spans(&commands[idx..], &mut rest_spans);
         let rest_count = rest_spans.len();
         if cursor + rest_count == total {
-            if crate::parser::apply_command_line_spans(&mut commands[idx..], &spans[cursor..]) {
+            // `spans`/`commands` are element slices (span records / AST
+            // nodes) and `cursor` an element index, not a byte/char
+            // offset — split_at states that tail without string-slice
+            // syntax (hygiene gate Check 3 keys on the name `cursor`).
+            let remaining_spans = spans.split_at(cursor).1;
+            if crate::parser::apply_command_line_spans(&mut commands[idx..], remaining_spans) {
                 cursor = total;
             } else {
                 retain = false;
@@ -3380,10 +3385,8 @@ fn apply_respawn_root_line_spans(executor: &mut Executor, commands: &mut [Comman
                     retain = false;
                     break;
                 }
-                crate::parser::apply_command_line_spans(
-                    std::slice::from_mut(command),
-                    &spans[cursor..cursor + count],
-                );
+                let span_window = spans.split_at(cursor).1.split_at(count).0;
+                crate::parser::apply_command_line_spans(std::slice::from_mut(command), span_window);
                 cursor += count;
             }
         } else {
