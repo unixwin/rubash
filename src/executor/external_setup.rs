@@ -484,6 +484,28 @@ impl Executor {
                     self.own_input_bindings.insert(fd, bound.clone());
                     return Some(bound);
                 }
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    // rubash#2292: a heredoc / here-string entry binds
+                    // its redirector to a text body at this list
+                    // position (GNU here_document_to_fd, redir.c:423,
+                    // dup2'd onto the redirector at redir.c:1065-1072),
+                    // so a later `<&N` dup in the same list copies
+                    // THAT body — the replay used to kind-skip these
+                    // entries and the dup failed EBADF. Materialize
+                    // the body into a carrier file with the
+                    // position-exact ordinal correlation the async
+                    // stdin face uses (materialize_async_stdin_body)
+                    // and stash it as the own binding, so the spawn
+                    // stamps this one description at N and the dup
+                    // shares it — GNU's open-then-dup2 shape.
+                    let Some((file, path)) = self.materialize_async_stdin_body(cmd, position)
+                    else {
+                        return None;
+                    };
+                    let bound = FileFd::from_file(file, path);
+                    self.own_input_bindings.insert(fd, bound.clone());
+                    return Some(bound);
+                }
                 _ => continue,
             }
         }

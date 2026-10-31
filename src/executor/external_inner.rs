@@ -1806,6 +1806,91 @@ impl Executor {
         pins
     }
 
+    /// rubash#2292: deliver the fd table's ambient Text endpoints
+    /// to a spawn. A Text endpoint is a heredoc / here-string body
+    /// bound into the table by an enclosing face — a brace group's,
+    /// function's, or script's redirects, applied scoped by
+    /// bind_numbered_heredoc_redirects, or a persistent `exec`
+    /// binding. The ambient stamp in apply_external_fd_delivery and
+    /// ambient_fd_pins_for only carry endpoints backed by a real
+    /// handle; a Text endpoint has none, so a spawned grandchild
+    /// inherited nothing at the slot and read EBADF where GNU's
+    /// forked child inherits the descriptor here_document_to_fd
+    /// created (redir.c:423, applied by do_redirections,
+    /// redir.c:237). The {var} channel solved the same problem for
+    /// its own bindings (#2272) by materializing the snapshot into
+    /// a carrier file; this pass is that materialization for
+    /// ambient bindings, in the one shared delivery segment.
+    ///
+    /// The skip rules preserve the owner-tag rationale documented
+    /// on ambient_fd_pins_for (2026-09-29): a slot the command's
+    /// OWN redirect list binds is the walk's to deliver —
+    /// materializing the ambient body there would clobber the
+    /// command's binding with the outer one. The same holds for a
+    /// slot named by the command's own heredoc_redirects (those
+    /// bindings deliver from their entries directly) and for a
+    /// slot a {var} redirect of this command claims (the applier
+    /// bound it; the {var} delivery arms own it). Injected group
+    /// redirects fall through, exactly as in ambient_fd_pins_for:
+    /// the table entry already IS the command's binding.
+    /// Process-substitution endpoints are not snapshots to
+    /// materialize — a live producer pipe must reach the child as
+    /// itself — and a slot also carrying a write endpoint keeps
+    /// today's composed behavior; both stay untouched.
+    fn deliver_ambient_text_endpoints(
+        &mut self,
+        cmd: &CommandNode,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+    ) {
+        let mut slots: Vec<u32> = Vec::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed || entry.write.is_some() {
+                continue;
+            }
+            if !matches!(
+                entry.read.as_ref(),
+                Some(crate::executor::fd_table::FdReadEndpoint::Text(_))
+            ) {
+                continue;
+            }
+            if let Some(redirect) = cmd
+                .redirects
+                .iter()
+                .find(|redirect| redirect.fd == Some(*fd))
+            {
+                if !crate::executor::support_names::is_injected_group_redirect(redirect) {
+                    continue;
+                }
+            }
+            if cmd
+                .heredoc_redirects
+                .iter()
+                .any(|redirect| redirect.fd == Some(*fd))
+            {
+                continue;
+            }
+            let var_claimed = cmd
+                .redirects
+                .iter()
+                .filter_map(|redirect| redirect.fd_var.as_deref())
+                .chain(
+                    cmd.heredoc_redirects
+                        .iter()
+                        .filter_map(|redirect| redirect.fd_var.as_deref()),
+                )
+                .any(|name| self.dynamic_fd_variable_value(name) == Some(*fd));
+            if var_claimed {
+                continue;
+            }
+            slots.push(*fd);
+        }
+        for fd in slots {
+            self.deliver_fd_var_text_binding(fd, fd, process, command_fd_pins, parent_side_dups);
+        }
+    }
+
     /// rubash#1688: register the ambient-fd pin on a stage process built
     /// by hand in the pipeline spawn loops (they bypass
     /// spawn_external_process, so without this a pipeline member sees
@@ -1972,6 +2057,18 @@ impl Executor {
         let mut numbered_dup_bindings: std::collections::HashMap<u32, NumberedDupBinding> =
             std::collections::HashMap::new();
         let mut fd_var_claimed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#2292: ambient Text endpoints (compound-bound
+        // heredoc bodies) have no handle for the stamp above or
+        // the pin computation below; materialize and deliver them
+        // here, before the walk, so the pass and the walk never
+        // deliver the same slot twice (the pass skips every slot
+        // the walk owns — see deliver_ambient_text_endpoints).
+        self.deliver_ambient_text_endpoints(
+            cmd,
+            &mut process,
+            &mut command_fd_pins,
+            &mut parent_side_dups,
+        );
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
                 self.deliver_fd_var_redirect(
@@ -2099,13 +2196,18 @@ impl Executor {
             // Merge-order note (#2235 × #2270): this lookup runs
             // BEFORE the heredoc arm below on purpose. A heredoc /
             // here-string entry still classifies as `write` at this
-            // point, so it can never claim a stash — which matches
-            // the dup replay itself (own_input_binding_before
-            // kind-skips heredocs, so a stash is never a heredoc
-            // binding). A stash under the same fd therefore belongs
-            // to an earlier plain entry, and the heredoc arm's own
+            // point, so it can never claim a stash. Since #2292 the
+            // dup replay DOES stash a materialized carrier for a
+            // heredoc source (own_input_binding_before's heredoc
+            // arm) — that stash belongs to the entry the replay
+            // resolved, the last binding of the fd BEFORE the dup:
+            // if it is an earlier plain entry, the heredoc arm's own
             // stamp, applied after it in list order, keeps GNU's
-            // last-wins for the slot.
+            // last-wins for the slot; if it is THIS entry, the arm
+            // materializes the same body again for the fd itself
+            // (the dup and the fd get independent carriers — the
+            // snapshot model's standing cost, where GNU shares one
+            // description).
             let stashed = if write {
                 None
             } else {
