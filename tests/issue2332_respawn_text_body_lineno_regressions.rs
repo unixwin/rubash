@@ -194,11 +194,11 @@ f"#;
     let (stdout, _) = run_script(&case, script);
     let pre = line_of(script, "pre=");
     let post = line_of(script, "post=");
-    // This pin asserts the $LINENO contract only. The heredoc body
-    // line ("literal") is dropped by a separate pre-existing
-    // divergence in async-subshell heredoc transport — #2388 owns
-    // that expectation.
-    assert_eq!(stdout, format!("pre={pre}\npost={post}\n"));
+    // The $LINENO contract, plus the heredoc body line: the body used
+    // to be dropped by the async-subshell heredoc transport gap that
+    // #2388 owned; since its fix the body arrives between pre and
+    // post (the full expectation set lives in the #2388 pins).
+    assert_eq!(stdout, format!("pre={pre}\nliteral\npost={post}\n"));
 }
 
 /// A failing command mid-body: the `script: line N:` diagnostic and

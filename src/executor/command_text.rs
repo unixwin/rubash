@@ -307,6 +307,100 @@ fn own_redirect(redirect: Option<&Redirect>) -> Option<&Redirect> {
         .filter(|redirect| !crate::executor::support_names::is_injected_group_redirect(redirect))
 }
 
+// rubash#2388: heredoc rendering for the respawn text renderer. GNU's
+// printer emits a heredoc's HEADER inline in the redirect list and
+// defers its BODY past the whole command line — past `|', `&&'/`||'
+// connectors and the `&' terminator — printing the collected bodies
+// after the line (print_cmd.c print_redirection_list /
+// print_heredoc_bodies / print_deferred_heredocs). This renderer
+// dropped heredocs entirely (the headers live only in cmd.redirects
+// as RedirectKind::HereDoc and no mirror field carries them), so a
+// respawned async child re-parsed a body-less header-less command and
+// the heredoc content vanished. The thread-locals below mirror
+// print_cmd.c's deferred_heredocs queue: connector arms hold the
+// queue while they render their elements, and the outermost render
+// (or the list separator logic) flushes the bodies after the line.
+thread_local! {
+    static DEFERRED_HEREDOC_BODIES: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static HEREDOC_RENDER_HOLD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static RENDER_ENDED_WITH_HEREDOC: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// RAII hold on the deferred-heredoc queue: while any hold is active,
+/// rendered heredoc bodies queue instead of landing in the text, so a
+/// connector arm can put its ` | ' / ` && ' / ` &' after the header
+/// line and let the enclosing render flush the bodies past it.
+struct HeredocRenderHold;
+
+impl HeredocRenderHold {
+    fn new() -> Self {
+        HEREDOC_RENDER_HOLD.with(|hold| hold.set(hold.get() + 1));
+        Self
+    }
+}
+
+impl Drop for HeredocRenderHold {
+    fn drop(&mut self) {
+        HEREDOC_RENDER_HOLD.with(|hold| hold.set(hold.get() - 1));
+    }
+}
+
+fn render_ended_with_heredoc() -> bool {
+    RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.get())
+}
+
+/// The (headers, bodies) of `cmd`'s own heredocs, correlated exactly
+/// like the parser-side printer (heredoc_redirect_info): the header
+/// spells `[fd]<<[-]['DELIM']`; each body is the stored body text plus
+/// its delimiter line, ready to be flushed after the command line.
+fn heredoc_headers_and_bodies(cmd: &CommandNode) -> (Vec<String>, Vec<String>) {
+    let mut headers = Vec::new();
+    let mut bodies = Vec::new();
+    let mut heredoc_index = 0usize;
+    for redirect in &cmd.redirects {
+        if redirect.kind != crate::parser::RedirectKind::HereDoc {
+            continue;
+        }
+        let info = crate::parser::ast_print::heredoc_redirect_info(cmd, redirect, heredoc_index);
+        heredoc_index += 1;
+        headers.push(crate::parser::ast_print::heredoc_header(&info));
+        bodies.push(crate::parser::ast_print::heredoc_body_text(cmd, &info));
+    }
+    (headers, bodies)
+}
+
+/// Attach rendered heredoc bodies to `text`: queued while a connector
+/// arm holds the render, otherwise appended after the command line
+/// (and the render is marked as ending with a heredoc body, which the
+/// separator/closer logic consults — a delimiter line admits only a
+/// newline after it).
+fn attach_heredoc_bodies(text: &mut String, bodies: Vec<String>) {
+    if bodies.is_empty() {
+        return;
+    }
+    if HEREDOC_RENDER_HOLD.with(|hold| hold.get()) > 0 {
+        DEFERRED_HEREDOC_BODIES.with(|queue| queue.borrow_mut().extend(bodies));
+        return;
+    }
+    text.push('\n');
+    text.push_str(&bodies.join("\n"));
+    RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.set(true));
+}
+
+/// Flush the deferred queue into `text` (after the enclosing line).
+/// Returns true when bodies were flushed.
+fn flush_deferred_heredoc_bodies(text: &mut String) -> bool {
+    let bodies = DEFERRED_HEREDOC_BODIES.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+    if bodies.is_empty() {
+        return false;
+    }
+    text.push('\n');
+    text.push_str(&bodies.join("\n"));
+    true
+}
+
 pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     let mut parts = Vec::new();
     let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
@@ -367,11 +461,17 @@ pub(in crate::executor) fn bash_command_text(cmd: &CommandNode) -> String {
     if let Some(redirect) = own_redirect(cmd.redirect_err_append.as_deref()) {
         parts.push(err_append_source_text(cmd, redirect));
     }
+    // rubash#2388: heredoc headers ride the redirect parts (the bodies
+    // attach after the joined line, print_cmd.c-style).
+    let (heredoc_headers, heredoc_bodies) = heredoc_headers_and_bodies(cmd);
+    parts.extend(heredoc_headers);
     if let Some(here_string) = &cmd.here_string {
         parts.push(format!("<<< {here_string}"));
     }
 
-    parts.join(" ")
+    let mut text = parts.join(" ");
+    attach_heredoc_bodies(&mut text, heredoc_bodies);
+    text
 }
 
 /// `2>&1` after `>file` is mirrored into `redirect_err_append` as a
@@ -455,20 +555,31 @@ pub(in crate::executor) fn bash_command_sequence_text(commands: &[CommandNode]) 
     // function definition (rubash#294: the async `kill $$` never ran, so
     // a trap-terminated `until` loop hung forever).
     let mut text = String::new();
-    for part in commands
-        .iter()
-        .map(bash_command_source_text)
-        .filter(|part| !part.trim().is_empty())
-    {
+    // rubash#2388: a part that ends with a heredoc delimiter line
+    // takes the newline separator too — the delimiter must stand alone
+    // on its line, so neither `; ' nor anything else may follow it
+    // (print_cmd.c print_deferred_heredocs swallows the `;' for the
+    // newline the same way).
+    let mut prev_ended_with_heredoc = false;
+    for part in commands.iter().map(bash_command_source_text) {
+        let ended_with_heredoc = render_ended_with_heredoc();
+        if part.trim().is_empty() {
+            continue;
+        }
         if !text.is_empty() {
-            if text.ends_with('&') {
+            if text.ends_with('&') || prev_ended_with_heredoc {
                 text.push('\n');
             } else {
                 text.push_str("; ");
             }
         }
         text.push_str(&part);
+        prev_ended_with_heredoc = ended_with_heredoc;
     }
+    // The flag must describe THIS text for the separator/closer logic
+    // of the enclosing arm (a trailing filtered-out part may have
+    // reset it during its own render).
+    RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.set(prev_ended_with_heredoc));
     text
 }
 
@@ -598,6 +709,21 @@ pub(in crate::executor) fn try_render_literal_command(cmd: &CommandNode) -> Opti
 }
 
 pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String {
+    // rubash#2388: the outermost render of a command flushes the
+    // heredoc bodies the connector arms deferred (print_cmd.c prints
+    // them after the complete command line) and records whether the
+    // text ends with a delimiter line, which the list separator and
+    // closer logic consult.
+    RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.set(false));
+    let mut text = bash_command_source_text_render(cmd);
+    if HEREDOC_RENDER_HOLD.with(|hold| hold.get()) == 0 && flush_deferred_heredoc_bodies(&mut text)
+    {
+        RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.set(true));
+    }
+    text
+}
+
+fn bash_command_source_text_render(cmd: &CommandNode) -> String {
     let mut text = if let Some(for_command) = &cmd.for_command {
         for_command_source_text(for_command)
     } else if let Some(pipeline_command) = &cmd.pipeline_command {
@@ -629,7 +755,13 @@ pub(in crate::executor) fn bash_command_source_text(cmd: &CommandNode) -> String
     } else if let Some(function_command) = &cmd.function_command {
         function_command_source_text(function_command)
     } else if let Some(brace_group) = &cmd.brace_group {
-        format!("{{ {}; }}", bash_command_sequence_text(&brace_group.body))
+        let body = bash_command_sequence_text(&brace_group.body);
+        if render_ended_with_heredoc() {
+            // A delimiter line admits only a newline before `}'.
+            format!("{{ {body}\n}}")
+        } else {
+            format!("{{ {body}; }}")
+        }
     } else {
         // bash_command_text already appends the command's redirections;
         // routing it through append_source_redirects below would render
@@ -669,6 +801,9 @@ fn for_command_source_text(for_command: &ForCommand) -> String {
 }
 
 fn pipeline_command_source_text(pipeline_command: &PipelineCommand) -> String {
+    // rubash#2388: stage heredoc bodies defer past the whole pipeline
+    // line (print_cmd.c flushes them after the connection).
+    let _hold = HeredocRenderHold::new();
     pipeline_command
         .stages
         .iter()
@@ -705,6 +840,9 @@ pub(in crate::executor) fn bash_job_stage_commands(cmd: &CommandNode) -> Vec<Str
 }
 
 fn and_or_list_source_text(and_or_list: &AndOrListCommand) -> String {
+    // rubash#2388: element heredoc bodies defer past the connectors,
+    // to the end of the list line (print_cmd.c print_deferred_heredocs).
+    let _hold = HeredocRenderHold::new();
     let mut text = String::new();
     for (index, command) in and_or_list.commands.iter().enumerate() {
         if index > 0 {
@@ -733,6 +871,9 @@ fn time_command_source_text(time_command: &TimeCommand) -> String {
 }
 
 fn background_command_source_text(background_command: &BackgroundCommand) -> String {
+    // rubash#2388: the ` &' terminator belongs on the header line; the
+    // inner command's heredoc bodies flush after it.
+    let _hold = HeredocRenderHold::new();
     format!(
         "{} &",
         bash_command_source_text(&background_command.command)
@@ -800,7 +941,14 @@ fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> 
 }
 
 fn subshell_command_source_text(subshell_command: &SubshellCommand) -> String {
-    format!("( {} )", bash_command_sequence_text(&subshell_command.body))
+    let body = bash_command_sequence_text(&subshell_command.body);
+    if render_ended_with_heredoc() {
+        // rubash#2388: the closing paren goes on its own line after a
+        // trailing heredoc body — a delimiter line admits nothing else.
+        format!("( {body}\n)")
+    } else {
+        format!("( {body} )")
+    }
 }
 
 /// rubash#720 form 2: the print_cmd text of a FLAT `f() ( list )` region —
@@ -841,7 +989,10 @@ fn select_command_source_text(select_command: &SelectCommand) -> String {
 /// 626-631 emits `semicolon(); newline("done")') must join with a newline
 /// instead (rubash#294 `&;' corruption family).
 pub(in crate::executor) fn push_command_separator(source: &mut String) {
-    if source.ends_with('&') {
+    // rubash#2388: a body ending with a heredoc delimiter line takes
+    // the newline form too — the delimiter must stand alone on its
+    // line before `fi' / `done' / `}' may follow.
+    if source.ends_with('&') || render_ended_with_heredoc() {
         source.push('\n');
     } else if !source.ends_with('\n') {
         source.push_str("; ");
@@ -990,32 +1141,50 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
 
     let body = bash_command_sequence_text(&function_command.body);
     match function_command.body_kind {
-        FunctionBodyKind::BraceGroup => format!(
-            "{} {} {}; {}",
-            text,
-            function_command
-                .body_open_delimiter
-                .as_deref()
-                .unwrap_or("{"),
-            body,
-            function_command
-                .body_close_delimiter
-                .as_deref()
-                .unwrap_or("}")
-        ),
-        FunctionBodyKind::Subshell => format!(
-            "{} {} {} {}",
-            text,
-            function_command
-                .body_open_delimiter
-                .as_deref()
-                .unwrap_or("("),
-            body,
-            function_command
-                .body_close_delimiter
-                .as_deref()
-                .unwrap_or(")")
-        ),
+        FunctionBodyKind::BraceGroup => {
+            // rubash#2388: after a trailing heredoc body the closer
+            // takes a newline, never `; }' (delimiter line rule).
+            let separator = if render_ended_with_heredoc() {
+                "\n"
+            } else {
+                "; "
+            };
+            format!(
+                "{} {} {}{}{}",
+                text,
+                function_command
+                    .body_open_delimiter
+                    .as_deref()
+                    .unwrap_or("{"),
+                body,
+                separator,
+                function_command
+                    .body_close_delimiter
+                    .as_deref()
+                    .unwrap_or("}")
+            )
+        }
+        FunctionBodyKind::Subshell => {
+            let separator = if render_ended_with_heredoc() {
+                "\n"
+            } else {
+                " "
+            };
+            format!(
+                "{} {} {}{}{}",
+                text,
+                function_command
+                    .body_open_delimiter
+                    .as_deref()
+                    .unwrap_or("("),
+                body,
+                separator,
+                function_command
+                    .body_close_delimiter
+                    .as_deref()
+                    .unwrap_or(")")
+            )
+        }
         FunctionBodyKind::CommandSequence | FunctionBodyKind::CompoundCommand => {
             format!("{text} {body}")
         }
@@ -1069,15 +1238,28 @@ pub(in crate::executor) fn append_source_redirects(text: &mut String, cmd: &Comm
     // them. GNU print_cmd prints every redirection, so reprint them too or
     // a `-c` child loses `3>f` entirely.
     for redirect in &cmd.redirects {
-        if redirect.is_list_only_redirect() {
+        // HereDoc entries render through the heredoc header/body path
+        // below (a bare format_redirect would print the delimiter as a
+        // filename target and lose the body) — rubash#2388.
+        if redirect.is_list_only_redirect() && redirect.kind != crate::parser::RedirectKind::HereDoc
+        {
             text.push(' ');
             text.push_str(&format_redirect(&redirect.operator, redirect));
         }
+    }
+    // rubash#2388: a compound node's own heredocs (`( ... ) <<EOF',
+    // `while ...; done <<EOF') — headers here, bodies after the whole
+    // compound text (attach_heredoc_bodies defers under a hold).
+    let (heredoc_headers, heredoc_bodies) = heredoc_headers_and_bodies(cmd);
+    for header in heredoc_headers {
+        text.push(' ');
+        text.push_str(&header);
     }
     if let Some(here_string) = &cmd.here_string {
         text.push_str(" <<< ");
         text.push_str(here_string);
     }
+    attach_heredoc_bodies(text, heredoc_bodies);
 }
 
 #[cfg(test)]
