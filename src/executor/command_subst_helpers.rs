@@ -107,6 +107,60 @@ impl super::Executor {
         self.no_closing_brace_failure.set(true);
         true
     }
+
+    /// rubash#2441 (GNU subst.c extract_delimited_string failure site,
+    /// reported via extract_arithmetic_subst): a `$[...]` span whose
+    /// extraction finds no closing `]` is `bad substitution: no closing
+    /// `]' in <string>` and the command is discarded with status 1
+    /// (exp_jump_to_top_level(DISCARD) — every mode, like the brace
+    /// verdict above, so it shares the no_closing_brace_failure latch
+    /// and its consumers). <string> is the whole string handed to that
+    /// expansion level (segment content for a double-quoted word, the
+    /// whole heredoc body for a heredoc walk). Prints at most once per
+    /// command: GNU jumps at the first failing word/span, so a latch
+    /// already set means an earlier verdict owns the diagnostic.
+    /// Returns true when the verdict applies — the caller contributes
+    /// no value for this span.
+    pub(in crate::executor) fn no_closing_bracket_verdict(&self, string: &str) -> bool {
+        if !self.no_closing_brace_failure.replace(true) {
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}bad substitution: no closing `]' in {}\n",
+                    self.diagnostic_prefix(),
+                    string
+                )
+                .as_bytes(),
+            );
+        }
+        true
+    }
+}
+
+/// rubash#2441: the <string> GNU names for a failed `$[...]` extraction
+/// in a non-heredoc walk — the expansion-level string up to where the
+/// extraction stopped caring: the word prefix through the failing `$[`
+/// plus the body bytes the collector consumed before its first
+/// unescaped quote character (a quote is where the double-quote segment
+/// machine, subst.c:1014 skip_double_quoted, cut the string). The
+/// collector echoes every consumed char exactly once on its failure
+/// paths, so the span's start in the word is recoverable by counting.
+pub(in crate::executor) fn dollar_bracket_no_closing_string(
+    word: &str,
+    expression: &str,
+) -> String {
+    let total = word.chars().count();
+    let consumed = 2 + expression.chars().count();
+    let span_start = total.saturating_sub(consumed);
+    let mut string: String = word.chars().take(span_start + 2).collect();
+    let mut previous_was_backslash = false;
+    for ch in expression.chars() {
+        if !previous_was_backslash && matches!(ch, '"' | '\'' | '`') {
+            break;
+        }
+        string.push(ch);
+        previous_was_backslash = ch == '\\' && !previous_was_backslash;
+    }
+    string
 }
 
 pub(in crate::executor) fn collect_braced_parameter_name(
