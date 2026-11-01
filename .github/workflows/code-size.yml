@@ -10,9 +10,10 @@
 # the pristine tree, and a second copy is brought to 5.3.20 by applying
 # the official bash53-001..020 patches. The patch step fails loudly if a
 # hunk does not apply, so a wrong strip level can never silently skew
-# the count. NOTE (draft): the -p1 strip level follows the recipe used
-# for the vendored tree; verify it on the first manual dispatch before
-# relying on the release trigger.
+# the count. Strip level is -p0, as the official patch headers themselves
+# prescribe ("Patch (apply with `patch -p0')"); verified locally against
+# the 5.3 tarball + bash53-001 (dry-run): -p0 applies, -p1 cannot find
+# the files to patch.
 name: code-size
 
 on:
@@ -47,7 +48,7 @@ jobs:
           for i in $(seq -w 1 20); do
             curl -fsSL "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-0${i}" \
               -o "/tmp/gnu/bash53-0${i}"
-            patch -p1 < "/tmp/gnu/bash53-0${i}"
+            patch -p0 < "/tmp/gnu/bash53-0${i}"
           done
 
       - name: Recount and update doc + badge
