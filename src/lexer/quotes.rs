@@ -297,7 +297,13 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                         // printed `"x"` (PR#898 review, rubash#880 Face 2
                         // family). The assignment walk's `$"` arm already
                         // passes `true`.
-                        rest = remove_double_quoted_into_cursor(&mut out, rest, true, posix);
+                        let seg_out_start = out.chars().count();
+                        let (next, cut) =
+                            remove_double_quoted_into_cursor(&mut out, rest, true, posix);
+                        rest = next;
+                        if cut {
+                            reopen_doomed_segment(&mut out, seg_out_start);
+                        }
                     }
                     Some(&b'{') => {
                         rest = copy_braced_parameter_unquoted_cursor(&mut out, rest);
@@ -368,7 +374,12 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                 }
                 pending_name = false;
                 rest = &rest[1..];
-                rest = remove_double_quoted_into_cursor(&mut out, rest, true, posix);
+                let seg_out_start = out.chars().count();
+                let (next, cut) = remove_double_quoted_into_cursor(&mut out, rest, true, posix);
+                rest = next;
+                if cut {
+                    reopen_doomed_segment(&mut out, seg_out_start);
+                }
             }
             b'`' => {
                 pending_name = false;
@@ -502,11 +513,11 @@ fn copy_dollar_paren_substitution_cursor<'a>(out: &mut String, rest: &'a str) ->
 /// would let a `"` inside the expression (e.g. `$["1+1"]`) end the
 /// quoted span early, so — exactly like the `$(` arm above — the span
 /// travels as one unit and the expansion walkers re-collect it.
-fn copy_dollar_bracket_arithmetic_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+fn copy_dollar_bracket_arithmetic_cursor<'a>(out: &mut String, rest: &'a str) -> (&'a str, bool) {
     out.push('$');
     let rest = &rest[1..]; // past '$'
     if !rest.starts_with('[') {
-        return rest; // unreachable from the dispatcher; keeps parity
+        return (rest, false); // unreachable from the dispatcher; keeps parity
     }
     out.push('[');
     copy_dollar_bracket_body_raw_cursor(out, &rest[1..], true)
@@ -590,7 +601,12 @@ fn dollar_bracket_body_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// past the closer, or bytes.len() when unterminated). The closer may
 /// wear the family's data spelling; backslash passes apply only where
 /// the quoted syntax has escapes (not in single quotes).
-fn skip_quote_unit_bytes(bytes: &[u8], open: usize, closers: &[u8], backslash_passes: bool) -> usize {
+fn skip_quote_unit_bytes(
+    bytes: &[u8],
+    open: usize,
+    closers: &[u8],
+    backslash_passes: bool,
+) -> usize {
     let mut index = open + 1;
     while index < bytes.len() {
         if backslash_passes && matches!(bytes[index], b'\\' | 0x11) {
@@ -745,7 +761,12 @@ fn dollar_bracket_body_end_chars(chars: &[char], start: usize) -> Option<usize> 
     None
 }
 
-fn skip_quote_unit_chars(chars: &[char], open: usize, closers: &[char], backslash_passes: bool) -> usize {
+fn skip_quote_unit_chars(
+    chars: &[char],
+    open: usize,
+    closers: &[char],
+    backslash_passes: bool,
+) -> usize {
     let mut index = open + 1;
     while index < chars.len() {
         if backslash_passes && matches!(chars[index], '\\' | '\u{11}') {
@@ -864,11 +885,14 @@ fn copy_dollar_bracket_verbatim_cursor<'a>(out: &mut String, rest: &'a str) -> &
 /// Cursor form of `copy_dollar_bracket_body_raw` (rest just past the
 /// `$[`). Returns the remainder just past the matching `]`, or the
 /// empty slice when the span runs to the end of input (the EOF verdict
-/// machinery owns that diagnostic). Bracket matching here is plain
-/// counting — every `[` nests, every `]` closes: this copier only
-/// copies bytes verbatim, so where the span boundary falls does not
-/// change the emitted text, and the expansion walkers' collectors
-/// re-extract the body with GNU's machine (subst.c:1361, see
+/// machinery owns that diagnostic), plus whether the span was CUT by the
+/// double-quote segment end (rubash#2227: the caller then re-emits the
+/// segment's opening `"` so the expansion walker can name the segment
+/// as GNU's expansion-level string, subst.c:11692-11723). Bracket
+/// matching here is plain counting — every `[` nests, every `]` closes:
+/// this copier only copies bytes verbatim, so where the span boundary
+/// falls does not change the emitted text, and the expansion walkers'
+/// collectors re-extract the body with GNU's machine (subst.c:1361, see
 /// dollar_bracket_body_end above) before evaluating it.
 ///
 /// With `deescape_dq` (the double-quote cookers) the `\"` pair GNU's
@@ -890,11 +914,32 @@ fn copy_dollar_bracket_verbatim_cursor<'a>(out: &mut String, rest: &'a str) -> &
 /// outcome (`$[\$x+1]` errors on the unexpanded `$x+1` in both). The
 /// raw copiers pass false — their spans are re-cooked later, and
 /// translating there would double-apply.
+/// rubash#2227: re-emit a double-quote segment's opening `"` after the
+/// segment's `$[...]` span was CUT by the segment end (the #2441 cut).
+/// GNU expand_word_internal (subst.c:11692-11723) hands the extracted
+/// segment (`string_extract_double_quoted`, subst.c:852) to a recursive
+/// expansion level, so a `$[...]` extraction that fails there names THE
+/// SEGMENT in its diagnostic (`bad substitution: no closing `]' in
+/// <string>`, subst.c:1505) — not the whole word prefix. The cookers
+/// strip the segment delimiters, which loses the level's start; this
+/// splice re-marks it. It only ever lands in a word whose walk ends in
+/// that discarded-command verdict, so no other consumer observes it.
+/// `segment_start_chars` is the cooked-output char count where the
+/// segment content began (recorded before the segment cooker ran).
+fn reopen_doomed_segment(out: &mut String, segment_start_chars: usize) {
+    let byte_index = out
+        .char_indices()
+        .nth(segment_start_chars)
+        .map(|(index, _)| index)
+        .unwrap_or(out.len());
+    out.insert(byte_index, '"');
+}
+
 fn copy_dollar_bracket_body_raw_cursor<'a>(
     out: &mut String,
     rest: &'a str,
     deescape_dq: bool,
-) -> &'a str {
+) -> (&'a str, bool) {
     if deescape_dq {
         // rubash#2441: this copier serves a double-quoted segment, and
         // GNU delimits the segment before extracting the span
@@ -929,14 +974,17 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
                     idx += 1;
                 }
                 out.push_str(&rest[seg_start..end]);
-                return &rest[end..];
+                return (&rest[end..], false);
             }
             _ => {
                 out.push_str(&rest[..seg_end]);
                 if seg_end < bytes.len() {
                     out.push('"');
                 }
-                return &rest[seg_end..];
+                // CUT (rubash#2227): the doomed span's segment opener must
+                // survive into the cooked word so the walker's verdict can
+                // name the segment — GNU's expansion-level string.
+                return (&rest[seg_end..], true);
             }
         }
     }
@@ -966,7 +1014,7 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
         }
     }
     out.push_str(&rest[seg_start..idx]);
-    &rest[idx..]
+    (&rest[idx..], false)
 }
 
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
@@ -1163,7 +1211,8 @@ fn copy_double_quoted_raw_cursor(out: &mut String, rest: &str) -> usize {
             '$' if rest.as_bytes().get(idx) == Some(&b'[') => {
                 idx += 1;
                 out.push('[');
-                let consumed = copy_dollar_bracket_body_raw_cursor(out, &rest[idx..], false);
+                let (consumed, _cut) =
+                    copy_dollar_bracket_body_raw_cursor(out, &rest[idx..], false);
                 idx = rest.len() - consumed.len();
             }
             _ => {}
@@ -1442,9 +1491,13 @@ fn remove_double_quoted_into_cursor<'a>(
     rest: &'a str,
     preserve_backticks: bool,
     posix: bool,
-) -> &'a str {
+) -> (&'a str, bool) {
     let mut rest = rest;
     let mut pending_name = false;
+    // rubash#2227: a `$[...]` span cut by this segment's closing quote
+    // must let the caller re-emit the opening `"` (the segment becomes
+    // GNU's expansion-level string, subst.c:11692-11723).
+    let mut segment_cut = false;
     while !rest.is_empty() {
         let first = rest.as_bytes()[0];
         if first == b'$' {
@@ -1461,7 +1514,9 @@ fn remove_double_quoted_into_cursor<'a>(
                 }
                 Some(&b'[') => {
                     pending_name = false;
-                    rest = copy_dollar_bracket_arithmetic_cursor(&mut *out, rest);
+                    let (next, cut) = copy_dollar_bracket_arithmetic_cursor(&mut *out, rest);
+                    rest = next;
+                    segment_cut |= cut;
                     continue;
                 }
                 Some(&b @ (b'?' | b'$' | b'!' | b'#' | b'-' | b'@' | b'*' | b'0'..=b'9')) => {
@@ -1497,7 +1552,7 @@ fn remove_double_quoted_into_cursor<'a>(
                 if pending_name {
                     out.push(PARAM_NAME_END_MARKER);
                 }
-                return &rest[1..];
+                return (&rest[1..], segment_cut);
             }
             b'`' if preserve_backticks => {
                 pending_name = false;
@@ -1568,7 +1623,7 @@ fn remove_double_quoted_into_cursor<'a>(
             }
         }
     }
-    rest
+    (rest, segment_cut)
 }
 
 pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
@@ -1586,7 +1641,10 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
             '$' if chars.peek() == Some(&'"') => {
                 pending_name = false;
                 chars.next();
-                remove_double_quoted_into(&mut out, &mut chars, true, false);
+                let seg_out_start = out.chars().count();
+                if remove_double_quoted_into(&mut out, &mut chars, true, false) {
+                    reopen_doomed_segment(&mut out, seg_out_start);
+                }
             }
             '$' if chars.peek() == Some(&'{') => {
                 pending_name = false;
@@ -1642,7 +1700,10 @@ pub(super) fn remove_shell_quotes_outside_backticks(raw: &str) -> String {
                     out.push(PARAM_NAME_END_MARKER);
                 }
                 pending_name = false;
-                remove_double_quoted_into(&mut out, &mut chars, true, false);
+                let seg_out_start = out.chars().count();
+                if remove_double_quoted_into(&mut out, &mut chars, true, false) {
+                    reopen_doomed_segment(&mut out, seg_out_start);
+                }
             }
             '\\' => {
                 pending_name = false;
@@ -1690,13 +1751,17 @@ fn remove_double_quoted_into(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     preserve_backticks: bool,
     posix: bool,
-) {
+) -> bool {
     // Unbraced `$name` inside double quotes keeps collecting name characters
     // up to the closing quote (bash: `"$xb"` reads the variable `xb`); the
     // closing quote must therefore emit PARAM_NAME_END_MARKER so the
     // expansion stage stops the name there instead of swallowing the
     // following literal text.
     let mut pending_name = false;
+    // rubash#2227: a `$[...]` span cut by this segment's closing quote
+    // must let the caller re-emit the opening `"` (see
+    // reopen_doomed_segment).
+    let mut segment_cut = false;
     while let Some(quoted) = chars.next() {
         if quoted == '$' && chars.peek() == Some(&'(') {
             pending_name = false;
@@ -1710,7 +1775,7 @@ fn remove_double_quoted_into(
         }
         if quoted == '$' && chars.peek() == Some(&'[') {
             pending_name = false;
-            copy_dollar_bracket_arithmetic(out, chars);
+            segment_cut |= copy_dollar_bracket_arithmetic(out, chars);
             continue;
         }
         if quoted == '$'
@@ -1805,6 +1870,7 @@ fn remove_double_quoted_into(
             }
         }
     }
+    segment_cut
 }
 
 fn copy_dollar_paren_substitution(
@@ -1820,35 +1886,37 @@ fn copy_dollar_paren_substitution(
 }
 
 /// Char form of `copy_dollar_bracket_arithmetic_cursor` (chars just past
-/// the `$` of a `$[...]` span). See the cursor form for the GNU anchors
-/// and the rubash#2217 rationale.
+/// the `$` of a `$[...]` span); returns whether the span was cut by the
+/// double-quote segment end (rubash#2227). See the cursor form for the
+/// GNU anchors and the rubash#2217 rationale.
 fn copy_dollar_bracket_arithmetic(
     out: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
-) {
+) -> bool {
     out.push('$');
     if chars.next() != Some('[') {
-        return;
+        return false;
     }
     out.push('[');
-    copy_dollar_bracket_body_raw(out, chars, true);
+    copy_dollar_bracket_body_raw(out, chars, true)
 }
 
 /// Char form of `copy_dollar_bracket_body_raw_cursor` (chars just past
 /// the `$[`): copy through the matching `]` by plain bracket counting,
-/// with the same `deescape_dq` rule as the cursor form. In a
-/// double-quoted segment (`deescape_dq`) the segment containment rule
-/// of the cursor form applies (rubash#2441): the span is copied
-/// through its extraction end only when that end lies inside the
-/// segment; otherwise the body is copied up to the segment end plus
-/// the segment-closing quote (left unconsumed so the enclosing cooker
-/// closes there), which makes the expansion walker report the span
-/// unclosed, as GNU does.
+/// with the same `deescape_dq` rule as the cursor form, and — like the
+/// cursor form — report whether the span was CUT by the double-quote
+/// segment end (rubash#2227). In a double-quoted segment
+/// (`deescape_dq`) the segment containment rule of the cursor form
+/// applies (rubash#2441): the span is copied through its extraction end
+/// only when that end lies inside the segment; otherwise the body is
+/// copied up to the segment end plus the segment-closing quote (left
+/// unconsumed so the enclosing cooker closes there), which makes the
+/// expansion walker report the span unclosed, as GNU does.
 fn copy_dollar_bracket_body_raw(
     out: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     deescape_dq: bool,
-) {
+) -> bool {
     if deescape_dq {
         let snapshot: Vec<char> = chars.clone().collect();
         let seg_end = dquote_segment_end_chars(&snapshot, 0);
@@ -1860,16 +1928,14 @@ fn copy_dollar_bracket_body_raw(
                         break;
                     };
                     consumed += 1;
-                    if ch == '\\'
-                        && consumed < end
-                        && matches!(chars.peek(), Some('"'))
-                    {
+                    if ch == '\\' && consumed < end && matches!(chars.peek(), Some('"')) {
                         out.push(chars.next().expect("peeked escape char"));
                         consumed += 1;
                         continue;
                     }
                     out.push(ch);
                 }
+                return false;
             }
             _ => {
                 for _ in 0..seg_end {
@@ -1881,9 +1947,10 @@ fn copy_dollar_bracket_body_raw(
                 if seg_end < snapshot.len() {
                     out.push('"');
                 }
+                // CUT (rubash#2227): see the cursor form.
+                return true;
             }
         }
-        return;
     }
     let mut depth = 1usize;
     while let Some(ch) = chars.next() {
@@ -1903,6 +1970,7 @@ fn copy_dollar_bracket_body_raw(
             _ => {}
         }
     }
+    false
 }
 
 fn copy_single_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
@@ -2055,7 +2123,8 @@ fn copy_double_quoted_raw(out: &mut String, chars: &mut std::iter::Peekable<std:
             '$' if chars.peek() == Some(&'[') => {
                 chars.next();
                 out.push('[');
-                copy_dollar_bracket_body_raw(out, chars, false);
+                // Raw dquote walk (deescape_dq=false): never a segment cut.
+                let _cut = copy_dollar_bracket_body_raw(out, chars, false);
             }
             _ => {}
         }

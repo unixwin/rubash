@@ -136,25 +136,46 @@ impl super::Executor {
     }
 }
 
-/// rubash#2441: the <string> GNU names for a failed `$[...]` extraction
-/// in a non-heredoc walk — the expansion-level string up to where the
-/// extraction stopped caring: the word prefix through the failing `$[`
-/// plus the body bytes the collector consumed before its first
-/// unescaped quote character (a quote is where the double-quote segment
-/// machine, subst.c:1014 skip_double_quoted, cut the string). The
-/// collector echoes every consumed char exactly once on its failure
-/// paths, so the span's start in the word is recoverable by counting.
+/// rubash#2441/rubash#2227: the <string> GNU names for a failed `$[...]`
+/// extraction in a non-heredoc walk. GNU expand_word_internal
+/// (subst.c:11692-11723) hands each double-quoted segment
+/// (string_extract_double_quoted, subst.c:852) to a recursive expansion
+/// level, so extract_arithmetic_subst's failing scan runs against THE
+/// SEGMENT and `bad substitution: no closing `]' in <string>`
+/// (subst.c:1505) names the segment — not the whole word prefix. The
+/// cookers re-emit the doomed segment's opening `"` (quotes.rs
+/// reopen_doomed_segment), so the segment is the text after the LAST
+/// raw `"` / E302 opener in the word prefix through the failing `$[`
+/// plus the collector's consumed body. `tail` is the walker iterator's
+/// unconsumed remainder at the verdict — with it the span's end in the
+/// word is exact (the segment-bounded collector stops at the cut
+/// quote and leaves the post-cut text unconsumed).
 pub(in crate::executor) fn dollar_bracket_no_closing_string(
     word: &str,
     expression: &str,
+    tail: &str,
 ) -> String {
     let total = word.chars().count();
-    let consumed = 2 + expression.chars().count();
-    let span_start = total.saturating_sub(consumed);
-    let mut string: String = word.chars().take(span_start + 2).collect();
+    let span_end = total.saturating_sub(expression.chars().count() + tail.chars().count());
+    let mut string: Vec<char> = word.chars().take(span_end).collect();
+    // Start at the last double-quote delimiter in the prefix — the
+    // doomed segment's re-emitted opener (raw `"` in the generic
+    // channels, E302 in the assignment hoist channel). A raw `"` from a
+    // single-quoted span also qualifies: in GNU's word string quotes
+    // are quotes, and expand_word_internal would open a segment there
+    // too. Data-quote carriers (DATA_DQUOTE 0x18 etc.) do not: GNU's
+    // segment machine passes an escaped quote by (subst.c:989).
+    if let Some(pos) = string.iter().rposition(|&ch| ch == '"' || ch == '\u{E302}') {
+        string.drain(..=pos);
+    }
+    let mut string: String = string.into_iter().collect();
     let mut previous_was_backslash = false;
     for ch in expression.chars() {
-        if !previous_was_backslash && matches!(ch, '"' | '\'' | '`') {
+        // The generic channels' collector stops before the cut quote, so
+        // the expression rarely reaches one; the assignment hoist
+        // channel's collector is not segment-bounded and consumes its
+        // E302 cut survivor as an unterminated quote unit — stop there.
+        if !previous_was_backslash && matches!(ch, '"' | '\'' | '`' | '\u{E302}') {
             break;
         }
         string.push(ch);
