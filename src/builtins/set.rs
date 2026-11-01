@@ -408,6 +408,16 @@ where
             // the word — the branch whose absence dropped `-e`/`-u` bundled
             // before `-o` (rubash#358).
             apply_short_set_flag(env_vars, option, prefix == '-');
+            // flags.c:257: a monitor write also drives the job_control
+            // variable through set_job_control; record it with the
+            // `-o` writes so the executor dispatch can replay it onto
+            // the variable's home after the builtin returns
+            // (rubash#2487).
+            if short_flag_option_name(option) == Some("monitor") {
+                if let Some(writes) = o_writes.as_deref_mut() {
+                    writes.push(("monitor".to_string(), prefix == '-'));
+                }
+            }
         }
 
         index += 1;

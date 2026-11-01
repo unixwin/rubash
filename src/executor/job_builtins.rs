@@ -3243,9 +3243,23 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         let mut stderr = Vec::new();
+        // builtins/suspend.def:103 reads the job_control VARIABLE
+        // (jobs.c:223), not the monitor flag: `set -m` feeds it
+        // through flags.c:257's set_job_control call, and fork
+        // boundaries erase it via without_job_control while the
+        // flag letter stays in `$-` (rubash#2487). The login guard
+        // reads the effective login state — the same
+        // `invocation_login && !subshell_login_cleared` formula as
+        // the exit/logout face (execute_cmd.c:1636-1637 resets
+        // login_shell at a subshell boundary; the command-substitution
+        // fork does not, subst.c:7143).
+        let job_control = self.shell_state.job_control.get();
+        let login_shell = self.invocation_login() && !self.shell_state.subshell_login_cleared.get();
         let (status, too_many_arguments) = crate::builtins::suspend::execute_with_io(
             &cmd.words[1..],
             &self.diagnostic_prefix(),
+            job_control,
+            login_shell,
             &mut stderr,
         )?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;

@@ -4565,6 +4565,16 @@ impl Executor {
         // execute_lastpipe_stage instead — it IS the current shell and
         // keeps login_shell.)
         let saved_login_cleared = self.shell_state.subshell_login_cleared.replace(true);
+        // rubash#2487: the same fork erases the job_control variable
+        // (jobs.c:5356-5366 without_job_control, the call the
+        // job-table swap below already cites via rubash#1349): the
+        // element's `suspend` must refuse even when the enclosing
+        // shell ran `set -m`, while the monitor flag letter stays in
+        // the element's `$-`. Bracket the variable like the login
+        // reset; a `set -m` inside the element re-arms it through
+        // flags.c:257. (lastpipe's last element keeps the variable —
+        // it IS the current shell.)
+        let saved_job_control = self.shell_state.job_control.replace(false);
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -4860,6 +4870,8 @@ impl Executor {
         self.shell_state
             .subshell_login_cleared
             .set(saved_login_cleared);
+        // rubash#2487: the element's job-control erasure dies with it.
+        self.shell_state.job_control.set(saved_job_control);
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;

@@ -795,11 +795,18 @@ impl Executor {
             // `$( (logout) )` in a login shell reports not-login
             // (rubash#2438). Save/restore with the depth above.
             let saved_login_cleared = self.shell_state.subshell_login_cleared.replace(true);
+            // The same boundary erases the job_control variable
+            // (jobs.c:5356-5366 without_job_control; the comsub fork
+            // itself kept it, but the `( )` group inside the body is
+            // a fresh execute_in_subshell) — save/restore with the
+            // login reset above (rubash#2487).
+            let saved_job_control = self.shell_state.job_control.replace(false);
             let result = self.expand_command_substitution_inner(inner, context);
             self.shell_state.subshell_depth.set(saved_depth);
             self.shell_state
                 .subshell_login_cleared
                 .set(saved_login_cleared);
+            self.shell_state.job_control.set(saved_job_control);
             return result;
         }
         if let Some(rest) = source.strip_prefix('<') {

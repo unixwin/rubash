@@ -153,6 +153,14 @@ impl Executor {
                     .borrow_mut()
                     .set_readline_variable("editing-mode", name);
             }
+            // flags.c:257: changing the `m` flag calls set_job_control,
+            // so a monitor write moves the job_control variable
+            // (jobs.c:223) with the flag — replayed here in write
+            // order, last write wins, exactly like the option cell
+            // itself (rubash#2487).
+            if name == "monitor" {
+                self.shell_state.job_control.set(*enabled);
+            }
         }
         if cmd.words.len() == 1 && !self.posix_mode_enabled() {
             // GNU set.def set_builtin with no arguments calls
@@ -268,6 +276,21 @@ impl Executor {
         let _ = shell.load_file_with_arming(&path, histsize, timestamps_armed);
     }
 
+    /// flags.c:257: a `set -m`/`set +m` write routes through
+    /// set_job_control, so the job_control variable (jobs.c:223)
+    /// shadows the monitor flag. The fast set arms apply the flag
+    /// directly on env_vars without reporting the write (the full
+    /// path reports it through o_writes and execute_set replays it);
+    /// when the words wrote monitor, re-read the resulting flag into
+    /// the variable (rubash#2487).
+    fn sync_job_control_after_fast_set(&mut self, args: &[String]) {
+        if set_words_write_monitor(args) {
+            let enabled =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
+            self.shell_state.job_control.set(enabled);
+        }
+    }
+
     pub(in crate::executor) fn execute_set_command(
         &mut self,
         cmd: &CommandNode,
@@ -292,11 +315,13 @@ impl Executor {
             return Ok(());
         }
         if self.apply_simple_set_flags(&cmd.words[1..]) {
+            self.sync_job_control_after_fast_set(&cmd.words[1..]);
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             self.exit_code = 0;
             return Ok(());
         }
         if self.apply_set_positional_operands(&cmd.words[1..]) {
+            self.sync_job_control_after_fast_set(&cmd.words[1..]);
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             self.exit_code = 0;
             return Ok(());
@@ -314,4 +339,48 @@ impl Executor {
         self.exit_code = self.execute_set(cmd)?;
         Ok(())
     }
+}
+
+/// Whether a `set` command's words write the monitor option, in the
+/// restricted grammars the two fast arms accept: leading flag words
+/// (a `-o`/`+o` word consumes the next word as the option name) up to
+/// the first positional word, `--`, or `-` — exactly the prefix each
+/// fast arm applies before it claims the command (rubash#2487).
+fn set_words_write_monitor(args: &[String]) -> bool {
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        if word == "--" || word == "-" {
+            break;
+        }
+        let Some(body) = word.strip_prefix('-').or_else(|| word.strip_prefix('+')) else {
+            break;
+        };
+        if body.is_empty() {
+            break;
+        }
+        if body == "o" {
+            if args.get(index + 1).map(String::as_str) == Some("monitor") {
+                return true;
+            }
+            index += 2;
+            continue;
+        }
+        let mut chars = body.chars().peekable();
+        while let Some(flag) = chars.next() {
+            if flag == 'm' {
+                return true;
+            }
+            if flag == 'o' && chars.peek().is_none() {
+                // set.def's `o` branch: the option name is the next
+                // word (trailing characters of this word would be
+                // applied as further flags, a shape the fast arms
+                // reject to the full path anyway).
+                if args.get(index + 1).map(String::as_str) == Some("monitor") {
+                    return true;
+                }
+            }
+        }
+        index += 1;
+    }
+    false
 }

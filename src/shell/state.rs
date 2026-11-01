@@ -332,6 +332,26 @@ pub struct ShellState {
     /// it through Clone exactly as a forked child inherits
     /// login_shell == 0.
     pub(crate) subshell_login_cleared: Cell<bool>,
+    /// jobs.c:223 `job_control` — the live job-control VARIABLE, as
+    /// distinct from the monitor option flag. The flag and the
+    /// variable move together only while the flag is being written
+    /// (flags.c:257 routes `set -m`/`set +m` through set_job_control)
+    /// and at shell startup (shell.c:647 set_job_control
+    /// (interactive_shell); shell.c:1858 for a `-m` invocation). A
+    /// fork boundary erases ONLY the variable (jobs.c:5356-5366
+    /// without_job_control, called from execute_in_subshell and
+    /// execute_subshell_builtin_or_function) while the flag letter
+    /// rides into the child's `$-` untouched — empirical GNU 5.3.20:
+    /// `set -m; (echo $-)` prints `hmBc` while `fg`/`suspend` in the
+    /// same subshell report "no job control". The command-
+    /// substitution fork does NOT erase it (subst.c:7143
+    /// command_substitute never touches job_control), so a cloned
+    /// state simply inherits the value there. Writers: the `set`
+    /// builtin's monitor writes (replayed in the executor's set
+    /// dispatch), `Executor::set_shell_option` (the startup/API
+    /// funnel), and the boundary resets at the execute_in_subshell
+    /// entries (rubash#2487).
+    pub(crate) job_control: Cell<bool>,
     /// print_cmd.c make_command_string of the innermost enclosing
     /// `( )` subshell, rendered at subshell entry (executor
     /// execute_subshell_command_with_redirects / the ast_exec region
@@ -805,6 +825,7 @@ impl Clone for ShellState {
             subshell_depth: Cell::new(self.subshell_depth.get()),
             exit_unwind_leaked_frames: Cell::new(self.exit_unwind_leaked_frames.get()),
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
+            job_control: Cell::new(self.job_control.get()),
             subshell_source_text: self.subshell_source_text.clone(),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
