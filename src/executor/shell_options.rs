@@ -913,6 +913,85 @@ impl Executor {
         None
     }
 
+    /// rubash#2385: the write endpoint a WRITE-MODE spelling open
+    /// of fd `fd` yields when the fd's stream is a pipe — GNU's
+    /// open() of the magic link attaches to the pipe's OTHER end
+    /// (redir.c redir_open's plain open, redir.c:725), so the open
+    /// succeeds even though the descriptor itself is read-only, and
+    /// the bytes land in the very stream the read end serves. The
+    /// alias layer's third question, after `fd_alias_reopen_path`
+    /// (fresh open) and `fd_alias_spelling_open_error` (ENXIO):
+    /// callers consult it only where those two have declined and no
+    /// write endpoint exists to share — a descriptor WITH a write
+    /// endpoint keeps the dup/shared serve, and a dup INSTRUCTION
+    /// (`>&N`) never consults it at all (a dup of a read end keeps
+    /// failing EBADF at the write, GNU's dup2 semantics).
+    ///
+    /// By the fd's READ endpoint kind (endpoint-keyed, never
+    /// number-keyed — a dup of stdin carries InheritedProcessStdin,
+    /// so its alias resolves to stdin's pipe exactly like
+    /// /dev/stdin's):
+    /// - a materialized byte channel (`Text` /
+    ///   `ProcessSubstitution`) pairs with
+    ///   `FdWriteEndpoint::PipeChannel` over the SAME queue;
+    /// - a handle-backed FIFO (a streamed procsub's real pipe, an
+    ///   inherited pipe fd, a coproc's stdout pipe, the process
+    ///   stdin when it is a pipe) pairs, on unix, with the kernel's
+    ///   own complementary end — `crate::fd::complementary_write_file`
+    ///   performs the magic-link open GNU performs — wrapped as a
+    ///   plain File endpoint so every downstream face already knows
+    ///   how to carry it. Off unix there is no such open and the
+    ///   resolver declines (the pre-#2385 EBADF stands there for
+    ///   kernel pipes; in-memory channels still resolve);
+    /// - every other kind (regular file, socket, directory, device)
+    ///   declines: the existing arms own those opens.
+    /// rubash#2385: the pure predicate twin of
+    /// `fd_alias_complementary_write_endpoint` — whether a write-mode
+    /// spelling open of `fd` would mint a complementary end, without
+    /// performing the kernel-pipe magic open. Judgment faces (the
+    /// ordered walk's dup shortcut) consult it to decline shapes
+    /// that are opens, not dups; the resolver itself stays the only
+    /// place that mints the endpoint.
+    pub(in crate::executor) fn fd_alias_complementary_write_available(&self, fd: u32) -> bool {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::Text(_)) | Some(FdReadEndpoint::ProcessSubstitution(_)) => true,
+            Some(FdReadEndpoint::File(file)) => crate::fd::is_pipe_handle(file.handle),
+            Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                crate::fd::is_pipe_handle(file.handle)
+            }
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                crate::fd::is_pipe_handle(crate::fd::process_std_handle(0))
+            }
+            _ => false,
+        }
+    }
+
+    pub(in crate::executor) fn fd_alias_complementary_write_endpoint(
+        &self,
+        fd: u32,
+    ) -> Option<FdWriteEndpoint> {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::Text(input))
+            | Some(FdReadEndpoint::ProcessSubstitution(input)) => {
+                Some(FdWriteEndpoint::PipeChannel(PipeChannelEnd(input)))
+            }
+            Some(FdReadEndpoint::File(file)) => crate::fd::complementary_write_file(file.handle)
+                .map(|opened| FdWriteEndpoint::File(FileFd::from_file(opened, file.path.clone()))),
+            Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                crate::fd::complementary_write_file(file.handle).map(|opened| {
+                    FdWriteEndpoint::File(FileFd::from_file(opened, file.path.clone()))
+                })
+            }
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                let handle = crate::fd::process_std_handle(0);
+                crate::fd::complementary_write_file(handle).map(|file| {
+                    FdWriteEndpoint::File(FileFd::from_file(file, PathBuf::from("/dev/stdin")))
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// rubash#2276: the error a spelling-open of fd `fd`'s alias
     /// (`/dev/fd/N`, `/dev/stdin`, ...) must fail with when the fd's
     /// endpoint is a connected socket — ENXIO — or None when the
@@ -1570,7 +1649,10 @@ impl Executor {
                 }
                 Some(
                     FdWriteEndpoint::CoprocStdin { .. }
-                    | FdWriteEndpoint::ProcessSubstitution { .. },
+                    | FdWriteEndpoint::ProcessSubstitution { .. }
+                    // rubash#2385: a complementary channel end is a
+                    // pipe write end — class 'p', writable.
+                    | FdWriteEndpoint::PipeChannel(_),
                 ) => {
                     class = 'p';
                     can_w = true;
@@ -2342,6 +2424,14 @@ impl Executor {
                 // the bound write faces carry the exact EINVAL shape.
                 return Self::synthetic_proc_write_sink(true);
             }
+            FdWriteEndpoint::PipeChannel(_) => {
+                // rubash#2385: an append-dup of a complementary
+                // channel end — no handle reproduces the in-memory
+                // queue, so the append lands on the absorbed sink (a
+                // deep edge; the bound write faces themselves append
+                // to the queue exactly).
+                return Self::synthetic_proc_write_sink(true);
+            }
             FdWriteEndpoint::File(_) => unreachable!("handled above"),
         };
         if is_null_device(&path.to_string_lossy()) {
@@ -2524,6 +2614,12 @@ impl Executor {
             FdWriteEndpoint::File(file_fd) => {
                 crate::fd::write_all(file_fd.handle, output)?;
             }
+            FdWriteEndpoint::PipeChannel(channel) => {
+                // rubash#2385: append at the shared queue's tail; the
+                // read cursor is the readers' business, never the
+                // writer's (GNU's pipe write has no offset either).
+                channel.append(output);
+            }
             FdWriteEndpoint::FullDevice => {
                 // rubash#1898: every write to a /dev/full binding
                 // fails ENOSPC; the payload carries the strerror so
@@ -2602,6 +2698,22 @@ impl Executor {
         }
         if self.fd_table.output_endpoint(fd).is_some() {
             return Some(self.write_output_fd_redirect(target, output).map(|_| ()));
+        }
+        // rubash#2385: a write-mode spelling open of a pipe READ end
+        // attaches to the pipe's other end — the complementary
+        // resolver mints the write endpoint the descriptor itself
+        // lacks, and the bytes land in the read end's stream.
+        if let Some(endpoint) = self.fd_alias_complementary_write_endpoint(fd) {
+            return Some(match endpoint {
+                FdWriteEndpoint::PipeChannel(channel) => {
+                    channel.append(output);
+                    Ok(())
+                }
+                FdWriteEndpoint::File(file_fd) => {
+                    crate::fd::write_all(file_fd.handle, output).map_err(ExecuteError::from)
+                }
+                _ => Ok(()),
+            });
         }
         match fd {
             1 => Some(self.write_default_stdout(output)),
@@ -2851,6 +2963,13 @@ impl Executor {
             // entry — the diagnostic write fails EINVAL and is lost,
             // the same GNU outcome for the failing stderr write.
             FdWriteEndpoint::ProcContentWrite => Ok(()),
+            // rubash#2385: fd 2 dup'd onto a complementary channel
+            // end — the diagnostic appends to the queue like any
+            // other write through the endpoint.
+            FdWriteEndpoint::PipeChannel(channel) => {
+                channel.append(output);
+                Ok(())
+            }
             FdWriteEndpoint::File(file_fd) => crate::fd::write_all(file_fd.handle, output),
         };
         let _ = result;
@@ -2954,6 +3073,12 @@ impl Executor {
             FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                 let mut file = OpenOptions::new().create(true).append(true).open(path)?;
                 file.write_all(output)?;
+            }
+            FdWriteEndpoint::PipeChannel(channel) => {
+                // rubash#2385: append at the shared queue's tail; the
+                // read cursor is the readers' business, never the
+                // writer's (GNU's pipe write has no offset either).
+                channel.append(output);
             }
         }
         Ok(())

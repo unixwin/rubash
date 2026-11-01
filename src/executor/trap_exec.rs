@@ -360,6 +360,18 @@ impl Executor {
             }
             let _ = self.fd_table.dup_input(fd, alias_fd);
             let _ = self.fd_table.dup_output(fd, alias_fd);
+            // rubash#2385: `<>` of a pipe read end is ONE O_RDWR
+            // description of the pipe in GNU — the dup pair binds the
+            // read direction, but the write direction is the pipe's
+            // OTHER end, which no dup can copy out of a read-only
+            // descriptor. When the pair left the slot without a write
+            // endpoint, the complementary resolver's endpoint is the
+            // write direction.
+            if self.fd_table.output_endpoint(fd).is_none() {
+                if let Some(endpoint) = self.fd_alias_complementary_write_endpoint(alias_fd) {
+                    self.fd_table.open_output(fd, endpoint, dynamic);
+                }
+            }
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -4403,6 +4415,32 @@ impl Executor {
                         }
                         continue;
                     }
+                    // rubash#2385: a PATH-spelled target naming a pipe
+                    // READ end is an open, not a dup — the dup apply
+                    // below would copy the read end's empty write side
+                    // and strand every later write at EBADF, where
+                    // GNU's open attaches to the pipe's other end.
+                    // Only this shape diverts (a `&N` dup spelling and
+                    // every other target keep the arms below).
+                    if !super::execution_misc::redirect_target_is_dup_spelling(&target) {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if self.fd_table.output_endpoint(source_fd).is_none()
+                                && self.fd_alias_complementary_write_available(source_fd)
+                            {
+                                if let Some(endpoint) =
+                                    self.fd_alias_complementary_write_endpoint(source_fd)
+                                {
+                                    self.flush_persistent_output_process_substitution(fd)?;
+                                    self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                    self.record_output_fd_ledger(fd);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // GNU redir.c: the dup/move apply is guarded by
                         // `redir_fd != redirector` — a self-dup/self-move
@@ -4440,6 +4478,36 @@ impl Executor {
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
+                    }
+                    // rubash#2385: a spelling target naming a pipe
+                    // READ end binds the pipe's other end — GNU's open
+                    // of the alias attaches there (redir.c redir_open),
+                    // while the literal open below would bind the
+                    // process's own same-numbered descriptor. Only the
+                    // complementary case diverts: a regular-file
+                    // endpoint keeps the fresh-open path below, a
+                    // socket keeps its ENXIO failure, and a source
+                    // WITH a write endpoint keeps the dup serve the
+                    // fall-through reaches.
+                    if let Some(source_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                        if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                            return Err(ExecuteError::from(crate::posix_errors::path_error(
+                                &target, error,
+                            )));
+                        }
+                        if self.fd_alias_reopen_path(source_fd).is_none()
+                            && self.fd_table.output_endpoint(source_fd).is_none()
+                        {
+                            if let Some(endpoint) =
+                                self.fd_alias_complementary_write_endpoint(source_fd)
+                            {
+                                self.flush_persistent_output_process_substitution(fd)?;
+                                self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                self.record_output_fd_ledger(fd);
+                                continue;
+                            }
+                        }
                     }
                     // rubash#2090: a quoted ">(...)" target is a literal
                     // filename (subst.c:11365-11372), not a span — only a
@@ -4533,6 +4601,35 @@ impl Executor {
                             .env_vars
                             .insert(fd_closed_key(fd), "1".to_string());
                         continue;
+                    }
+                    // rubash#2385: a ReadWrite PATH spelling naming a
+                    // pipe read end is ONE O_RDWR open in GNU — the
+                    // dup copy below would bind the read direction
+                    // only and strand the write direction at EBADF.
+                    // Copy the read side, then install the
+                    // complementary write end. (A plain Input spelling
+                    // keeps the copy alone: an input open of a read
+                    // end IS the read end.)
+                    if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                        && !super::execution_misc::redirect_target_is_dup_spelling(&target)
+                    {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if self.fd_table.output_endpoint(source_fd).is_none()
+                                && self.fd_alias_complementary_write_available(source_fd)
+                            {
+                                if let Some(endpoint) =
+                                    self.fd_alias_complementary_write_endpoint(source_fd)
+                                {
+                                    self.copy_persistent_input_fd(fd, source_fd);
+                                    self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                    self.record_output_fd_ledger(fd);
+                                    continue;
+                                }
+                            }
+                        }
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // Self-dup/self-move: no-op (rubash#1236).
@@ -4990,6 +5087,18 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(fd_output_key(target_fd), "/proc/self/status".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::PipeChannel(_)) => {
+                // rubash#2385: a complementary channel end has no
+                // respellable target — the in-memory queue cannot
+                // travel into a respawned shell — so the ledger
+                // clears, exactly the None arm's record; the fd's
+                // spawn delivery (sink materialization) is the
+                // boundary a child actually meets.
+                self.shell_state.env_vars.remove(&fd_output_key(target_fd));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));
