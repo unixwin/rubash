@@ -3446,8 +3446,7 @@ pub fn apply_required_windows_child_environment(
 
 /// The data form of [`apply_required_windows_child_environment`]:
 /// the (name, value) pairs it would set on a child, in its order.
-/// The route seam (external_route) composes a routed call's
-/// environment from pairs, so the two forms share this one body.
+/// The two forms share this one body.
 #[cfg(windows)]
 pub fn required_windows_child_environment_pairs(
     env_vars: &HashMap<String, String>,

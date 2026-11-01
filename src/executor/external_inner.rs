@@ -235,17 +235,6 @@ fn fd_is_pin_source_pipe_alias(
         .any(|&source| pipe_identity(source) == Some(identity))
 }
 
-/// The result of one route-seam attempt (see
-/// `Executor::try_external_route`): `Handled` — the call ran
-/// in-process; `Declined` — the call falls through to the
-/// prepared spawn, carrying the stdin text the realization
-/// already pulled (when the stdin source was a text buffer) so
-/// the spawn's feed uses it instead of pulling a second time.
-enum RouteAttempt {
-    Handled,
-    Declined(Option<String>),
-}
-
 impl Executor {
     /// The simple-command execution lookup. Under a `command -p`
     /// re-dispatch (standard_path_scope set) the lookup walks the
@@ -448,7 +437,7 @@ impl Executor {
         // rubash#1832: the environment was composed to finality by
         // the env emulation above — the seam must not stamp SHLVL
         // over it (env_composed_final).
-        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true, None)
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, true)
     }
 
     fn parse_env_command_args(
@@ -1138,36 +1127,7 @@ impl Executor {
         process.current_dir(&self.shell_state.cwd);
         self.apply_external_environment(cmd, &mut process, &program);
         self.apply_external_redirects(cmd, &mut process)?;
-        // niubash#567 route seam: consult the host provider with
-        // the spawn fully prepared — every redirect already
-        // adjudicated by apply_external_redirects above, so a
-        // handled call leaves spawn semantics byte-for-byte, and a
-        // decline falls through to the prepared spawn untouched.
-        // The shell-spawn leg (`used_shell`) never routes: its
-        // payload IS rubash. Materialization that rewrote a word
-        // (a /dev/fd or process-substitution operand became a
-        // carrier path) also keeps the call on spawn, whose
-        // operand cleanup the materialization record feeds.
-        let mut route_pulled_stdin: Option<String> = None;
-        if !used_shell && !dev_ops.has_deferred_flushes() && proc_args.as_slice() == &cmd.words[1..]
-        {
-            match self.try_external_route(cmd, &program, &proc_args)? {
-                RouteAttempt::Handled => {
-                    self.note_emulated_foreground_wait();
-                    return Ok(());
-                }
-                RouteAttempt::Declined(pulled_text) => route_pulled_stdin = pulled_text,
-            }
-        }
-        self.spawn_external_process(
-            cmd,
-            &program,
-            process,
-            used_shell,
-            dev_ops,
-            false,
-            route_pulled_stdin,
-        )
+        self.spawn_external_process(cmd, &program, process, used_shell, dev_ops, false)
     }
 
     fn handle_host_external_command(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
@@ -1472,229 +1432,6 @@ impl Executor {
         // (rubash#1806). Setting it last in this composition is what
         // makes the supersede hold over both sources above.
         process.env("_", program.to_string_lossy().into_owned());
-    }
-
-    /// The route seam's form of [`Executor::apply_external_environment`]:
-    /// the complete environment of the call about to be routed, as
-    /// ordered pairs in GNU block composition (variables.c
-    /// maybe_make_export_env; rubash#1806) — the command's prefix
-    /// assignments first (source order, values resolved by the same
-    /// rules apply_external_environment applies: appends skipped
-    /// because the table already carries their composed value, the
-    /// compound marker stripped, the nameref export-name resolution,
-    /// the Windows TMPDIR boundary), then the child-environment
-    /// composition ([`Executor::compose_child_environment`]),
-    /// add_or_supercede throughout, and `_` finished by
-    /// put_command_name_into_env: the resolved program pathname,
-    /// superseding any inherited or prefix-assigned entry — a
-    /// prefix-assigned `_` keeps its prefix slot carrying the
-    /// program value (the #1806 oracle case), any other `_` closes
-    /// the composition.
-    pub(in crate::executor) fn compose_external_env_pairs(
-        &mut self,
-        cmd: &CommandNode,
-        program: &std::path::Path,
-    ) -> Vec<(String, String)> {
-        let mut pairs: Vec<(String, String)> = Vec::new();
-        let mut underscore_prefix_assigned = false;
-        let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
-        for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
-            let (base_name, append) = assignment_name_and_append(var_name);
-            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
-            // (att_noassign) prefix target never enters the temporary
-            // environment — no env entry is composed for it
-            // (rubash#2369).
-            if self.assignment_target_is_noassign(base_name) {
-                continue;
-            }
-            if append {
-                // Same skip as apply_external_environment: the
-                // dispatch seam already composed the append into the
-                // table, and the base composition below exports it.
-                continue;
-            }
-            let raw = raws_aligned
-                .then(|| cmd.assignment_raws.get(index))
-                .flatten()
-                .map(String::as_str);
-            let expanded_value = self.expand_assignment_value_with_raw(var_name, var_value, raw);
-            let expanded_value = expanded_value
-                .strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
-                .unwrap_or(&expanded_value);
-            let Some(env_name) = self.tempenv_export_name(base_name) else {
-                continue;
-            };
-            if is_valid_process_env(&env_name, expanded_value) {
-                let value = if cfg!(windows) && env_name == "TMPDIR" {
-                    self.child_env_value(&env_name, expanded_value)
-                } else {
-                    expanded_value.to_string()
-                };
-                if env_name == "_" {
-                    underscore_prefix_assigned = true;
-                }
-                super::readonly_functions::env_pair_supercede(&mut pairs, env_name, value);
-            }
-        }
-        for (name, value) in self.compose_child_environment() {
-            if name == "_" {
-                // `_` is finished below, superseding (see the doc).
-                continue;
-            }
-            super::readonly_functions::env_pair_supercede(&mut pairs, name, value);
-        }
-        let program_value = program.to_string_lossy().into_owned();
-        if underscore_prefix_assigned {
-            if let Some(slot) = pairs.iter_mut().find(|(name, _)| name == "_") {
-                slot.1 = program_value;
-            }
-        } else {
-            pairs.retain(|(name, _)| name != "_");
-            pairs.push(("_".to_string(), program_value));
-        }
-        pairs
-    }
-
-    /// One route-seam attempt for the foreground external call
-    /// whose spawn is fully prepared (niubash#567). `Handled`
-    /// when the registered provider COMPLETED or was CANCELLED —
-    /// the call ran in-process and this fn owns its finish (exit
-    /// code, capture routing) — and `Declined(pulled_text)` when
-    /// the call must spawn: no provider, an engine-side decline
-    /// gate, a realization decline, or the provider's own
-    /// decline. A decline leaves every piece of spawn state
-    /// exactly as the preparation left it; the pulled text is the
-    /// stdin text the realization already pulled with the feed's
-    /// own pull (when the source was a text buffer), handed to
-    /// the spawn's feed so the body's substitutions run exactly
-    /// once on either route.
-    fn try_external_route(
-        &mut self,
-        cmd: &CommandNode,
-        program: &std::path::Path,
-        proc_args: &[String],
-    ) -> Result<RouteAttempt, ExecuteError> {
-        use super::external_route::{
-            route_sigint_pending, ExternalRouteOutcome, ExternalRouteRequest,
-        };
-        let Some(provider_slot) = self.external_route_provider.clone() else {
-            return Ok(RouteAttempt::Declined(None));
-        };
-        // Engine-side decline gates: shapes whose plumbing is
-        // spawn-internal. An fd >= 3 redirect (or an fd-var
-        // binding) travels the `__RUBASH_FD_*` env channel and the
-        // parent-side fd fixups pinned by the fd regression
-        // suites; the legacy piped fallback means the stdio plan
-        // itself declined, so there are no slots to realize.
-        if cmd
-            .redirects
-            .iter()
-            .any(|redirect| redirect.fd_var.is_some() || redirect.fd.is_some_and(|fd| fd >= 3))
-            || self.external_stdio_piped_fallback
-        {
-            return Ok(RouteAttempt::Declined(None));
-        }
-        let Some(mut route_stdio) = self.realize_route_stdio() else {
-            return Ok(RouteAttempt::Declined(None));
-        };
-        let Some(stdin) = self.route_stdin_handle(cmd) else {
-            return Ok(RouteAttempt::Declined(None));
-        };
-        route_stdio.stdio.stdin = stdin.handle;
-        let pulled_text = stdin.pulled_text;
-        let env = self.compose_external_env_pairs(cmd, program);
-        let request = ExternalRouteRequest {
-            name: &cmd.words[0],
-            // The seam argv is the full vector, argv[0] (the
-            // command word as typed) included — `proc_args` is
-            // its tail, proven word-identical to the typed words
-            // by the caller's materialization gate.
-            argv: &cmd.words,
-            program,
-            env: &env,
-            cwd: &self.shell_state.cwd,
-            stdio: &route_stdio.stdio,
-            cancel_check: &route_sigint_pending,
-        };
-        // The drain starts BEFORE the provider runs (the spawn
-        // path's rubash#2094 discipline): a provider writing past
-        // the pipe buffer into a command-substitution capture must
-        // never deadlock against an undrained reader.
-        let drain = route_stdio.capture.map(|(reader, generation)| {
-            (
-                std::thread::spawn(move || {
-                    let mut reader = reader;
-                    let mut bytes = Vec::new();
-                    let _ = std::io::Read::read_to_end(&mut reader, &mut bytes);
-                    bytes
-                }),
-                generation,
-            )
-        });
-        // A re-entrant consult (the provider somehow re-entered
-        // the dispatcher on this executor) declines to spawn
-        // rather than deadlocking on the slot's borrow.
-        let outcome = match provider_slot.try_borrow_mut() {
-            Ok(mut slot) => slot.0.execute_route(&request),
-            Err(_) => ExternalRouteOutcome::Declined,
-        };
-        // Release every realized writer before joining the drain:
-        // EOF on the capture reader follows the last writer clone.
-        drop(route_stdio.keep_alive);
-        drop(stdin.keep_alive);
-        let captured =
-            drain.map(|(handle, generation)| (handle.join().unwrap_or_default(), generation));
-        match outcome {
-            // A decline leaves every piece of spawn state exactly
-            // as the preparation left it (this fn's contract above)
-            // — INCLUDING the spawn plan's capture outcome record.
-            // The record owns the capture pipe's reader when the
-            // plan bound fd 1 to the active capture, and the
-            // prepared spawn's drain is keyed off it: spending the
-            // record here dropped the reader and disarmed that
-            // drain, so the spawned child wrote into a pipe nobody
-            // routed into the capture and its output vanished
-            // (niubash#729: `command perl ... | wc -c` printed 0 in
-            // niubash, whose session always registers a provider,
-            // while the provider-less rubash binary exited this fn
-            // at the no-provider gate above and stayed correct).
-            // The prepared spawn is the record's owner on this
-            // path: spawn_external_process consumes it on every
-            // success path and drops it on the spawn-error path,
-            // so keeping it leaks nothing into the next command.
-            ExternalRouteOutcome::Declined => Ok(RouteAttempt::Declined(pulled_text)),
-            ExternalRouteOutcome::Completed(status) => {
-                // The route ran the call and no spawn follows: the
-                // spawn plan's capture outcome record is spent here
-                // so it cannot leak into the NEXT command's take;
-                // the routed bytes enter the capture through the
-                // realization's own drain instead.
-                self.external_stdio_outcome = None;
-                if let Some((bytes, generation)) = captured {
-                    super::shell_options::write_stdout_capture_at_generation(&bytes, generation)?;
-                }
-                self.exit_code = status;
-                Ok(RouteAttempt::Handled)
-            }
-            ExternalRouteOutcome::Cancelled => {
-                // Same record spend as Completed: this fn owns the
-                // cancelled call's finish and no spawn follows.
-                self.external_stdio_outcome = None;
-                if let Some((bytes, generation)) = captured {
-                    super::shell_options::write_stdout_capture_at_generation(&bytes, generation)?;
-                }
-                // The interrupted status is the dispatch layer's
-                // (the provider's contract): 130 unless the
-                // pending-signal adjudication — the same one a
-                // blocked spawn wait runs — hands back a verdict
-                // (a trapped SIGINT requeues for the boundary and
-                // the command completes AT 130; an untrapped one
-                // unwinds exactly like the wait's abort).
-                self.exit_code = 130;
-                self.observe_signals_while_blocked()?;
-                Ok(RouteAttempt::Handled)
-            }
-        }
     }
 
     /// GNU variables.c:3564-3578 assign_in_env -> bind_variable (ASS_NAMEREF):
@@ -3487,12 +3224,6 @@ impl Executor {
         // fact; the direct disk-command path composes from shell
         // state and passes false.
         env_composed_final: bool,
-        // niubash#567: the stdin text a declined route attempt
-        // already pulled with the feed's own pull (route_stdin_handle),
-        // when the stdin source was a text buffer. The feed below
-        // uses it instead of pulling again, so the body's embedded
-        // substitutions run exactly once on either route.
-        pre_materialized_stdin: Option<String>,
     ) -> Result<(), ExecuteError> {
         // rubash#2255: the fd delivery (ambient table stamps, the
         // command's own numbered redirects, the unix pin
@@ -3678,9 +3409,7 @@ impl Executor {
                 // the fd to build a dropped string would corrupt the shared
                 // offset.
                 if let Some(mut stdin) = child.stdin.take() {
-                    if let Some(input) =
-                        pre_materialized_stdin.or_else(|| self.stdin_string_for_command_mut(cmd))
-                    {
+                    if let Some(input) = self.stdin_string_for_command_mut(cmd) {
                         // The input is shell text: raw-byte marker pairs
                         // (heredoc bodies, expanded bytes) must decode to
                         // real bytes for the child (GNU writes fd bytes).
@@ -3961,7 +3690,6 @@ impl Executor {
                             true,
                             dev_ops,
                             env_composed_final,
-                            pre_materialized_stdin,
                         );
                     }
                 }

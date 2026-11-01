@@ -96,21 +96,12 @@ impl Executor {
         if let Some(path) = self.command_path(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
-                    // niubash#567 annotation: the resolved-path line
-                    // is the one face that may carry the host route
-                    // provider's suffix (see route_annotation_for).
-                    // No provider, or a name it does not claim:
-                    // the line is byte-identical to the bare form.
-                    let suffix = self
-                        .route_annotation_for(name)
-                        .map(|annotation| format!(" — {annotation}"))
-                        .unwrap_or_default();
                     if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
                         .is_some()
                     {
-                        writeln!(stdout, "{name} is hashed ({path}){suffix}")?;
+                        writeln!(stdout, "{name} is hashed ({path})")?;
                     } else {
-                        writeln!(stdout, "{name} is {path}{suffix}")?;
+                        writeln!(stdout, "{name} is {path}")?;
                     }
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
@@ -222,7 +213,6 @@ impl Executor {
             }
         }
 
-        let mut first_path = true;
         for path in self.command_paths(name, force_path) {
             match mode {
                 TypeDescribeMode::Verbose => {
@@ -231,25 +221,13 @@ impl Executor {
                     // never reaches (`all == 0 || CDESC_FORCE_PATH` guard, and
                     // -P clears CDESC_SHORTDESC). `type -a` always prints the
                     // plain `name is path` form.
-                    // niubash#567: the route annotation rides the
-                    // FIRST enumerated path only — that is the
-                    // resolution dispatch would run; later PATH
-                    // entries are unannotated enumerations.
-                    let suffix = if first_path {
-                        self.route_annotation_for(name)
-                            .map(|annotation| format!(" — {annotation}"))
-                            .unwrap_or_default()
-                    } else {
-                        String::new()
-                    };
-                    writeln!(stdout, "{name} is {path}{suffix}")?;
+                    writeln!(stdout, "{name} is {path}")?;
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
                     writeln!(stdout, "{path}")?
                 }
                 TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
             }
-            first_path = false;
             found = true;
         }
 
@@ -274,23 +252,6 @@ impl Executor {
     /// alone, and a Windows-only row claims nothing off Windows.
     /// Liveness implies the stand-down lookup resolved, so the path
     /// the sentence names always exists.
-    /// niubash#567 discoverability ruling — checkable, never
-    /// noisy: the registered route provider's annotation for
-    /// `name`, consulted ONLY by the Verbose describe faces above.
-    /// The annotation is a description suffix, not a replacement
-    /// identity: unlike the emulation disclosure, the command
-    /// still IS the resolved file (the provider routes calls to
-    /// it in-process, with the file as the standing fallback), so
-    /// `command -v`, `hash`, and `type -t` keep reporting the
-    /// external identity byte-for-byte in every provider state,
-    /// and with no provider registered — or a name the provider
-    /// does not claim — every describe byte is unchanged.
-    fn route_annotation_for(&self, name: &str) -> Option<String> {
-        let slot = self.external_route_provider.as_ref()?;
-        let slot = slot.try_borrow().ok()?;
-        slot.0.route_annotation(name)
-    }
-
     fn describe_emulated_claim_with_io<W>(
         &self,
         name: &str,
