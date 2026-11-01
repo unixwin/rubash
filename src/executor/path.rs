@@ -2996,8 +2996,22 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
         if drive_path {
             let drive = normalized.as_bytes()[1].to_ascii_lowercase();
             let translated = shell_path_to_windows(arg, env_vars);
-            // `/c/...` is Rubash's explicit POSIX display-path spelling and
-            // must be translated even before the target is created.
+            // `/c/...` WITH path components is Rubash's explicit POSIX
+            // display-path spelling and must be translated even before
+            // the target is created. The root forms stay verbatim for
+            // EVERY drive (niubash#779, owner ruling 2026-11-01): `/X/`
+            // returns below, and bare `/X` never reaches this branch (it
+            // falls through untranslated). A root-form token is
+            // indistinguishable from a switch in the receiving program's
+            // grammar — `/c` is both the C-drive root spelling and
+            // cmd.exe's run-and-exit flag — and the #779 experiment round
+            // killed every discriminating rule (unconditional translation
+            // and the existence gate score identically on the killing
+            // rows). Drive c's root forms used to fall through and
+            // translate, which also corrupted data-shaped operands (a
+            // native `tr '/c/' X` received `C:\` as its SET1). The
+            // spellings that reach a drive root for a native child are
+            // `/X/.`, `/mnt/X/` and the native `X:/` form.
             // Option B (niubash#124(b)): other `/X/...` operands translate
             // UNCONDITIONALLY for native children — existence-gating here
             // was the source of one argv arriving as `D:\a` + `/d/b`
@@ -3013,7 +3027,7 @@ fn external_argument_path(arg: &str, env_vars: &HashMap<String, String>) -> Stri
             // external_command_for_named_program), so the ambiguity class
             // no longer flows through here. The legacy escape hatch
             // (__RUBASH_ARGV_DIALECT=legacy) restores the gated behavior.
-            if drive != b'c' && normalized.len() <= 3 {
+            if normalized.len() <= 3 {
                 return arg.to_string();
             }
             if drive != b'c' && argv_dialect_legacy(env_vars) && !translated.exists() {
@@ -5393,6 +5407,51 @@ mod tests {
             .map(|arg| arg.to_string_lossy().to_string())
             .collect::<Vec<_>>();
         assert_eq!(args, vec!["/h/not-a-real-pathspec".to_string()]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn issue779_drive_root_forms_stay_verbatim_for_native_children() {
+        // niubash#779 (owner ruling 2026-11-01; R0 for the root forms plus
+        // the R2 cleanup): root forms (`/X`, `/X/`) reach a native child
+        // verbatim on EVERY drive. A root-form token is indistinguishable
+        // from a switch in the receiving program's grammar (`/c` is both
+        // the C-drive root spelling and cmd.exe's run-and-exit flag), and
+        // the #779 experiment round killed every discriminating rule —
+        // unconditional translation and the existence gate score
+        // identically on the killing rows (`cmd /c`, `xcopy /D`,
+        // `robocopy /E`). Drive c's root forms used to be the exception:
+        // they fell through the funnel's root-form guard and translated
+        // to `C:\`, which also corrupted data-shaped operands (below).
+        // With-components forms keep translating (Option B); the
+        // spellings that reach a drive root are `/X/.`, `/mnt/X/`, `X:/`.
+        let env_vars = HashMap::new();
+        let native = PathBuf::from("git.exe");
+        for root_form in ["/c", "/c/", "/d", "/d/", "/C/"] {
+            assert_eq!(
+                child_argv(&native, &[root_form], &env_vars),
+                vec![root_form.to_string()],
+                "root form {root_form:?} must reach a native child verbatim"
+            );
+        }
+        // Overreach guard: with-components drive forms still translate.
+        assert_eq!(
+            child_argv(&native, &["/c/Users"], &env_vars),
+            vec![r"C:\Users".to_string()]
+        );
+        assert_eq!(
+            child_argv(&native, &["/d/x"], &env_vars),
+            vec![r"D:\x".to_string()]
+        );
+        // The data case the old drive-c exception corrupted: `tr` is not
+        // one of the grammar-masked tools (grep/sed/awk/find/basename/
+        // dirname), so a native tr's SET1 flows through the funnel — and
+        // `/c/` as SET1 is data, not a path. It used to arrive as `C:\`.
+        let tr = PathBuf::from("tr.exe");
+        assert_eq!(
+            child_argv(&tr, &["/c/", "X"], &env_vars),
+            vec!["/c/".to_string(), "X".to_string()]
+        );
     }
 
     #[cfg(windows)]
