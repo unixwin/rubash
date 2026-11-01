@@ -2806,6 +2806,35 @@ impl Executor {
                 } else {
                     0
                 }
+            } else if self.read_eof_no_delimiter {
+                // rubash#2416: the acquisition ended at EOF with the
+                // delimiter unsatisfied and no other verdict above
+                // claimed it — the shape the `read -e` line editor
+                // produces on C-d with an empty buffer (EditEnd::Eof).
+                // GNU: readline returns NULL for the eof char typed on
+                // a blank line (lib/readline/readline.c:677
+                // readline_internal_charloop), edit_line hands the
+                // NULL back and read.def:705-710 sets eof=1, so
+                // read.def:949 returns EXECUTION_FAILURE with the
+                // empty record assigned. The editor WAS the fd-0
+                // transport for this acquisition; falling through to
+                // read_stdin_until asked a second, canonical-mode
+                // reader on the same descriptor, which swallowed the
+                // EOF verdict and blocked forever. Assign the empty
+                // record and fail, like the EOF arms above.
+                let assign_status = self.assign_read_scalar_names(
+                    &scalar_names,
+                    initial_text.as_deref().unwrap_or(""),
+                    raw,
+                );
+                if assign_status != 0 {
+                    return self.finish_read_error(cmd, &stderr, assign_status);
+                }
+                if initial_text.is_none() {
+                    1
+                } else {
+                    0
+                }
             } else {
                 // rubash#1250: hold the foreground SIGINT guard across
                 // the raw fallback read as well (see read_input_for_
