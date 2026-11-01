@@ -1082,32 +1082,70 @@ impl Executor {
         // BEFORE the spawn: a regular file that is neither #!-headed
         // nor a native ELF image is exactly what execve refuses
         // (rubash#1037).
+        //
+        // rubash#2345: GNU's re-entry runs inside the FORKED child
+        // (execute_cmd.c:6237-6260), so on a rooted, opted-in
+        // executor the classification only refuses (binary / bad
+        // interpreter) and otherwise RETARGETS the shared spawn tail
+        // below at this binary, with the script spelling
+        // (enoexec_script_spelling) as its lead argument — observably
+        // the explicit `rubash script` invocation, a real process
+        // with its own pid and signal domain. The in-process entry
+        // remains for library hosts and fork-copy clones, whose
+        // process model is the emulation.
         #[cfg(unix)]
-        if is_enoexec_candidate(&program) {
+        let enoexec_child = if is_enoexec_candidate(&program) {
             if let Some((diagnostic, status)) = self.exec_format_refusal(cmd, &program) {
                 let mut stderr = Vec::new();
                 let _ = writeln!(&mut stderr, "{diagnostic}");
                 self.finish_external_error(cmd, &stderr, status)?;
                 return Ok(());
             }
-            self.execute_enoexec_shell_script(cmd, &program)?;
-            return Ok(());
-        }
+            let target = self.enoexec_spawn_target(cmd, &program);
+            if target.is_none() {
+                self.execute_enoexec_shell_script(cmd, &program)?;
+                return Ok(());
+            }
+            target
+        } else {
+            None
+        };
+        #[cfg(not(unix))]
+        let enoexec_child: Option<(std::path::PathBuf, String)> = None;
+        // The shared tail's spawn target: the resolved program, or —
+        // for a retargeted ENOEXEC child — this binary, named by its
+        // own path and led by the script spelling in the argv built
+        // below. Everything else about the tail (operand
+        // materialization, environment, redirects, the wait and its
+        // notices) is the ordinary disk-command machinery, keyed on
+        // the typed command as before.
+        let (spawn_program, enoexec_lead): (std::path::PathBuf, Option<String>) =
+            match enoexec_child {
+                Some((exe, spelling)) => (exe, Some(spelling)),
+                None => (program.clone(), None),
+            };
+        let spawn_name: String = match &enoexec_lead {
+            Some(_) => spawn_program.to_string_lossy().into_owned(),
+            None => cmd.words[0].clone(),
+        };
 
         let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
             &cmd.words[1..],
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
-            Some(program.as_path()),
+            Some(spawn_program.as_path()),
         );
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
         // record lives until spawn_external_process has waited the
-        // child out (function scope end).
+        // child out (function scope end). A retargeted ENOEXEC child
+        // IS this binary — it owns a /proc layer like any explicit
+        // invocation — so its operands key on the binary, not the
+        // script.
         let (proc_args, _proc_ops) = crate::executor::proc_operands::materialize_proc_operands(
             &dev_args,
-            Some(&cmd.words[0]),
-            Some(program.as_path()),
+            Some(&spawn_name),
+            Some(spawn_program.as_path()),
             &self.shell_state.env_vars,
         );
         // rubash#2378: the execve filename is the name the search
@@ -1122,21 +1160,34 @@ impl Executor {
         // (path::spawn_exec_name) — every spawn route derives its
         // filename through it, not just this foreground one.
         let exec_name = crate::executor::path::spawn_exec_name(
-            &cmd.words[0],
-            &program,
+            &spawn_name,
+            &spawn_program,
             &self.shell_state.env_vars,
         );
+        // A retargeted ENOEXEC child's argv is the script spelling
+        // followed by the command's own (materialized) operands —
+        // the argv an explicit `rubash script ...` invocation hands
+        // the child. The unretargeted tail passes the operands as-is.
+        let spawn_args: std::borrow::Cow<'_, [String]> = match &enoexec_lead {
+            Some(spelling) => {
+                let mut args = Vec::with_capacity(proc_args.len() + 1);
+                args.push(spelling.clone());
+                args.extend(proc_args.iter().cloned());
+                std::borrow::Cow::Owned(args)
+            }
+            None => std::borrow::Cow::Borrowed(&proc_args),
+        };
         let (mut process, used_shell) = external_command_for_named_program_with_exec_name(
-            &program,
-            Some(&cmd.words[0]),
-            &proc_args,
+            &spawn_program,
+            Some(&spawn_name),
+            &spawn_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&cmd.assignments),
             exec_name.as_deref(),
         );
         // G-02: children are born in the session cwd, not the process cwd.
         process.current_dir(&self.shell_state.cwd);
-        self.apply_external_environment(cmd, &mut process, &program);
+        self.apply_external_environment(cmd, &mut process, &spawn_program);
         self.apply_external_redirects(cmd, &mut process)?;
         // niubash#567 route seam: consult the host provider with
         // the spawn fully prepared — every redirect already
@@ -1149,7 +1200,12 @@ impl Executor {
         // carrier path) also keeps the call on spawn, whose
         // operand cleanup the materialization record feeds.
         let mut route_pulled_stdin: Option<String> = None;
-        if !used_shell && !dev_ops.has_deferred_flushes() && proc_args.as_slice() == &cmd.words[1..]
+        // rubash#2345: a retargeted ENOEXEC spawn never routes — like
+        // the used_shell leg, its payload IS rubash.
+        if enoexec_lead.is_none()
+            && !used_shell
+            && !dev_ops.has_deferred_flushes()
+            && proc_args.as_slice() == &cmd.words[1..]
         {
             match self.try_external_route(cmd, &program, &proc_args)? {
                 RouteAttempt::Handled => {
@@ -1159,11 +1215,18 @@ impl Executor {
                 RouteAttempt::Declined(pulled_text) => route_pulled_stdin = pulled_text,
             }
         }
+        // A retargeted ENOEXEC spawn takes the find_shell spawn
+        // shape (used_shell = true, bookkeeping keyed on the script):
+        // the prepared Command's payload is this binary, not
+        // `program`, and spawn_external_process's program-keyed
+        // machinery (the synthetic-ENOEXEC pre-empt, the exec-format
+        // fallbacks, the spawn-error diagnostics) is about the
+        // script, exactly as for the find_shell leg below.
         self.spawn_external_process(
             cmd,
             &program,
             process,
-            used_shell,
+            used_shell || enoexec_lead.is_some(),
             dev_ops,
             false,
             route_pulled_stdin,
@@ -3943,6 +4006,38 @@ impl Executor {
                     // mailbox keeps the find_shell spawn: it cannot observe
                     // a real execve refusal for extensionless text files.
                     if cfg!(unix) {
+                        // rubash#2345: on a rooted, opted-in executor
+                        // the re-entry is a real spawn of this binary
+                        // on the script — the forked-child boundary
+                        // itself — prepared exactly like the
+                        // find_shell spawn below (same cwd, env, and
+                        // redirect application; the script argument
+                        // carries the re-entry spelling so the child's
+                        // $0/BASH_SOURCE match GNU's recorded name).
+                        // Hosts and clones keep the in-process entry.
+                        if self.real_shell_children_apply() {
+                            if let (Ok(exe), Some(spelling)) = (
+                                std::env::current_exe(),
+                                self.enoexec_script_spelling(cmd, program),
+                            ) {
+                                let mut exe_process = Command::new(exe);
+                                exe_process.arg(spelling);
+                                exe_process.args(&cmd.words[1..]);
+                                // G-02: children are born in the session cwd.
+                                exe_process.current_dir(&self.shell_state.cwd);
+                                self.apply_external_environment(cmd, &mut exe_process, program);
+                                self.apply_external_redirects(cmd, &mut exe_process)?;
+                                return self.spawn_external_process(
+                                    cmd,
+                                    program,
+                                    exe_process,
+                                    true,
+                                    dev_ops,
+                                    env_composed_final,
+                                    pre_materialized_stdin,
+                                );
+                            }
+                        }
                         self.execute_enoexec_shell_script(cmd, program)?;
                         return Ok(());
                     }
