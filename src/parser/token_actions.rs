@@ -646,13 +646,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             }
         }
         TokenKind::Semicolon => {
-            // Command separator
+            // Command separator. The lexer folds newline separators into
+            // this kind with `line_break` set; GNU's list grammar keeps
+            // the connector char on the connection node (parse.y:1264-
+            // 1290), and print_cmd.c:288-320 reprints it distinctly in
+            // comsub mode — stamp it on the flushed command (rubash#2500).
             state.current_cmd.subshell |= state.in_subshell;
             if !command_is_empty(&state.current_cmd) {
-                state
-                    .ast
-                    .commands
-                    .push(std::mem::take(&mut state.current_cmd));
+                let mut command = std::mem::take(&mut state.current_cmd);
+                command.separator_newline = token.line_break;
+                state.ast.commands.push(command);
             }
         }
         TokenKind::RedirectIn => {

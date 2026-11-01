@@ -1271,6 +1271,19 @@ pub struct CommandNode {
     /// than the physical lines consumed — the warning prefix must use this
     /// line, not `gather_line + body.lines().count()` (rubash#1028).
     pub heredoc_end_line: Option<usize>,
+    /// The list separator that terminated this command was a NEWLINE, not
+    /// `;` — stamped at the separator flush (token_actions.rs Semicolon
+    /// arm, the flush point every command list shares). GNU keeps the
+    /// connector char on the connection node built by the list grammar
+    /// (parse.y:1264-1290 `list: list ';' newline_list list1`; make_cmd.c
+    /// builds cm_connection with `connector = ';'` or `'\n'`), and
+    /// make_command_string_internal reprints it (print_cmd.c:288-320): in
+    /// comsub mode the connector char itself is printed (`s[0] =
+    /// printing_comsub ? c : ';'`), so `$(a\nb)` reprints with the newline
+    /// while `$(a; b)` reprints with `; `. Outside comsubs both print
+    /// `;`. Only the AST-reprint paths (exportstr / declare -f,
+    /// rubash#2500) read this flag.
+    pub separator_newline: bool,
 }
 
 impl CommandNode {
@@ -1354,6 +1367,7 @@ impl CommandNode {
             end_line: None,
             heredoc_gather_line: None,
             heredoc_end_line: None,
+            separator_newline: false,
         }
     }
 

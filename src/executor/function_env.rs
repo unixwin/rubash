@@ -150,48 +150,24 @@ pub(in crate::executor) fn exported_function_env_value(
     body: &[CommandNode],
     def_redirects: &[crate::parser::Redirect],
 ) -> String {
-    let commands: Vec<String> = body
-        .iter()
-        .filter_map(exported_function_command_text)
-        .collect();
-    if commands.is_empty() && def_redirects.is_empty() {
-        "() { :; }".to_string()
-    } else if commands.is_empty() {
-        format!("() {{ :; }}{}", redirect_suffix_text(def_redirects))
-    } else {
-        // GNU variables.c exportstr -> print_cmd.c print_function_def in
-        // string mode: the body list prints at indentation 1 — the first
-        // command follows `{ ` plus the indent (two spaces total), each
-        // later command starts after `;` + newline + one space, and the
-        // closing brace sits on its own line (rubash#1057):
-        // `() {  echo a;\n echo b\n}`.
-        let mut output = String::from("() {  ");
-        for (index, command) in commands.iter().enumerate() {
-            if index > 0 {
-                output.push('\n');
-                output.push(' ');
-            }
-            output.push_str(command);
-            let command_has_heredoc = body
-                .get(index)
-                .is_some_and(|command| command.heredoc.is_some());
-            // print_cmd.c:1520-1529 semicolon(): the `;' separator is
-            // suppressed after a command printed as `... &` (parse.y:1275/
-            // 1290 admit only newline_list after `&`). Appending `;' after
-            // a backgrounded body command corrupted the exportstr value
-            // (`true &;` does not re-parse), breaking re-imported
-            // functions in child shells (rubash#294).
-            if index + 1 < commands.len()
-                && !command_has_heredoc
-                && !command.ends_with(';')
-                && !command.ends_with('&')
-            {
-                output.push(';');
-            }
+    if body.is_empty() {
+        if def_redirects.is_empty() {
+            "() { :; }".to_string()
+        } else {
+            format!("() {{ :; }}{}", redirect_suffix_text(def_redirects))
         }
-        output.push_str("\n}");
-        output.push_str(&redirect_suffix_text(def_redirects));
-        output
+    } else {
+        // GNU variables.c:4875 make_env_array_from_var_list renders every
+        // exported function with named_function_string(NULL, cmd, 0) — a
+        // full AST reprint (comments dropped at parse, `$'..'` words
+        // carried decoded and single-quoted) in the non-multiline export
+        // form: indentation 1 / indentation_amount 0 (print_cmd.c:1428-
+        // 1431), so `() {  a;\n b\n}` with nested keywords at one space.
+        // The connector rules (`;` separator, `;`-after-newline
+        // suppression, `&`-connector space) live in the printer's
+        // print_command_list, the same port declare -f uses (rubash#1057,
+        // #294, #2500).
+        crate::parser::ast_print::exported_function_string(body, def_redirects)
     }
 }
 
@@ -205,24 +181,6 @@ fn redirect_suffix_text(def_redirects: &[crate::parser::Redirect]) -> String {
         " {}",
         crate::parser::ast_print::redirect_list_text(def_redirects)
     )
-}
-
-pub(in crate::executor) fn exported_function_command_text(command: &CommandNode) -> Option<String> {
-    // rubash#1029: render through the same ast_print printer `declare -f`
-    // uses (print_cmd.c make_command_string in GNU serves both). The old
-    // hand-rolled renderer joined the quote-stripped expansion values in
-    // command.words/assignments, which dropped every quote and leaked
-    // the lexer's carrier markers (\037/\021) into BASH_FUNC_*%% — any
-    // child re-parsing the value got a corrupted function. The printer
-    // renders from word_metadata/assignment_raws with value re-quoting
-    // where no raw survives, so the exportstr re-parses to the same body.
-    let text = crate::parser::ast_print::pretty_print_command(command);
-    let text = text.trim_end_matches('\n');
-    if text.trim().is_empty() {
-        None
-    } else {
-        Some(text.to_string())
-    }
 }
 
 pub(in crate::executor) fn export_args_request_functions(args: &[String]) -> bool {

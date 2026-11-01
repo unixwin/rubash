@@ -35,6 +35,14 @@ struct Printer {
     printing_connection: usize,
     printing_comsub: bool,
     deferred_heredocs: Vec<DeferredHeredoc>,
+    /// print_cmd.c:54 indentation_amount: the per-level step nested
+    /// constructs (if/for/case/group/function-def) add to `indentation`.
+    /// The default is 4; named_function_string's export form (flags=0,
+    /// print_cmd.c:1428-1431) temporarily sets indentation=1 and
+    /// indentation_amount=0, so nested keywords reprint at one space in
+    /// exportstr values while `declare -f` keeps the 4-space form
+    /// (rubash#2500).
+    indentation_amount: i32,
 }
 
 /// Render `name () { body }` the way `declare -f` / `type NAME` print it
@@ -105,6 +113,38 @@ pub fn multiline_function_def_text_with(
 /// collect_redirects logic exposed for the exportstr roundtrip).
 pub fn collected_redirects(cmd: &CommandNode) -> Vec<Redirect> {
     Printer::new().collect_redirects(cmd)
+}
+
+/// named_function_string(NULL, command, 0) — the exportstr value form
+/// (variables.c:4875 make_env_array_from_var_list calls it with flags 0
+/// for every exported function). flags=0 takes the non-FUNC_MULTILINE
+/// branch (print_cmd.c:1428-1431): indentation = 1, indentation_amount =
+/// 0, so the body list prints as `() {  cmd;\n cmd\n}` with every nested
+/// keyword (`else`, `fi`, `do`...) at one space, unlike the 4-space
+/// multiline form `declare -f` prints (rubash#2500). The definition's
+/// redirections print after the closing brace (`newline("} ")`),
+/// print_cmd.c:1452-1458.
+pub fn exported_function_string(body: &[CommandNode], def_redirects: &[Redirect]) -> String {
+    let mut printer = Printer::new();
+    // name == NULL: no `name ` prefix and no `function ` fallback — the
+    // env name carries the function name.
+    printer.cprintf("() ");
+    printer.indentation = 1;
+    printer.indentation_amount = 0;
+    printer.cprintf("{ ");
+    printer.inside_function_def += 1;
+    printer.print_command_list(body);
+    printer.print_deferred_heredocs("");
+    printer.indentation = 0;
+    printer.indentation_amount = INDENTATION_AMOUNT;
+    printer.inside_function_def = printer.inside_function_def.saturating_sub(1);
+    if def_redirects.is_empty() {
+        printer.newline("}");
+    } else {
+        printer.newline("} ");
+        printer.print_redirect_slice(def_redirects);
+    }
+    printer.out
 }
 
 /// Render a redirect list the way print_redirection_list does (headers only
@@ -183,6 +223,7 @@ impl Printer {
             printing_connection: 0,
             printing_comsub: false,
             deferred_heredocs: Vec::new(),
+            indentation_amount: INDENTATION_AMOUNT,
         }
     }
 
@@ -373,6 +414,14 @@ impl Printer {
                 if self.deferred_heredocs.is_empty() {
                     if self.was_heredoc {
                         self.was_heredoc = false;
+                    } else if self.printing_comsub && previous.separator_newline {
+                        // print_cmd.c:292 `s[0] = printing_comsub ? c : ';'`:
+                        // in comsub mode the connector char itself is
+                        // printed, so a newline separator reprints as the
+                        // newline (print_comsub preserves body newlines
+                        // without turning them into `;`), while `;`
+                        // reprints as `;` (rubash#2500).
+                        self.cprintf("\n");
                     } else {
                         self.cprintf(";");
                     }
@@ -386,8 +435,9 @@ impl Printer {
                 }
                 if self.inside_function_def > 0 {
                     self.cprintf("\n");
-                } else if self.printing_comsub {
-                    self.cprintf("\n");
+                } else if self.printing_comsub && previous.separator_newline {
+                    // The newline connector was already emitted above (the
+                    // print_cmd.c:311 `was_newline` guard doubles nothing).
                 } else {
                     self.cprintf(" ");
                     self.skip_this_indent += 1;
@@ -421,47 +471,51 @@ impl Printer {
         // value re-quoting only for synthetic entries (rubash#202 classes
         // 2/4: nested comsub quotes printed as `\"`, `""` printed as `''`).
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
-        let mut parts: Vec<String> = cmd
-            .assignments
-            .iter()
-            .enumerate()
-            .map(|(index, (name, value))| {
-                if let Some(source) =
-                    value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
-                {
-                    // `a+=(...)` compounds ride the COMPOUND_ASSIGNMENT_MARKER
-                    // with the parenthesized source text verbatim (parser
-                    // token_actions.rs); the name already carries the `+`.
-                    // print_cmd.c reprints assignments as source-level text
-                    // only (xtrace_print_assignment, print_cmd.c:514), so the
-                    // transport marker must never survive into declare -f
-                    // output (rubash#126). Marker-zone literals inside the
-                    // compound source carry the script-entry E400 escape —
-                    // fold it for display (rubash#856).
-                    format!(
-                        "{name}={}",
-                        crate::executor::markers::fold_literal_char_escapes(source)
-                    )
-                } else if raws_aligned {
-                    let raw = &cmd.assignment_raws[index];
-                    if raw.is_empty() {
-                        format!("{name}={}", render_assignment_value(value))
-                    } else {
-                        // GNU's assignment word text carries ANSI-C spans
-                        // decoded (parse.y:5566-5575); see
-                        // decode_ansi_c_word_spans.
-                        format!(
-                            "{name}={}",
-                            crate::executor::markers::fold_literal_char_escapes(
-                                &decode_ansi_c_word_spans(raw)
-                            )
-                        )
+        let mut parts: Vec<String> = Vec::new();
+        for (index, (name, value)) in cmd.assignments.iter().enumerate() {
+            let rendered_rhs = if let Some(source) =
+                value.strip_prefix(crate::executor::types::COMPOUND_ASSIGNMENT_MARKER)
+            {
+                // `a+=(...)` compounds ride the COMPOUND_ASSIGNMENT_MARKER
+                // with the parenthesized source text verbatim (parser
+                // token_actions.rs); the name already carries the `+`.
+                // print_cmd.c reprints assignments as source-level text
+                // only (xtrace_print_assignment, print_cmd.c:514), so the
+                // transport marker must never survive into declare -f
+                // output (rubash#126). Marker-zone literals inside the
+                // compound source carry the script-entry E400 escape —
+                // fold it for display (rubash#856).
+                crate::executor::markers::fold_literal_char_escapes(source)
+            } else if raws_aligned && !cmd.assignment_raws[index].is_empty() {
+                // GNU's assignment word text carries comsub bodies
+                // normalized at parse time (parse.y:4632 print_comsub) and
+                // ANSI-C spans decoded (parse.y:5566-5575). The raw slice
+                // keeps the source verbatim, so re-serialize `$(...)`
+                // spans from their parsed trees before decoding — without
+                // this, comments and original indentation inside the
+                // substitution leaked into declare -f / exportstr values
+                // and the child's function-import check refused them
+                // (rubash#2500).
+                let raw = cmd.assignment_raws[index].clone();
+                let mut rendered = raw.clone();
+                for node in &crate::parser::command_substitutions_in_word_public(&raw) {
+                    if node.backtick || node.current_shell {
+                        continue;
                     }
-                } else {
-                    format!("{name}={}", render_assignment_value(value))
+                    if node.text.is_empty() || !rendered.contains(&node.text) {
+                        continue;
+                    }
+                    let replacement = self.comsub_text(node);
+                    rendered = rendered.replacen(&node.text, &replacement, 1);
                 }
-            })
-            .collect();
+                crate::executor::markers::fold_literal_char_escapes(&decode_ansi_c_word_spans(
+                    &rendered,
+                ))
+            } else {
+                render_assignment_value(value)
+            };
+            parts.push(format!("{name}={rendered_rhs}"));
+        }
         // `{name}` words consumed as fd-variable redirect prefixes
         // (`exec {v}>>file`) belong to the redirection, not the word list.
         let fd_vars: Vec<String> = self
@@ -604,11 +658,11 @@ impl Printer {
     /// done (print_cmd.c prints do, the body, a semicolon, then done).
     fn print_do_done_body(&mut self, body: &[CommandNode]) {
         self.newline("do\n");
-        self.indentation += INDENTATION_AMOUNT;
+        self.indentation += self.indentation_amount;
         self.print_command_list(body);
         self.print_deferred_heredocs("");
         self.semicolon();
-        self.indentation -= INDENTATION_AMOUNT;
+        self.indentation -= self.indentation_amount;
         self.newline("done");
     }
 
@@ -642,10 +696,10 @@ impl Printer {
         } else {
             self.cprintf(" do\n");
         }
-        self.indentation += INDENTATION_AMOUNT;
+        self.indentation += self.indentation_amount;
         self.print_command_list(&loop_command.body);
         self.print_deferred_heredocs("");
-        self.indentation -= INDENTATION_AMOUNT;
+        self.indentation -= self.indentation_amount;
         self.semicolon();
         self.newline("done");
     }
@@ -657,16 +711,16 @@ impl Printer {
         self.print_deferred_heredocs("");
         self.semicolon();
         if self.was_heredoc {
-            self.indent(INDENTATION_AMOUNT);
+            self.indent(self.indentation_amount);
             self.cprintf("then\n");
             self.was_heredoc = false;
         } else {
             self.cprintf(" then\n");
         }
-        self.indentation += INDENTATION_AMOUNT;
+        self.indentation += self.indentation_amount;
         self.print_command_list(&if_command.then_body);
         self.print_deferred_heredocs("");
-        self.indentation -= INDENTATION_AMOUNT;
+        self.indentation -= self.indentation_amount;
 
         self.print_if_tail(if_command);
 
@@ -680,7 +734,7 @@ impl Printer {
         if let Some((first, rest)) = if_command.elif_branches.split_first() {
             self.semicolon();
             self.newline("else\n");
-            self.indentation += INDENTATION_AMOUNT;
+            self.indentation += self.indentation_amount;
             let nested = IfCommand {
                 keyword: first.keyword.clone(),
                 keyword_metadata: first.keyword_metadata.clone(),
@@ -702,14 +756,14 @@ impl Printer {
                 ..CommandNode::new()
             };
             self.make_command_string(&nested_node);
-            self.indentation -= INDENTATION_AMOUNT;
+            self.indentation -= self.indentation_amount;
         } else if let Some(else_body) = &if_command.else_body {
             self.semicolon();
             self.newline("else\n");
-            self.indentation += INDENTATION_AMOUNT;
+            self.indentation += self.indentation_amount;
             self.print_command_list(else_body);
             self.print_deferred_heredocs("");
-            self.indentation -= INDENTATION_AMOUNT;
+            self.indentation -= self.indentation_amount;
         }
     }
 
@@ -725,7 +779,7 @@ impl Printer {
     }
 
     fn print_case_clauses(&mut self, clauses: &[crate::parser::CaseClause]) {
-        self.indentation += INDENTATION_AMOUNT;
+        self.indentation += self.indentation_amount;
         let mut first = true;
         for clause in clauses {
             if !self.printing_comsub || !first {
@@ -745,9 +799,9 @@ impl Printer {
                 self.cprintf(&raw);
             }
             self.cprintf(")\n");
-            self.indentation += INDENTATION_AMOUNT;
+            self.indentation += self.indentation_amount;
             self.print_command_list(&clause.body);
-            self.indentation -= INDENTATION_AMOUNT;
+            self.indentation -= self.indentation_amount;
             self.print_deferred_heredocs("");
             self.newline(match clause.terminator {
                 crate::parser::CaseTerminator::FallThrough => ";&",
@@ -755,7 +809,7 @@ impl Printer {
                 crate::parser::CaseTerminator::Break => ";;",
             });
         }
-        self.indentation -= INDENTATION_AMOUNT;
+        self.indentation -= self.indentation_amount;
     }
 
     /// print_group_command: `{ ` ... ` }`. Inside a function definition the
@@ -764,7 +818,7 @@ impl Printer {
         self.cprintf("{ ");
         if self.inside_function_def > 0 {
             self.cprintf("\n");
-            self.indentation += INDENTATION_AMOUNT;
+            self.indentation += self.indentation_amount;
         } else {
             self.skip_this_indent += 1;
         }
@@ -772,7 +826,7 @@ impl Printer {
         self.print_deferred_heredocs("");
         if self.inside_function_def > 0 {
             self.cprintf("\n");
-            self.indentation -= INDENTATION_AMOUNT;
+            self.indentation -= self.indentation_amount;
             self.indent(self.indentation);
         } else {
             self.semicolon();
@@ -935,7 +989,7 @@ impl Printer {
         self.indent(self.indentation);
         self.cprintf("{ \n");
         self.inside_function_def += 1;
-        self.indentation += INDENTATION_AMOUNT;
+        self.indentation += self.indentation_amount;
         if function.body_kind == crate::parser::FunctionBodyKind::Subshell {
             self.indent(self.indentation);
             self.cprintf("( ");
@@ -953,7 +1007,7 @@ impl Printer {
             self.print_command_list(&function.body);
             self.print_deferred_heredocs("");
         }
-        self.indentation -= INDENTATION_AMOUNT;
+        self.indentation -= self.indentation_amount;
         self.inside_function_def = self.inside_function_def.saturating_sub(1);
         if function.body_kind != crate::parser::FunctionBodyKind::Subshell {
             let def_redirects = self.collect_redirects(cmd);
