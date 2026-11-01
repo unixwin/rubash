@@ -63,7 +63,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 **原生的意义。** Git for Windows 对自己 shell 的定性原话是「a BASH emulation used to run Git from the command line」——为跑 Git 而设的模拟。它的 bash 是移植版，骑在 POSIX 模拟层（`msys-2.0.dll`）上：fork 模拟、参数改写、设备怪癖，全都渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。
 
-**路径是一等公民，一个子进程一种方言。** MSYS 的模型是*猜*哪些参数像路径然后改写；MSYS2 官方文档自承这种自动转换「并不完美」，会改写根本不是路径的参数——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flags` 被改成 `C:/Program Files/Git/flags`。Rubash 用**逐子进程方言契约**把模型反过来（与 GNU 画的是同一条线：`shell_execve` 把原始词字节原样交给 `execve`，从不改写 argv）。自带 POSIX 层的子进程——凡是从 WinuxCmd 安装解析出来的、或经 `winuxcmd` 分发器解析的——拿到的 argv **逐字原样**，`/d/...`、`/tmp`、`/dev/*` 由它自己解析。原生 Windows 程序则拿到路径形参数的真实 Win32 拼写，翻译**整体一致**（绝不半个 argv 被翻译、另一半留在 POSIX 形），每个操作数——包括它即将创建的尚不存在目标——都是合法 Win32 路径。翻译面刻意收窄：引号参数永不改写，唯一的设备翻译是精确 token `/dev/null` → `nul`（[#1506](https://github.com/unixwin/rubash/issues/1506)）。历次被套件抓到的过度翻译（[#31](https://github.com/unixwin/rubash/issues/31)、[#59](https://github.com/unixwin/rubash/issues/59)、[#60](https://github.com/unixwin/rubash/issues/60)）全部立公开 issue 并固化回归。紧急回退：导出 `__RUBASH_ARGV_DIALECT=legacy` 可恢复 Option-B 之前的翻译行为。
+**路径是一等公民，一个子进程一种方言。** MSYS 的模型是*猜*哪些参数像路径然后改写；MSYS2 官方文档自承这种自动转换「并不完美」，会改写根本不是路径的参数——这就是为什么每个 AI agent 和脚本都得设置 `MSYS_NO_PATHCONV=1`，防止 `/flags` 被改成 `C:/Program Files/Git/flags`。Rubash 用**逐子进程方言契约**把模型反过来（与 GNU 画的是同一条线：`shell_execve` 把原始词字节原样交给 `execve`，从不改写 argv）。自带 POSIX 层的子进程——凡是从 WinuxCmd 安装解析出来的、或经 `winuxcmd` 分发器解析的——保留 shell 拼写，`/tmp`、`/dev/*` 与 shell 树由它自己解析；一处有据可查的例外：盘符形态操作数（`/d/...`）由引擎漏斗对所有子进程类统一翻译（[#592](https://github.com/unixwin/rubash/issues/592)）。原生 Windows 程序则拿到经分类的路径形操作数的真实 Win32 拼写——虚拟根、`/mnt/X` 与带分量的盘符形态（如 `/d/repo`），目标存不存在都翻译；而有据可查的 verbatim 类按原样过界：裸 `/`、盘根形态（`/d`、`/d/`）、附着值（`--opt=/d/x`）与语法数据操作数（[#748](https://github.com/unixwin/niubash/issues/748)、[#779](https://github.com/unixwin/niubash/issues/779)）。契约正本见 niubash 的 `docs/src/windows-path-contract.md`。翻译面刻意收窄：引号参数永不改写，唯一的设备翻译是精确 token `/dev/null` → `nul`（[#1506](https://github.com/unixwin/rubash/issues/1506)）。历次被套件抓到的过度翻译（[#31](https://github.com/unixwin/rubash/issues/31)、[#59](https://github.com/unixwin/rubash/issues/59)、[#60](https://github.com/unixwin/rubash/issues/60)）全部立公开 issue 并固化回归。紧急回退：导出 `__RUBASH_ARGV_DIALECT=legacy` 可恢复 Option-B 之前的翻译行为。
 
 **Bash 5.3，不是 5.2。** Git for Windows 捆绑的是 Bash 5.2 系。rubash 以 5.3 语义为目标，包括 5.2 里结构性不存在的语法——如无 fork 命令替换 `${ cmd; }`（[#195](https://github.com/unixwin/rubash/issues/195)）。
 
@@ -79,7 +79,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 | --- | --- | --- |
 | 实现 | Rust 从零重实现 bash 语义，直对 Win32 | GNU Bash 移植到 `msys-2.0.dll` POSIX 模拟层之上 |
 | Bash 语言层级 | **GNU Bash 5.3** 语义——含 5.3 独有的无 fork 命令替换 `${ cmd; }`（[#195](https://github.com/unixwin/rubash/issues/195)） | GNU Bash **5.2**（Git for Windows 捆绑版本） |
-| 参数路径处理 | 确定性的逐子进程方言契约——POSIX 层子进程拿逐字 argv，原生程序拿一致的 Win32 拼写；引号参数永不改写；不靠猜、没有总开关变量 | 对路径形参数的启发式改写——其官方文档自承「并不完美」；`MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` 是官方给的逃生舱 |
+| 参数路径处理 | 确定性的逐子进程方言契约——按子进程类翻译经分类的拼写、有据可查的 verbatim 类原样过界；引号参数永不改写；不靠猜、没有总开关变量 | 对路径形参数的启发式改写——其官方文档自承「并不完美」；`MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` 是官方给的逃生舱 |
 | 子壳与命令替换 | 进程内——零进程创建 | 运行时内的 `fork()` 模拟 |
 | 控制台设备重定向 | 与 GNU Bash 一致——引擎把 `CON` 拆为 `CONIN$`/`CONOUT$`（[#1312](https://github.com/unixwin/rubash/issues/1312)、[#1314](https://github.com/unixwin/rubash/issues/1314)） | 在 MSYS 层直接以 `Invalid argument` 失败（项目自测口径） |
 | 给原生程序的设备路径 | 原生程序参数中的 `/dev/null` 统一译为 `nul`，与同一 argv 的其余部分一致（[#1506](https://github.com/unixwin/rubash/issues/1506)） | 在模拟层内部翻译 |
@@ -198,7 +198,7 @@ src/
 
 - **词法分析器**：Bash 风格引号、转义、注释、变量、命令替换、算术展开、here-doc/here-string token、常见重定向。
 - **解析器**：简单命令、管道、AND/OR 列表、函数、花括号/子 shell 组、`if`、`for`、算术 `for`、`while`、`until`、`case`、`select`、`[[ ... ]]`、`coproc`、`time` 前缀。
-- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退，以及逐子进程 argv 方言契约（POSIX 层子进程拿逐字 argv，原生子进程拿一致翻译的 Win32 拼写）。
+- **执行器**：外部命令、管道、重定向、临时赋值、函数调用、`source`/`.`、`eval`、无 shebang 脚本回退，以及逐子进程 argv 方言契约（POSIX 层子进程拿 shell 拼写，原生子进程拿经分类翻译的 Win32 拼写——见 `docs/windows-path-contract.md`）。
 - **展开系统**：变量、位置参数、索引/关联数组、命令替换、算术展开、花括号展开、tilde 展开、路径名 glob、`${parameter...}` 操作符、大小写/替换变换。
 - **内建命令**：62 个引擎内建——机器核对的清单在 [`docs/builtins.md`](docs/builtins.md)（由 `src/executor/builtin_names.rs` 上的测试守护同步），外加有意隐藏的 fast-path 内建（`sleep`、`dirname`、`basename`、`uname`、`arch`），让 `type`/`compgen -b` 照报外部命令，与 GNU 完全一致。
 
