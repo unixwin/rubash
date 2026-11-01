@@ -1041,6 +1041,9 @@ impl Executor {
                 last_background_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
+                pcomp_curcs: None,
+                pcomp_curcmd: None,
+                line_completion_active: false,
                 bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
                     crate::shell::bind_registry::BindRegistry::default(),
                 )),
