@@ -826,18 +826,55 @@ impl Executor {
                 }
             }
         };
-        if computed_index < 0
-            && resolve_indexed_array_subscript(
-                &self
-                    .shell_state
-                    .env_vars
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_default(),
-                computed_index,
-            )
-            .is_none()
-        {
+        // GNU arrayfunc.c:425-434 + 262-290: subscript resolution and
+        // the element store both run against the variable as it stands
+        // BEFORE bind_array_variable converts a scalar target with
+        // convert_var_to_array (arrayfunc.c:74-100) — the conversion
+        // preserves the old scalar value VERBATIM as element 0, so a
+        // not-yet-array target resolves negative subscripts against
+        // its single implicit element (array_p == 0 -> max index 0; an
+        // absent entry resolves nothing) and seeds the store from that
+        // one element. Parsing the scalar's text as array storage
+        // instead word-split it (rubash#2433: `x="(a b)"; x[1]=z`
+        // stored element 0 `a`, and `x[-2]=z` resolved against the
+        // phantom second element instead of failing).
+        let target_is_indexed_array = is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, name)
+            || self
+                .shell_state
+                .variables
+                .indexed_array_shape(name)
+                .is_some();
+        let scalar_text: Option<String> = if target_is_indexed_array {
+            None
+        } else {
+            self.shell_state.env_vars.get(name).cloned().or_else(|| {
+                match self.shell_state.variables.get(name) {
+                    Some(variable) => match &variable.value {
+                        crate::shell::ShellValue::Scalar(value) => Some(value.clone()),
+                        _ => None,
+                    },
+                    None => None,
+                }
+            })
+        };
+        let resolve_negative = |computed: i128| -> Option<usize> {
+            if scalar_text.is_some() {
+                // Max index 0: resolved = 0 + 1 + computed.
+                let resolved = computed + 1;
+                (resolved >= 0).then(|| usize::try_from(resolved).unwrap_or(usize::MAX))
+            } else {
+                resolve_indexed_array_subscript(
+                    &self
+                        .shell_state
+                        .env_vars
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    computed,
+                )
+            }
+        };
+        if computed_index < 0 && resolve_negative(computed_index).is_none() {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.error_prefix(),
@@ -850,13 +887,7 @@ impl Executor {
         }
 
         let index = if computed_index < 0 {
-            let current = self
-                .shell_state
-                .env_vars
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            let Some(index) = resolve_indexed_array_subscript(&current, computed_index) else {
+            let Some(index) = resolve_negative(computed_index) else {
                 eprintln!(
                     "{}{}: bad array subscript",
                     self.error_prefix(),
@@ -898,6 +929,15 @@ impl Executor {
                         _ => None,
                     })
                     .unwrap_or_default()
+            } else if let Some(scalar) = &scalar_text {
+                // Conversion pending (rubash#2433): the pre-conversion
+                // array has exactly one element — the verbatim scalar
+                // at index 0 (arrayfunc.c:74-100 convert_var_to_array).
+                if index == 0 {
+                    scalar.clone()
+                } else {
+                    String::new()
+                }
             } else {
                 let current = self
                     .shell_state
@@ -1061,7 +1101,15 @@ impl Executor {
                 .get(name)
                 .cloned()
                 .unwrap_or_default();
-            let mut entries = indexed_array_entries(&current);
+            // Scalar -> array conversion (rubash#2433): the seed is
+            // the verbatim old value at element 0 (arrayfunc.c:74-100
+            // convert_var_to_array, reached from bind_array_variable),
+            // never a re-parse of the scalar's text as array storage.
+            let mut entries = if let Some(scalar) = &scalar_text {
+                BTreeMap::from([(0usize, scalar.clone())])
+            } else {
+                indexed_array_entries(&current)
+            };
             entries.insert(index, element);
             // rubash#616 (plan Phase 1a): the structured cell follows the
             // mirror in lockstep so `${#a[@]}` reads the count in O(1) (GNU
