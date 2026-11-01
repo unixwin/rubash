@@ -5542,6 +5542,11 @@ impl Executor {
             // content entry — same boundary: the EINVAL write profile
             // cannot cross into the child's handle; writes absorb.
             Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2385: fd 2 bound to a complementary channel end
+            // — same boundary: the in-memory queue cannot cross the
+            // spawn boundary; the child's stderr writes absorb (the
+            // in-shell fd-2 faces append to the queue exactly).
+            Some(FdWriteEndpoint::PipeChannel(_)) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -6201,6 +6206,8 @@ impl Executor {
             // the child's stderr writes absorb (Null), exactly like
             // the /dev/full binding's ENOSPC ceiling.
             Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
+            // rubash#2385: mirrors the plan's channel arm.
+            Some(FdWriteEndpoint::PipeChannel(_)) => CoprocFdSpec::Null,
         })
     }
 

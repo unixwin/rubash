@@ -789,6 +789,18 @@ impl Executor {
                                 continue;
                             }
                         }
+                        // rubash#2385: a pipe read end has no write
+                        // endpoint to dup — the spelling open attaches
+                        // to the pipe's other end, so bind the
+                        // complementary endpoint the resolver mints.
+                        if self.fd_table.output_endpoint(source).is_none() {
+                            if let Some(endpoint) =
+                                self.fd_alias_complementary_write_endpoint(source)
+                            {
+                                self.fd_table.open_output(fd, endpoint, false);
+                                continue;
+                            }
+                        }
                         let _ = self.fd_table.dup_output(fd, source);
                         continue;
                     }

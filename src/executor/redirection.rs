@@ -240,6 +240,13 @@ pub(in crate::executor) enum OutputTarget {
     /// at the shared offset, not a fresh append-mode reopen. `N<>file`
     /// writes at offset 0 and `1>&6` shares fd 6's offset.
     SharedFile(Rc<FileFd>),
+    /// rubash#2385: the complementary end of an in-memory byte
+    /// channel — the walk-level twin of
+    /// `FdWriteEndpoint::PipeChannel`. A write-mode spelling open of
+    /// a pipe read end whose stream the fd model materialized
+    /// resolves here; flushes append to the shared queue the read
+    /// endpoint serves.
+    PipeChannel(PipeChannelEnd),
     Closed,
 }
 
@@ -2083,6 +2090,11 @@ impl Executor {
                     FdWriteEndpoint::ProcessSubstitution { path, .. } => {
                         OutputTarget::Path(path.to_string_lossy().into_owned())
                     }
+                    // rubash#2385: an installed complementary channel
+                    // end seeds its walk-level twin, so a dup onto it
+                    // (`echo x >&4` after `exec 4> /dev/fd/3`) appends
+                    // through the walk like any other write.
+                    FdWriteEndpoint::PipeChannel(input) => OutputTarget::PipeChannel(input.clone()),
                 }
             };
             state.fds.insert(*fd, target);
@@ -2219,9 +2231,26 @@ impl Executor {
                         crate::executor::execution_misc::dev_stdio_redirect_fd(&target).is_some()
                             && redirect_target_fd(&target)
                                 .is_some_and(|source_fd| state.fd_target(source_fd).is_none());
+                    // rubash#2385: a path-spelled target naming a pipe
+                    // READ end is likewise an open, never a dup — the
+                    // seeded state maps the read-only source to
+                    // OutputTarget::Closed (it has no write endpoint),
+                    // so the dup shortcut would clone Closed and the
+                    // flush would fail EBADF where GNU's open attaches
+                    // to the pipe's other end. Decline the shortcut
+                    // when the complementary resolver can mint the
+                    // write end; open_command_output_target owns the
+                    // shape from there.
+                    let complementary_path_spelled_fd =
+                        crate::executor::execution_misc::dev_stdio_redirect_fd(&target).is_some()
+                            && redirect_target_fd(&target).is_some_and(|source_fd| {
+                                self.fd_table.output_endpoint(source_fd).is_none()
+                                    && self.fd_alias_complementary_write_available(source_fd)
+                            });
                     if let Some(source_fd) = redirect_target_fd(&target).filter(|_| {
                         !self.dev_stdio_target_reopens_disk(cmd, index, &target, state)
                             && !dead_path_spelled_fd
+                            && !complementary_path_spelled_fd
                     }) {
                         let Some(source_target) = state.fd_target(source_fd).cloned() else {
                             self.write_bad_fd_redirect_diagnostic(
@@ -2675,6 +2704,27 @@ impl Executor {
                 state.saw_output_redirect = true;
                 return Ok(());
             }
+            // rubash#2385: the source has no write endpoint of its
+            // own — if its stream is a pipe, GNU's spelling open
+            // attaches to the pipe's other end (the complementary
+            // resolver). No noclobber gate rides this arm: the
+            // refusal gates regular files only, and a pipe link
+            // under `set -C` opens fine (probe y01). The append and
+            // truncate forms are the same write — a pipe has no
+            // offset for either to act on (probe x02).
+            if let Some(endpoint) = self.fd_alias_complementary_write_endpoint(source_fd) {
+                match endpoint {
+                    FdWriteEndpoint::File(file_fd) => {
+                        state.fds.insert(fd, OutputTarget::SharedFile(file_fd));
+                    }
+                    FdWriteEndpoint::PipeChannel(input) => {
+                        state.fds.insert(fd, OutputTarget::PipeChannel(input));
+                    }
+                    _ => {}
+                }
+                state.saw_output_redirect = true;
+                return Ok(());
+            }
             match self.fd_table.output_endpoint(source_fd) {
                 Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
                     state.fds.insert(
@@ -3111,6 +3161,14 @@ impl Executor {
             OutputTarget::SharedFile(file) => {
                 crate::fd::write_all(file.handle, &bytes)?;
             }
+            OutputTarget::PipeChannel(channel) => {
+                // rubash#2385: a stage's drained bytes append to the
+                // shared queue — this is also how an external stage's
+                // complementary write lands (probe x04): the child
+                // wrote into a capture pipe, the parent's routing
+                // appends here.
+                channel.append(&bytes);
+            }
         }
         Ok(())
     }
@@ -3456,6 +3514,11 @@ impl OutputFdState {
             }
             OutputTarget::SharedFile(file) => {
                 crate::fd::write_all(file.handle, output)?;
+                Ok(())
+            }
+            OutputTarget::PipeChannel(channel) => {
+                // rubash#2385: append at the shared queue's tail.
+                channel.append(output);
                 Ok(())
             }
         }

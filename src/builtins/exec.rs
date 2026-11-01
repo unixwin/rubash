@@ -105,6 +105,36 @@ pub(crate) fn process_replacement_enabled() -> bool {
     PROCESS_REPLACEMENT_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// rubash#2345 host opt-in for real same-shell child processes. GNU
+/// runs every shell-script child as its own OS process:
+/// execute_disk_command forks and the child reaches the script
+/// through shell_execve (execute_cmd.c:6139) — for an explicit
+/// interpreter invocation and for the ENOEXEC re-entry alike — so
+/// the child owns its pid (variables.c:546 `$$` is per-process),
+/// its signal dispositions, and its trap domain. The in-process
+/// emulation (executor::external_finish::execute_direct_shell_script)
+/// reproduces the child's shell state but cannot reproduce that
+/// process boundary: the nested child's `$$` reads the host's pid,
+/// an untrapped SIGKILL addressed to it kills the host process, and
+/// the host's traps are displaced for the span of the nested run.
+/// When the hosting binary's process IS the shell (rubash's own
+/// main), the rooted executor therefore routes same-shell script
+/// children to a real spawn of this binary instead. Library hosts
+/// (niubash's Session) never opt in: their process is the host
+/// application's, and the in-process emulation is the only sound
+/// model there — the same opt-in discipline as process replacement
+/// above (rubash#1175).
+static REAL_SHELL_CHILDREN_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn enable_real_shell_children() {
+    REAL_SHELL_CHILDREN_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn real_shell_children_enabled() -> bool {
+    REAL_SHELL_CHILDREN_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// rubash#1175: attempt a true process-image replacement for
 /// `exec command ...` (builtins/exec.def exec_builtin ->
 /// execute_cmd.c:6126 shell_execve), for a dispatcher that has already

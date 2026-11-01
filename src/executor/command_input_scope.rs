@@ -1348,6 +1348,22 @@ impl Executor {
                             self.record_output_fd_ledger(fd);
                             continue;
                         }
+                        // rubash#2385: the source is a pipe read end
+                        // with no write endpoint to dup — GNU's open
+                        // attaches to the pipe's other end, so bind
+                        // the complementary write endpoint the
+                        // resolver mints instead of the dup's empty
+                        // write side.
+                        if self.fd_table.output_endpoint(source_fd).is_none() {
+                            if let Some(endpoint) =
+                                self.fd_alias_complementary_write_endpoint(source_fd)
+                            {
+                                self.fd_table.open_output(fd, endpoint, false);
+                                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                self.record_output_fd_ledger(fd);
+                                continue;
+                            }
+                        }
                         if self.fd_table.dup_output(fd, source_fd).is_ok() {
                             self.record_output_fd_ledger(fd);
                             continue;

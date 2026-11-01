@@ -309,6 +309,37 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// GNU parse.y:3163 assignment_acceptable(token) =
+    /// command_token_position(token) && !PST_CASEPAT, where
+    /// command_token_position (parse.y:3157-3161) holds when the
+    /// previous token was ASSIGNMENT_WORD, when a redirection list is
+    /// open before the command word (PST_REDIRLIST), or when
+    /// reserved_word_acceptable holds. This is the position gate for
+    /// read_token_word's `[` span consumption (parse.y:5636): only in
+    /// this position may a subscript span swallow whitespace into the
+    /// word. Inside a conditional command no assignment statement can
+    /// appear, so PST_CONDCMD stands the gate down as well.
+    pub(super) fn assignment_word_position(&self) -> bool {
+        if self.parse_state.case_pattern || self.parse_state.in_cond_command {
+            return false;
+        }
+        match &self.parse_state.last_token {
+            None => true,
+            Some((TokenKind::Assignment, _)) => true,
+            Some((
+                TokenKind::RedirectOut
+                | TokenKind::RedirectIn
+                | TokenKind::Append
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::HereDoc
+                | TokenKind::HereString,
+                _,
+            )) => true,
+            _ => self.reserved_word_position(),
+        }
+    }
+
     /// Track the GNU reader state that affects `{` handling:
     /// reserved-word acceptability (last two tokens) and PST_CASEPAT.
     fn record_token(&mut self, token: &mut Token) {
