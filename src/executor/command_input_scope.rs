@@ -961,10 +961,14 @@ impl Executor {
                 // filesystem file behind the mapped path on Windows;
                 // serve the snapshot bytes through the fd byte channel.
                 self.set_fd_input_bytes(fd, bytes, true);
-            } else if let Some(link) = crate::special_paths::synthetic_link_target(
-                &target,
-                Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-            ) {
+            } else if let Some(link) = {
+                let (cwd_forms, root_forms) = self.proc_link_forms();
+                crate::special_paths::synthetic_link_target(
+                    &target,
+                    Some(&cwd_forms),
+                    Some(&root_forms),
+                )
+            } {
                 // SyntheticLink (rubash#1900): open the resolved
                 // native target (session cwd answers for self/cwd).
                 // rubash#1937: a directory target binds the directory
