@@ -1162,10 +1162,14 @@ impl Executor {
                     }
                 }
             }
-            let link_native = crate::special_paths::synthetic_link_target(
-                &expanded_target,
-                Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-            )
+            let link_native = {
+                let (cwd_forms, root_forms) = self.proc_link_forms();
+                crate::special_paths::synthetic_link_target(
+                    &expanded_target,
+                    Some(&cwd_forms),
+                    Some(&root_forms),
+                )
+            }
             .map(|link| link.native);
 
             // niubash#177: same operand resolution as open_input_redirect —
