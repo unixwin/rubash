@@ -398,6 +398,7 @@ impl<'a> Lexer<'a> {
     fn skip_word_inner(&mut self, token_start: usize) {
         let mut extglob_operator = false;
         let array_assignment = self.looks_like_array_element_assignment();
+        let array_compound_assignment = self.looks_like_array_element_compound_assignment();
         let mut array_subscript_depth = 0usize;
         let mut array_value_paren_depth = 0usize;
         // GNU parse.y read_token_word tracks the whole token: a `name=(...)`
@@ -439,7 +440,25 @@ impl<'a> Lexer<'a> {
                 // body is consumed as substitution text, so
                 // `index[7<(4+2)]` inside `[[ ]]` stays one word.
                 && !(matches!(c, '<' | '>') && self.peek_after(1) == Some('('))
-                && !(array_assignment && array_subscript_depth > 0 && c.is_ascii_whitespace())
+                // GNU parse.y:5636: the matched `[...]` span is consumed
+                // into the word ONLY where an assignment word is
+                // acceptable (command-token position) or inside a
+                // compound list (PST_COMPASSIGN); everywhere else the
+                // whitespace inside the brackets is an ordinary word
+                // boundary (syntax.h:29-30 shell_break_chars), and the
+                // resulting words are what assignment() (general.c:480)
+                // and the builtins see — `declare a[bc + 1]=x` reaches
+                // declare as THREE words (rubash#2463). The lexer gates
+                // the span on assignment_word_position (the parse.y:3163
+                // port); where the reader state cannot prove the
+                // position (a resumed or sub-lexed stream), the parser
+                // reassembles the one-word form at first-word position
+                // (collect_split_array_element_assignment_word). The
+                // compound-value form stays glued at any position: its
+                // `(` cannot be recovered from split word tokens.
+                && !(array_subscript_depth > 0
+                    && c.is_ascii_whitespace()
+                    && (array_compound_assignment || self.assignment_word_position()))
                 && !(in_array_value && c.is_ascii_whitespace())
                 && !(in_array_value && matches!(c, '(' | ')'))
                 // GNU skip_to_delim/skipsubscript (subst.c:2186): the
@@ -741,19 +760,21 @@ impl<'a> Lexer<'a> {
             && bytes.iter().any(|b| b.is_ascii_alphabetic() || *b == b'_')
     }
 
-    fn looks_like_array_element_assignment(&self) -> bool {
-        // GNU parse.y:5633-5651 read_token_word: the `[` subscript arm
-        // decides AT the `[` from the word assembled SO FAR
-        // (`token_index > 0 && assignment_acceptable && token_is_ident`,
-        // parse.y:5636, token_is_ident at parse.y:5291 = valid_identifier
-        // over the whole prefix — no name-length limit), then consumes the
-        // matched span via parse_matched_pair P_ARRAYSUB. This predicate used
-        // to require the scan position itself to sit AT the `[`, but it runs
-        // once at word-start+1, so only single-character names ever armed
-        // the subscript path and `ab[((n))]=x` broke at the paren
-        // (issue #1335 linux_exploit_suggester.sh `EXPLOITS[((n++))]=...`).
-        // Fix the invariant: locate the candidate shape from the word start
-        // (identifier `[` balanced `]` `=`), wherever the `[` sits.
+    // The text after the matching `]` when the word begun near the scan
+    // position has the shape `identifier[subscript]<tail>`, else None.
+    // GNU parse.y:5633-5651 read_token_word: the `[` subscript arm
+    // decides AT the `[` from the word assembled SO FAR
+    // (`token_index > 0 && assignment_acceptable && token_is_ident`,
+    // parse.y:5636, token_is_ident at parse.y:5291 = valid_identifier
+    // over the whole prefix — no name-length limit), then consumes the
+    // matched span via parse_matched_pair P_ARRAYSUB. This scan used to
+    // require the scan position itself to sit AT the `[`, but it runs
+    // once at word-start+1, so only single-character names ever armed
+    // the subscript path and `ab[((n))]=x` broke at the paren
+    // (issue #1335 linux_exploit_suggester.sh `EXPLOITS[((n++))]=...`).
+    // Fix the invariant: locate the candidate shape from the word start
+    // (identifier `[` balanced `]`), wherever the `[` sits.
+    fn array_element_assignment_tail(&self) -> Option<&str> {
         let mut name_start = self.position;
         while name_start > 0 {
             let ch = self.input.as_bytes()[name_start - 1] as char;
@@ -768,7 +789,7 @@ impl<'a> Lexer<'a> {
         for (offset, ch) in rest.char_indices() {
             if offset == 0 {
                 if !(ch == '_' || ch.is_ascii_alphabetic()) {
-                    return false;
+                    return None;
                 }
                 name_len = ch.len_utf8();
             } else if ch == '_' || ch.is_ascii_alphanumeric() {
@@ -778,11 +799,11 @@ impl<'a> Lexer<'a> {
             }
         }
         if name_len == 0 {
-            return false;
+            return None;
         }
         let rest = &rest[name_len..];
         if !rest.starts_with('[') {
-            return false;
+            return None;
         }
         let mut depth = 1usize;
         let mut escaped = false;
@@ -863,11 +884,29 @@ impl<'a> Lexer<'a> {
                 _ => idx += 1,
             }
         }
-        close
-            .and_then(|offset| rest.get(offset + 1..))
-            // GNU parse.y:5653 token_is_assignment: both `=` and `+=` make
-            // the word an assignment.
+        close.and_then(|offset| rest.get(offset + 1..))
+    }
+
+    fn looks_like_array_element_assignment(&self) -> bool {
+        // GNU parse.y:5653 token_is_assignment: both `=` and `+=` make
+        // the word an assignment.
+        self.array_element_assignment_tail()
             .is_some_and(|tail| tail.starts_with('=') || tail.starts_with("+="))
+    }
+
+    // True for `name[subscript]=(...)` / `name[subscript]+=(...)`: the
+    // only array-element shape whose subscript interior must stay atomic
+    // at lex time even outside assignment position, because the compound
+    // list's `(` is a separate token class — once the word splits at the
+    // subscript's whitespace, the parser cannot reassemble the list.
+    // GNU parse.y:5653-5670 enters parse_compound_assignment at that `=`
+    // (assignment_acceptable or PST_ASSIGNOK); rubash's lexer keeps the
+    // whole word atomic for compound values at every position (the
+    // compound_assignment_start invariant), and this predicate extends
+    // the same atomicity to the element form's subscript span.
+    fn looks_like_array_element_compound_assignment(&self) -> bool {
+        self.array_element_assignment_tail()
+            .is_some_and(|tail| tail.starts_with("=(") || tail.starts_with("+("))
     }
 
     fn word_so_far_ends_extglob_operator(&self, start: usize) -> bool {
