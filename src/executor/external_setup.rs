@@ -128,7 +128,7 @@ struct OutputProcessSubstitution {
 /// a temp carrier) captures that prefix state at materialization
 /// time, before the command's redirects are applied and undone.
 #[derive(Debug, Clone)]
-enum ProcsubSpawnFd {
+pub(in crate::executor) enum ProcsubSpawnFd {
     /// Untouched by the prefix: inherit the shell's ambient state
     /// (stdio inherit for fds 1-2; nothing crosses for fds >= 3,
     /// matching the consumer spawn's existing transport).
@@ -2374,6 +2374,173 @@ impl Executor {
     /// way GNU's fork would inherit it. Non-file endpoints (pipes,
     /// coproc streams, text inputs) cannot cross the consumer
     /// spawn's transport and stay Inherit.
+    /// rubash#2466: the ambient half of a process-substitution fork's
+    /// fd table — every open fd >= 3 the shell holds that the fork
+    /// must carry (GNU process_substitute, subst.c:6412, reaches
+    /// make_child with FORK_ASYNC|FORK_PROCSUB: the fork copies the
+    /// shell's whole fd table, and only the substitution pipe ends and
+    /// the pending command's fd_bitmap entries are closed afterwards,
+    /// subst.c:6557-6581 — an `exec 9>file` binding is not in that
+    /// set, so it survives into the procsub child and its own
+    /// children). Shared by both fork faces: the `>(...)` consumer
+    /// spawn (external_setup.rs, plan entries win where present) and
+    /// the `<(...)` producer spawn (trap_exec.rs). Virtual endpoints
+    /// (text inputs, live pipes) cannot cross the transport and stay
+    /// unforwarded — ambient_procsub_spawn_fd's Inherit verdict.
+    pub(in crate::executor) fn ambient_procsub_spawn_fds(&self) -> Vec<(u32, ProcsubSpawnFd)> {
+        let mut spawn_fds: Vec<(u32, ProcsubSpawnFd)> = Vec::new();
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed {
+                continue;
+            }
+            let disposition = self.ambient_procsub_spawn_fd(*fd);
+            if !matches!(disposition, ProcsubSpawnFd::Inherit) {
+                spawn_fds.push((*fd, disposition));
+            }
+        }
+        spawn_fds
+    }
+
+    /// rubash#2195/#2466: turn one process-substitution fork's fd
+    /// dispositions into the __RUBASH_FD_* env channel entries plus
+    /// the parent-side inheritable duplicates they name (the same
+    /// transport the background respawn uses, compound_exec.rs). The
+    /// child learns the fd -> handle binding from the env keys its
+    /// init restores into its fd table (init.rs); the caller closes
+    /// the returned dups once the spawn lands. A Closed disposition
+    /// needs no key: the child inherits nothing at >= 3 except
+    /// through this channel. The returned pins are (duplicate, slot)
+    /// pairs for the caller's pre_exec pass (unix): the child-side
+    /// restore prefers the descriptor AT the slot number (init.rs,
+    /// rubash#2333), and a raw spawn delivers each carrier at its
+    /// duplicate's number — which can collide with another slot's
+    /// number and rotate the bindings — so the spawn must dup2 each
+    /// carrier onto its slot between fork and exec
+    /// (pin_ambient_fds_in_child), exactly like the foreign-child
+    /// spawns (external_inner.rs). The env stamps stay as the
+    /// fallback for targets the pin guards must skip (std's
+    /// exec-error pipe) and for platforms without pre_exec.
+    pub(in crate::executor) fn procsub_fd_transport(
+        &self,
+        spawn_fds: &[(u32, ProcsubSpawnFd)],
+    ) -> (
+        Vec<(String, String)>,
+        Vec<crate::fd::HANDLE>,
+        Vec<(crate::fd::HANDLE, u32)>,
+    ) {
+        let mut env_entries: Vec<(String, String)> = Vec::new();
+        let mut parent_side_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        let mut fd_pins: Vec<(crate::fd::HANDLE, u32)> = Vec::new();
+        let mut stamp = |handle_key: &str,
+                         path_key: &str,
+                         fd: u32,
+                         dup: crate::fd::HANDLE,
+                         path: &std::path::Path,
+                         env_entries: &mut Vec<(String, String)>| {
+            env_entries.push((format!("{handle_key}_{fd}"), format!("{dup:#x}")));
+            env_entries.push((
+                format!("{path_key}_{fd}"),
+                path.to_string_lossy().into_owned(),
+            ));
+        };
+        for (fd, disposition) in spawn_fds {
+            if *fd < 3 {
+                continue;
+            }
+            match disposition {
+                ProcsubSpawnFd::File { read, write } => {
+                    if let Some(file) = read {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            stamp(
+                                "__RUBASH_FD_HANDLE",
+                                "__RUBASH_FD_PATH",
+                                *fd,
+                                dup,
+                                &file.path,
+                                &mut env_entries,
+                            );
+                            parent_side_dups.push(dup);
+                            fd_pins.push((dup, *fd));
+                        }
+                    }
+                    if let Some(file) = write {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            stamp(
+                                "__RUBASH_FD_WHANDLE",
+                                "__RUBASH_FD_WPATH",
+                                *fd,
+                                dup,
+                                &file.path,
+                                &mut env_entries,
+                            );
+                            parent_side_dups.push(dup);
+                            fd_pins.push((dup, *fd));
+                        }
+                    }
+                }
+                ProcsubSpawnFd::TruncatedFile(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        // Seek the dup (the shared description) to
+                        // end-of-file before it crosses: see the
+                        // variant's offset note.
+                        let mut seeked = crate::fd::handle_to_file(dup);
+                        use std::io::Seek as _;
+                        let _ = seeked.seek(std::io::SeekFrom::End(0));
+                        let dup = crate::fd::into_handle(seeked);
+                        stamp(
+                            "__RUBASH_FD_WHANDLE",
+                            "__RUBASH_FD_WPATH",
+                            *fd,
+                            dup,
+                            &file.path,
+                            &mut env_entries,
+                        );
+                        parent_side_dups.push(dup);
+                        fd_pins.push((dup, *fd));
+                    }
+                }
+                ProcsubSpawnFd::CarrierWrite(path) => {
+                    if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
+                        let handle = crate::fd::into_handle(file);
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                            stamp(
+                                "__RUBASH_FD_WHANDLE",
+                                "__RUBASH_FD_WPATH",
+                                *fd,
+                                dup,
+                                path,
+                                &mut env_entries,
+                            );
+                            parent_side_dups.push(dup);
+                            fd_pins.push((dup, *fd));
+                        }
+                        crate::fd::close_handle(handle);
+                    }
+                }
+                ProcsubSpawnFd::CarrierRead(path) => {
+                    if let Ok(file) = std::fs::File::open(path) {
+                        let handle = crate::fd::into_handle(file);
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                            stamp(
+                                "__RUBASH_FD_HANDLE",
+                                "__RUBASH_FD_PATH",
+                                *fd,
+                                dup,
+                                path,
+                                &mut env_entries,
+                            );
+                            parent_side_dups.push(dup);
+                            fd_pins.push((dup, *fd));
+                        }
+                        crate::fd::close_handle(handle);
+                    }
+                }
+                ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
+            }
+        }
+        (env_entries, parent_side_dups, fd_pins)
+    }
+
     fn ambient_procsub_spawn_fd(&self, fd: u32) -> ProcsubSpawnFd {
         let read = match self.fd_table.read_endpoint(fd) {
             Some(FdReadEndpoint::File(file)) => Some(file),
@@ -3383,92 +3550,16 @@ impl Executor {
         // pipes) cannot cross this transport and stay unforwarded,
         // matching ambient_procsub_spawn_fd's Inherit verdict.
         let mut spawn_fds: Vec<(u32, ProcsubSpawnFd)> = spawn_plan.fds.clone();
-        for (fd, entry) in &self.fd_table.entries {
-            if *fd < 3 || entry.closed || spawn_plan.get(*fd).is_some() {
-                continue;
-            }
-            let disposition = self.ambient_procsub_spawn_fd(*fd);
-            if !matches!(disposition, ProcsubSpawnFd::Inherit) {
-                spawn_fds.push((*fd, disposition));
+        for (fd, disposition) in self.ambient_procsub_spawn_fds() {
+            if spawn_plan.get(fd).is_none() {
+                spawn_fds.push((fd, disposition));
             }
         }
-        for (fd, disposition) in &spawn_fds {
-            if *fd < 3 {
-                continue;
-            }
-            match disposition {
-                ProcsubSpawnFd::File { read, write } => {
-                    if let Some(file) = read {
-                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
-                            env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
-                            env_map.insert(
-                                format!("__RUBASH_FD_PATH_{fd}"),
-                                file.path.to_string_lossy().into_owned(),
-                            );
-                            parent_side_dups.push(dup);
-                        }
-                    }
-                    if let Some(file) = write {
-                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
-                            env_map
-                                .insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
-                            env_map.insert(
-                                format!("__RUBASH_FD_WPATH_{fd}"),
-                                file.path.to_string_lossy().into_owned(),
-                            );
-                            parent_side_dups.push(dup);
-                        }
-                    }
-                }
-                ProcsubSpawnFd::TruncatedFile(file) => {
-                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
-                        // Seek the dup (the shared description) to
-                        // end-of-file before it crosses: see the
-                        // variant's offset note.
-                        let mut seeked = crate::fd::handle_to_file(dup);
-                        use std::io::Seek as _;
-                        let _ = seeked.seek(std::io::SeekFrom::End(0));
-                        let dup = crate::fd::into_handle(seeked);
-                        env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
-                        env_map.insert(
-                            format!("__RUBASH_FD_WPATH_{fd}"),
-                            file.path.to_string_lossy().into_owned(),
-                        );
-                        parent_side_dups.push(dup);
-                    }
-                }
-                ProcsubSpawnFd::CarrierWrite(path) => {
-                    if let Ok(file) = std::fs::OpenOptions::new().append(true).open(path) {
-                        let handle = crate::fd::into_handle(file);
-                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
-                            env_map
-                                .insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
-                            env_map.insert(
-                                format!("__RUBASH_FD_WPATH_{fd}"),
-                                path.to_string_lossy().into_owned(),
-                            );
-                            parent_side_dups.push(dup);
-                        }
-                        crate::fd::close_handle(handle);
-                    }
-                }
-                ProcsubSpawnFd::CarrierRead(path) => {
-                    if let Ok(file) = std::fs::File::open(path) {
-                        let handle = crate::fd::into_handle(file);
-                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
-                            env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
-                            env_map.insert(
-                                format!("__RUBASH_FD_PATH_{fd}"),
-                                path.to_string_lossy().into_owned(),
-                            );
-                            parent_side_dups.push(dup);
-                        }
-                        crate::fd::close_handle(handle);
-                    }
-                }
-                ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
-            }
+        let (fd_env, fd_dups, fd_pins) = self.procsub_fd_transport(&spawn_fds);
+        for (key, value) in fd_env {
+            env_map.insert(key, value);
         }
+        parent_side_dups.extend(fd_dups);
         // rubash#2356: same state-channel spill as the `&` respawn —
         // the composed environment can carry a single entry past
         // MAX_ARG_STRLEN (the fork-context stamp scales with the
@@ -3491,6 +3582,27 @@ impl Executor {
             .stdout(self.procsub_plan_stdio(spawn_plan.get(1)))
             .stderr(self.procsub_plan_stdio(spawn_plan.get(2)));
         process.current_dir(&self.shell_state.cwd);
+        // rubash#2466: install each transported ambient carrier AT its
+        // slot number between fork and exec — the child-side restore
+        // prefers the descriptor at the slot (init.rs, rubash#2333),
+        // and without the pin a duplicate landing on another slot's
+        // number rotates the bindings.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: same contract as the foreign-child registration
+            // (external_inner.rs) — the closure runs only in the
+            // forked child before exec and only dup2/closes raw
+            // descriptors.
+            unsafe {
+                let pins = fd_pins;
+                process.pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+            }
+        }
+        // The pins are a unix-only delivery (pre_exec); elsewhere the
+        // env channel alone carries the bindings.
+        #[cfg(not(unix))]
+        let _ = &fd_pins;
         suppress_orphan_console(&mut process);
         let spawn_result = process.spawn();
         for dup in parent_side_dups {

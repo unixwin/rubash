@@ -4142,6 +4142,22 @@ impl Executor {
         for (key, value) in self.fork_context_transport_entries() {
             env_entries.push((key, value));
         }
+        // rubash#2466: the producer is the SAME make_child fork as the
+        // `>(...)` consumer face (subst.c:6412, FORK_ASYNC|FORK_PROCSUB):
+        // the fork copies the shell's whole fd table, and the procsub
+        // child-side teardown closes only the substitution pipe ends and
+        // the pending command's fd_bitmap entries (subst.c:6557-6581) —
+        // so an ambient `exec 9>file` binding must reach the producer's
+        // body and its own children at its number, exactly like it
+        // reaches the consumer (rubash#2212, external_setup.rs) and
+        // every `cmd &` respawn. The producer spawn here never carried
+        // the transport, so a body writing `>&9` got EBADF. Same
+        // shared channel as the consumer: __RUBASH_FD_* env keys the
+        // child's init restores into its fd table (init.rs), naming
+        // parent-side inheritable duplicates closed after the spawn.
+        let (fd_env, fd_dups, fd_pins) =
+            self.procsub_fd_transport(&self.ambient_procsub_spawn_fds());
+        env_entries.extend(fd_env);
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone()));
         }
@@ -4163,7 +4179,35 @@ impl Executor {
         child.stdout(writer);
         child.stderr(Stdio::inherit());
         child.current_dir(&self.shell_state.cwd);
-        match child.spawn() {
+        // rubash#2466: install each transported ambient carrier AT its
+        // slot number between fork and exec (the consumer face does the
+        // same, external_setup.rs) — the child-side restore prefers the
+        // descriptor at the slot (init.rs, rubash#2333), and without the
+        // pin a duplicate landing on another slot's number rotates the
+        // bindings.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: same contract as the foreign-child registration
+            // (external_inner.rs) — the closure runs only in the
+            // forked child before exec and only dup2/closes raw
+            // descriptors.
+            unsafe {
+                child.pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&fd_pins));
+            }
+        }
+        // The pins are a unix-only delivery (pre_exec); elsewhere the
+        // env channel alone carries the bindings.
+        #[cfg(not(unix))]
+        let _ = &fd_pins;
+        let spawn_result = child.spawn();
+        // rubash#2466: the transport's parent-side dups are spent once
+        // the spawn lands (the child holds its own copies) — the same
+        // close-after-spawn the consumer face performs.
+        for dup in fd_dups {
+            crate::fd::close_handle(dup);
+        }
+        match spawn_result {
             Ok(child_proc) => {
                 let pid = child_proc.id();
                 self.background_children
