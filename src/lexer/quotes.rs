@@ -302,6 +302,16 @@ fn remove_shell_quotes_inner_cursor(raw: &str, posix: bool) -> String {
                     Some(&b'{') => {
                         rest = copy_braced_parameter_unquoted_cursor(&mut out, rest);
                     }
+                    Some(&b'[') => {
+                        // rubash#2375: `$[...]` is a self-contained unit
+                        // in the unquoted walk too (the double-quote
+                        // cookers already had this arm via
+                        // copy_dollar_bracket_arithmetic_cursor); without
+                        // it the body's quotes and glob characters were
+                        // cooked as word text and a quoted body never
+                        // evaluated.
+                        rest = copy_dollar_bracket_verbatim_cursor(&mut out, rest);
+                    }
                     next => {
                         // `$` with none of the four special followers: the
                         // original falls to the `_` arm, which arms
@@ -502,15 +512,103 @@ fn copy_dollar_bracket_arithmetic_cursor<'a>(out: &mut String, rest: &'a str) ->
     copy_dollar_bracket_body_raw_cursor(out, &rest[1..], true)
 }
 
+/// End of a `$[...]` body in a byte slice (index just past the matching
+/// `]`, body starting at `start`), by GNU's extraction machine —
+/// subst.c:1361 extract_delimited_string via subst.c:1301
+/// extract_arithmetic_subst: a backslash or CTLESC passes the next byte
+/// (it can neither delimit nor nest), single/double-quoted and backquote
+/// units are skipped whole, and nested `[` / `$[` openers nest. Returns
+/// None when the span is unterminated. The byte scan is safe: every
+/// sentinel is ASCII and UTF-8 continuation bytes (>= 0x80) never match.
+fn dollar_bracket_body_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' | 0x11 => index += 2,
+            b'\'' => {
+                index += 1;
+                while index < bytes.len() && bytes[index] != b'\'' {
+                    index += 1;
+                }
+                if index >= bytes.len() {
+                    return None;
+                }
+                index += 1;
+            }
+            b'"' | b'`' => {
+                let closer = bytes[index];
+                index += 1;
+                let mut closed = false;
+                while index < bytes.len() {
+                    match bytes[index] {
+                        b'\\' => index += 2,
+                        byte if byte == closer => {
+                            index += 1;
+                            closed = true;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'[') => {
+                depth += 1;
+                index += 2;
+            }
+            b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Cursor copier for a `$[...]` span in the unquoted word walk (rest at
+/// the `$`): the whole span is pushed verbatim — `$`, `[`, body, `]` —
+/// with no carrier cooking of the body bytes. GNU read_token_word hands
+/// the bracket hunt (parse.y:5527 parse_matched_pair with P_ARITH) the
+/// body as one unit and the expansion walkers re-collect it; cooking the
+/// body byte by byte let an inner `"` open the walk's double-quote arm,
+/// which CTLESC-prefixed the arithmetic characters and dropped the
+/// quotes, so `$["1+1"]` in assignment or prefixed position reached the
+/// evaluator as the corrupted token `1\u{11}+1` (rubash#2375). An
+/// unterminated span copies to the end of input (the EOF verdict
+/// machinery owns that diagnostic).
+fn copy_dollar_bracket_verbatim_cursor<'a>(out: &mut String, rest: &'a str) -> &'a str {
+    match dollar_bracket_body_end(rest.as_bytes(), 2) {
+        Some(end) => {
+            out.push_str(&rest[..end]);
+            &rest[end..]
+        }
+        None => {
+            out.push_str(rest);
+            &rest[rest.len()..]
+        }
+    }
+}
+
 /// Cursor form of `copy_dollar_bracket_body_raw` (rest just past the
 /// `$[`). Returns the remainder just past the matching `]`, or the
 /// empty slice when the span runs to the end of input (the EOF verdict
-/// machinery owns that diagnostic). Bracket matching is plain counting
-/// — every `[` nests, every `]` closes — the rule shared by GNU's
-/// read-time hunt (parse.y:5527 parse_matched_pair with P_ARITH,
-/// counting at parse.y:3974-3980), rubash's own EOF hunt (lexer/skip.rs
-/// db_scan_bracket_hunt), and the expansion walkers' collectors, so
-/// every layer agrees on the span.
+/// machinery owns that diagnostic). Bracket matching here is plain
+/// counting — every `[` nests, every `]` closes: this copier only
+/// copies bytes verbatim, so where the span boundary falls does not
+/// change the emitted text, and the expansion walkers' collectors
+/// re-extract the body with GNU's machine (subst.c:1361, see
+/// dollar_bracket_body_end above) before evaluating it.
 ///
 /// With `deescape_dq` (the double-quote cookers) the two escape pairs
 /// GNU's read_token_word resolves inside double quotes before
