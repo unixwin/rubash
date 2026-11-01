@@ -93,4 +93,35 @@ fn issue2438_controls() {
     assert_eq!(r.stdout, "rc=0 x=[]\n");
     assert_eq!(r.stderr, "");
     assert_eq!(r.code, Some(0));
+
+    // GNU builtins/exit.def:160 (bash_logout): ~/.bash_logout runs
+    // only when subshell_environment == 0. The comsub child's logout
+    // keeps login_shell (so it exits the child) but its
+    // subshell_environment carries SUBSHELL_COMSUB, so the file is
+    // NOT sourced; a top-level login logout sources it. Oracle:
+    // GNU bash 5.3.20 with a marker-writing ~/.bash_logout.
+    let logout_file_ran = |tag: &str, args: &[&str]| -> bool {
+        let dir =
+            std::env::temp_dir().join(format!("rubash-issue2438-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        fs::write(dir.join(".bash_logout"), "echo ran >> \"$HOME/marker\"\n")
+            .expect("write bash_logout");
+        Command::new(rubash_bin())
+            .args(args)
+            .stdin(Stdio::null())
+            .env("HOME", &dir)
+            .env_remove("BASH_ENV")
+            .env_remove("POSIXLY_CORRECT")
+            .output()
+            .expect("run shell");
+        let marked = dir.join("marker").exists();
+        let _ = fs::remove_dir_all(&dir);
+        marked
+    };
+    assert!(!logout_file_ran(
+        "logoutfile-comsub",
+        &["-l", "-c", "x=$(logout)"]
+    ));
+    assert!(logout_file_ran("logoutfile-top", &["-l", "-c", "logout"]));
 }

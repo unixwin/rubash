@@ -3785,6 +3785,11 @@ impl Executor {
         let saved_exec_replaced = self.exec_replaced;
         crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
+        // execute_in_subshell (execute_cmd.c:1636-1637): the region is
+        // "neither login nor interactive" — record the login reset
+        // alongside the depth bump; saved_state's wholesale restore
+        // reverts it at the boundary (rubash#2438).
+        self.shell_state.subshell_login_cleared.set(true);
         // rubash#1493: GNU's signal-death notice for a job killed inside
         // the parens names the WHOLE subshell command (jobs.c:4625
         // pretty_print_job on the dead job). Record the node's print_cmd

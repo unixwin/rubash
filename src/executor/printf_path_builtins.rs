@@ -210,23 +210,26 @@ impl Executor {
 
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
         // may logout; anything else reports and continues. The login
-        // state the builtin sees is the EFFECTIVE one: GNU clears
-        // login_shell at every subshell entry — execute_cmd.c:1637
+        // state the builtin sees is the EFFECTIVE one. GNU clears
+        // login_shell at a real subshell boundary — execute_cmd.c:1637
         // (execute_in_subshell) and execute_cmd.c:5475
         // (execute_subshell_builtin_or_function) both run
         // `login_shell = interactive = 0` under the comment
         // "Subshells are neither login nor interactive" — so a `( )`
-        // region (or pipeline stage) of a login shell reports
-        // not-login and continues instead of exiting as a login shell
-        // (rubash#2438). rubash's subshell_depth carries exactly that
-        // split: bumped for ( ) regions and fork-copy faces, NOT for
-        // command substitution (command_substitution.rs, rubash#403),
-        // whose child keeps login_shell in GNU too — `$(logout)` in a
-        // login shell silently exits the substitution child with the
-        // last status. The same depth gate already guards the
-        // bash_logout sourcing and the farewell echo in execute_exit.
-        let login_shell =
-            self.invocation_login() && self.shell_state.subshell_depth.get() == 0;
+        // region of a login shell reports not-login and continues
+        // instead of exiting as a login shell (rubash#2438). But the
+        // command-substitution fork is not such a boundary:
+        // subst.c:7143 command_substitute's child setup only sets
+        // `interactive = 0` and ORs SUBSHELL_COMSUB into
+        // subshell_environment — login_shell crosses untouched, so
+        // `$(logout)` in a login shell silently exits the substitution
+        // child with the last status. rubash's subshell_depth cannot
+        // express the split: it is subshell_level (BASH_SUBSHELL),
+        // which the comsub child increments too (rubash#403). The
+        // dedicated latch subshell_login_cleared carries it instead:
+        // set at the `( )` region entries, inherited by fork copies,
+        // never set by a comsub boundary.
+        let login_shell = self.invocation_login() && !self.shell_state.subshell_login_cleared.get();
         if !login_shell {
             let mut stderr = Vec::new();
             let status =
@@ -305,8 +308,21 @@ impl Executor {
         // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a
         // login shell sources ~/.bash_logout once before exiting —
         // only a validated exit reaches it (see the get_exitstat arms
-        // above).
-        self.source_bash_logout_once()?;
+        // above). bash_logout carries its own subshell guard
+        // (exit.def:160: `subshell_environment == 0`): a logout that
+        // exits a command-substitution child — the face whose login
+        // state survives, above — must NOT source it. The fork-copy
+        // executor presets the latch for exactly this, but the
+        // shared-executor substitution faces run on the parent's
+        // latch, so state the guard here the way execute_exit's call
+        // site states its depth half: depth covers the `( )`/clone
+        // boundaries, in_command_substitution covers the `$( )`
+        // windows where depth is not bumped (rubash#2438).
+        if self.shell_state.subshell_depth.get() == 0
+            && !self.shell_state.in_command_substitution.get()
+        {
+            self.source_bash_logout_once()?;
+        }
 
         // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level
         // (EXITBLTIN) — the shell exits with the logout status (an

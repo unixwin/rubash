@@ -987,6 +987,13 @@ impl Executor {
                 crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
                 let old_depth = self.shell_state.subshell_depth.get();
                 self.shell_state.subshell_depth.set(old_depth + 1);
+                // execute_in_subshell (execute_cmd.c:1636-1637): the
+                // region is "neither login nor interactive" — record the
+                // login reset alongside the depth bump so builtins that
+                // consult the effective login state (logout,
+                // builtins/exit.def:83) see it; the region's saved state
+                // clone above reverts it at the boundary (rubash#2438).
+                self.shell_state.subshell_login_cleared.set(true);
                 // rubash#1493: record the region's whole `( ... )` text
                 // for the exec signal-death notice (jobs.c:4625 names
                 // the whole job command) — a node-form region renders
