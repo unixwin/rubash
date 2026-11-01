@@ -869,8 +869,18 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             // them; `('/`)' operator keywords stay rejected. Operator tokens
             // are syntax errors (`cat << ;;` => near `;;', rubash#220).
             if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
-                let fd = redirect_operator_fd(&token.value)
-                    .or_else(|| take_heredoc_fd_prefix(&mut state.current_cmd));
+                // GNU parse.y read_token_word() (got_token): a digit token
+                // is a NUMBER only when the character that ENDED it is `<`
+                // or `>` — the grammar's `NUMBER LESS_LESS WORD`
+                // (parse.y:629) therefore engages only for the fused
+                // spelling. A whitespace-terminated digit word is a plain
+                // WORD argument (`echo 3 <<X` prints `3`), so the fd
+                // re-fusion must pass the same column-adjacency test as
+                // every other redirection arm; the unchecked pop swallowed
+                // the argument (rubash#2467).
+                let fd = redirect_operator_fd(&token.value).or_else(|| {
+                    take_adjacent_redirect_fd_prefix(&mut state.current_cmd, tokens, *i)
+                });
                 let delimiter_token = &tokens[*i + 1];
                 let delimiter = delimiter_token.value.clone();
                 state
