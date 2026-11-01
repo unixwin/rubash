@@ -114,9 +114,26 @@ pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_
 /// collect_command_line_spans order. See
 /// docs/design/respawn-root-line-spans.md.
 pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_ROOT_SPANS";
+/// rubash#2456: the spawner's effective login state, stamped ONLY by
+/// the two process-substitution spawn sites. GNU's procsub fork
+/// (subst.c:6412-6445 process_substitute) is the one fork-shaped child
+/// whose `login_shell` is never reset: the only reset sites are
+/// execute_cmd.c:1636-1637 (execute_in_subshell) and
+/// execute_cmd.c:5474-5475 (execute_subshell_builtin_or_function),
+/// and neither lies on the procsub path, so the child inherits the
+/// parent's CURRENT global — the value the logout gate reads,
+/// `invocation_login && !subshell_login_cleared`, at the moment the
+/// substitution is constructed. Presence with value "1" is the bit
+/// (the FORK_IN_FUNCTION convention): the spawner stamps it exactly
+/// when its effective state is on, and every other respawn form
+/// (async, coproc, subshell wrappers) is born non-login because GNU's
+/// reset sites clear the global on those paths. The child's init
+/// consumes it under the provenance gate (init.rs) and the key is
+/// stripped unconditionally with the rest of this family.
+pub(in crate::executor) const FORK_LOGIN_SHELL_TRANSPORT: &str = "__RUBASH_FORK_LOGIN_SHELL";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 12] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -128,6 +145,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
     FORK_PIPESTATUS_TRANSPORT,
     FORK_FN_SPANS_TRANSPORT,
     FORK_ROOT_SPANS_TRANSPORT,
+    FORK_LOGIN_SHELL_TRANSPORT,
 ];
 
 impl Executor {
@@ -1713,17 +1731,43 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            let read_file = match &entry.read {
-                Some(FdReadEndpoint::File(f)) => Some(f),
-                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd),
+            // Each delivery is (source handle, path label, shared-dup
+            // key): File/Coproc endpoints key by their Rc identity so
+            // two slots sharing one description share one dup;
+            // standard-stream endpoints (rubash#2212 — an `N<&0` /
+            // `N>&1` / `N>&2` dup carries no FileFd) key by the
+            // standard handle itself and deliver the process standard
+            // descriptor GNU's fork would inherit.
+            let read_delivery = match &entry.read {
+                Some(FdReadEndpoint::File(f)) => Some((
+                    f.handle,
+                    f.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(f) as usize,
+                )),
+                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some((
+                    fd.handle,
+                    fd.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(fd) as usize,
+                )),
+                Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                    // A Windows GUI parent has no standard handle
+                    // (process_std_handle == 0); leave the endpoint
+                    // unforwarded rather than fail the spawn on a
+                    // bad dup. On Unix the handle IS the fd (0 is a
+                    // valid descriptor).
+                    #[cfg(windows)]
+                    if handle == 0 {
+                        return None;
+                    }
+                    Some((handle, label.to_string(), handle as usize))
+                }),
                 _ => None,
             };
-            if let Some(f) = read_file {
-                let key = Rc::as_ptr(f) as usize;
+            if let Some((src_handle, src_path, key)) = read_delivery {
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
                     None => {
-                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        let dup = crate::fd::duplicate_handle_inheritable(src_handle)?;
                         fd_shared_dups.insert(key, dup);
                         extra_handles.push(dup);
                         owned_handles.push(dup);
@@ -1731,22 +1775,33 @@ impl Executor {
                     }
                 };
                 env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{:#x}", dup));
-                env_map.insert(
-                    format!("__RUBASH_FD_PATH_{fd}"),
-                    f.path.to_string_lossy().into_owned(),
-                );
+                env_map.insert(format!("__RUBASH_FD_PATH_{fd}"), src_path);
             }
-            let write_file = match &entry.write {
-                Some(FdWriteEndpoint::File(f)) => Some(f),
-                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd),
+            let write_delivery = match &entry.write {
+                Some(FdWriteEndpoint::File(f)) => Some((
+                    f.handle,
+                    f.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(f) as usize,
+                )),
+                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some((
+                    fd.handle,
+                    fd.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(fd) as usize,
+                )),
+                Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                    #[cfg(windows)]
+                    if handle == 0 {
+                        return None;
+                    }
+                    Some((handle, label.to_string(), handle as usize))
+                }),
                 _ => None,
             };
-            if let Some(f) = write_file {
-                let key = Rc::as_ptr(f) as usize;
+            if let Some((src_handle, src_path, key)) = write_delivery {
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
                     None => {
-                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        let dup = crate::fd::duplicate_handle_inheritable(src_handle)?;
                         fd_shared_dups.insert(key, dup);
                         extra_handles.push(dup);
                         owned_handles.push(dup);
@@ -1754,10 +1809,7 @@ impl Executor {
                     }
                 };
                 env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
-                env_map.insert(
-                    format!("__RUBASH_FD_WPATH_{fd}"),
-                    f.path.to_string_lossy().into_owned(),
-                );
+                env_map.insert(format!("__RUBASH_FD_WPATH_{fd}"), src_path);
             }
         }
 
@@ -2748,7 +2800,16 @@ impl Executor {
                 // only admits newline_list after `&`, and `& ; }` is the
                 // syntax error that killed respawned background children
                 // (rubash#294). `&\n}` is the valid GNU spelling.
-                if body_text.ends_with('&') {
+                // Same delimiter-line rule when the body ends with a
+                // heredoc body (rubash#2388's closer logic in
+                // function_command_source_text): the delimiter must stand
+                // alone on its line, so `DELIM; }` leaves the heredoc
+                // unterminated and the respawned child dies at parse
+                // (rubash#2212 cell 118: bats' `usage()` heredoc broke
+                // every async respawn out of bats-main's table).
+                if body_text.ends_with('&')
+                    || crate::executor::command_text::render_ended_with_heredoc()
+                {
                     source.push_str("\n}; ");
                 } else {
                     source.push_str("; }; ");
@@ -5481,6 +5542,11 @@ impl Executor {
             // content entry — same boundary: the EINVAL write profile
             // cannot cross into the child's handle; writes absorb.
             Some(FdWriteEndpoint::ProcContentWrite) => CoprocStderrPlan::Direct(Stdio::null()),
+            // rubash#2385: fd 2 bound to a complementary channel end
+            // — same boundary: the in-memory queue cannot cross the
+            // spawn boundary; the child's stderr writes absorb (the
+            // in-shell fd-2 faces append to the queue exactly).
+            Some(FdWriteEndpoint::PipeChannel(_)) => CoprocStderrPlan::Direct(Stdio::null()),
         }
     }
 
@@ -6140,6 +6206,8 @@ impl Executor {
             // the child's stderr writes absorb (Null), exactly like
             // the /dev/full binding's ENOSPC ceiling.
             Some(FdWriteEndpoint::ProcContentWrite) => CoprocFdSpec::Null,
+            // rubash#2385: mirrors the plan's channel arm.
+            Some(FdWriteEndpoint::PipeChannel(_)) => CoprocFdSpec::Null,
         })
     }
 

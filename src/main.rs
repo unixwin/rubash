@@ -116,6 +116,15 @@ fn run_main() -> i32 {
     // (niubash) never opt in — their process is not the shell's.
     rubash::builtins::exec::enable_process_replacement();
 
+    // rubash#2345: this process IS the shell, so a same-shell script
+    // child (`"$THIS_SH" child.sh`, or a shebangless script this shell
+    // would interpret after ENOEXEC) is spawned as a real child
+    // process with its own pid, signal domain, and trap domain (GNU
+    // execute_cmd.c:6139 shell_execve in the forked child), not run
+    // in-process. Library hosts (niubash) never opt in — the
+    // in-process emulation is their only sound model.
+    rubash::builtins::exec::enable_real_shell_children();
+
     // rubash#590: the bash.exe shim (src/bin/bash.rs) erases Windows argv[0]
     // when it re-execs this engine, so the invocation face travels in
     // NIU_INVOKED_AS (rubash#504 forwarded the sh/ash faces for the POSIX

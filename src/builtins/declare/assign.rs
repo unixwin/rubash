@@ -33,6 +33,7 @@ pub(super) fn assign_declare_names<W>(
     deleted_names: &mut std::collections::HashSet<String>,
     stderr: &mut W,
     oob_word: &mut Option<String>,
+    written_hints: &mut super::WrittenOperandHints,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -282,7 +283,30 @@ where
                     // conversion below from seeding it at element 0.
                     variables.remove(base);
                 }
-                let index = if index_expression.trim().is_empty() {
+                // GNU make_new_array_variable creates an indexed array
+                // with no elements; only convert_var_to_array (an existing
+                // scalar promoted by the declare operand) lands the scalar
+                // in [0] (array.tests: m=; declare -a m[10]=v keeps
+                // [0]=""). Parsing "" as one empty word materialized a
+                // phantom [0]="" element in every freshly created array.
+                // The snapshot is taken before the subscript resolves
+                // because GNU assign_array_element (arrayfunc.c:382-390)
+                // wraps a negative subscript against the array's CURRENT
+                // maximum index — the same entries the bind below writes,
+                // including elements bound by earlier operands of this
+                // same command.
+                let mut entries = match variables.get(base).cloned() {
+                    Some(current) if current.starts_with(STORAGE_WORD_PREFIX) => {
+                        indexed_array_entries(&current)
+                    }
+                    Some(current)
+                        if !current.is_empty() || !variables.is_marked(ARRAY_VARS, base) =>
+                    {
+                        indexed_array_entries(&current)
+                    }
+                    _ => Default::default(),
+                };
+                let evaluated_index = if index_expression.trim().is_empty() {
                     Some(0)
                 } else if index_expression == crate::executor::types::FAILED_SUBSCRIPT_SENTINEL {
                     // The executor's subscript pass already evaluated this
@@ -291,26 +315,36 @@ where
                     None
                 } else {
                     eval_conditional_arith_value(index_expression, variables)
-                        .and_then(|value| usize::try_from(value).ok())
+                };
+                let index = match evaluated_index {
+                    Some(value) if value >= 0 => usize::try_from(value).ok(),
+                    Some(value) => {
+                        // GNU arrayfunc.c:382-390 (assign_array_element):
+                        // ind < 0 wraps with ind = array_max_index + 1 +
+                        // ind; if it is STILL negative, err_badarraysub
+                        // (error.c:440-443) reports the WRITTEN
+                        // name[subscript] and this operand fails while the
+                        // remaining operands still bind. A scalar counts
+                        // as a one-element array (its value sits at index
+                        // 0 in the snapshot above); an empty or unset
+                        // array has no maximum and always fails.
+                        let wrapped = entries.keys().max().and_then(|max| {
+                            usize::try_from(*max as i128 + 1 + i128::from(value)).ok()
+                        });
+                        if wrapped.is_none() {
+                            let word = written_element_word(name, written_hints);
+                            writeln!(
+                                stderr,
+                                "{}{}: bad array subscript",
+                                diagnostic_prefix(variables),
+                                word
+                            )?;
+                        }
+                        wrapped
+                    }
+                    None => None,
                 };
                 if let Some(index) = index {
-                    // GNU make_new_array_variable creates an indexed array
-                    // with no elements; only convert_var_to_array (an existing
-                    // scalar promoted by the declare operand) lands the scalar
-                    // in [0] (array.tests: m=; declare -a m[10]=v keeps
-                    // [0]=""). Parsing "" as one empty word materialized a
-                    // phantom [0]="" element in every freshly created array.
-                    let mut entries = match variables.get(base).cloned() {
-                        Some(current) if current.starts_with(STORAGE_WORD_PREFIX) => {
-                            indexed_array_entries(&current)
-                        }
-                        Some(current)
-                            if !current.is_empty() || !variables.is_marked(ARRAY_VARS, base) =>
-                        {
-                            indexed_array_entries(&current)
-                        }
-                        _ => Default::default(),
-                    };
                     // GNU bind_array_element: appends through a nameref land
                     // on the referenced element, arithmetically when the
                     // referenced array carries the integer attribute
@@ -349,9 +383,24 @@ where
                 // `declare -ai a`).
                 if !variables.is_marked(ASSOC_VARS, base) {
                     mark_typed(variables, ARRAY_VARS, base);
-                    if !variables.contains_key(base)
+                    if variables.contains_key(base)
                         && !variables.is_marked(DECLARED_UNSET_VARS, base)
                     {
+                        // convert_var_to_array on an existing scalar
+                        // promotes the scalar to element [0] — rewrite
+                        // the mirror in storage form so it carries the
+                        // promoted element; leaving the bare scalar
+                        // string under an ARRAY mark desyncs the typed
+                        // cell (which promotes the same way) from the
+                        // mirror on the executor's post-command sync. A
+                        // declared-but-unset variable has no value to
+                        // promote and stays cell-less, like GNU.
+                        let current = variables.get(base).cloned().unwrap_or_default();
+                        if !current.starts_with(STORAGE_WORD_PREFIX) {
+                            variables
+                                .insert(base.to_string(), format_indexed_array_storage(entries));
+                        }
+                    } else if !variables.is_marked(DECLARED_UNSET_VARS, base) {
                         variables.insert(
                             base.to_string(),
                             format_indexed_array_storage(Default::default()),
@@ -949,6 +998,30 @@ fn assoc_bare_element(value: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Recover the `name[subscript]` word GNU's err_badarraysub prints
+/// (error.c:440-443: the lhs string assign_array_element received — the
+/// operand AS WRITTEN, before the executor's subscript pass replaced the
+/// subscript with its value). `operand` is the rewritten operand the
+/// builtin is failing on; `written_hints` maps its `name[subscript]`
+/// prefix to the written operand (see WrittenOperandHints). Without a
+/// hint — the direct builtin entry, where no rewrite ran — the operand
+/// itself is the written form. Either way the reported word is the
+/// operand's `name[...]` prefix: the append `+` and the `=value` tail
+/// are not part of it (`a[abc]+=x` reports `a[abc]`).
+fn written_element_word(operand: &str, written_hints: &mut super::WrittenOperandHints) -> String {
+    let key = super::element_word_prefix(operand).unwrap_or_else(|| operand.to_string());
+    let written = written_hints
+        .get_mut(&key)
+        .and_then(|queue| queue.pop_front());
+    let text = written.as_deref().unwrap_or(operand);
+    super::element_word_prefix(text).unwrap_or_else(|| {
+        // Defensive fallback for a malformed span: strip the `=value`
+        // tail and an append `+`.
+        let head = text.split('=').next().unwrap_or(text);
+        head.strip_suffix('+').unwrap_or(head).to_string()
+    })
 }
 
 fn declare_indexed_element(name: &str) -> Option<(&str, &str)> {

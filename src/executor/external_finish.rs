@@ -157,15 +157,37 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#2345: whether a same-shell script child of THIS
+    /// executor must be a real OS process. True only for the rooted
+    /// executor of a binary that opted in (builtins::exec::
+    /// enable_real_shell_children — rubash's own main): GNU's child
+    /// is a forked process (execute_cmd.c:6139 shell_execve), so its
+    /// pid, signal dispositions, and trap domain are its own
+    /// (variables.c:546). Fork-copy clones (subshells, pipeline
+    /// stages, command substitution) keep the in-process emulation:
+    /// their GNU model is a subshell of this very process, where
+    /// `$$` still names the root shell. Library hosts never opt in,
+    /// so their Session executors keep the emulation wholesale.
+    pub(in crate::executor) fn real_shell_children_apply(&self) -> bool {
+        self.owns_process_image && crate::builtins::exec::real_shell_children_enabled()
+    }
+
     pub(in crate::executor) fn execute_same_shell_script(
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        // TODO(execute_cmd.c/shell.c/input.c): Bash forks a new shell process
-        // here while preserving the underlying input stream for redirected
-        // stdin. On Windows test runs, launching the wrapper loses the next
-        // stdin line before `read` can consume it, so execute the same Rubash
-        // script in-process for tests/input-line.sh.
+        // GNU forks a new shell process here (execute_cmd.c:6139
+        // shell_execve in the forked child) while preserving the
+        // underlying input stream for redirected stdin. Where this
+        // executor may route the child to a real spawn
+        // (real_shell_children_apply), it declines below and the
+        // ordinary disk-command path spawns this binary — except
+        // when the parent is consuming a virtual stdin stream whose
+        // remainder only exists in this process (FUNCTION_STDIN /
+        // fd-0 input offset: the tests/input-line.sh shape, where
+        // launching the wrapper on Windows loses the next stdin line
+        // before `read` can consume it); those keep the in-process
+        // execution.
         let Some(command_name) = cmd.words.first() else {
             return Ok(false);
         };
@@ -254,6 +276,29 @@ impl Executor {
         if !script_path.is_file() {
             return Ok(false);
         }
+        // rubash#2345: on a rooted, opted-in executor this invocation
+        // is a child shell PROCESS in GNU (execute_cmd.c:6139:
+        // execute_disk_command forks, the child execs this shell on
+        // the script), with its own pid (variables.c:546), signal
+        // dispositions, and trap domain. Decline so the ordinary
+        // disk-command path spawns this binary and waits it out like
+        // any other child — the death notice, the 128+signal status,
+        // and the parent's trap deferral across the wait are then the
+        // real-child machinery's, not the emulation's. The in-process
+        // run remains for the one shape a spawn cannot serve: the
+        // parent is mid-consumption of a virtual stdin stream
+        // (FUNCTION_STDIN set, or fd 0 carries a virtual input
+        // offset) whose unread remainder exists only in this
+        // process's buffers — a spawned child would start from the
+        // raw descriptor and lose or re-read lines (the
+        // tests/input-line.sh shape the TODO above this function
+        // originally recorded).
+        if self.real_shell_children_apply()
+            && !self.shell_state.env_vars.contains_key(FUNCTION_STDIN)
+            && self.fd_table.input_offset(0).is_none()
+        {
+            return Ok(false);
+        }
         self.execute_direct_shell_script(cmd, &script, &script_path, false, true)?;
         Ok(true)
     }
@@ -274,11 +319,28 @@ impl Executor {
         cmd: &CommandNode,
         program: &std::path::Path,
     ) -> Result<(), ExecuteError> {
-        // $0 keeps the invoked spelling (`./trap2.sub`), like
-        // shell.c:720 dollar_vars[0] = shell_script_filename.
-        let Some(command_name) = cmd.words.first() else {
+        let Some(script) = self.enoexec_script_spelling(cmd, program) else {
             return Ok(());
         };
+        self.execute_direct_shell_script(cmd, &script, program, true, false)
+    }
+
+    /// The script name an ENOEXEC child shell is entered with: the
+    /// spelling GNU's re-entry records as the child's script_name
+    /// ($0, shell.c:1613; the BASH_SOURCE push, variables.c:5718 via
+    /// shell.c:1640; the in-script diagnostic prefix). Shared by the
+    /// in-process entry (execute_enoexec_shell_script) and the
+    /// real-spawn route (rubash#2345), which hands this exact string
+    /// to the spawned shell as its script argument so the child's
+    /// own CLI records the identical name.
+    pub(in crate::executor) fn enoexec_script_spelling(
+        &self,
+        cmd: &CommandNode,
+        program: &std::path::Path,
+    ) -> Option<String> {
+        // $0 keeps the invoked spelling (`./trap2.sub`), like
+        // shell.c:720 dollar_vars[0] = shell_script_filename.
+        let command_name = cmd.words.first()?;
         let script = self.expand_word(command_name);
         // rubash#2302: for a slash-less word the invoked spelling is
         // NOT what GNU's reader sees. execute_disk_command resolves
@@ -307,7 +369,32 @@ impl Executor {
         } else {
             shell_display_path(&program.to_string_lossy())
         };
-        self.execute_direct_shell_script(cmd, &script, program, true, false)
+        Some(script)
+    }
+
+    /// rubash#2345: the real-spawn target for an ENOEXEC script
+    /// child on a rooted, opted-in executor: (this binary's path,
+    /// the re-entry spelling). The foreground classification in
+    /// external_inner retargets its shared spawn tail at this
+    /// binary with the spelling as the lead argument — observably
+    /// the explicit `rubash script` invocation, a distinct process
+    /// with its own pid and signal domain, which is where GNU's
+    /// re-entry lives (inside the forked child,
+    /// execute_cmd.c:6237-6260). None when this executor keeps the
+    /// in-process entry (library hosts, fork-copy clones) or the
+    /// target cannot be composed.
+    #[cfg(unix)]
+    pub(in crate::executor) fn enoexec_spawn_target(
+        &self,
+        cmd: &CommandNode,
+        program: &std::path::Path,
+    ) -> Option<(std::path::PathBuf, String)> {
+        if !self.real_shell_children_apply() {
+            return None;
+        }
+        let exe = std::env::current_exe().ok()?;
+        let spelling = self.enoexec_script_spelling(cmd, program)?;
+        Some((exe, spelling))
     }
 
     fn execute_direct_shell_script(

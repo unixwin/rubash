@@ -89,7 +89,6 @@ mod external_file_builtins;
 mod external_finish;
 mod external_inner;
 mod external_redirects;
-mod external_route;
 mod external_setup;
 pub(crate) mod fd_table;
 mod function_calls;
@@ -241,7 +240,9 @@ use execution_misc::*;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
-use fd_table::{FdReadEndpoint, FdTable, FdWriteEndpoint, FileFd, MaterializedRead};
+use fd_table::{
+    FdReadEndpoint, FdTable, FdWriteEndpoint, FileFd, MaterializedRead, PipeChannelEnd,
+};
 use function_env::*;
 use local_helpers::*;
 use parameter_case::*;
@@ -283,11 +284,6 @@ pub struct HostExternalCommandOutput {
     pub stderr: Vec<u8>,
     pub status: i32,
 }
-
-pub use external_route::{
-    ExternalRouteHandle, ExternalRouteOutcome, ExternalRouteProvider, ExternalRouteRequest,
-    ExternalRouteStdio,
-};
 
 struct HostExternalCommandHandler(
     Box<dyn FnMut(&[String], &HashMap<String, String>) -> Option<HostExternalCommandOutput>>,
@@ -1244,6 +1240,18 @@ pub struct Executor {
     /// does not fire it a second time. Reset at each execute_ast loop
     /// iteration, like command_expansion_failed.
     pub(crate) err_trap_fired_at_dispatch: Cell<bool>,
+    /// rubash#2212: the EXIT trap has run for this executor's exit.
+    /// GNU runs it exactly once per shell exit (shell.c exit_shell ->
+    /// trap.c run_exit_trap); rubash's exit funnel is entered from
+    /// several paths (the `exit` builtin's dispatch, the script
+    /// finish, subshell finishes), and take_exit_trap's take
+    /// semantics alone do not stop a second entry from firing an
+    /// action the first handler RE-REGISTERED while running (bats'
+    /// exec-suite teardown does exactly that, and GNU never fires
+    /// the new registration during the same exit). Set when an
+    /// action actually runs; later funnel entries return the status
+    /// without running anything.
+    pub(crate) exit_trap_ran: Cell<bool>,
     /// rubash#1164: GNU samples `was_error_trap` (execute_cmd.c:914/851 —
     /// signal_is_trapped(ERROR_TRAP) && !signal_is_ignored) BEFORE a
     /// command executes and adjudicates that command's failure against the
@@ -1837,32 +1845,6 @@ pub struct Executor {
     /// endpoint. Reset at the start of every `apply_external_redirects`.
     external_stdio_piped_fallback: bool,
     host_external_command_handler: Option<HostExternalCommandHandler>,
-    /// The external-command route seam's registered provider
-    /// (niubash#567 P3, external_route.rs): consulted by
-    /// `execute_external_inner` after name resolution when a simple
-    /// command is about to be spawned. `None` (the default) leaves
-    /// dispatch byte-identical to the pre-seam engine. Shared
-    /// (`Rc`) with command-substitution fork copies: the provider
-    /// is a process-level host service (the motivating host's is a
-    /// process singleton), and a forked comsub child routes through
-    /// the same registration as its parent. `RefCell` because a
-    /// fork shares the registration while the parent executor may
-    /// be mid-dispatch; the dispatch consults it through
-    /// `try_borrow_mut`, so a re-entrant routed call (a provider
-    /// that itself runs shell commands) declines to spawn instead
-    /// of panicking.
-    external_route_provider:
-        Option<std::rc::Rc<std::cell::RefCell<external_route::ExternalRouteProviderSlot>>>,
-    /// The fd 1/2 slots the last successful stdio plan walked
-    /// (external_redirects::PlannedStdioSlots), stashed by
-    /// `plan_external_stdio` so the route seam can realize the same
-    /// bindings as OS handles without walking the redirects a
-    /// second time (a second walk would re-open — re-truncate —
-    /// the command's targets). Consumed by the route attempt that
-    /// immediately follows the `apply_external_redirects` which
-    /// produced it; reset at the start of every
-    /// `apply_external_redirects`.
-    external_stdio_slots: Option<external_redirects::PlannedStdioSlots>,
     /// rubash#2235: bindings of the command's OWN numbered input
     /// redirects (`3<file`, `3< <(...)`) that
     /// `apply_external_stdin_redirect` opened while resolving an

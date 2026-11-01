@@ -1933,6 +1933,7 @@ impl Executor {
             evalerror_line: Cell::new(None),
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
+            exit_trap_ran: Cell::new(false),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -2109,8 +2110,6 @@ impl Executor {
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
-            external_route_provider: self.external_route_provider.clone(),
-            external_stdio_slots: None,
             own_input_bindings: std::collections::HashMap::new(),
             // A forked comsub child starts with no pending stdin fold:
             // the fold belongs to the parent's in-flight external

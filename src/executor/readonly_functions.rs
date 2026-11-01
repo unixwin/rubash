@@ -90,7 +90,7 @@ impl Executor {
             && !is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK")
         {
             let (kept, _routed, failed, diagnostics) =
-                self.route_declare_dirstack_operands(&args, "readonly", false);
+                self.route_declare_dirstack_operands(&args, &cmd.words[1..], "readonly", false);
             for line in &diagnostics {
                 write!(stderr, "{line}")?;
             }
@@ -358,9 +358,8 @@ impl Executor {
 
     /// The child-environment composition as ordered pairs — the data
     /// form of [`Executor::apply_child_environment`], sharing this
-    /// one body: the route seam (external_route) hands a routed call
-    /// the environment as pairs, and the spawn path applies the same
-    /// pairs to its `Command`. Composition uses add_or_supercede
+    /// one body: the spawn path applies these pairs to its
+    /// `Command`. Composition uses add_or_supercede
     /// semantics (variables.c maybe_make_export_env): a name already
     /// present is replaced in place, so the sequence of pairs this
     /// returns carries exactly the names and values the `Command`

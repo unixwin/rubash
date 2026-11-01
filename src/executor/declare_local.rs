@@ -11,6 +11,26 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 /// word `--badflag` contains both `f` and `a`, which routed plain
 /// `declare --badflag` into the function path and reported `-a`
 /// (rubash#1259).
+/// Pair each subscript-rewritten declare operand with its written form
+/// (see WrittenOperandHints in builtins::declare): right after
+/// rewrite_declare_operand_subscripts the two lists are positionally
+/// aligned, so zip them and keep only the operands the rewrite actually
+/// changed, keyed by the rewritten `name[subscript]` prefix.
+fn declare_written_operand_hints(
+    written_args: &[String],
+    rewritten_args: &[String],
+) -> crate::builtins::declare::WrittenOperandHints {
+    let mut hints = crate::builtins::declare::WrittenOperandHints::default();
+    for (written, rewritten) in written_args.iter().zip(rewritten_args.iter()) {
+        if written != rewritten {
+            if let Some(key) = crate::builtins::declare::element_word_prefix(rewritten) {
+                hints.entry(key).or_default().push_back(written.clone());
+            }
+        }
+    }
+    hints
+}
+
 fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
     const VALID: &str = "acfgilnprtuxAFGI";
     let mut letters = Vec::new();
@@ -889,6 +909,7 @@ impl Executor {
     pub(in crate::executor) fn route_declare_dirstack_operands(
         &mut self,
         args: &[String],
+        written_args: &[String],
         command_name: &str,
         allow_subscripts: bool,
     ) -> (Vec<String>, bool, bool, Vec<String>) {
@@ -917,7 +938,7 @@ impl Executor {
         let mut opt_integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, "DIRSTACK");
         let mut opt_lower = is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK");
         let mut opt_upper = is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK");
-        for arg in args {
+        for (position, arg) in args.iter().enumerate() {
             if parse_options && arg == "--" {
                 parse_options = false;
                 kept.push(arg.clone());
@@ -1068,13 +1089,32 @@ impl Executor {
                     // the builtin's generic path swallows all three for
                     // DIRSTACK (rubash#2432). Other unresolvable text
                     // keeps the builtin's paths.
-                    if inner.parse::<i64>().is_ok_and(|v| v < 0)
-                        || matches!(inner, "" | "@" | "*")
+                    if inner.parse::<i64>().is_ok_and(|v| v < 0) || matches!(inner, "" | "@" | "*")
                     {
                         routed = true;
                         failed = true;
+                        // GNU err_badarraysub (error.c:440-443) is
+                        // always called with the operand text as
+                        // written — assign_array_element's `name`
+                        // (arrayfunc.c:334,431) — never with the
+                        // evaluated index. The rewrite pass resolved
+                        // the subscript in `inner` (`abc` -> `-5`), so
+                        // the spelling is recovered from the
+                        // pre-rewrite operand at this position
+                        // (rubash#2454); the rewrite and the integer
+                        // pass both preserve operand positions, so the
+                        // index is exact, with `inner` as the fallback
+                        // for any shape that does not line up.
+                        let written = written_args
+                            .get(position)
+                            .and_then(|original| {
+                                let (lhs, _) = original.split_once('=')?;
+                                let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
+                                lhs.strip_prefix("DIRSTACK[")?.strip_suffix(']')
+                            })
+                            .unwrap_or(inner);
                         diagnostics.push(format!(
-                            "{}DIRSTACK[{inner}]: bad array subscript\n",
+                            "{}DIRSTACK[{written}]: bad array subscript\n",
                             self.error_prefix()
                         ));
                         kept.push("DIRSTACK".to_string());
@@ -1137,10 +1177,10 @@ impl Executor {
         // plain local/tempenv shadow owns the name, and a shadowed
         // DIRSTACK must not be re-materialized from the stack
         // (rubash#2424).
-        let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
         let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
         let mut args = match self.rewrite_declare_operand_subscripts(
-            &args,
+            &written_args,
             &cmd.word_metadata,
             command_name,
         ) {
@@ -1149,6 +1189,7 @@ impl Executor {
             // abort already raised; GNU discards the rest of the list.
             Err(()) => return Ok(1),
         };
+        let mut written_hints = declare_written_operand_hints(&written_args, &args);
         // GNU variables.c:2920-2944 make_variable_value: an evalexp failure
         // on an integer assignment (no ASS_NOLONGJMP here — that flag is
         // only for internal rebinds) prints the evalerror, discards the
@@ -1181,7 +1222,7 @@ impl Executor {
             && (self.shell_state.function_depth == 0 || declare_args_force_global(&args))
         {
             let (kept, routed, failed, diagnostics) =
-                self.route_declare_dirstack_operands(&args, command_name, true);
+                self.route_declare_dirstack_operands(&args, &written_args, command_name, true);
             args = kept;
             dirstack_routed = routed;
             dirstack_failed = failed;
@@ -1470,6 +1511,7 @@ impl Executor {
                     &dynamic_views,
                     &underlay,
                     &mut oob_word,
+                    &mut written_hints,
                 )?;
                 // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
                 // rubash#635): report_error carries no `command:` segment
@@ -1601,6 +1643,24 @@ impl Executor {
                 }
             }
         }
+        if result.as_ref().is_ok_and(|status| *status != 0) {
+            // GNU has ONE array object per name: a failed operand does
+            // not roll back the operands that bound around it
+            // (arrayfunc.c:382-390 binds each element as its operand is
+            // processed; any_failed only sets the final status). The
+            // builtin has already installed those partial binds in the
+            // mirror, so the typed cells must re-sync from it even when
+            // the command failed — the same re-sync the oob abort path
+            // performs above (rubash#635). Skipping it leaves the cell
+            // stale against the mirror, and the command-boundary
+            // verifier panics on the next read (rubash#2462: a bad
+            // negative subscript followed by a good bind in one declare).
+            crate::builtins::declare::sync_typed_assignments(
+                &args,
+                &self.shell_state.env_vars,
+                &mut self.shell_state.variables,
+            );
+        }
         self.finish_global_declare_for_local_names(global_local_values);
         // The evalerror DISCARD makes the command fail (GNU $? = 1) even
         // when the surviving prefix operands all bound cleanly.
@@ -1655,12 +1715,16 @@ impl Executor {
             writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
             (2, Vec::new())
         } else {
-            let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
-            let mut args =
-                match self.rewrite_declare_operand_subscripts(&args, &cmd.word_metadata, "local") {
-                    Ok(args) => args,
-                    Err(()) => return Ok(1),
-                };
+            let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
+            let mut args = match self.rewrite_declare_operand_subscripts(
+                &written_args,
+                &cmd.word_metadata,
+                "local",
+            ) {
+                Ok(args) => args,
+                Err(()) => return Ok(1),
+            };
+            let mut written_hints = declare_written_operand_hints(&written_args, &args);
             // Same variables.c:2920-2944 rule as execute_declare: an
             // integer-RHS evalexp failure prints `local: <evalerror>`,
             // drops the failing operand and its successors, and arms the
@@ -1952,6 +2016,7 @@ impl Executor {
                     &dynamic_views,
                     &underlay,
                     &mut oob_word,
+                    &mut written_hints,
                 )?;
                 let status = if local_blocked.is_empty()
                     && noassign_blocked.is_empty()
@@ -2036,29 +2101,34 @@ impl Executor {
                     }
                 }
             }
-            if builtin_status == 0 {
-                // rubash#1719: the scalar-shadow pass above skips array and
-                // assoc operands outright, and nothing else in execute_local
-                // re-synced their typed cells — the builtin wrote the new
-                // binding into the mirror only, so a cell installed by an
-                // intervening plain assignment (or append / element write)
-                // stayed stale and shadowed the new binding (debug builds
-                // panicked in verify_typed_cells; the oh-my-bash module
-                // loader re-declares `local -a locations=()` per module in
-                // its while loop, after a case-branch plain assignment had
-                // created the cell). GNU has ONE variable object per name:
-                // declare.def:261 declare_internal binds through
-                // variables.c:2579 make_local_variable and variables.c:3225
-                // bind_variable, and every read consults that same object.
-                // The typed/mirror split is ours, so a mirror write must
-                // sync or drop the cell (the storage.rs contract) — perform
-                // the same post-bind sync execute_declare performs.
-                crate::builtins::declare::sync_typed_assignments(
-                    &args,
-                    &self.shell_state.env_vars,
-                    &mut self.shell_state.variables,
-                );
-            }
+            // rubash#1719: the scalar-shadow pass above skips array and
+            // assoc operands outright, and nothing else in execute_local
+            // re-synced their typed cells — the builtin wrote the new
+            // binding into the mirror only, so a cell installed by an
+            // intervening plain assignment (or append / element write)
+            // stayed stale and shadowed the new binding (debug builds
+            // panicked in verify_typed_cells; the oh-my-bash module
+            // loader re-declares `local -a locations=()` per module in
+            // its while loop, after a case-branch plain assignment had
+            // created the cell). GNU has ONE variable object per name:
+            // declare.def:261 declare_internal binds through
+            // variables.c:2579 make_local_variable and variables.c:3225
+            // bind_variable, and every read consults that same object.
+            // The typed/mirror split is ours, so a mirror write must
+            // sync or drop the cell (the storage.rs contract) — perform
+            // the same post-bind sync execute_declare performs.
+            // This must also run when the command FAILED on a sibling
+            // operand (rubash#2462): the builtin installed the partial
+            // binds in the mirror (arrayfunc.c binds per operand;
+            // any_failed only sets the status), and a stale cell
+            // panics the command-boundary verifier on the next read.
+            // The oob branch above already synced once; the call is
+            // idempotent.
+            crate::builtins::declare::sync_typed_assignments(
+                &args,
+                &self.shell_state.env_vars,
+                &mut self.shell_state.variables,
+            );
             // rubash#1471: restore the outer locals begin unshadowed —
             // the scope slots now hold the NEW global values (so a later
             // frame exit restores the globals as declare -g left them),

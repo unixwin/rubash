@@ -621,6 +621,21 @@ impl Executor {
         // (the journal guard above is still held) and serialized
         // against sibling sessions' mirror writes.
         mirror_env_remove("__RUBASH_SUBSHELL_DEPTH");
+        // rubash#2456: the process-substitution spawner stamps its
+        // effective login state under FORK_LOGIN_SHELL_TRANSPORT
+        // because GNU's procsub fork (subst.c:6412-6445
+        // process_substitute) never passes through the login_shell
+        // reset sites (execute_cmd.c:1636-1637 / 5474-5475), so the
+        // child is born with the parent's current login global. Every
+        // other respawn form crosses one of those reset sites in GNU
+        // and is born non-login, so no other spawner stamps the key.
+        // The key itself is stripped by the FORK_TRANSPORT_KEYS sweep
+        // below, validated or not.
+        let respawn_login_shell = internal_respawn
+            && env_vars
+                .get(super::compound_exec::FORK_LOGIN_SHELL_TRANSPORT)
+                .map(String::as_str)
+                == Some("1");
         // Rubash#234: a respawned `rubash -c` child is GNU's forked child —
         // it inherits the parent's job_control state and never re-runs
         // initialize_job_control. The env marker is stripped below, so
@@ -934,9 +949,12 @@ impl Executor {
                 // were stripped from the import above (#2259), and
                 // the owning host declares the shape through the
                 // funnels (builder / argv classification) after
-                // construction.
+                // construction. The one birth-shape exception is the
+                // procsub fork stamp consumed above (rubash#2456):
+                // GNU's forked child inherits login_shell, so the
+                // validated stamp IS this child's invocation shape.
                 invocation_interactive: false,
-                invocation_login: false,
+                invocation_login: respawn_login_shell,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
@@ -1141,6 +1159,7 @@ impl Executor {
             evalerror_line: Cell::new(None),
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
+            exit_trap_ran: Cell::new(false),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -1218,8 +1237,6 @@ impl Executor {
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
-            external_route_provider: None,
-            external_stdio_slots: None,
             own_input_bindings: std::collections::HashMap::new(),
             pending_stdin_fold: None,
             #[cfg(windows)]
@@ -1247,7 +1264,29 @@ impl Executor {
             // dup_adopted_fd returns None there, and the stamped
             // value stays authoritative.
             let adopted = crate::fd::dup_adopted_fd(fd);
-            let restore_handle = |stamped: crate::fd::HANDLE| adopted.unwrap_or(stamped);
+            // rubash#2212: the #2333 adoption above assumes the
+            // spawn pinned the descriptor AT `fd` (the external
+            // pin transport). The whitelist respawn transport
+            // instead delivers each extra AT ITS STAMPED NUMBER
+            // (fd/unix.rs spawn_whitelisted), and this child's raw
+            // `fd` can be its own startup file (the respawn script
+            // file, opened read-only) — adopting it made `>&3`
+            // write to a read-only descriptor (EBADF) for every
+            // std-stream ambient delivery. Prefer the stamped
+            // descriptor when it is actually open in this process;
+            // fall back to the at-slot adoption when it is not
+            // (the #2333 pin transport, where the stamped number
+            // names a parent descriptor that never crossed).
+            let restore_handle = |stamped: crate::fd::HANDLE| {
+                #[cfg(unix)]
+                {
+                    let stamped_open = unsafe { libc::fcntl(stamped, libc::F_GETFD) } >= 0;
+                    if stamped_open {
+                        return crate::fd::dup_adopted_fd(stamped as u32).unwrap_or(stamped);
+                    }
+                }
+                adopted.unwrap_or(stamped)
+            };
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),
