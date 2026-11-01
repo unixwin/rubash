@@ -91,6 +91,15 @@ pub(super) fn record_arith_write(name: &str, old_value: Option<String>) {
     });
 }
 
+/// Whether the current evaluation window has recorded an arithmetic
+/// write to `name`. The log is cleared at every top-level evaluation
+/// entry and drained by the boundary sync, so a hit means THIS
+/// evaluation wrote the name — the point where a snapshot taken at
+/// evaluation start stops being the value's owner (rubash#2384).
+pub(super) fn arith_write_recorded(name: &str) -> bool {
+    ARITH_WRITES.with(|log| log.borrow().iter().any(|(written, _)| written == name))
+}
+
 fn take_arith_writes() -> Vec<(String, Option<String>)> {
     ARITH_WRITES.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
@@ -141,9 +150,34 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
                 &new_value,
             );
         } else if let Some(variable) = executor.shell_state.variables.get_mut(&name) {
-            variable.value = crate::shell::ShellValue::Scalar(new_value);
+            variable.value = crate::shell::ShellValue::Scalar(new_value.clone());
         } else if !name.starts_with("__RUBASH_") {
             let _ = executor.shell_state.variables.set_scalar(&name, &new_value);
+        }
+        // rubash#2384: PIPESTATUS has a second owner — the live cell in
+        // shell_state (variables.c:6291 set_pipestatus_array's array
+        // object), which is what ${PIPESTATUS[i]} expansion and the next
+        // evaluation's dynamic snapshot read. GNU has ONE store, so an
+        // arithmetic write the sync only lands in the typed variables
+        // map stays invisible to those readers (`$((PIPESTATUS[0]=3))`
+        // followed by `$((PIPESTATUS[0]))` in the same word read the
+        // pre-write pipeline value). Apply the write to the live cell
+        // as well: an indexed render becomes the entry vector, a plain
+        // scalar flips the cell to its Scalar shape (its value already
+        // lives in env_vars, where the Scalar readers look).
+        if name == "PIPESTATUS" {
+            if new_value.starts_with(crate::executor::markers::STORAGE_WORD_PREFIX) {
+                let entries = crate::executor::arrays::indexed_array_entries(&new_value);
+                executor.shell_state.pipestatus = entries
+                    .iter()
+                    .map(|(index, value)| (*index as i64, value.parse::<i32>().unwrap_or(0)))
+                    .collect();
+                executor.shell_state.pipestatus_shape =
+                    crate::shell::state::PipestatusShape::LiveArray;
+            } else {
+                executor.shell_state.pipestatus_shape =
+                    crate::shell::state::PipestatusShape::Scalar;
+            }
         }
     }
 }

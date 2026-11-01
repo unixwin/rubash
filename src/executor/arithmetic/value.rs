@@ -19,8 +19,17 @@ impl ConditionalArithParser<'_> {
     /// writer updates the cell state only — so the mirror leg would
     /// read a stale assignment-era value (or nothing). Every other
     /// array reads through the mirror storage as before.
+    ///
+    /// rubash#2384: the snapshot owns the read only until THIS
+    /// evaluation writes PIPESTATUS. GNU has one store (the array
+    /// object set_pipestatus_array writes, variables.c:6291), so a
+    /// read after `PIPESTATUS[i]=v` in the same evaluation must see
+    /// the write; the write lands in the mirror (set_array_element),
+    /// so once a PIPESTATUS write is recorded the mirror legs below
+    /// own the read, exactly like ${PIPESTATUS[i]} expansion sharing
+    /// the cell with statement-level writes.
     fn indexed_element_text(&self, name: &str, index: i128) -> Option<String> {
-        if name == "PIPESTATUS" {
+        if name == "PIPESTATUS" && !super::super::arith_write_recorded(name) {
             if let Some(verdict) = self
                 .dynamic_values
                 .and_then(|context| context.pipestatus_element(index))
@@ -107,7 +116,10 @@ impl ConditionalArithParser<'_> {
     /// rebase still lands below zero (an empty array is bad for
     /// every negative subscript).
     fn arith_negative_subscript_is_bad(&self, name: &str, index: i128) -> bool {
-        if name == "PIPESTATUS" {
+        // rubash#2384: same ownership rule as indexed_element_text —
+        // after an in-evaluation PIPESTATUS write the mirror's shape
+        // (below) decides the rebase, not the pre-write snapshot.
+        if name == "PIPESTATUS" && !super::super::arith_write_recorded(name) {
             return self
                 .dynamic_values
                 .is_none_or(|context| context.pipestatus_negative_is_bad(index));
@@ -483,8 +495,14 @@ impl ConditionalArithParser<'_> {
             // re-enter as nested expressions, matching expr_streval's
             // evalexp recursion.
             if let Some(context) = self.dynamic_values {
-                if let Some(value) = context.resolve(self.env_vars, name) {
-                    return self.evaluate_variable_text(name, &value);
+                // rubash#2384: a bare PIPESTATUS read is element 0 of
+                // the same store the indexed reads use — after an
+                // in-evaluation write the snapshot's first element is
+                // stale, so yield to the mirror legs below.
+                if name != "PIPESTATUS" || !super::super::arith_write_recorded(name) {
+                    if let Some(value) = context.resolve(self.env_vars, name) {
+                        return self.evaluate_variable_text(name, &value);
+                    }
                 }
             }
         }
