@@ -1216,9 +1216,28 @@ impl Executor {
             None
         };
         if let Some((program, argv)) = direct_plan {
-            let mut process = std::process::Command::new(&program);
-            // argv[0] is the child's image name; the words after the
-            // command name are the real arguments.
+            // rubash#2442: the async child is an execute_disk_command
+            // spawn like any other (execute_cmd.c:5810 resolution,
+            // 6133 execve) — its execve filename comes from the shared
+            // funnel (typed word / as-written search join), so a
+            // background script's $0 matches GNU, and argv[0] is the
+            // typed word exactly as the named-program constructor
+            // sets it. The child is born in the session cwd below,
+            // which is what a relative join resolves against.
+            let exec_name = crate::executor::path::spawn_exec_name(
+                &argv[0],
+                &program,
+                &self.shell_state.env_vars,
+            );
+            let mut process = match &exec_name {
+                Some(name) => std::process::Command::new(name),
+                None => std::process::Command::new(&program),
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                process.arg0(&argv[0]);
+            }
             process.args(&argv[1..]);
             let [stdin_stdio, stdout_stdio, stderr_stdio] = stdio.map(|resolved| match resolved {
                 BackgroundStdio::Inherit => std::process::Stdio::inherit(),
@@ -4733,7 +4752,29 @@ impl Executor {
         // direct_plan.is_none() block below).
         let mut respawn_argv_bytes = exe.as_os_str().len() + 16;
         let mut child = if let Some((program, argv)) = &direct_plan {
-            let mut command = Command::new(program);
+            // rubash#2442: a direct coproc child is spawned from the
+            // same execute_disk_command resolution as any external
+            // (execute_cmd.c:5810 -> 6133) — its execve filename comes
+            // from the shared funnel and argv[0] is the typed word,
+            // mirroring the named-program constructor. The shared
+            // tail below births the child in the session cwd, which
+            // is what a relative join resolves against; a plan whose
+            // program the funnel cannot reproduce (the bridge-aware
+            // lookup above) declines to the anchored program.
+            let exec_name = crate::executor::path::spawn_exec_name(
+                &argv[0],
+                program,
+                &self.shell_state.env_vars,
+            );
+            let mut command = match &exec_name {
+                Some(name) => Command::new(name),
+                None => Command::new(program),
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.arg0(&argv[0]);
+            }
             command.args(&argv[1..]);
             self.apply_external_environment(&CommandNode::new(), &mut command, program);
             command
@@ -6427,7 +6468,10 @@ impl Executor {
                 output.push_str(&self.expand_case_pattern_run(&run));
             }
             let restored = output.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
-            return std::borrow::Cow::Owned(strip_surrounding_quotes(&restored));
+            // No surrounding-quote strip: quotes at the edges of the
+            // expanded text can only have arrived from an expansion
+            // result, where they are data (rubash#2428).
+            return std::borrow::Cow::Owned(restored);
         }
 
         let array_at = self.case_pattern_array_at_map(&pattern.raw_text);
@@ -6441,10 +6485,12 @@ impl Executor {
     /// One unquoted run of a quote-free case pattern (the text between
     /// two escape pairs): full mutable expansion plus the pattern quote
     /// decode, exactly the pipeline the former whole-string guard scheme
-    /// applied to the protected text (rubash#2421).
+    /// applied to the protected text (rubash#2421). The decode runs in
+    /// expansion-result mode: quote characters the expansion produced
+    /// are data, not pattern quoting (rubash#2428).
     fn expand_case_pattern_run(&mut self, run: &str) -> String {
         let expanded = self.expand_word_mut(run);
-        decode_parameter_pattern_quotes(&expanded)
+        decode_case_pattern_expansion(&expanded)
     }
 
     /// First element + element count for every `${name[@]}` unit in a
@@ -7409,9 +7455,11 @@ fn quote_aware_case_pattern(
         }
         let segment = chars[start..index].iter().collect::<String>();
         let expanded = expand_word(&segment);
-        output.push_str(&strip_surrounding_quotes(&decode_parameter_pattern_quotes(
-            &expanded,
-        )));
+        // The segment text between the source quotes is expanded, and
+        // the decode runs in expansion-result mode: quote characters
+        // the expansion produced are data, not pattern quoting, and
+        // are not stripped from the edges either (rubash#2428).
+        output.push_str(&decode_case_pattern_expansion(&expanded));
     }
 
     output

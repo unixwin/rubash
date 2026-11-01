@@ -10,11 +10,13 @@
 //! for the shell to install its termios, writes the key bytes, then
 //! reads until the process exits (6s deadline) and checks the
 //! expected suffix appears in the captured output. Verdicts recorded
-//! 2026-11-01: GNU bash 5.3.20 passes 17/17; rubash master passes
+//! 2026-11-01: GNU bash 5.3.20 passes 17/17; rubash master passed
 //! 16/17 — rs24 (C-d on an empty buffer must end the read with EOF)
-//! is the one divergence, and its pin below keeps the GNU
-//! expectation under an `#[ignore]` marker instead of weakening it
-//! (TEST-ONLY item: the product fix is a separate cluster's job).
+//! was the one divergence, and its pin kept the GNU expectation
+//! under an `#[ignore]` marker instead of weakening it.
+//! rubash#2416 closed the divergence (the editor surfaced EOF
+//! correctly; the read builtin dropped the verdict and fell into a
+//! second blocking read), so the rs24 pin now runs un-ignored.
 //!
 //! Unix-only: the harness needs openpty(3).
 
@@ -229,13 +231,15 @@ read_e_case!(
 );
 
 /// GNU bash 5.3.20: C-d on an EMPTY buffer is EOF — `read` returns
-/// 1 with the variable empty (`<> rc=1`). rubash master keeps the
-/// editor open instead (only repaint residue is emitted and the
-/// read never terminates), so this pin stays ignored with the GNU
-/// expectation intact until the editor learns EOF-on-empty-C-d.
+/// 1 with the variable empty (`<> rc=1`). rubash#2416: the editor
+/// always surfaced this EOF (EditEnd::Eof); the read builtin's
+/// scalar consumption chain did not recognize the verdict and fell
+/// through to a second, canonical-mode blocking read on the same
+/// descriptor, so only repaint residue was emitted and the read
+/// never terminated. The chain now ends the read on the editor's
+/// EOF verdict (read.def:705-710, :949), and this pin runs live.
 #[cfg(unix)]
 #[test]
-#[ignore = "rubash#2339 residual: read -e does not return EOF on C-d with an empty buffer; GNU prints <> rc=1"]
 fn issue2339_read_e_rs24_c_d_empty() {
     let out = run_case("read -e v; echo \"<$v> rc=$?\"", b"\x04");
     assert!(

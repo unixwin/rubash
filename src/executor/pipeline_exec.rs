@@ -2628,12 +2628,22 @@ impl Executor {
                 process.arg(format!("--internal-{name}")).args(args);
                 (process, false)
             } else {
-                external_command_for_named_program(
+                external_command_for_named_program_with_exec_name(
                     program,
                     Some(expanded_name),
                     args,
                     &self.shell_state.env_vars,
                     self.bash_argv0_env_supplied(&consumers[index].assignments),
+                    // rubash#2442: a pipeline member is an
+                    // execute_disk_command spawn (execute_cmd.c:2620
+                    // -> 5810) — its execve filename comes from the
+                    // shared funnel, not the anchored program.
+                    crate::executor::path::spawn_exec_name(
+                        expanded_name,
+                        program,
+                        &self.shell_state.env_vars,
+                    )
+                    .as_deref(),
                 )
             };
             // rubash#1564: the tempenv application expands the
@@ -3353,12 +3363,20 @@ impl Executor {
                 // expanded_name); re-reading words[0] with expand_word would
                 // re-strip data quotes (rubash#205) and re-run its
                 // substitution side effects a second time.
-                external_command_for_named_program(
+                external_command_for_named_program_with_exec_name(
                     program,
                     Some(expanded_name),
                     &proc_args,
                     &self.shell_state.env_vars,
                     self.bash_argv0_env_supplied(&commands[index].assignments),
+                    // rubash#2442: shared execve-filename funnel (see
+                    // the shell-writer spawn above).
+                    crate::executor::path::spawn_exec_name(
+                        expanded_name,
+                        program,
+                        &self.shell_state.env_vars,
+                    )
+                    .as_deref(),
                 )
             };
             // Apply the element's `VAR=value` tempenv prefix to the child
@@ -3645,12 +3663,20 @@ impl Executor {
                 process.arg(format!("--internal-{name}")).args(args);
                 (process, false)
             } else {
-                external_command_for_named_program(
+                external_command_for_named_program_with_exec_name(
                     program,
                     Some(expanded_name),
                     args,
                     &self.shell_state.env_vars,
                     self.bash_argv0_env_supplied(&commands[index].assignments),
+                    // rubash#2442: shared execve-filename funnel (see
+                    // the shell-writer spawn above).
+                    crate::executor::path::spawn_exec_name(
+                        expanded_name,
+                        program,
+                        &self.shell_state.env_vars,
+                    )
+                    .as_deref(),
                 )
             };
             // rubash#1564: tempenv bracket, as in spawn_wait above.
@@ -4126,7 +4152,7 @@ impl Executor {
         let mut first_stdin: Option<std::process::ChildStdin> = None;
 
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
-            let (mut process, _) = external_command_for_named_program(
+            let (mut process, _) = external_command_for_named_program_with_exec_name(
                 &program,
                 // The spec's already-expanded first field; re-reading
                 // words[0] with expand_word would re-strip data quotes
@@ -4135,6 +4161,14 @@ impl Executor {
                 &args,
                 &self.shell_state.env_vars,
                 self.bash_argv0_env_supplied(&commands[index].assignments),
+                // rubash#2442: shared execve-filename funnel (see the
+                // shell-writer spawn above).
+                crate::executor::path::spawn_exec_name(
+                    expanded_name,
+                    &program,
+                    &self.shell_state.env_vars,
+                )
+                .as_deref(),
             );
             // Same tempenv application as the os_pipe path above.
             // rubash#1564: tempenv bracket, as in spawn_wait above.

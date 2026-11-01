@@ -1342,12 +1342,21 @@ impl Executor {
             Some(program.as_path()),
             &self.shell_state.env_vars,
         );
-        let (mut process, _) = external_command_for_named_program(
+        let (mut process, _) = external_command_for_named_program_with_exec_name(
             &program,
             Some(&expanded_name),
             &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&[]),
+            // rubash#2442: a sequential pipeline stage is the same
+            // execute_disk_command spawn as the concurrent members —
+            // its execve filename comes from the shared funnel.
+            crate::executor::path::spawn_exec_name(
+                &expanded_name,
+                &program,
+                &self.shell_state.env_vars,
+            )
+            .as_deref(),
         );
 
         self.apply_child_environment(&mut process);

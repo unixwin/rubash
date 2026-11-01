@@ -1376,15 +1376,22 @@ pub fn cannot_read_reason(err: &std::io::Error) -> String {
 /// verbatim. `editing-mode` and `keymap` are the two variables GNU keeps
 /// cross-consistent: `set editing-mode vi` also switches `keymap` to
 /// `vi-insert` (GNU probe) — [`apply_readline_variable`] maintains that.
+///
+/// Two entries the WT probe recorded as `off` are `on` by the C
+/// defaults — lib/readline/bind.c:1874 binds `bind-tty-special-chars`
+/// to `_rl_bind_stty_chars` and bind.c:1883 binds `convert-meta` to
+/// `_rl_convert_meta_chars_to_ascii`, both initialized to 1 in
+/// lib/readline/readline.c — and the GNU bash 5.3.20 oracle's
+/// `bind -v` (clean env) prints both `on` (rubash#2418).
 pub const READLINE_VARIABLE_DEFAULTS: &[(&str, &str)] = &[
-    ("bind-tty-special-chars", "off"),
+    ("bind-tty-special-chars", "on"),
     ("blink-matching-paren", "off"),
     ("byte-oriented", "off"),
     ("colored-completion-prefix", "off"),
     ("colored-stats", "off"),
     ("completion-ignore-case", "off"),
     ("completion-map-case", "off"),
-    ("convert-meta", "off"),
+    ("convert-meta", "on"),
     ("disable-completion", "off"),
     ("echo-control-characters", "on"),
     ("enable-active-region", "off"),
@@ -2651,10 +2658,15 @@ mod tests {
         // `bind -v` order and defaults pinned against WSL GNU bash 5.3.0
         // (48 lines).
         assert_eq!(READLINE_VARIABLE_DEFAULTS.len(), 48);
+        // bind.c:1874/1883: both variables sit on C ints initialized
+        // to 1 (readline.c) — the 5.3.20 oracle prints them `on`
+        // (rubash#2418; the WT 5.3.0 probe behind the original table
+        // recorded them off, contradicted by source + oracle).
         assert_eq!(
             READLINE_VARIABLE_DEFAULTS[0],
-            ("bind-tty-special-chars", "off")
+            ("bind-tty-special-chars", "on")
         );
+        assert_eq!(READLINE_VARIABLE_DEFAULTS[7], ("convert-meta", "on"));
         assert_eq!(READLINE_VARIABLE_DEFAULTS[35], ("visible-stats", "off"));
         assert_eq!(READLINE_VARIABLE_DEFAULTS[36], ("bell-style", "audible"));
         assert_eq!(
