@@ -196,8 +196,24 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
-        // may logout; anything else reports and continues.
-        let login_shell = self.invocation_login();
+        // may logout; anything else reports and continues. The login
+        // state the builtin sees is the EFFECTIVE one: GNU clears
+        // login_shell at every subshell entry — execute_cmd.c:1637
+        // (execute_in_subshell) and execute_cmd.c:5475
+        // (execute_subshell_builtin_or_function) both run
+        // `login_shell = interactive = 0` under the comment
+        // "Subshells are neither login nor interactive" — so a `( )`
+        // region (or pipeline stage) of a login shell reports
+        // not-login and continues instead of exiting as a login shell
+        // (rubash#2438). rubash's subshell_depth carries exactly that
+        // split: bumped for ( ) regions and fork-copy faces, NOT for
+        // command substitution (command_substitution.rs, rubash#403),
+        // whose child keeps login_shell in GNU too — `$(logout)` in a
+        // login shell silently exits the substitution child with the
+        // last status. The same depth gate already guards the
+        // bash_logout sourcing and the farewell echo in execute_exit.
+        let login_shell =
+            self.invocation_login() && self.shell_state.subshell_depth.get() == 0;
         if !login_shell {
             let mut stderr = Vec::new();
             let status =
