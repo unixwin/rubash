@@ -1459,6 +1459,26 @@ impl Executor {
         &self.shell_state.cwd
     }
 
+    /// GNU `pathexp.c:442 shell_glob_filename` for one pattern: pathname
+    /// expansion against the session cwd, honoring noglob / nullglob /
+    /// failglob / nocaseglob / dotglob / globskipdots / extglob / globstar
+    /// and `GLOBIGNORE`, with the match list in the shell's sort order.
+    /// A word that is not a pattern, an unmatched pattern, and a
+    /// failglob failure all yield an empty list — the readline completion
+    /// callers (`bashline.c:4039 glob_complete_word`) treat `GLOB_FAILED`
+    /// exactly that way.
+    pub fn glob_filename(&self, pattern: &str) -> Vec<String> {
+        match crate::executor::glob::pathname_expand_word(
+            pattern,
+            &self.shell_state.env_vars,
+            &self.shell_state.cwd,
+        ) {
+            crate::executor::glob::PathnameExpansion::Matches(matches) => matches,
+            crate::executor::glob::PathnameExpansion::NoMatch
+            | crate::executor::glob::PathnameExpansion::Fail(_) => Vec::new(),
+        }
+    }
+
     pub fn env_vars(&self) -> &HashMap<String, String> {
         self.shell_state.env_vars.values_map()
     }

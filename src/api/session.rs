@@ -587,6 +587,16 @@ impl Session {
         self.executor.has_compspec(command)
     }
 
+    /// GNU `pathexp.c:442 shell_glob_filename` over one pattern, for the
+    /// readline glob-completion entry point (`bashline.c:4053`
+    /// `glob_complete_word` → `bash_glob_completion_internal`). The
+    /// executor's pathname expansion supplies the matches, so every glob
+    /// option and `GLOBIGNORE` behaves exactly as it does for a command
+    /// word. No match (including `failglob`) is an empty list.
+    pub fn glob_filename(&self, pattern: &str) -> Vec<String> {
+        self.executor.glob_filename(pattern)
+    }
+
     // ----------------------------------------------------------
     // Functions (§5.2 / §5.3)
     // ----------------------------------------------------------
