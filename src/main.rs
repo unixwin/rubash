@@ -1918,22 +1918,36 @@ fn run_stdin_script_with_init(
 /// Whether the drivers' direct --rcfile call should run: false when
 /// run_startup_files already sourced this exact file (recorded in
 /// __RUBASH_SOURCED_RC) — without this, interactive shells source
-/// --rcfile twice (issue312 gate test). True for the leftover shapes
-/// startup skips (empty HOME, non-interactive extension, login).
+/// --rcfile twice (issue312 gate test).
+///
+/// GNU shell.c run_startup_files (shell.c:1156-1245): the file named
+/// by --init-file/--rcfile (bashrc_file) is executed by exactly one
+/// arm — execute_bashrc_file, reached only by an interactive,
+/// non-login, non-posix shell invoked as bash with no_rc clear
+/// (shell.c:1235-1237). Every other shape closes the door: a
+/// non-interactive shell returns right after the $BASH_ENV step
+/// (shell.c:1214-1221), a login shell bumps no_rc and reads the
+/// profile chain instead (shell.c:1196-1206, 1223-1233), --norc sets
+/// no_rc at parse time, and the sh/posix arms read $ENV
+/// (shell.c:1238-1245). The direct run survives only for the shapes
+/// where that one arm applies but the chain could not record the
+/// file — an empty HOME empties the chain's file list — and must not
+/// reopen any of the four closed doors (rubash#2436; the interactive
+/// $ENV-arm door was rubash#2412).
 fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
     if executor.get_env("__RUBASH_SOURCED_RC").as_deref() == Some(init_file) {
         return false;
     }
-    // GNU shell.c:1238-1239 / 1244-1245: an interactive shell in the
-    // $ENV arm — invoked as `sh`, or any posix-mode shell — has no
-    // rcfile slot at all; --rcfile belongs to the bash arm's
-    // execute_bashrc_file. The direct run is rubash's extension for
-    // the non-interactive/login/empty-HOME shapes above and must not
-    // leak an rcfile into an interactive $ENV-arm shell, whose whole
-    // startup contract is the $ENV file (rubash#2412).
-    if own_interactive_shell()
-        && (own_act_like_sh() || executor.shell_option_enabled("posix"))
-    {
+    if !own_interactive_shell() {
+        return false;
+    }
+    if own_login_shell() {
+        return false;
+    }
+    if executor.get_env("__RUBASH_NO_RC").as_deref() == Some("1") {
+        return false;
+    }
+    if own_act_like_sh() || executor.shell_option_enabled("posix") {
         return false;
     }
     true
