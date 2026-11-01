@@ -114,9 +114,26 @@ pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_
 /// collect_command_line_spans order. See
 /// docs/design/respawn-root-line-spans.md.
 pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_ROOT_SPANS";
+/// rubash#2456: the spawner's effective login state, stamped ONLY by
+/// the two process-substitution spawn sites. GNU's procsub fork
+/// (subst.c:6412-6445 process_substitute) is the one fork-shaped child
+/// whose `login_shell` is never reset: the only reset sites are
+/// execute_cmd.c:1636-1637 (execute_in_subshell) and
+/// execute_cmd.c:5474-5475 (execute_subshell_builtin_or_function),
+/// and neither lies on the procsub path, so the child inherits the
+/// parent's CURRENT global — the value the logout gate reads,
+/// `invocation_login && !subshell_login_cleared`, at the moment the
+/// substitution is constructed. Presence with value "1" is the bit
+/// (the FORK_IN_FUNCTION convention): the spawner stamps it exactly
+/// when its effective state is on, and every other respawn form
+/// (async, coproc, subshell wrappers) is born non-login because GNU's
+/// reset sites clear the global on those paths. The child's init
+/// consumes it under the provenance gate (init.rs) and the key is
+/// stripped unconditionally with the rest of this family.
+pub(in crate::executor) const FORK_LOGIN_SHELL_TRANSPORT: &str = "__RUBASH_FORK_LOGIN_SHELL";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 12] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -128,6 +145,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
     FORK_PIPESTATUS_TRANSPORT,
     FORK_FN_SPANS_TRANSPORT,
     FORK_ROOT_SPANS_TRANSPORT,
+    FORK_LOGIN_SHELL_TRANSPORT,
 ];
 
 impl Executor {

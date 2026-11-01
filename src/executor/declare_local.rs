@@ -889,6 +889,7 @@ impl Executor {
     pub(in crate::executor) fn route_declare_dirstack_operands(
         &mut self,
         args: &[String],
+        written_args: &[String],
         command_name: &str,
         allow_subscripts: bool,
     ) -> (Vec<String>, bool, bool, Vec<String>) {
@@ -917,7 +918,7 @@ impl Executor {
         let mut opt_integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, "DIRSTACK");
         let mut opt_lower = is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK");
         let mut opt_upper = is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK");
-        for arg in args {
+        for (position, arg) in args.iter().enumerate() {
             if parse_options && arg == "--" {
                 parse_options = false;
                 kept.push(arg.clone());
@@ -1068,13 +1069,32 @@ impl Executor {
                     // the builtin's generic path swallows all three for
                     // DIRSTACK (rubash#2432). Other unresolvable text
                     // keeps the builtin's paths.
-                    if inner.parse::<i64>().is_ok_and(|v| v < 0)
-                        || matches!(inner, "" | "@" | "*")
+                    if inner.parse::<i64>().is_ok_and(|v| v < 0) || matches!(inner, "" | "@" | "*")
                     {
                         routed = true;
                         failed = true;
+                        // GNU err_badarraysub (error.c:440-443) is
+                        // always called with the operand text as
+                        // written — assign_array_element's `name`
+                        // (arrayfunc.c:334,431) — never with the
+                        // evaluated index. The rewrite pass resolved
+                        // the subscript in `inner` (`abc` -> `-5`), so
+                        // the spelling is recovered from the
+                        // pre-rewrite operand at this position
+                        // (rubash#2454); the rewrite and the integer
+                        // pass both preserve operand positions, so the
+                        // index is exact, with `inner` as the fallback
+                        // for any shape that does not line up.
+                        let written = written_args
+                            .get(position)
+                            .and_then(|original| {
+                                let (lhs, _) = original.split_once('=')?;
+                                let lhs = lhs.strip_suffix('+').unwrap_or(lhs);
+                                lhs.strip_prefix("DIRSTACK[")?.strip_suffix(']')
+                            })
+                            .unwrap_or(inner);
                         diagnostics.push(format!(
-                            "{}DIRSTACK[{inner}]: bad array subscript\n",
+                            "{}DIRSTACK[{written}]: bad array subscript\n",
                             self.error_prefix()
                         ));
                         kept.push("DIRSTACK".to_string());
@@ -1137,10 +1157,10 @@ impl Executor {
         // plain local/tempenv shadow owns the name, and a shadowed
         // DIRSTACK must not be re-materialized from the stack
         // (rubash#2424).
-        let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
+        let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
         let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
         let mut args = match self.rewrite_declare_operand_subscripts(
-            &args,
+            &written_args,
             &cmd.word_metadata,
             command_name,
         ) {
@@ -1181,7 +1201,7 @@ impl Executor {
             && (self.shell_state.function_depth == 0 || declare_args_force_global(&args))
         {
             let (kept, routed, failed, diagnostics) =
-                self.route_declare_dirstack_operands(&args, command_name, true);
+                self.route_declare_dirstack_operands(&args, &written_args, command_name, true);
             args = kept;
             dirstack_routed = routed;
             dirstack_failed = failed;

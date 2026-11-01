@@ -45,7 +45,7 @@ WINUXSH_ROOT → RUBASH_ROOT 顺序取**第一个非空值**；迁移完成后 N
 
 ## 2. 宿主↔引擎职责分层（NIU-1 审计确认的现状 + 目标）
 
-- 宿主（niu.exe，静态嵌入 rubash）：reedline 编辑/补全候选/prompt 渲染/
+- 宿主（niu.exe，静态嵌入 rubash）：ruline 编辑（GNU readline 兼容层）/补全候选/prompt 渲染/
   历史**存储**（~/.niubash_history，经 HistoryProvider 注入）/高亮/插件。
 - 引擎（rubash）：全部 shell 语义；history/fc 内建（走注入的 Provider）；
   complete/compgen 语义（GNU 纯表）；prompt 模板展开。

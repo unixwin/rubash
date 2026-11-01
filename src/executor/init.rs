@@ -621,6 +621,21 @@ impl Executor {
         // (the journal guard above is still held) and serialized
         // against sibling sessions' mirror writes.
         mirror_env_remove("__RUBASH_SUBSHELL_DEPTH");
+        // rubash#2456: the process-substitution spawner stamps its
+        // effective login state under FORK_LOGIN_SHELL_TRANSPORT
+        // because GNU's procsub fork (subst.c:6412-6445
+        // process_substitute) never passes through the login_shell
+        // reset sites (execute_cmd.c:1636-1637 / 5474-5475), so the
+        // child is born with the parent's current login global. Every
+        // other respawn form crosses one of those reset sites in GNU
+        // and is born non-login, so no other spawner stamps the key.
+        // The key itself is stripped by the FORK_TRANSPORT_KEYS sweep
+        // below, validated or not.
+        let respawn_login_shell = internal_respawn
+            && env_vars
+                .get(super::compound_exec::FORK_LOGIN_SHELL_TRANSPORT)
+                .map(String::as_str)
+                == Some("1");
         // Rubash#234: a respawned `rubash -c` child is GNU's forked child —
         // it inherits the parent's job_control state and never re-runs
         // initialize_job_control. The env marker is stripped below, so
@@ -934,9 +949,12 @@ impl Executor {
                 // were stripped from the import above (#2259), and
                 // the owning host declares the shape through the
                 // funnels (builder / argv classification) after
-                // construction.
+                // construction. The one birth-shape exception is the
+                // procsub fork stamp consumed above (rubash#2456):
+                // GNU's forked child inherits login_shell, so the
+                // validated stamp IS this child's invocation shape.
                 invocation_interactive: false,
-                invocation_login: false,
+                invocation_login: respawn_login_shell,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
