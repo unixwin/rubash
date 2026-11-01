@@ -18,6 +18,11 @@ pub enum DisownAction {
     },
     All {
         nohup_only: bool,
+        /// GNU builtins/jobs.def disown_builtin: `-a` and `-r` both
+        /// reach delete_all_jobs, but its argument is the `-r` flag
+        /// (jobs.c:5066 delete_all_jobs (running_only)) — set when `-r`
+        /// was given, with or without `-a`.
+        running_only: bool,
     },
     Jobs {
         specs: Vec<String>,
@@ -34,6 +39,7 @@ where
     E: Write,
 {
     let mut all_jobs = false;
+    let mut running_only = false;
     let mut nohup_only = false;
     let mut index = 0;
     while let Some(arg) = args.get(index) {
@@ -47,7 +53,11 @@ where
 
         for option in arg[1..].chars() {
             match option {
-                'a' | 'r' => all_jobs = true,
+                'a' => all_jobs = true,
+                'r' => {
+                    all_jobs = true;
+                    running_only = true;
+                }
                 'h' => nohup_only = true,
                 other => {
                     writeln!(
@@ -63,7 +73,10 @@ where
     }
 
     if all_jobs && args.get(index).is_none() {
-        return Ok(DisownAction::All { nohup_only });
+        return Ok(DisownAction::All {
+            nohup_only,
+            running_only,
+        });
     }
 
     if index < args.len() {
