@@ -1276,7 +1276,14 @@ impl Executor {
         // output rides the same open file description as the body — no
         // re-binding here, which would re-open `>file` and truncate what
         // the body already wrote.
+        // rubash#2212: the action runs under the running-trap umbrella
+        // (GNU's `running_trap != 0` at every run_debug_trap call
+        // site), so commands inside the EXIT action take no DEBUG
+        // firing; debug_trap_running is the umbrella bit the funnel
+        // consults.
+        let saved_debug_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        self.debug_trap_running = saved_debug_trap_running;
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.trap_saved_exit_value = prev_saved_exit;
@@ -1315,6 +1322,21 @@ impl Executor {
         seam: crate::debugger::SeamKind,
         command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
+        // GNU gates every run_debug_trap call site on
+        // `signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0`
+        // (execute_cmd.c:704/3047/3519/...): the DEBUG trap never
+        // fires for commands executed inside a trap action. The
+        // EXIT window holds debug_trap_running itself (see
+        // run_exit_trap_for_status), which is the half rubash#2212
+        // proved missing: the EXIT handler's own first command took
+        // a DEBUG firing GNU never makes. The ERR/RETURN/signal
+        // windows are deliberately NOT consulted here — the
+        // post-ERR re-presentation seams (the DEBUG firing GNU
+        // makes for the failing command as its failure propagates
+        // to the caller) run inside this executor's ERR bookkeeping
+        // window, and gating on error_trap_running silences them
+        // (probe rDbg: GNU fires DEBUG between the inner and outer
+        // ERR firings; a gated funnel drops it).
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
         }
