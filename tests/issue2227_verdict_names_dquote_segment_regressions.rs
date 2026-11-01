@@ -233,6 +233,51 @@ fn issue2227_assignment_channel_single_quote_units() {
     );
 }
 
+/// Follow-up shapes (rubash#2227, cluster G review of this PR):
+/// (w1) a quote inside a ${ } unit of the SAME segment is unit data —
+/// the segment machine skips the unit whole (subst.c:1014), so the
+/// segment opened at the word's first quote is still open at the span
+/// and GNU names it whole; a "last raw quote wins" scan cut the name
+/// to `} $[...]`. (n16) an escaped quote inside the segment travels as
+/// the DATA_DQUOTE carrier (0x18) in the cooked word; GNU's diagnostic
+/// prints the resolved quote, so the name decodes the carrier.
+#[test]
+fn issue2227_segment_scan_units_and_carrier_decode() {
+    assert_verdict(
+        "braced-unit-quote",
+        "echo \"a=${x:-\"} \"} $[\"1\"] b\"\n",
+        1,
+        "a=${x:-\"} \"} $[",
+    );
+    assert_verdict(
+        "escaped-quote",
+        "echo \"a\\\"b=$[\"1\"] c\"\n",
+        1,
+        "a\"b=$[",
+    );
+}
+
+/// The comsub-body RAW copiers bound a `$[...]` span by GNU's
+/// extraction end (subst.c:1361), not plain bracket counting: a `]`
+/// inside the span's own quotes does not end the copy, so the
+/// enclosing double-quoted span inside the `$(...)` body is copied
+/// whole and the inner walk raises the span's own bad-substitution
+/// verdict (the assignment completes with status 1). Plain counting
+/// cut the body at the inner `)` and rubash reported
+/// `unexpected EOF while looking for matching ')'` instead.
+#[test]
+fn issue2227_comsub_raw_copier_bracket_boundary() {
+    let scratch = Scratch::new("comsub-raw");
+    let (stdout, stderr, code) = scratch.run("x=$(echo \"a=$[\"]\"] b) c\")\necho \"rc=$?\"\n");
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "rc=1\n");
+    assert!(
+        stderr.contains("line 1: bad substitution: no closing `]' in a=$["),
+        "stderr: {stderr}"
+    );
+    assert!(!stderr.contains("unexpected EOF"), "stderr: {stderr}");
+}
+
 /// The unquoted assignment/channel control that already agreed with GNU
 /// before this fix must not regress.
 #[test]

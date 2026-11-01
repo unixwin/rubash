@@ -1,5 +1,6 @@
-use crate::executor::markers::DATA_DOLLAR;
+use crate::executor::markers::{DATA_DOLLAR, DATA_DQUOTE};
 use crate::executor::substitution_metadata::bytes_to_shell_text;
+use crate::lexer::quotes::{skip_braced_unit_chars, skip_paren_unit_chars, skip_quote_unit_chars};
 
 /// Whether a collected `${...}` body ends inside an unterminated
 /// single-quoted span, scanned with the same state machine
@@ -144,9 +145,10 @@ impl super::Executor {
 /// SEGMENT and `bad substitution: no closing `]' in <string>`
 /// (subst.c:1505) names the segment — not the whole word prefix. The
 /// cookers re-emit the doomed segment's opening `"` (quotes.rs
-/// reopen_doomed_segment), so the segment is the text after the LAST
-/// raw `"` / E302 opener in the word prefix through the failing `$[`
-/// plus the collector's consumed body. `tail` is the walker iterator's
+/// reopen_doomed_segment), so the segment is the one still open at the
+/// failing `$[` when GNU's segment machine is replayed over the word
+/// prefix (see open_segment_content_start), through the `$[` plus the
+/// collector's consumed body. `tail` is the walker iterator's
 /// unconsumed remainder at the verdict — with it the span's end in the
 /// word is exact (the segment-bounded collector stops at the cut
 /// quote and leaves the post-cut text unconsumed).
@@ -157,18 +159,16 @@ pub(in crate::executor) fn dollar_bracket_no_closing_string(
 ) -> String {
     let total = word.chars().count();
     let span_end = total.saturating_sub(expression.chars().count() + tail.chars().count());
-    let mut string: Vec<char> = word.chars().take(span_end).collect();
-    // Start at the last double-quote delimiter in the prefix — the
-    // doomed segment's re-emitted opener (raw `"` in the generic
-    // channels, E302 in the assignment hoist channel). A raw `"` from a
-    // single-quoted span also qualifies: in GNU's word string quotes
-    // are quotes, and expand_word_internal would open a segment there
-    // too. Data-quote carriers (DATA_DQUOTE 0x18 etc.) do not: GNU's
-    // segment machine passes an escaped quote by (subst.c:989).
-    if let Some(pos) = string.iter().rposition(|&ch| ch == '"' || ch == '\u{E302}') {
-        string.drain(..=pos);
-    }
-    let mut string: String = string.into_iter().collect();
+    let prefix: Vec<char> = word.chars().take(span_end).collect();
+    // Start just past the opener of the segment still open at the span
+    // — the doomed segment's re-emitted opener (raw `"` in the generic
+    // channels, E302 in the assignment hoist channel). Outside every
+    // segment the level string is the whole prefix.
+    let start = open_segment_content_start(&prefix).unwrap_or(0);
+    let mut string: String = prefix[start..]
+        .iter()
+        .map(|&ch| decode_verdict_name_carrier(ch))
+        .collect();
     let mut previous_was_backslash = false;
     for ch in expression.chars() {
         // The generic channels' collector stops before the cut quote, so
@@ -178,10 +178,101 @@ pub(in crate::executor) fn dollar_bracket_no_closing_string(
         if !previous_was_backslash && matches!(ch, '"' | '\'' | '`' | '\u{E302}') {
             break;
         }
-        string.push(ch);
+        string.push(decode_verdict_name_carrier(ch));
         previous_was_backslash = ch == '\\' && !previous_was_backslash;
     }
     string
+}
+
+/// GNU's diagnostic prints the expansion-level string with its quoting
+/// carriers resolved: the CTLESC that marked an escaped quote is not
+/// itself printed (subst.c:1505 names the string the level received).
+/// rubash's cooked word spells that escaped quote DATA_DQUOTE (0x18),
+/// so the verdict name decodes it back to `"` (rubash#2227 n16: GNU
+/// names `a"b=$[`; the carrier byte leaked into the name raw).
+fn decode_verdict_name_carrier(ch: char) -> char {
+    if ch == DATA_DQUOTE {
+        '"'
+    } else {
+        ch
+    }
+}
+
+/// Char index just past the opener of the double-quoted segment still
+/// open at the end of `prefix` (the cooked word prefix through the
+/// failing `$[`), or None when the span sits outside every segment.
+/// The replay follows GNU's word walk: expand_word_internal
+/// (subst.c:11692-11723) hands each segment to its own expansion
+/// level, and skip_double_quoted (subst.c:1014) delimits a segment —
+/// backquote and $( ) / ${ } units are skipped whole, so a quote
+/// inside such a unit can neither close the segment nor open a new
+/// one. (A "last raw quote wins" scan misread exactly that: in
+/// `"a=${x:-"} "} $["1"] b"` the ${ } unit skip consumes
+/// `${x:-"} "}` whole, the segment opened at the word's first quote
+/// is still open at the span, and GNU names it whole — rubash#2227
+/// w1.) Segment delimiters are the raw `"` of the generic channels or
+/// the E302 carrier of the assignment hoist channel; DATA carriers
+/// (DATA_DQUOTE 0x18 etc.) are data and never delimit — GNU's segment
+/// machine passes an escaped quote by (subst.c:989).
+fn open_segment_content_start(prefix: &[char]) -> Option<usize> {
+    let mut index = 0usize;
+    let mut content_start: Option<usize> = None;
+    while index < prefix.len() {
+        if content_start.is_some() {
+            match dquote_segment_close(prefix, index) {
+                Some(close) => {
+                    content_start = None;
+                    index = close + 1;
+                }
+                // The segment runs to the span: still open.
+                None => break,
+            }
+            continue;
+        }
+        match prefix[index] {
+            '"' | '\u{E302}' => {
+                content_start = Some(index + 1);
+                index += 1;
+            }
+            '`' | '\u{1a}' => {
+                index = skip_quote_unit_chars(prefix, index, &['`', '\u{1a}'], true);
+            }
+            '$' if prefix.get(index + 1) == Some(&'(') => {
+                index = skip_paren_unit_chars(prefix, index + 1);
+            }
+            '$' if prefix.get(index + 1) == Some(&'{') => {
+                index = skip_braced_unit_chars(prefix, index + 1);
+            }
+            _ => index += 1,
+        }
+    }
+    content_start
+}
+
+/// Index of the quote closing the segment whose content starts at
+/// `start` in `prefix`, or None when the segment is unterminated.
+/// Mirrors quotes.rs dquote_segment_end_chars (subst.c:1014
+/// skip_double_quoted: a backslash passes the next byte, backquote and
+/// $( ) / ${ } units are skipped whole, `$[` is NOT special so a bare
+/// quote after it closes the segment), with the assignment channel's
+/// E302 carrier admitted as the closer spelling.
+fn dquote_segment_close(prefix: &[char], start: usize) -> Option<usize> {
+    let mut index = start;
+    while index < prefix.len() {
+        match prefix[index] {
+            '\\' | '\u{11}' => index += 2,
+            '`' | '\u{1a}' => index = skip_quote_unit_chars(prefix, index, &['`', '\u{1a}'], true),
+            '$' if prefix.get(index + 1) == Some(&'(') => {
+                index = skip_paren_unit_chars(prefix, index + 1);
+            }
+            '$' if prefix.get(index + 1) == Some(&'{') => {
+                index = skip_braced_unit_chars(prefix, index + 1);
+            }
+            '"' | '\u{E302}' => return Some(index),
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 pub(in crate::executor) fn collect_braced_parameter_name(

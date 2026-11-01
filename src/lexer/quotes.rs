@@ -761,7 +761,7 @@ fn dollar_bracket_body_end_chars(chars: &[char], start: usize) -> Option<usize> 
     None
 }
 
-fn skip_quote_unit_chars(
+pub(crate) fn skip_quote_unit_chars(
     chars: &[char],
     open: usize,
     closers: &[char],
@@ -781,7 +781,7 @@ fn skip_quote_unit_chars(
     chars.len()
 }
 
-fn skip_paren_unit_chars(chars: &[char], open: usize) -> usize {
+pub(crate) fn skip_paren_unit_chars(chars: &[char], open: usize) -> usize {
     let mut depth = 1usize;
     let mut index = open + 1;
     while index < chars.len() {
@@ -809,7 +809,7 @@ fn skip_paren_unit_chars(chars: &[char], open: usize) -> usize {
     chars.len()
 }
 
-fn skip_braced_unit_chars(chars: &[char], open: usize) -> usize {
+pub(crate) fn skip_braced_unit_chars(chars: &[char], open: usize) -> usize {
     let mut depth = 1usize;
     let mut index = open + 1;
     while index < chars.len() {
@@ -888,12 +888,17 @@ fn copy_dollar_bracket_verbatim_cursor<'a>(out: &mut String, rest: &'a str) -> &
 /// machinery owns that diagnostic), plus whether the span was CUT by the
 /// double-quote segment end (rubash#2227: the caller then re-emits the
 /// segment's opening `"` so the expansion walker can name the segment
-/// as GNU's expansion-level string, subst.c:11692-11723). Bracket
-/// matching here is plain counting — every `[` nests, every `]` closes:
-/// this copier only copies bytes verbatim, so where the span boundary
-/// falls does not change the emitted text, and the expansion walkers'
-/// collectors re-extract the body with GNU's machine (subst.c:1361, see
-/// dollar_bracket_body_end above) before evaluating it.
+/// as GNU's expansion-level string, subst.c:11692-11723). The span
+/// boundary is GNU's extraction end (subst.c:1361, see
+/// dollar_bracket_body_end above) in both paths — never plain bracket
+/// counting: a `]` inside the body's own quotes or after a backslash
+/// pass does not close the span. The copied bytes are verbatim either
+/// way, but the boundary decides where the enclosing copier resumes
+/// scanning, and plain counting misplaces it (rubash#2227 t_s3: in
+/// `$(echo "a=$["]"] b) c")` the raw path cut the span at the quoted
+/// `]`, the double-quote raw copier then closed the segment early, and
+/// the comsub body ended at the inner `)` — rubash reported
+/// unexpected EOF where GNU reports the span's own bad substitution).
 ///
 /// With `deescape_dq` (the double-quote cookers) the `\"` pair GNU's
 /// read_token_word resolves inside double quotes before expansion is
@@ -988,33 +993,22 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
             }
         }
     }
+    // Raw path (deescape_dq == false; the cooker path above always
+    // returns): copy through GNU's extraction end (subst.c:1361 via
+    // subst.c:1301 — quote units skipped whole, backslash passes the
+    // next byte, `[`/`$[` nest). An unterminated span copies to the
+    // end of input; the EOF verdict machinery owns that diagnostic.
     let bytes = rest.as_bytes();
-    let mut depth = 1usize;
-    let mut idx = 0usize;
-    let mut seg_start = 0usize;
-    while idx < bytes.len() {
-        let b = bytes[idx];
-        if deescape_dq && b == b'\\' && matches!(bytes.get(idx + 1), Some(b'"')) {
-            out.push_str(&rest[seg_start..idx]);
-            out.push(char::from(bytes[idx + 1]));
-            idx += 2;
-            seg_start = idx;
-            continue;
+    match dollar_bracket_body_end(bytes, 0) {
+        Some(end) => {
+            out.push_str(&rest[..end]);
+            (&rest[end..], false)
         }
-        idx += 1;
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
+        None => {
+            out.push_str(rest);
+            (&rest[rest.len()..], false)
         }
     }
-    out.push_str(&rest[seg_start..idx]);
-    (&rest[idx..], false)
 }
 
 /// Cursor form of `copy_dollar_paren_body_raw` (rest just past the `$(`).
@@ -1902,8 +1896,9 @@ fn copy_dollar_bracket_arithmetic(
 }
 
 /// Char form of `copy_dollar_bracket_body_raw_cursor` (chars just past
-/// the `$[`): copy through the matching `]` by plain bracket counting,
-/// with the same `deescape_dq` rule as the cursor form, and — like the
+/// the `$[`): copy through GNU's extraction end (subst.c:1361 — never
+/// plain bracket counting; see the cursor form for the t_s3 boundary
+/// failure), with the same `deescape_dq` rule, and — like the
 /// cursor form — report whether the span was CUT by the double-quote
 /// segment end (rubash#2227). In a double-quoted segment
 /// (`deescape_dq`) the segment containment rule of the cursor form
@@ -1952,22 +1947,16 @@ fn copy_dollar_bracket_body_raw(
             }
         }
     }
-    let mut depth = 1usize;
-    while let Some(ch) = chars.next() {
-        if deescape_dq && ch == '\\' && matches!(chars.peek(), Some('"')) {
-            out.push(chars.next().expect("peeked escape char"));
-            continue;
-        }
-        out.push(ch);
-        match ch {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            _ => {}
+    // Raw path (deescape_dq == false; the cooker path above always
+    // returns): copy through GNU's extraction end, or to the end of
+    // input when the span is unterminated (the EOF verdict machinery
+    // owns that diagnostic). Same boundary rule as the cursor form.
+    let snapshot: Vec<char> = chars.clone().collect();
+    let end = dollar_bracket_body_end_chars(&snapshot, 0).unwrap_or(snapshot.len());
+    for _ in 0..end {
+        match chars.next() {
+            Some(ch) => out.push(ch),
+            None => break,
         }
     }
     false
