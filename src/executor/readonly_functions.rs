@@ -90,7 +90,7 @@ impl Executor {
             && !is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK")
         {
             let (kept, _routed, failed, diagnostics) =
-                self.route_declare_dirstack_operands(&args, "readonly", false);
+                self.route_declare_dirstack_operands(&args, &cmd.words[1..], "readonly", false);
             for line in &diagnostics {
                 write!(stderr, "{line}")?;
             }
