@@ -3089,11 +3089,12 @@ impl Executor {
                     // (bind.def:205-216). Every -o write funnels
                     // through set_minus_o_option (set.def:476-491) into
                     // that setter, so the bind belongs at this
-                    // application site too — the slow path's bridge in
-                    // execute_set keys on the PRIOR option state, which
-                    // this fast path has already moved by the time the
-                    // slow path runs, so without this hook `set -o vi`
-                    // never moved the keymap at all (rubash#2386).
+                    // application site too: when this path completes
+                    // the command, execute_set never runs; when it
+                    // bails after applying, the slow path replays the
+                    // writes set_with_io reports (rubash#2448) and the
+                    // registry write is idempotent, so both doors land
+                    // the same bind (rubash#2386).
                     self.bind_registry()
                         .borrow_mut()
                         .set_readline_variable("editing-mode", option_name);

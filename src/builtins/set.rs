@@ -162,6 +162,48 @@ where
     W: Write,
     E: Write,
 {
+    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, None)
+}
+
+/// [`set_with_io`] plus a sink for the `-o` option WRITES (name,
+/// enabled) in operand order. GNU builtins/set.def:476-491
+/// set_minus_o_option invokes the option's setter on EVERY write via
+/// SET_BINARY_O_OPTION_VALUE (set.def:247-249) — for vi/emacs the
+/// setter is set_edit_mode (set.def:424-447), whose FLAG_ON arm runs
+/// rl_variable_bind("editing-mode", name) even when the option was
+/// already on — so a caller mirroring the funnel's side effects needs
+/// the writes themselves, not a before/after state diff
+/// (rubash#2448; the shopt door's tracked twin is rubash#2435). The
+/// `-o` print form (no operand) writes nothing and records nothing.
+pub(crate) fn set_with_io_and_o_writes<'a, I, W, E>(
+    args: I,
+    env_vars: &mut crate::shell::var_table::VarTable,
+    stdout: &mut W,
+    stderr: &mut E,
+    underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    o_writes: &mut Vec<(String, bool)>,
+) -> io::Result<i32>
+where
+    I: IntoIterator<Item = &'a str>,
+    W: Write,
+    E: Write,
+{
+    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, Some(o_writes))
+}
+
+fn set_with_io_tracked<'a, I, W, E>(
+    args: I,
+    env_vars: &mut crate::shell::var_table::VarTable,
+    stdout: &mut W,
+    stderr: &mut E,
+    underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    mut o_writes: Option<&mut Vec<(String, bool)>>,
+) -> io::Result<i32>
+where
+    I: IntoIterator<Item = &'a str>,
+    W: Write,
+    E: Write,
+{
     let args: Vec<&str> = args.into_iter().collect();
 
     if args.is_empty() {
@@ -308,6 +350,9 @@ where
                             return Ok(EX_USAGE);
                         }
                         set_shell_option(env_vars, name, prefix == '-');
+                        if let Some(writes) = o_writes.as_deref_mut() {
+                            writes.push((name.to_string(), prefix == '-'));
+                        }
                         index += 1;
                     }
                     _ => print_shell_options(env_vars, prefix == '+', SET_O_PRINT_WIDTH, stdout)?,

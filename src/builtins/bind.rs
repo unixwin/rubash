@@ -2194,6 +2194,14 @@ pub struct InputrcDiagnostic {
 pub struct InputrcParsed {
     /// `"keyseq": value` bindings from active regions.
     pub bindings: Vec<(String, BindingSpec)>,
+    /// The keymap each `bindings` entry was parsed under, parallel to
+    /// `bindings`: `Some(name)` once the file itself moved the keymap
+    /// (an in-file `set editing-mode` / `set keymap` — sv_editmode,
+    /// lib/readline/bind.c:2092-2110, moves `_rl_keymap` at the moment
+    /// the set line runs, so a later binding belongs to the new map);
+    /// `None` for entries parsed before any in-file move, which belong
+    /// to the keymap current when the file started (the caller's map).
+    pub binding_keymaps: Vec<Option<String>>,
     /// Validated `set NAME VALUE` lines (value normalized the way
     /// [`apply_readline_variable`] normalizes; `editing-mode` normalized
     /// lowercase).
@@ -2222,6 +2230,7 @@ pub fn parse_inputrc_with_env(
         // readline's encapsulations); deeper `$if`s are ignored.
         conditionals: Vec::new(),
         include_depth: 0,
+        keymap: None,
     };
     state.parse_text(text, load);
     state.result
@@ -2233,6 +2242,11 @@ struct InputrcParseState<'a> {
     file: String,
     conditionals: Vec<ConditionalRegion>,
     include_depth: u8,
+    /// The keymap the file itself has selected so far (`set
+    /// editing-mode` / `set keymap`), in `keymap`-variable spelling;
+    /// `None` until the file moves it — bindings parsed before that
+    /// belong to the caller's starting keymap.
+    keymap: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -2276,7 +2290,10 @@ impl<'a> InputrcParseState<'a> {
                 continue;
             }
             match parse_binding_line(line) {
-                Some(Ok(parsed)) => self.result.bindings.push((parsed.keyseq, parsed.spec)),
+                Some(Ok(parsed)) => {
+                    self.result.bindings.push((parsed.keyseq, parsed.spec));
+                    self.result.binding_keymaps.push(self.keymap.clone());
+                }
                 // rl_parse_and_bind errors do not fail the bind builtin
                 // (bind.def:304-333 ignores the return value; GNU probe:
                 // `bind '"\C-t'` prints
@@ -2361,8 +2378,16 @@ impl<'a> InputrcParseState<'a> {
         let (outcome, editing_mode) = apply_readline_variable(&mut scratch, name, value);
         match outcome {
             SetVariableOutcome::Applied => {
-                for (stored, normalized) in scratch {
-                    store_variable(&mut self.result.variables, &stored, &normalized);
+                for (stored, normalized) in &scratch {
+                    store_variable(&mut self.result.variables, stored, normalized);
+                    if stored == "keymap" {
+                        // The `editing-mode` and `keymap` setters both
+                        // store a `keymap` row, and both move the live
+                        // keymap at this point in the file (sv_editmode
+                        // / the keymap setter, lib/readline/bind.c:
+                        // 2092-2110): later bindings belong to it.
+                        self.keymap = Some(normalized.clone());
+                    }
                 }
                 if let Some((mode_name, mode_value)) = editing_mode {
                     // Later `mode=` conditionals in this file see the new
@@ -2604,6 +2629,23 @@ mod tests {
         assert_eq!(parsed.variables[0].1, "vi");
         assert_eq!(parsed.variables[1].0, "keymap");
         assert_eq!(parsed.variables[1].1, "vi-insert");
+        // The binding was parsed after the in-file set moved the
+        // keymap, so it carries the vi-insert stamp (rubash#2447).
+        assert_eq!(parsed.binding_keymaps, vec![Some("vi-insert".to_string())]);
+    }
+
+    #[test]
+    fn inputrc_binding_keymap_stamp_follows_in_file_sets() {
+        let text = "\"\\C-g\": abort\nset keymap vi-command\n\"\\C-m\": vi-editing-mode\n";
+        let parsed = parse_inputrc_with_env(text, "", &InputrcEnv::default(), &mut |_| None);
+        assert_eq!(parsed.bindings.len(), 2);
+        // Before the file moves the keymap the stamp stays open: the
+        // binding belongs to the caller's starting keymap.
+        assert_eq!(parsed.binding_keymaps[0], None);
+        // `set keymap vi-command` stores the canonical `vi` keymap row
+        // (rl_get_keymap_name spelling), and the next binding is
+        // stamped with it.
+        assert_eq!(parsed.binding_keymaps[1], Some("vi".to_string()));
     }
 
     #[test]
