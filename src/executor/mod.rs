@@ -1847,6 +1847,20 @@ pub struct Executor {
     /// reached the consumer (`yes | true` drained into RAM forever).
     /// Mirrors `pipeline_stdout_stream` for the consumer side.
     pipeline_stdin_stream: Option<crate::fd::HANDLE>,
+    /// rubash#2483: while a concurrent pipeline driver (the shell-writer
+    /// path, the streaming sandwich) runs a shell-side stage whose fd 2
+    /// disposition is the ambient live stderr, the function/compound stage
+    /// funnels leave the stage clone's stderr UNCAPTURED, so the body's
+    /// diagnostics write the live descriptor as produced — GNU forks the
+    /// element with the shell's own fd 2 (execute_cmd.c:2620
+    /// execute_pipeline), so its writes land in real time alongside the
+    /// other elements' streams. The default (captured) mode assembles the
+    /// stage's stderr into its result and the driver emits it only when
+    /// the stage completes, which reorders it against every stream the
+    /// stage was supposed to interleave with. Set/restored by the driver
+    /// around the stage call; never set for a stage whose own redirects
+    /// claim fd 2, nor while an enclosing stderr capture is armed.
+    pipeline_stage_stderr_live: bool,
     /// niubash#144: outcome of the external stdio plan from the last
     /// `apply_external_redirects` (ordered-walk shared handles), consumed
     /// by the immediately following `spawn_external_process`. `Some(..)`

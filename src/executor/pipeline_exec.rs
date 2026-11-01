@@ -1424,6 +1424,19 @@ impl Executor {
             return Ok(Some(end + 1));
         }
 
+        // rubash#2483: exactly one shell-side stage (function/compound)
+        // amid external members — run every member concurrently on real
+        // OS pipes with the shell stage bound between the pipe ends, so
+        // the streams interleave in production order (GNU forks every
+        // element, execute_cmd.c:2620) instead of the sequential loop's
+        // capture-then-emit. See `execute_streaming_sandwich_pipeline`.
+        if self
+            .execute_streaming_sandwich_pipeline(&commands)?
+            .is_some()
+        {
+            return Ok(Some(end + 1));
+        }
+
         // rubash#761: an UNBOUNDED external producer feeding a pipeline whose
         // rightmost stage is served in-shell (a builtin tail such as
         // `true`/`:`/`read`/`echo`). The sequential loop would materialize the
@@ -2429,6 +2442,30 @@ impl Executor {
         self.function_name_for_command_word(word.as_str()).is_some()
     }
 
+    /// rubash#2483: true when a shell-side stage's fd 2 disposition is
+    /// the ambient live stderr, so a concurrent pipeline driver may run
+    /// the stage with `pipeline_stage_stderr_live` armed and its
+    /// diagnostics land as produced (GNU: the element inherits the
+    /// shell's fd 2, execute_cmd.c:2620 execute_pipeline). The stage's
+    /// own redirects must not claim fd 2 (an explicit `2>file` / `2>&1`
+    /// is routed from the captured stage result instead), the
+    /// pipeline's fd 2 must resolve to the process stderr (an ambient
+    /// `2>&1` rebinds it to fd 1's object, a case the merged-stream
+    /// machinery owns), and no enclosing stderr capture may be armed.
+    fn pipeline_stage_stderr_may_stream(&self, command: &CommandNode) -> bool {
+        if self.stderr_capture.is_some()
+            || command.redirect_err.is_some()
+            || command.redirect_err_append.is_some()
+            || !command.redirects.is_empty()
+        {
+            return false;
+        }
+        matches!(
+            self.fd_table.write_endpoint(2),
+            None | Some(FdWriteEndpoint::Stderr)
+        )
+    }
+
     /// niubash#345: a shell-side producer (a compound `while`/`for`/`until`
     /// loop and friends) feeding an external consumer chain. GNU forks every
     /// pipeline element (execute_cmd.c:2620 execute_pipeline): the producer
@@ -2800,6 +2837,12 @@ impl Executor {
             .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
         let saved_pipeline_stream = self.pipeline_stdout_stream;
         self.pipeline_stdout_stream = stream_handle;
+        // rubash#2483: the consumers are live processes on live pipes,
+        // so a producer whose fd 2 is the ambient live stderr writes its
+        // diagnostics as produced instead of trailing the whole
+        // pipeline in the collected producer_err below.
+        let saved_stderr_live = self.pipeline_stage_stderr_live;
+        self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(commands[0]);
         let producer_result = self.execute_pipeline_stage(
             commands[0],
             &stage0_input,
@@ -2807,6 +2850,7 @@ impl Executor {
             stage0_stdin_live,
         );
         self.pipeline_stdout_stream = saved_pipeline_stream;
+        self.pipeline_stage_stderr_live = saved_stderr_live;
 
         let (mut producer_status, mut producer_out, mut producer_err, mut producer_error) =
             match producer_result {
@@ -3810,6 +3854,460 @@ impl Executor {
     /// Windows and Unix; other platforms keep the sequential stage loop.
     #[cfg(not(any(windows, unix)))]
     fn execute_external_prefix_streaming_tail(
+        &mut self,
+        _commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
+        Ok(None)
+    }
+
+    /// Whether a stage's first word expands to exactly `word` (the
+    /// classification peek the spec machinery itself performs).
+    fn stage_first_word_expands_to(&mut self, command: &CommandNode, word: &str) -> bool {
+        let fields = self.expand_stage_first_word(command);
+        fields.len() == 1 && fields[0] == word
+    }
+
+    /// rubash#2483: GNU forks every pipeline element before the
+    /// element's command runs (execute_cmd.c:2620 execute_pipeline),
+    /// so an element spelled `exec prog args...` IS `prog args...`
+    /// as the element: the forked child's exec_builtin
+    /// (builtins/exec.def) hands the already pipe-bound descriptors
+    /// to shell_execve and the image replaces the child. Return the
+    /// stage rewritten without the `exec` prefix when the operand is
+    /// a plain word; the caller's spec vetting then adjudicates the
+    /// operand like any other external element (a builtin/function
+    /// operand resolves to no program and declines). Exec OPTIONS
+    /// (`-c`/`-l`/`-a`, spelled with a leading dash on the raw second
+    /// word) change the replacement's environment/argv0 and keep the
+    /// sequential path, as does an exec with no operand (a
+    /// redirects-only element).
+    fn exec_unwrapped_stage(&self, command: &CommandNode) -> Option<CommandNode> {
+        if command.words.len() < 2 || command.words[1].starts_with('-') {
+            return None;
+        }
+        if command.word_metadata.len() != command.words.len()
+            || command.word_kinds.len() != command.words.len()
+        {
+            return None;
+        }
+        let mut shifted = command.clone();
+        shifted.words.drain(..1);
+        shifted.word_metadata.drain(..1);
+        for entry in &mut shifted.word_metadata {
+            entry.word_index = entry.word_index.saturating_sub(1);
+        }
+        shifted.word_kinds.drain(..1);
+        Some(shifted)
+    }
+
+    /// rubash#2483: a pipeline with exactly ONE shell-side stage
+    /// (function or compound) amid otherwise concurrent-eligible
+    /// external members — `bats-exec-suite | validator_fn |
+    /// bats-format-tap` is the shape that filed this issue. GNU forks
+    /// every element onto real pipes (execute_cmd.c:2620
+    /// execute_pipeline), so the TAP stream flows through the validator
+    /// while exec-suite is still producing, and exec-suite's direct
+    /// stderr writes bracket it in real time. The sequential stage loop
+    /// instead hands the shell stage the producer's COMPLETE captured
+    /// output, so the producer's late stderr line (written live by the
+    /// concurrent prefix machinery) overtakes the pipeline's first
+    /// bytes. The shell-writer path owns a shell-side PRODUCER and the
+    /// streaming tail owns a builtin tail; neither composes a shell
+    /// stage in the middle (or a function tail behind external
+    /// members).
+    ///
+    /// Here every external member is spawned on real OS pipes first,
+    /// then the one shell stage runs on this executor between the two
+    /// pipe ends — fd 0 bound to the upstream pipe exactly as the
+    /// streaming tail binds it, fd 1 armed to the downstream pipe via
+    /// `pipeline_stdout_stream` exactly as the shell-writer arms its
+    /// producer — so all members produce and consume concurrently and
+    /// the streams interleave in production order. Admission is
+    /// deliberately narrow (anything unmodelled keeps the sequential
+    /// loop): one plain function/compound stage, no stage-0 payload,
+    /// no ambient fd-2 merge, no enclosing capture.
+    #[cfg(any(windows, unix))]
+    fn execute_streaming_sandwich_pipeline(
+        &mut self,
+        commands: &[&CommandNode],
+    ) -> Result<Option<()>, ExecuteError> {
+        if commands.len() < 2
+            || commands.len() > 8
+            || self.stderr_capture.is_some()
+            || self.stdout_capture.is_some()
+            // Same DEBUG-trap bail-out as the other concurrent paths:
+            // the sequential loop owns the per-element fires.
+            || (self.debug_trap_in_scope()
+                && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
+                    .is_some())
+            || commands[0].inverted
+            || commands[0].inverted_command.is_some()
+            // An ambient `2>&1` binding merges the members' stderr
+            // onto the pipeline's output stream; the merged-stream
+            // machinery (the sequential loop's ambient fold) owns it.
+            || self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout)
+        {
+            return Ok(None);
+        }
+        // Locate the single shell-side stage. A second one (or a
+        // producer-side one — the shell-writer path's claim) declines.
+        let mut shell_index: Option<usize> = None;
+        for (index, command) in commands.iter().enumerate() {
+            if command_is_compound_pipeline_stage(command)
+                || self.command_first_word_is_function(command)
+            {
+                if shell_index.is_some() {
+                    return Ok(None);
+                }
+                shell_index = Some(index);
+            }
+        }
+        let Some(shell_index) = shell_index else {
+            return Ok(None);
+        };
+        if shell_index == 0 {
+            return Ok(None);
+        }
+        let shell_command = commands[shell_index];
+        // The shell stage must be plain: the pipes are its only stream
+        // claims. Its own redirects/tempenv/heredoc/procsubs keep the
+        // shell-aware sequential machine.
+        if !shell_command.assignments.is_empty()
+            || !shell_command.redirects.is_empty()
+            || shell_command.redirect_in.is_some()
+            || shell_command.redirect_out.is_some()
+            || shell_command.append.is_some()
+            || shell_command.redirect_err.is_some()
+            || shell_command.redirect_err_append.is_some()
+            || shell_command.heredoc.is_some()
+            || !shell_command.heredoc_redirects.is_empty()
+            || shell_command.here_string.is_some()
+            || !shell_command.process_substitutions.is_empty()
+            || shell_command.time_command.is_some()
+        {
+            return Ok(None);
+        }
+        // Speculative member expansion below must leave no latch
+        // behind on a decline (the fast-path discipline of
+        // execute_simple_pipeline_inner): bracket it, restore on any
+        // bail-out, and start the real execution from the clean entry
+        // state the sequential loop would have seen.
+        let saved_discard_latches = self.snapshot_discard_latches();
+        let mut specs: Vec<Option<(std::path::PathBuf, String, Vec<String>)>> =
+            Vec::with_capacity(commands.len());
+        for (index, command) in commands.iter().enumerate() {
+            if index == shell_index {
+                specs.push(None);
+                continue;
+            }
+            // rubash#2483: an element spelled `exec prog args...` IS
+            // `prog args...` as the element (see exec_unwrapped_stage);
+            // an exec-headed stage never falls back to a PATH program
+            // that happens to be named `exec` — the special builtin is
+            // what GNU's element runs.
+            let spec = if self.stage_first_word_expands_to(command, "exec") {
+                self.exec_unwrapped_stage(command).and_then(|shifted| {
+                    self.concurrent_external_stage_spec(
+                        &shifted,
+                        index,
+                        index + 1 == commands.len(),
+                    )
+                })
+            } else {
+                self.concurrent_external_stage_spec(command, index, index + 1 == commands.len())
+            };
+            let Some(spec) = spec else {
+                self.restore_discard_latches(&saved_discard_latches);
+                return Ok(None);
+            };
+            specs.push(Some(spec));
+        }
+        // A `/dev/`-family operand on a member needs the dev-fd
+        // materializer the plain spawner wires (same decline as the
+        // shell-writer path).
+        if specs.iter().flatten().any(|(_, _, args)| {
+            args.iter().any(|arg| {
+                crate::executor::dev_fd_operands::dev_operand_targets_fd(arg, 0)
+                    || crate::executor::dev_fd_operands::dev_operand_targets_fd(arg, 1)
+            })
+        }) {
+            self.restore_discard_latches(&saved_discard_latches);
+            return Ok(None);
+        }
+        // Stage 0 is an external member whose fd 0 is the shell's
+        // inherited stdin (GNU forks the element with the shell's own
+        // descriptors); a staged FUNCTION_STDIN payload keeps the
+        // sequential path, as in the streaming tail.
+        let (stage0_input, _stage0_stdin_base, _alias_fold) =
+            self.initial_pipeline_input(commands[0]);
+        if !stage0_input.is_empty() {
+            self.restore_discard_latches(&saved_discard_latches);
+            return Ok(None);
+        }
+        let stage0_inherits = self.stdin_string_for_command(commands[0]).is_none()
+            && match self.fd_table.entries.get(&0) {
+                Some(entry) => {
+                    !entry.closed
+                        && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+                }
+                None => true,
+            };
+        self.restore_discard_latches(&saved_discard_latches);
+
+        let last_index = commands.len() - 1;
+        // pipe[j] connects member j to member j+1.
+        let mut pipes: Vec<(Option<os_pipe::PipeReader>, Option<os_pipe::PipeWriter>)> =
+            Vec::with_capacity(last_index);
+        for _ in 0..last_index {
+            let (read, write) = os_pipe::pipe().map_err(ExecuteError::IoError)?;
+            pipes.push((Some(read), Some(write)));
+        }
+        // Spawn every external member before the shell stage runs, so
+        // the whole chain is live while the shell stage works (the
+        // #2244 discipline: member output is drained from the start,
+        // never only once the in-process member returns).
+        let mut processes: Vec<(usize, std::process::Child)> = Vec::new();
+        for (index, spec) in specs.iter().enumerate() {
+            let Some((program, expanded_name, args)) = spec else {
+                continue;
+            };
+            let command = commands[index];
+            let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
+                let mut process = std::process::Command::new(std::env::current_exe()?);
+                process.arg(format!("--internal-{name}")).args(args);
+                (process, false)
+            } else {
+                external_command_for_named_program_with_exec_name(
+                    program,
+                    Some(expanded_name),
+                    args,
+                    &self.shell_state.env_vars,
+                    self.bash_argv0_env_supplied(&command.assignments),
+                    // rubash#2442: shared execve-filename funnel (see
+                    // the shell-writer spawn above).
+                    crate::executor::path::spawn_exec_name(
+                        expanded_name,
+                        program,
+                        &self.shell_state.env_vars,
+                    )
+                    .as_deref(),
+                )
+            };
+            // rubash#1564: tempenv bracket, as in the sibling paths.
+            let saved_env = self.snapshot_spec_env(command);
+            self.apply_external_environment(command, &mut process, program);
+            self.restore_spec_env_into_process(saved_env, &mut process);
+            if index == 0 {
+                if stage0_inherits {
+                    process.stdin(Stdio::inherit());
+                } else {
+                    process.stdin(Stdio::null());
+                }
+            } else {
+                let (read, _) = &mut pipes[index - 1];
+                process.stdin(stdio_from_transferred_handle(
+                    read.take().expect("producer reader already transferred"),
+                ));
+            }
+            if index == last_index {
+                process.stdout(Stdio::piped());
+                process.stderr(Stdio::piped());
+            } else {
+                let (_, write) = &mut pipes[index];
+                process.stdout(stdio_from_transferred_handle(
+                    write.take().expect("pipeline writer already transferred"),
+                ));
+                // Intermediate members keep the shell's fd 2 (GNU: the
+                // element's diagnostics land on the shared stream as
+                // produced) — std::process::Command inherits stderr by
+                // default, so nothing to wire.
+            }
+            // rubash#1688 / #2308: ambient fd delivery, as in the
+            // sibling paths.
+            self.attach_ambient_fd_pins(command, &mut process);
+            let parent_side_dups = self.attach_ambient_text_delivery(command, &mut process);
+            process.current_dir(&self.shell_state.cwd);
+            suppress_orphan_console(&mut process);
+            let spawned = process.spawn();
+            for dup in parent_side_dups {
+                crate::fd::close_handle(dup);
+            }
+            let mut child = spawned.map_err(|error| {
+                ExecuteError::IoError(io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {}",
+                        program
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("external"),
+                        crate::posix_errors::message(&error)
+                    ),
+                ))
+            })?;
+            adopt_orphan_console(child.id());
+            processes.push((index, child));
+        }
+        // The last member's drains start NOW when it is a process (its
+        // bytes may not wait for the shell stage to finish).
+        let last_is_process = last_index != shell_index;
+        let (mut last_child, last_stdout_drain, last_stderr_drain) = if last_is_process {
+            let (_, mut child) = processes
+                .pop()
+                .expect("last member process was spawned above");
+            let stdout_target = if self.final_member_stdout_streams_to_host(commands[last_index]) {
+                PipelineDrainTarget::StreamHostStdout
+            } else {
+                PipelineDrainTarget::Collect
+            };
+            let stdout_drain = child
+                .stdout
+                .take()
+                .map(|reader| spawn_pipe_drain(reader, stdout_target));
+            let stderr_drain = child
+                .stderr
+                .take()
+                .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
+            (Some(child), stdout_drain, stderr_drain)
+        } else {
+            (None, None, None)
+        };
+
+        // Run the shell stage between the two pipe ends. The fd-0
+        // binding is the streaming tail's (a File endpoint over the
+        // read handle + `pipeline_stdin_stream` armed so the mirror
+        // stays absent); the fd-1 arming is the shell-writer's
+        // (`pipeline_stdout_stream` over the write handle).
+        #[cfg(unix)]
+        use std::os::unix::io::{AsRawFd, IntoRawFd};
+        #[cfg(windows)]
+        use std::os::windows::io::{AsRawHandle, IntoRawHandle};
+        let stage_reader = pipes[shell_index - 1]
+            .0
+            .take()
+            .expect("shell stage reader already transferred");
+        #[cfg(windows)]
+        let stage_handle = stage_reader.into_raw_handle() as crate::fd::HANDLE;
+        #[cfg(unix)]
+        let stage_handle = stage_reader.into_raw_fd() as crate::fd::HANDLE;
+        let saved_fd0 = self.fd_table.entries.insert(
+            0,
+            FdEntry {
+                read: Some(FdReadEndpoint::File(std::rc::Rc::new(FileFd {
+                    handle: stage_handle,
+                    path: std::path::PathBuf::from("<rubash-pipeline-stdin>"),
+                }))),
+                write: None,
+                closed: false,
+                dynamic: false,
+            },
+        );
+        let saved_stdin_stream = self.pipeline_stdin_stream;
+        self.pipeline_stdin_stream = Some(stage_handle);
+        let mut stage_writer = if shell_index < last_index {
+            pipes[shell_index].1.take()
+        } else {
+            None
+        };
+        #[cfg(windows)]
+        let stage_stream_handle = stage_writer
+            .as_ref()
+            .map(|writer| writer.as_raw_handle() as crate::fd::HANDLE);
+        #[cfg(unix)]
+        let stage_stream_handle = stage_writer
+            .as_ref()
+            .map(|writer| writer.as_raw_fd() as crate::fd::HANDLE);
+        let saved_stdout_stream = self.pipeline_stdout_stream;
+        self.pipeline_stdout_stream = stage_stream_handle;
+        let saved_final_stage = self.pipeline_final_stage.get();
+        self.pipeline_final_stage.set(shell_index == last_index);
+        let saved_stderr_live = self.pipeline_stage_stderr_live;
+        self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(shell_command);
+        self.set_current_command(shell_command);
+        let stage_result = self.execute_pipeline_stage(shell_command, "", false, false);
+        self.pipeline_stage_stderr_live = saved_stderr_live;
+        self.pipeline_final_stage.set(saved_final_stage);
+        self.pipeline_stdout_stream = saved_stdout_stream;
+        self.pipeline_stdin_stream = saved_stdin_stream;
+        // Restoring fd 0 drops the File endpoint's read handle: the
+        // upstream member's next write is a broken pipe (its SIGPIPE
+        // shape), exactly as in the streaming tail.
+        match saved_fd0 {
+            Some(entry) => {
+                self.fd_table.entries.insert(0, entry);
+            }
+            None => {
+                self.fd_table.entries.remove(&0);
+            }
+        }
+        // Close the shell stage's write end so the downstream member
+        // sees EOF now that the stage is done.
+        drop(stage_writer.take());
+
+        // Reap the process members in stage order, each waited against
+        // its immediate downstream (the windows broken-pipe window
+        // discipline of the sibling paths).
+        let mut statuses = vec![0; commands.len()];
+        if let Some(mut last) = last_child {
+            for position in 0..processes.len() {
+                let (head, tail) = processes.split_at_mut(position + 1);
+                let (stage_idx, member) = head.last_mut().expect("member inside pipeline");
+                let downstream = match tail.first_mut() {
+                    Some((_, next)) => next,
+                    None => &mut last,
+                };
+                let status = wait_for_windows_pipeline_member(self, member, Some(downstream))?;
+                statuses[*stage_idx] = crate::executor::wait_status::process_exit_status(&status);
+            }
+            self.note_foreground_wait();
+            let status = wait_pipeline_member_interruptibly(self, &mut last)?;
+            statuses[last_index] = crate::executor::wait_status::process_exit_status(&status);
+        } else {
+            for position in 0..processes.len() {
+                let (head, tail) = processes.split_at_mut(position + 1);
+                let (stage_idx, member) = head.last_mut().expect("member inside pipeline");
+                let status = wait_for_windows_pipeline_member(
+                    self,
+                    member,
+                    tail.first_mut().map(|(_, next)| next),
+                )?;
+                statuses[*stage_idx] = crate::executor::wait_status::process_exit_status(&status);
+            }
+        }
+
+        let (shell_out, shell_err, shell_status) = match stage_result? {
+            Some(triple) => triple,
+            None => (String::new(), String::new(), 0),
+        };
+        statuses[shell_index] = shell_status;
+
+        if last_is_process {
+            let stdout_bytes = join_pipe_drain(last_stdout_drain)?;
+            self.write_pipeline_output(
+                commands[last_index],
+                &crate::executor::substitution_metadata::bytes_to_shell_text(&stdout_bytes),
+                false,
+            )?;
+            let stderr_bytes = join_pipe_drain(last_stderr_drain)?;
+            if !stderr_bytes.is_empty() {
+                std::io::stderr().write_all(&stderr_bytes)?;
+            }
+        } else {
+            self.write_pipeline_output(shell_command, &shell_out, false)?;
+        }
+        if !shell_err.is_empty() {
+            std::io::stderr().write_all(
+                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&shell_err),
+            )?;
+        }
+        self.exit_code = self.pipeline_exit_status(&statuses);
+        self.set_pipestatus(statuses);
+        Ok(Some(()))
+    }
+
+    /// Non Windows/Unix port: see the streaming tail stub above.
+    #[cfg(not(any(windows, unix)))]
+    fn execute_streaming_sandwich_pipeline(
         &mut self,
         _commands: &[&CommandNode],
     ) -> Result<Option<()>, ExecuteError> {
