@@ -1921,7 +1921,22 @@ fn run_stdin_script_with_init(
 /// --rcfile twice (issue312 gate test). True for the leftover shapes
 /// startup skips (empty HOME, non-interactive extension, login).
 fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
-    executor.get_env("__RUBASH_SOURCED_RC").as_deref() != Some(init_file)
+    if executor.get_env("__RUBASH_SOURCED_RC").as_deref() == Some(init_file) {
+        return false;
+    }
+    // GNU shell.c:1238-1239 / 1244-1245: an interactive shell in the
+    // $ENV arm — invoked as `sh`, or any posix-mode shell — has no
+    // rcfile slot at all; --rcfile belongs to the bash arm's
+    // execute_bashrc_file. The direct run is rubash's extension for
+    // the non-interactive/login/empty-HOME shapes above and must not
+    // leak an rcfile into an interactive $ENV-arm shell, whose whole
+    // startup contract is the $ENV file (rubash#2412).
+    if own_interactive_shell()
+        && (own_act_like_sh() || executor.shell_option_enabled("posix"))
+    {
+        return false;
+    }
+    true
 }
 
 /// GNU shell.c:1547 start_debugger: run the bashdb starter file once before
