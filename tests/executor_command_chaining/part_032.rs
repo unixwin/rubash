@@ -165,7 +165,10 @@ fn test_enable_f_consumes_load_filename() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("enable: loaded: dynamic loading from ./missing.so not supported"));
+    // GNU enable.def:355-365 dyn_load_builtin: the diagnostic names the
+    // requested object, not the builtin (the builtin symbol is only
+    // looked up after a successful dlopen).
+    assert!(error.contains("enable: cannot open shared object ./missing.so:"));
     assert!(!error.contains("invalid option"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);

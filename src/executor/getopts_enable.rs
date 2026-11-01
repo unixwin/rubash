@@ -474,9 +474,10 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::enable::execute_with_io(
+        let status = crate::builtins::enable::execute_with_io_in_dir(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
+            &self.shell_state.cwd,
             &mut stdout,
             &mut stderr,
         )?;
