@@ -2120,7 +2120,14 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
         Vec::new()
     } else {
         let exists = |path: &str| std::fs::metadata(executor.resolve_shell_path(path)).is_ok();
-        if login {
+        // GNU shell.c gates BOTH login profile blocks on
+        // posixly_correct == 0: the argv[0]-dash/--login block at
+        // shell.c:1196 and the interactive non-posix arm at
+        // shell.c:1223 (the posix arm, shell.c:1242-1245, sources
+        // $ENV only). A posix-mode login shell therefore never runs
+        // the profile chain — interactive it reads $ENV (the env-file
+        // step below), non-interactive it reads nothing (rubash#2411).
+        if login && !posix {
             login_profile_branch(&home, no_profile, exists)
         } else if interactive && !no_rc && !act_like_sh && !posix {
             // GNU shell.c:1235-1239 / 1242-1245: the bashrc chain is
