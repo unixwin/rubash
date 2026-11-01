@@ -1090,7 +1090,22 @@ fn case_command_source_text(case_command: &CaseCommand) -> String {
         text.push_str(&patterns);
         text.push_str(") ");
         text.push_str(&bash_command_sequence_text(&clause.body));
-        text.push(' ');
+        // GNU print_cmd.c:787-793 (print_case_clauses): the deferred
+        // heredoc bodies flush after the clause action
+        // (PRINT_DEFERRED_HEREDOCS, print_cmd.c:787) and the clause
+        // terminator is then printed via newline(";;") /
+        // newline(";&") / newline(";;&") — it starts on its OWN line.
+        // When the clause body ends with a heredoc body, the delimiter
+        // line admits nothing after it, so the terminator takes a
+        // newline instead of the usual space: gluing it onto the
+        // delimiter line (`HD ;;`) leaves the delimiter unterminated
+        // and the whole case unparseable in the respawned child
+        // (rubash#2429).
+        if render_ended_with_heredoc() {
+            text.push('\n');
+        } else {
+            text.push(' ');
+        }
         text.push_str(match clause.terminator {
             CaseTerminator::Break => ";;",
             CaseTerminator::FallThrough => ";&",
@@ -1098,6 +1113,11 @@ fn case_command_source_text(case_command: &CaseCommand) -> String {
         });
     }
     text.push_str(" esac");
+    // The case text ends with `esac`, never with a heredoc body:
+    // leave the flag describing THIS text for the separator/closer
+    // logic of the enclosing render (the same contract
+    // bash_command_sequence_text keeps for its own text).
+    RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.set(false));
     text
 }
 
