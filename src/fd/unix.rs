@@ -65,6 +65,24 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     }
 }
 
+/// rubash#2385: open the complementary (write) end of the pipe a
+/// read handle refers to — the operation GNU's open() of
+/// `/proc/self/fd/N` performs on a pipe descriptor (the magic-link
+/// open attaches to the pipe's other end). The returned File owns a
+/// NEW open file description of the pipe's write side; closing it
+/// never touches `h`. None when `h` is not a FIFO or the link open
+/// fails. The O_WRONLY open cannot block: the caller holds the
+/// pipe's read end open through `h` itself, so a reader exists.
+pub fn complementary_write_file(h: HANDLE) -> Option<std::fs::File> {
+    if !is_pipe_handle(h) {
+        return None;
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(format!("/proc/self/fd/{h}"))
+        .ok()
+}
+
 /// S_ISSOCK — the handle refers to a socket. The Windows twin
 /// (windows_impl::is_socket_handle) exists for the spawn layer; the
 /// fd-fact classification (rubash#2132) needs the same judgment on

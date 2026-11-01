@@ -20,6 +20,43 @@ pub(crate) struct TextInput {
     timing: Option<super::timed_input::SharedTimedInput>,
 }
 
+impl TextInput {
+    /// rubash#2385: append bytes at the stream's tail — the write
+    /// half of a complementary-end open (see
+    /// `FdWriteEndpoint::PipeChannel`). The read cursor never moves:
+    /// GNU's write() into a pipe lands behind every byte already in
+    /// the stream, consumed or not (probe y05: a partially-read
+    /// stream serves its remainder first, then the appended bytes).
+    pub(crate) fn append_bytes(&mut self, bytes: &[u8]) {
+        self.data.extend_from_slice(bytes);
+    }
+}
+
+/// rubash#2385: one complementary (write) end of an in-memory byte
+/// channel — a handle onto the SAME `TextInput` queue a read
+/// endpoint serves. Identity is the queue allocation itself
+/// (pointer equality): two ends are "the same endpoint" exactly
+/// when they append to the same stream, which is what the endpoint
+/// equality consumers (dup bookkeeping, target merging) mean.
+#[derive(Debug, Clone)]
+pub(crate) struct PipeChannelEnd(pub Rc<RefCell<TextInput>>);
+
+impl PipeChannelEnd {
+    /// Append at the shared queue's tail (see
+    /// `TextInput::append_bytes`).
+    pub(crate) fn append(&self, bytes: &[u8]) {
+        self.0.borrow_mut().append_bytes(bytes);
+    }
+}
+
+impl PartialEq for PipeChannelEnd {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for PipeChannelEnd {}
+
 /// A real kernel object behind a file-backed fd. `Rc`-shared across dup'd
 /// slots and fork'd (cloned) fd tables so the file offset stays shared —
 /// POSIX open file description semantics (governance doc 3.6, P6/P10).
@@ -174,6 +211,20 @@ pub(crate) enum FdWriteEndpoint {
     /// faces produce the failure — the registry's answer travels
     /// with the descriptor instead of being re-derived per face.
     FullDevice,
+    /// rubash#2385: the complementary (write) end of an in-memory
+    /// byte channel — the write-mode open of a pipe read end whose
+    /// stream the fd model materialized (`FdReadEndpoint::Text` /
+    /// `::ProcessSubstitution`). GNU's open() of the fd's magic link
+    /// attaches to the pipe's other end in the kernel (redir.c
+    /// redir_open's plain open, redir.c:725); a materialized stream
+    /// has no kernel pipe, so the write end is a handle onto the SAME
+    /// queue: writes append at the tail through the shared Rc, reads
+    /// consume from the shared cursor. Minted only by the alias
+    /// layer's complementary resolver
+    /// (`Executor::fd_alias_complementary_write_endpoint`), never by
+    /// a dup — `>&N` of a read end keeps failing EBADF exactly like
+    /// GNU's dup2 of a read-only description.
+    PipeChannel(PipeChannelEnd),
     /// rubash#2042: an fd bound to a 0644-class synthetic /proc
     /// content entry (`/proc/self/status`, `/proc/<pid>/cmdline`).
     /// The open succeeds (procfs 0644) and every WRITE fails EINVAL —
@@ -187,6 +238,42 @@ pub(crate) enum FdWriteEndpoint {
     /// snapshot byte channel; the failed write never alters what a
     /// later read serves (GNU's observable too).
     ProcContentWrite,
+}
+
+impl FdReadEndpoint {
+    /// rubash#2212: the (handle, path label) backing this endpoint for
+    /// cross-process fd delivery when the endpoint names one of the
+    /// process's own standard descriptors. GNU's forked children
+    /// inherit the descriptor itself (execute_cmd.c fork inheritance;
+    /// subst.c:6362 for the process_substitute fork), but the symbolic
+    /// endpoint carries no FileFd, so the delivery transports resolve
+    /// it to the process standard handle at spawn time. `None` for
+    /// endpoints that carry their own FileFd and for endpoints with
+    /// no descriptor behind them (Text snapshots, carriers — those
+    /// ride their own delivery passes).
+    pub(crate) fn standard_backing(&self) -> Option<(crate::fd::HANDLE, &'static str)> {
+        match self {
+            FdReadEndpoint::InheritedProcessStdin => {
+                Some((crate::fd::process_std_handle(0), "ambient:stdin"))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl FdWriteEndpoint {
+    /// rubash#2212: the write-side twin of
+    /// `FdReadEndpoint::standard_backing` — a `N>&1` / `N>&2` dup binds
+    /// the shell's own stdout/stderr description into the table as
+    /// the symbolic Stdout/Stderr endpoint (bats' `exec 3<&1` in
+    /// bats_tee is the driving shape).
+    pub(crate) fn standard_backing(&self) -> Option<(crate::fd::HANDLE, &'static str)> {
+        match self {
+            FdWriteEndpoint::Stdout => Some((crate::fd::process_std_handle(1), "ambient:stdout")),
+            FdWriteEndpoint::Stderr => Some((crate::fd::process_std_handle(2), "ambient:stderr")),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1431,6 +1518,25 @@ impl FdTable {
                         let _ = std::fs::File::create(&path);
                         MaterializedWrite::File(path)
                     }
+                    FdWriteEndpoint::PipeChannel(_) => {
+                        // rubash#2385: same boundary as FullDevice —
+                        // the in-memory queue cannot cross the spawn
+                        // boundary, so a child inheriting a
+                        // complementary write fd gets an absorbed
+                        // sink file; the in-shell write faces append
+                        // to the queue exactly. (Kernel-pipe
+                        // complementary ends are plain File endpoints
+                        // and DO reach children as working
+                        // descriptors.) GNU hands the child the real
+                        // pipe write end.
+                        let path = std::env::temp_dir().join(format!(
+                            "rubash-channel-sink-{}-{}",
+                            std::process::id(),
+                            fd
+                        ));
+                        let _ = std::fs::File::create(&path);
+                        MaterializedWrite::File(path)
+                    }
                 });
                 (*fd, MaterializedFd { read, write })
             })
@@ -1474,6 +1580,9 @@ impl PartialEq for FdWriteEndpoint {
             // are interchangeable, like the device class above.
             (Self::ProcContentWrite, Self::ProcContentWrite) => true,
             (Self::File(a), Self::File(b)) => Rc::ptr_eq(a, b),
+            // rubash#2385: channel identity is the shared queue
+            // (PipeChannelEnd's own pointer equality).
+            (Self::PipeChannel(a), Self::PipeChannel(b)) => a == b,
             (Self::CoprocStdin { pid: a, .. }, Self::CoprocStdin { pid: b, .. }) => a == b,
             (
                 Self::ProcessSubstitution {

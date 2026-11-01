@@ -400,6 +400,10 @@ impl Executor {
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
                 | FdWriteEndpoint::FullDevice
+                // rubash#2385: a complementary channel end declines
+                // identically — the queue cannot be a child handle;
+                // the legacy route's materialization owns the fd.
+                | FdWriteEndpoint::PipeChannel(_)
                 | FdWriteEndpoint::ProcContentWrite => return Ok(None),
             };
             if !is_default_slot(&slot) {
@@ -462,6 +466,11 @@ impl Executor {
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
                 | FdWriteEndpoint::FullDevice
+                // rubash#2385: a complementary channel end cannot be
+                // a child handle either — the in-memory queue stays
+                // in the parent (the spawn delivery's sink-file
+                // materialization owns the inherited case).
+                | FdWriteEndpoint::PipeChannel(_)
                 | FdWriteEndpoint::ProcContentWrite => None,
             }
         };
@@ -951,6 +960,9 @@ impl Executor {
                     // apply_external_stdout_target — a fresh
                     // O_APPEND open of the resolved regular file.
                     process.stdout(Stdio::from(opened?));
+                } else if self.apply_external_complementary_target(process, &target, false)? {
+                    // rubash#2385: complementary-end target (see
+                    // apply_external_stdout_target's arm).
                 } else if self.has_output_fd_target(&target) {
                     process.stdout(Stdio::from(self.open_output_fd_append(&target)?));
                 } else if redirect_target_fd(&target).is_none() {
@@ -1000,6 +1012,57 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#2385: realize a complementary-end target for an
+    /// external child — the target is a PATH spelling naming a pipe
+    /// READ end, so no branch of the callers' chains fires (the
+    /// source has no write endpoint to dup, no file to reopen) and
+    /// without this arm the child silently inherits the real
+    /// stdout/stderr (the #2285 disease, complementary class).
+    /// A kernel-pipe complementary end is a real file description:
+    /// the child holds a dup of it and writes the pipe itself. An
+    /// in-memory channel cannot cross the spawn boundary, so the
+    /// child writes a capture pipe and the post-external routing
+    /// walk appends the drained bytes to the queue (the
+    /// piped-fallback transport). Returns true when it set the
+    /// process's stdio.
+    fn apply_external_complementary_target(
+        &mut self,
+        process: &mut Command,
+        target: &str,
+        stderr: bool,
+    ) -> Result<bool, ExecuteError> {
+        let Some(source) = dev_stdio_redirect_fd(target) else {
+            return Ok(false);
+        };
+        if self.fd_table.output_endpoint(source).is_some() {
+            return Ok(false);
+        }
+        let Some(endpoint) = self.fd_alias_complementary_write_endpoint(source) else {
+            return Ok(false);
+        };
+        match endpoint {
+            FdWriteEndpoint::File(file_fd) => {
+                let dup = crate::fd::duplicate_handle(file_fd.handle)?;
+                let file = crate::fd::handle_to_file(dup);
+                if stderr {
+                    process.stderr(Stdio::from(file));
+                } else {
+                    process.stdout(Stdio::from(file));
+                }
+            }
+            FdWriteEndpoint::PipeChannel(_) => {
+                if stderr {
+                    process.stderr(Stdio::piped());
+                } else {
+                    process.stdout(Stdio::piped());
+                }
+                self.external_stdio_piped_fallback = true;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
     fn apply_external_stdout_target(
         &mut self,
         cmd: &CommandNode,
@@ -1028,6 +1091,9 @@ impl Executor {
             // without this arm no branch fired and the child
             // inherited the real stdout.
             process.stdout(Stdio::from(opened?));
+        } else if self.apply_external_complementary_target(process, target, false)? {
+            // rubash#2385: the spelling names a pipe read end — the
+            // child writes the pipe's other end (see the helper).
         } else if self.has_output_fd_target(target) {
             process.stdout(Stdio::from(self.open_output_fd_append(target)?));
         } else if redirect_target_fd(target).is_none() {
@@ -1071,6 +1137,8 @@ impl Executor {
                 // rubash#2285: fd-2 form of the alias arm in
                 // apply_external_stdout_target.
                 process.stderr(Stdio::from(opened?));
+            } else if self.apply_external_complementary_target(process, &target, true)? {
+                // rubash#2385: complementary-end target, fd-2 form.
             } else if self.has_output_fd_target(&target) {
                 process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
             } else if redirect_target_fd(&target).is_none() {
@@ -1112,6 +1180,9 @@ impl Executor {
                     // rubash#2285: append form of the fd-2 alias arm
                     // above.
                     process.stderr(Stdio::from(opened?));
+                } else if self.apply_external_complementary_target(process, &target, true)? {
+                    // rubash#2385: complementary-end target, fd-2
+                    // append form.
                 } else if self.has_output_fd_target(&target) {
                     process.stderr(Stdio::from(self.open_output_fd_append(&target)?));
                 } else if redirect_target_fd(&target).is_none() {

@@ -1159,6 +1159,7 @@ impl Executor {
             evalerror_line: Cell::new(None),
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
+            exit_trap_ran: Cell::new(false),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),
@@ -1263,7 +1264,29 @@ impl Executor {
             // dup_adopted_fd returns None there, and the stamped
             // value stays authoritative.
             let adopted = crate::fd::dup_adopted_fd(fd);
-            let restore_handle = |stamped: crate::fd::HANDLE| adopted.unwrap_or(stamped);
+            // rubash#2212: the #2333 adoption above assumes the
+            // spawn pinned the descriptor AT `fd` (the external
+            // pin transport). The whitelist respawn transport
+            // instead delivers each extra AT ITS STAMPED NUMBER
+            // (fd/unix.rs spawn_whitelisted), and this child's raw
+            // `fd` can be its own startup file (the respawn script
+            // file, opened read-only) — adopting it made `>&3`
+            // write to a read-only descriptor (EBADF) for every
+            // std-stream ambient delivery. Prefer the stamped
+            // descriptor when it is actually open in this process;
+            // fall back to the at-slot adoption when it is not
+            // (the #2333 pin transport, where the stamped number
+            // names a parent descriptor that never crossed).
+            let restore_handle = |stamped: crate::fd::HANDLE| {
+                #[cfg(unix)]
+                {
+                    let stamped_open = unsafe { libc::fcntl(stamped, libc::F_GETFD) } >= 0;
+                    if stamped_open {
+                        return crate::fd::dup_adopted_fd(stamped as u32).unwrap_or(stamped);
+                    }
+                }
+                adopted.unwrap_or(stamped)
+            };
             let read_rc = read_h.map(|handle| {
                 Rc::new(FileFd {
                     handle: restore_handle(handle),

@@ -360,6 +360,18 @@ impl Executor {
             }
             let _ = self.fd_table.dup_input(fd, alias_fd);
             let _ = self.fd_table.dup_output(fd, alias_fd);
+            // rubash#2385: `<>` of a pipe read end is ONE O_RDWR
+            // description of the pipe in GNU — the dup pair binds the
+            // read direction, but the write direction is the pipe's
+            // OTHER end, which no dup can copy out of a read-only
+            // descriptor. When the pair left the slot without a write
+            // endpoint, the complementary resolver's endpoint is the
+            // write direction.
+            if self.fd_table.output_endpoint(fd).is_none() {
+                if let Some(endpoint) = self.fd_alias_complementary_write_endpoint(alias_fd) {
+                    self.fd_table.open_output(fd, endpoint, dynamic);
+                }
+            }
             self.shell_state.env_vars.remove(&fd_closed_key(fd));
             self.shell_state
                 .env_vars
@@ -1216,6 +1228,12 @@ impl Executor {
         if self.exec_replaced {
             return Ok(exit_status);
         }
+        // rubash#2212: the EXIT trap runs once per exit (see the
+        // exit_trap_ran field) — a later funnel entry for the same
+        // exit must not fire an action the first handler re-registered.
+        if self.exit_trap_ran.get() {
+            return Ok(exit_status);
+        }
         let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.shell_state.env_vars)
         else {
             return Ok(exit_status);
@@ -1223,6 +1241,7 @@ impl Executor {
         if action.is_empty() {
             return Ok(exit_status);
         }
+        self.exit_trap_ran.set(true);
 
         self.exit_code = exit_status;
         // GNU trap.c:1128 run_exit_trap saves the exiting status in
@@ -1269,7 +1288,14 @@ impl Executor {
         // output rides the same open file description as the body — no
         // re-binding here, which would re-open `>file` and truncate what
         // the body already wrote.
+        // rubash#2212: the action runs under the running-trap umbrella
+        // (GNU's `running_trap != 0` at every run_debug_trap call
+        // site), so commands inside the EXIT action take no DEBUG
+        // firing; debug_trap_running is the umbrella bit the funnel
+        // consults.
+        let saved_debug_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        self.debug_trap_running = saved_debug_trap_running;
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.trap_saved_exit_value = prev_saved_exit;
@@ -1308,6 +1334,21 @@ impl Executor {
         seam: crate::debugger::SeamKind,
         command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
+        // GNU gates every run_debug_trap call site on
+        // `signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0`
+        // (execute_cmd.c:704/3047/3519/...): the DEBUG trap never
+        // fires for commands executed inside a trap action. The
+        // EXIT window holds debug_trap_running itself (see
+        // run_exit_trap_for_status), which is the half rubash#2212
+        // proved missing: the EXIT handler's own first command took
+        // a DEBUG firing GNU never makes. The ERR/RETURN/signal
+        // windows are deliberately NOT consulted here — the
+        // post-ERR re-presentation seams (the DEBUG firing GNU
+        // makes for the failing command as its failure propagates
+        // to the caller) run inside this executor's ERR bookkeeping
+        // window, and gating on error_trap_running silences them
+        // (probe rDbg: GNU fires DEBUG between the inner and outer
+        // ERR firings; a gated funnel drops it).
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
         }
@@ -4167,6 +4208,70 @@ impl Executor {
                 line.saturating_sub(1).to_string(),
             ));
         }
+        // rubash#2212: GNU's process_substitute fork (subst.c:6362)
+        // inherits the shell's WHOLE ambient fd table. The output
+        // form's spawn adjudicates it through ambient_procsub_spawn_fd;
+        // the input form must too — an `exec 3>file` / `exec 3<&1` fd
+        // opened by an earlier command reaches a `<(...)` body that
+        // writes `>&3`. Unix-only here: this spawn is a plain
+        // Command::spawn, whose child inherits the inheritable dups
+        // through the raw fd space; the Windows handle-whitelist
+        // transport belongs to the spawn_whitelisted form the output
+        // spawn uses. Parent-side dups close once the spawn lands.
+        let mut ambient_fd_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        #[cfg(unix)]
+        let mut ambient_pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
+        #[cfg(unix)]
+        for (fd, entry) in &self.fd_table.entries {
+            if *fd < 3 || entry.closed {
+                continue;
+            }
+            match self.ambient_procsub_spawn_fd(*fd) {
+                super::external_setup::ProcsubSpawnFd::File { read, write } => {
+                    if let Some(file) = &read {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            env_entries
+                                .push((format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}")));
+                            env_entries.push((
+                                format!("__RUBASH_FD_PATH_{fd}"),
+                                file.path.to_string_lossy().into_owned(),
+                            ));
+                            ambient_fd_dups.push(dup);
+                            ambient_pins.push((dup, *fd));
+                        }
+                    }
+                    if let Some(file) = &write {
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                            env_entries
+                                .push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                            env_entries.push((
+                                format!("__RUBASH_FD_WPATH_{fd}"),
+                                file.path.to_string_lossy().into_owned(),
+                            ));
+                            ambient_fd_dups.push(dup);
+                            ambient_pins.push((dup, *fd));
+                        }
+                    }
+                }
+                super::external_setup::ProcsubSpawnFd::CarrierWrite(path) => {
+                    if let Ok(file) = std::fs::OpenOptions::new().append(true).open(&path) {
+                        let handle = crate::fd::into_handle(file);
+                        if let Ok(dup) = crate::fd::duplicate_handle_inheritable(handle) {
+                            env_entries
+                                .push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                            env_entries.push((
+                                format!("__RUBASH_FD_WPATH_{fd}"),
+                                path.to_string_lossy().into_owned(),
+                            ));
+                            ambient_fd_dups.push(dup);
+                            ambient_pins.push((dup, *fd));
+                        }
+                        crate::fd::close_handle(handle);
+                    }
+                }
+                _ => {}
+            }
+        }
         // rubash#2356: spill + apply the gathered environment (see
         // the gather above).
         let argv_bytes = exe.as_os_str().len() + source.len() + 8;
@@ -4178,8 +4283,24 @@ impl Executor {
         child.stdout(writer);
         child.stderr(Stdio::inherit());
         child.current_dir(&self.shell_state.cwd);
+        // A foreign child ignores the __RUBASH_FD_* env stamps: it
+        // needs the descriptors themselves at their slot numbers
+        // (rubash#1626's pin transport, reused). The pins are the
+        // inheritable dups above; dup2 in pre_exec lands each on its
+        // slot after stdio setup, just before exec.
+        #[cfg(unix)]
+        if !ambient_pins.is_empty() {
+            use std::os::unix::process::CommandExt;
+            let pins = ambient_pins;
+            unsafe {
+                child.pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+            }
+        }
         match child.spawn() {
             Ok(child_proc) => {
+                for dup in &ambient_fd_dups {
+                    crate::fd::close_handle(*dup);
+                }
                 let pid = child_proc.id();
                 self.background_children
                     .insert(pid, crate::fd::SpawnedChild::from(child_proc));
@@ -4194,6 +4315,9 @@ impl Executor {
                 Some(FileFd::from_file(file, format!("<({source})").into()))
             }
             Err(_) => {
+                for dup in &ambient_fd_dups {
+                    crate::fd::close_handle(*dup);
+                }
                 if let Some(path) = &state_temp {
                     let _ = std::fs::remove_file(path);
                 }
@@ -4403,6 +4527,32 @@ impl Executor {
                         }
                         continue;
                     }
+                    // rubash#2385: a PATH-spelled target naming a pipe
+                    // READ end is an open, not a dup — the dup apply
+                    // below would copy the read end's empty write side
+                    // and strand every later write at EBADF, where
+                    // GNU's open attaches to the pipe's other end.
+                    // Only this shape diverts (a `&N` dup spelling and
+                    // every other target keep the arms below).
+                    if !super::execution_misc::redirect_target_is_dup_spelling(&target) {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if self.fd_table.output_endpoint(source_fd).is_none()
+                                && self.fd_alias_complementary_write_available(source_fd)
+                            {
+                                if let Some(endpoint) =
+                                    self.fd_alias_complementary_write_endpoint(source_fd)
+                                {
+                                    self.flush_persistent_output_process_substitution(fd)?;
+                                    self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                    self.record_output_fd_ledger(fd);
+                                    continue;
+                                }
+                            }
+                        }
+                    }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // GNU redir.c: the dup/move apply is guarded by
                         // `redir_fd != redirector` — a self-dup/self-move
@@ -4440,6 +4590,36 @@ impl Executor {
                         self.flush_persistent_output_process_substitution(2)?;
                         self.share_fd_output_file(1, 2, &path, false);
                         continue;
+                    }
+                    // rubash#2385: a spelling target naming a pipe
+                    // READ end binds the pipe's other end — GNU's open
+                    // of the alias attaches there (redir.c redir_open),
+                    // while the literal open below would bind the
+                    // process's own same-numbered descriptor. Only the
+                    // complementary case diverts: a regular-file
+                    // endpoint keeps the fresh-open path below, a
+                    // socket keeps its ENXIO failure, and a source
+                    // WITH a write endpoint keeps the dup serve the
+                    // fall-through reaches.
+                    if let Some(source_fd) = super::execution_misc::dev_stdio_redirect_fd(&target) {
+                        if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                            return Err(ExecuteError::from(crate::posix_errors::path_error(
+                                &target, error,
+                            )));
+                        }
+                        if self.fd_alias_reopen_path(source_fd).is_none()
+                            && self.fd_table.output_endpoint(source_fd).is_none()
+                        {
+                            if let Some(endpoint) =
+                                self.fd_alias_complementary_write_endpoint(source_fd)
+                            {
+                                self.flush_persistent_output_process_substitution(fd)?;
+                                self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                self.record_output_fd_ledger(fd);
+                                continue;
+                            }
+                        }
                     }
                     // rubash#2090: a quoted ">(...)" target is a literal
                     // filename (subst.c:11365-11372), not a span — only a
@@ -4533,6 +4713,35 @@ impl Executor {
                             .env_vars
                             .insert(fd_closed_key(fd), "1".to_string());
                         continue;
+                    }
+                    // rubash#2385: a ReadWrite PATH spelling naming a
+                    // pipe read end is ONE O_RDWR open in GNU — the
+                    // dup copy below would bind the read direction
+                    // only and strand the write direction at EBADF.
+                    // Copy the read side, then install the
+                    // complementary write end. (A plain Input spelling
+                    // keeps the copy alone: an input open of a read
+                    // end IS the read end.)
+                    if redirect.kind == crate::parser::RedirectKind::ReadWrite
+                        && !super::execution_misc::redirect_target_is_dup_spelling(&target)
+                    {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if self.fd_table.output_endpoint(source_fd).is_none()
+                                && self.fd_alias_complementary_write_available(source_fd)
+                            {
+                                if let Some(endpoint) =
+                                    self.fd_alias_complementary_write_endpoint(source_fd)
+                                {
+                                    self.copy_persistent_input_fd(fd, source_fd);
+                                    self.fd_table.open_output(fd, endpoint, fd >= 10);
+                                    self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                    self.record_output_fd_ledger(fd);
+                                    continue;
+                                }
+                            }
+                        }
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // Self-dup/self-move: no-op (rubash#1236).
@@ -4990,6 +5199,18 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(fd_output_key(target_fd), "/proc/self/status".to_string());
+                self.shell_state
+                    .env_vars
+                    .remove(&fd_output_process_substitution_key(target_fd));
+            }
+            Some(FdWriteEndpoint::PipeChannel(_)) => {
+                // rubash#2385: a complementary channel end has no
+                // respellable target — the in-memory queue cannot
+                // travel into a respawned shell — so the ledger
+                // clears, exactly the None arm's record; the fd's
+                // spawn delivery (sink materialization) is the
+                // boundary a child actually meets.
+                self.shell_state.env_vars.remove(&fd_output_key(target_fd));
                 self.shell_state
                     .env_vars
                     .remove(&fd_output_process_substitution_key(target_fd));

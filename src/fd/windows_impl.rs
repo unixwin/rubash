@@ -687,6 +687,15 @@ pub fn is_pipe_handle(h: HANDLE) -> bool {
     (unsafe { GetFileType(h) }) == FILE_TYPE_PIPE
 }
 
+/// rubash#2385: no Windows twin of the unix magic-link open exists —
+/// a pipe handle is directional and carries no complementary-open
+/// operation — so the alias layer's complementary resolver always
+/// declines for kernel pipes here (in-memory channels still resolve;
+/// see the unix implementation for the real open).
+pub fn complementary_write_file(_h: HANDLE) -> Option<std::fs::File> {
+    None
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GetNamedPipeInfo(

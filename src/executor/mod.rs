@@ -240,7 +240,9 @@ use execution_misc::*;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };
-use fd_table::{FdReadEndpoint, FdTable, FdWriteEndpoint, FileFd, MaterializedRead};
+use fd_table::{
+    FdReadEndpoint, FdTable, FdWriteEndpoint, FileFd, MaterializedRead, PipeChannelEnd,
+};
 use function_env::*;
 use local_helpers::*;
 use parameter_case::*;
@@ -1238,6 +1240,18 @@ pub struct Executor {
     /// does not fire it a second time. Reset at each execute_ast loop
     /// iteration, like command_expansion_failed.
     pub(crate) err_trap_fired_at_dispatch: Cell<bool>,
+    /// rubash#2212: the EXIT trap has run for this executor's exit.
+    /// GNU runs it exactly once per shell exit (shell.c exit_shell ->
+    /// trap.c run_exit_trap); rubash's exit funnel is entered from
+    /// several paths (the `exit` builtin's dispatch, the script
+    /// finish, subshell finishes), and take_exit_trap's take
+    /// semantics alone do not stop a second entry from firing an
+    /// action the first handler RE-REGISTERED while running (bats'
+    /// exec-suite teardown does exactly that, and GNU never fires
+    /// the new registration during the same exit). Set when an
+    /// action actually runs; later funnel entries return the status
+    /// without running anything.
+    pub(crate) exit_trap_ran: Cell<bool>,
     /// rubash#1164: GNU samples `was_error_trap` (execute_cmd.c:914/851 —
     /// signal_is_trapped(ERROR_TRAP) && !signal_is_ignored) BEFORE a
     /// command executes and adjudicates that command's failure against the
