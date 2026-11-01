@@ -262,6 +262,32 @@ impl Executor {
         if !in_process_close_snapshots.is_empty() {
             self.restore_fd_var_close_snapshots(in_process_close_snapshots);
         }
+        // rubash#2476: fold a buffered-write failure the dispatch
+        // left unconsumed into this command's status. GNU's output
+        // builtins return sh_chkwrite's verdict (builtins/common.c:
+        // 319): when flushing the builtin's stdout fails, the
+        // builtin returns EXECUTION_FAILURE whatever its payload
+        // logic computed. rubash's write machinery records the
+        // failure on last_builtin_write_failed and prints the
+        // diagnostic; the echo/printf/pwd dispatches fold the flag
+        // themselves, but the listing dispatches (declare/typeset,
+        // alias, set, export -p, umask, ...) never did, so their
+        // status stayed 0 next to a correct diagnostic — in-session
+        // (`declare -p x >&-`) and in a child born with fd 1 closed
+        // alike. This funnel is the one completion point every
+        // simple command passes, so the fold lives here instead of
+        // in each dispatch: lift a success status to 1 when the
+        // flag is set. A status the command already failed with is
+        // never rewritten — a usage-error path writes no stdout
+        // payload and never sets the flag. Compound commands are
+        // excluded: their inner commands complete through this
+        // same funnel one by one and fold there.
+        if !super::pipeline_exec::command_is_compound_pipeline_stage(cmd)
+            && self.take_builtin_write_failed()
+            && self.exit_code == 0
+        {
+            self.exit_code = 1;
+        }
         // rubash#2174: GNU flushes its stdio stdout after EVERY builtin
         // or function executed in the current shell context
         // (execute_cmd.c:5648 execute_builtin_or_function:
