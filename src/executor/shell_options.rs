@@ -3066,6 +3066,25 @@ impl Executor {
                     // session (niubash#660 resume semantics).
                     self.reload_history_file_on_rearm();
                 }
+                if enabled && (option_name == "vi" || option_name == "emacs") {
+                    // builtins/set.def:200,235: the vi/emacs entries'
+                    // setter IS set_edit_mode (set.def:424-447) — a
+                    // FLAG_ON runs rl_variable_bind("editing-mode",
+                    // name), and sv_editmode (lib/readline/bind.c:
+                    // 2092-2110) moves the one current-keymap cell
+                    // (_rl_keymap) the bind builtin reads
+                    // (bind.def:205-216). Every -o write funnels
+                    // through set_minus_o_option (set.def:476-491) into
+                    // that setter, so the bind belongs at this
+                    // application site too — the slow path's bridge in
+                    // execute_set keys on the PRIOR option state, which
+                    // this fast path has already moved by the time the
+                    // slow path runs, so without this hook `set -o vi`
+                    // never moved the keymap at all (rubash#2386).
+                    self.bind_registry()
+                        .borrow_mut()
+                        .set_readline_variable("editing-mode", option_name);
+                }
                 if option_name == "ignoreeof" {
                     // set.def:388-399 set_ignoreeof binds/unbinds IGNOREEOF —
                     // mirror the env write into the typed owner expansion

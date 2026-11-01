@@ -305,6 +305,16 @@ impl Executor {
                 continue;
             }
             crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
+            if enabled && (name == "vi" || name == "emacs") {
+                // The flip runs the option's own set function
+                // (set.def:358-386): for vi/emacs that is set_edit_mode
+                // (set.def:424-447), whose FLAG_ON arm binds the
+                // editing-mode readline variable — the registry's
+                // current keymap follows the restore (rubash#2386).
+                self.bind_registry()
+                    .borrow_mut()
+                    .set_readline_variable("editing-mode", name);
+            }
             if name == "ignoreeof" {
                 // Same typed-owner mirror as the `set -o ignoreeof` path —
                 // set.def:388-399 binds IGNOREEOF=10 or unbinds it.
