@@ -10,6 +10,7 @@ pub mod command;
 pub mod complete;
 pub mod declare;
 pub mod disown;
+pub(crate) mod dynamic;
 pub mod echo;
 pub mod enable;
 pub mod eval;

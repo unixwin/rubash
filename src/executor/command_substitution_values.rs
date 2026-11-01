@@ -1155,9 +1155,12 @@ impl Executor {
                 .and_then(|value| value.parse::<usize>().ok())
                 .or_else(|| {
                     Some(
-                        crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
-                            .len()
-                            .saturating_sub(1),
+                        crate::builtins::pushd::load_stack(
+                            &self.shell_state.env_vars,
+                            &self.shell_state.cwd,
+                        )
+                        .len()
+                        .saturating_sub(1),
                     )
                 });
         }
@@ -1173,9 +1176,12 @@ impl Executor {
             .get("NDIRS")
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or_else(|| {
-                crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
-                    .len()
-                    .saturating_sub(1)
+                crate::builtins::pushd::load_stack(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                )
+                .len()
+                .saturating_sub(1)
             });
         ndirs.checked_sub(rhs)
     }

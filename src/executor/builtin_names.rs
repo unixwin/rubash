@@ -133,7 +133,10 @@ pub fn builtin_names() -> &'static [&'static str] {
 }
 
 pub(in crate::executor) fn is_shell_builtin_name(name: &str) -> bool {
-    BUILTIN_NAMES.binary_search(&name).is_ok()
+    // The compiled table plus process-global `enable -f` builtins.  GNU
+    // keeps both in shell_builtins, so tempenv binding and command
+    // resolution treat a loadable builtin exactly like a static one.
+    BUILTIN_NAMES.binary_search(&name).is_ok() || crate::builtins::dynamic::is_loaded(name)
 }
 
 #[cfg(test)]

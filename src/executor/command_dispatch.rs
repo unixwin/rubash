@@ -684,10 +684,52 @@ impl Executor {
         if crate::builtins::enable::is_disabled(&self.shell_state.env_vars, word) {
             return self.execute_external(cmd);
         }
+        // GNU find_shell_builtin sees dynamically loaded entries in
+        // shell_builtins (enable.def:449-466), so a loadable builtin
+        // shadows the compiled table exactly like a static one.
+        if self.execute_dynamic_builtin_command(cmd, word)? {
+            return Ok(());
+        }
         if let Some(result) = self.execute_primary_builtin_command(cmd, word)? {
             return result;
         }
         self.execute_late_builtin_command(cmd, word)
+    }
+
+    /// Run NAME if it was installed by `enable -f`.  The plugin receives
+    /// GNU's `WORD_LIST` of arguments (no command word) and returns the
+    /// builtin status directly (`sh_builtin_func_t`, general.h:240).
+    pub(in crate::executor) fn execute_dynamic_builtin_command(
+        &mut self,
+        cmd: &CommandNode,
+        word: &str,
+    ) -> Result<bool, ExecuteError> {
+        if !crate::builtins::dynamic::is_loaded(word) {
+            return Ok(false);
+        }
+        // rubash#2397: execute_cmd.c:4810-4813 roll, same as the static
+        // primary/late slots.
+        self.note_builtin_dispatch(Self::builtin_dispatch_class(word));
+        // GNU runs the builtin's redirections before its function and lets
+        // it write to those descriptors.  The plugin writes through libc,
+        // so its fd 1/2 bytes are captured and replayed through the same
+        // buffered router every in-process builtin uses (redirects,
+        // command substitution, pipeline stages).
+        // execute_cmd.c:5097 passes `words->next` — arguments only.
+        let args = cmd.words.get(1..).unwrap_or(&[]);
+        let Some(output) = crate::builtins::dynamic::call_captured(word, args) else {
+            self.exit_code = 1;
+            return Ok(true);
+        };
+        // execute_cmd.c:4881 EX_DISKFALLBACK: the builtin declined and
+        // asks the shell to run the disk command of the same name.
+        if output.status == 262 {
+            self.execute_external(cmd)?;
+            return Ok(true);
+        }
+        self.exit_code = crate::builtins::dynamic::normalize_builtin_status(output.status);
+        self.write_buffered_builtin_output(cmd, &output.stdout, &output.stderr)?;
+        Ok(true)
     }
 }
 

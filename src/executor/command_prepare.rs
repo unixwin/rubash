@@ -3657,6 +3657,32 @@ impl Executor {
         // expansion does not reorder leading words).
         variable_expanded.words =
             self.expand_aliases_with_raw(&variable_expanded.words, original_raws);
+        // rubash#2410: alias VALUE text is re-lexed by GNU at parse time
+        // (parse.y push_string input stream), so a process substitution
+        // spelled by an alias value IS source syntax — but it reaches
+        // execution with no parse record, because expansion dropped the
+        // word metadata and the alias text was never parsed as a word.
+        // Record provenance for the alias-introduced leading words that
+        // carry a substitution, exactly as WordMetadata::new records a
+        // parsed word, so materialization serves them through the
+        // recorded-substitution arm instead of the text re-scan arm
+        // (which is now gated on parse provenance in
+        // command_with_process_substitution_files).
+        let introduced = self.alias_introduced_words.get();
+        for index in 0..introduced.min(variable_expanded.words.len()) {
+            let word = variable_expanded.words[index].clone();
+            let metadata = crate::parser::WordMetadata::new(index, word.clone(), word);
+            if metadata.process_substitutions.is_empty() {
+                continue;
+            }
+            variable_expanded
+                .word_metadata
+                .retain(|existing| existing.word_index != index);
+            variable_expanded
+                .process_substitutions
+                .extend(metadata.process_substitutions.iter().cloned());
+            variable_expanded.word_metadata.push(metadata);
+        }
         variable_expanded
     }
 

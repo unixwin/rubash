@@ -498,6 +498,40 @@ impl Executor {
         )
     }
 
+    /// GNU `expand_word` + `string_list` over one command line — the
+    /// expansion tail of bashline.c:2982 `shell_expand_line`, after
+    /// the host's history/alias legs. The line is split into shell
+    /// words with quote information preserved
+    /// (`parse.y`/`quotes.rs` quote removal), each word expands
+    /// through the engine (`expand_word`), unquoted results
+    /// field-split on IFS (subst.c `expand_word` → `word_list_split`),
+    /// and the fields rejoin with single spaces (`string_list`).
+    ///
+    /// Filename globbing is deliberately NOT performed: GNU's
+    /// `expand_string`/`expand_word` comment says globbing belongs to
+    /// command expansion, never to word or string expansion, and
+    /// `shell_expand_line` calls `expand_word` (bashline.c:3031).
+    /// A quoted expansion keeps its spacing (`"$v"` with `a  b`
+    /// stays one word); an unquoted one splits (`echo $v` → `echo
+    /// a b`).
+    pub(crate) fn expand_shell_words(&self, line: &str) -> String {
+        let ifs = self.shell_state.env_vars.get("IFS").map(String::as_str);
+        let mut fields: Vec<String> = Vec::new();
+        for (word, quoted) in
+            crate::executor::alias_helpers::split_shell_words_with_quote_info(line)
+        {
+            let expanded = self.expand_word(&word);
+            if quoted {
+                fields.push(expanded);
+            } else {
+                fields.extend(crate::executor::arrays::field_split_values_with_ifs(
+                    &expanded, ifs,
+                ));
+            }
+        }
+        fields.join(" ")
+    }
+
     pub(in crate::executor) fn expand_braced_parameter_word(
         &self,
         word: &str,
@@ -1394,5 +1428,62 @@ mod braced_name_gate_tests {
                 "unexpected bad substitution: {name:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod expand_shell_words_tests {
+    use crate::executor::Executor;
+
+    // bashline.c:2982 shell_expand_line's expansion tail: expand_word
+    // (which field-splits) + string_list. GNU oracle pins (`bash
+    // 5.3.20`, M-C-e followed by C-x C-e to dump the buffer):
+    //   VAR='a  b'; echo $VAR        -> "echo a b"
+    //   VAR='a  b'; echo "$VAR"      -> "echo a  b"  (quotes removed)
+    //   echo *                       -> "echo *"     (no globbing)
+    //   echo $'x\ty'                 -> "echo x<TAB>y"
+    #[test]
+    fn unquoted_expansions_field_split_and_rejoin_with_one_space() {
+        let mut executor = Executor::new();
+        executor.set_env("NIU_T", "a  b");
+        assert_eq!(executor.expand_shell_words("echo $NIU_T"), "echo a b");
+    }
+
+    #[test]
+    fn quoted_expansions_keep_their_spacing() {
+        let mut executor = Executor::new();
+        executor.set_env("NIU_T", "a  b");
+        assert_eq!(executor.expand_shell_words("echo \"$NIU_T\""), "echo a  b");
+        assert_eq!(executor.expand_shell_words("echo '$NIU_T'"), "echo $NIU_T");
+    }
+
+    #[test]
+    fn filename_globbing_is_not_part_of_word_expansion() {
+        let executor = Executor::new();
+        assert_eq!(executor.expand_shell_words("echo *"), "echo *");
+        assert_eq!(
+            executor.expand_shell_words("echo /definitely-no-such-dir-zzz/*"),
+            "echo /definitely-no-such-dir-zzz/*"
+        );
+    }
+
+    #[test]
+    fn ansi_c_quoted_words_stay_one_field() {
+        let executor = Executor::new();
+        assert_eq!(executor.expand_shell_words("echo $'x\\ty'"), "echo x\ty");
+    }
+
+    #[test]
+    fn ifs_controls_the_split_set() {
+        let mut executor = Executor::new();
+        executor.set_env("IFS", ":");
+        executor.set_env("NIU_T", "a:b");
+        assert_eq!(executor.expand_shell_words("echo $NIU_T"), "echo a b");
+    }
+
+    #[test]
+    fn empty_line_stays_empty() {
+        let executor = Executor::new();
+        assert_eq!(executor.expand_shell_words(""), "");
     }
 }

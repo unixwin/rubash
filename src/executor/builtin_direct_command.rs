@@ -79,6 +79,12 @@ impl Executor {
         // restores the pre-note value.
         let tracker_before_builtin_redispatch = self.shell_state.last_dispatch_was_eval_or_source;
         self.note_simple_command_dispatch(name);
+        // GNU builtins/builtin.def calls the named builtin's function
+        // directly; loadable entries are part of shell_builtins, so
+        // `builtin NAME` reaches them through the same table.
+        if self.execute_dynamic_builtin_command(&builtin_cmd, name)? {
+            return Ok(());
+        }
         match name {
             ":" => {
                 let redirect_failed =

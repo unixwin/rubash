@@ -5422,9 +5422,11 @@ fn decode_bind_keyseq(written: &str) -> Vec<char> {
 /// emacs-meta / emacs-ctlx submaps — in GNU those are reached through
 /// the ESC / C-x prefixes, which the flat sequence match subsumes.
 /// `set editing-mode vi` (registry state) switches to the vi-insert
-/// family; keymap-less entries always count (the registry records
-/// `None` for "the current keymap", which at bind time in a vi shell
-/// IS vi-insert, and in an emacs shell is emacs-standard).
+/// family. Registered entries carry the concrete keymap they were
+/// bound in — the registry resolves a keymap-less registration to
+/// its then-current keymap (rubash#2386) — and match by it; a
+/// keymap-less entry constructed outside the registry still counts
+/// for either family.
 fn bind_table_for<'a>(
     executor: &Executor,
     st: &'a mut EditState,

@@ -49,8 +49,11 @@ pub struct BindEntry {
     pub kind: BindKind,
     /// `-m keymap` target (bind.def:37-40): emacs, emacs-standard,
     /// emacs-meta, emacs-ctlx, vi, vi-move, vi-command, vi-insert. `None`
-    /// means the current keymap, which is emacs-standard in the default
-    /// editing mode.
+    /// names the registry's current keymap; [`BindRegistry::register`]
+    /// resolves it to that concrete keymap before storing, because
+    /// rl_parse_and_bind writes into one concrete map — GNU has no
+    /// floating binding — so a stored entry always names the map it
+    /// was bound in (rubash#2386).
     pub keymap: Option<String>,
 }
 
@@ -91,6 +94,10 @@ pub struct BindRegistry {
     /// (oracle: `bind -r "\C-x"` leaves `\C-x\C-?` bound, because
     /// unbind_keyseq only acts when the sequence resolves to a
     /// function). Registering the sequence again clears its removal.
+    /// The keymap is stored resolved (the `-m` map, or the map that
+    /// was current when the removal landed, normalized): GNU deletes
+    /// from one concrete map, so a later editing-mode flip must not
+    /// reinterpret the tombstone (rubash#2386).
     pub removals: Vec<(String, Option<String>)>,
     /// The readline kill ring (lib/readline/kill.c): text killed by
     /// the line editor, newest entry last, shared by every editor
@@ -151,22 +158,51 @@ impl BindRegistry {
             .map(|(_, value)| value.as_str())
     }
 
+    /// The registry's current keymap, normalized — the mirror of
+    /// readline's `_rl_keymap`. sv_editmode (lib/readline/bind.c:2097,
+    /// 2104) and the `keymap` variable's setter (bind.c:2517) keep
+    /// `_rl_keymap` in step with the `keymap` variable, and every
+    /// no-`-m` listing/query/unbind reads the current map
+    /// (bind.def:205-216; bind.c:2743 rl_function_dumper, :2753
+    /// rl_print_keybinding; bind.def:386 unbind_command). The
+    /// registry's variable table is that same mirror, so the current
+    /// keymap is the table's `keymap` row, normalized (rubash#2386).
+    fn current_keymap(&self) -> String {
+        normalize_keymap_name(self.variable_value("keymap").unwrap_or("emacs")).to_string()
+    }
+
+    /// Resolve an optional keymap argument the way the C does: an
+    /// explicit name names its map; `None` is the current keymap.
+    fn resolve_keymap(&self, keymap: Option<&str>) -> String {
+        match keymap {
+            Some(name) => normalize_keymap_name(name).to_string(),
+            None => self.current_keymap(),
+        }
+    }
+
     /// Insert or replace the binding for `(keyseq, keymap)`. GNU's
     /// rl_generic_bind replaces any previous binding of the same sequence.
     /// Registering also revives a sequence a `bind -r`/`-u` removed:
     /// the removal record for `(keyseq, keymap)` is cleared.
-    pub fn register(&mut self, entry: BindEntry) {
+    /// A keymap-less entry is stamped with the current keymap (see
+    /// [`BindEntry::keymap`]): the binding lands in the map that is
+    /// current at registration time and stays there across later
+    /// editing-mode flips, exactly like a slot in a C keymap.
+    pub fn register(&mut self, mut entry: BindEntry) {
+        if entry.keymap.is_none() {
+            entry.keymap = Some(self.current_keymap());
+        }
         let wanted =
             normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard")).to_string();
         self.removals.retain(|(seq, keymap)| {
             !(seq == &entry.keyseq
                 && normalize_keymap_name(keymap.as_deref().unwrap_or("emacs-standard")) == wanted)
         });
-        match self
-            .entries
-            .iter_mut()
-            .find(|existing| existing.keyseq == entry.keyseq && existing.keymap == entry.keymap)
-        {
+        match self.entries.iter_mut().find(|existing| {
+            existing.keyseq == entry.keyseq
+                && normalize_keymap_name(existing.keymap.as_deref().unwrap_or("emacs-standard"))
+                    == wanted
+        }) {
             Some(existing) => existing.kind = entry.kind,
             None => self.entries.push(entry),
         }
@@ -175,23 +211,26 @@ impl BindRegistry {
 
     /// Record one `bind -r`/`-u` removal of an exact sequence in one
     /// keymap (see the `removals` field: GNU mutates the map itself,
-    /// defaults included). Idempotent.
+    /// defaults included). The keymap is stored resolved (an explicit
+    /// `-m` map, or the current map for a plain removal): GNU deletes
+    /// from one concrete map, so the tombstone must not move when the
+    /// editing mode later flips (rubash#2386). Idempotent.
     fn record_removal(&mut self, keyseq: &str, keymap: Option<&str>) {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let wanted = self.resolve_keymap(keymap);
         let exists = self.removals.iter().any(|(seq, bound)| {
             seq == keyseq
                 && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
         });
         if !exists {
-            self.removals
-                .push((keyseq.to_string(), keymap.map(str::to_string)));
+            self.removals.push((keyseq.to_string(), Some(wanted)));
             self.generation += 1;
         }
     }
 
     /// Is `keyseq` removed in `keymap` (a `bind -r`/`-u` record)?
+    /// A `None` keymap is the current keymap, as in the C.
     fn is_removed(&self, keyseq: &str, keymap: Option<&str>) -> bool {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let wanted = self.resolve_keymap(keymap);
         self.removals.iter().any(|(seq, bound)| {
             seq == keyseq
                 && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
@@ -257,26 +296,28 @@ impl BindRegistry {
     /// keymap's default sequences for the function are recorded as
     /// removed (rubash#2337).
     pub fn unbind_function_for_keymap(&mut self, name: &str, keymap: Option<&str>) {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let wanted = self.resolve_keymap(keymap);
         self.entries.retain(|entry| {
             !(matches!(&entry.kind, BindKind::Function { name: bound } if bound == name)
                 && normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard"))
                     == wanted)
         });
-        for (seq, bound) in crate::builtins::bind::default_bindings_for_keymap(keymap) {
+        for (seq, bound) in crate::builtins::bind::default_bindings_for_keymap(Some(&wanted)) {
             if *bound == name {
-                self.record_removal(seq, keymap);
+                self.record_removal(seq, Some(&wanted));
             }
         }
     }
 
-    /// Bindings restricted to one keymap (`None` keymap counts as
-    /// emacs-standard, the default current keymap).
+    /// Bindings restricted to one keymap (`None` keymap counts as the
+    /// current keymap, as in the C — rubash#2386). A stored entry with
+    /// no keymap (constructible only outside [`BindRegistry::register`],
+    /// which stamps one) keeps the legacy emacs-standard reading.
     pub fn entries_for_keymap<'a>(
         &'a self,
         keymap: Option<&'a str>,
     ) -> impl Iterator<Item = &'a BindEntry> + 'a {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let wanted = self.resolve_keymap(keymap);
         self.entries
             .iter()
             .filter(move |entry| match entry.keymap.as_deref() {
@@ -293,7 +334,7 @@ impl BindRegistry {
     /// sequence may be a DEFAULT binding, and GNU deletes those too
     /// (rubash#2337). Returns true when an entry went away.
     pub fn unbind_keyseq_for_keymap(&mut self, keyseq: &str, keymap: Option<&str>) -> bool {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
+        let wanted = self.resolve_keymap(keymap);
         let before = self.entries.len();
         self.entries.retain(|entry| {
             if entry.keyseq != keyseq {
@@ -306,7 +347,7 @@ impl BindRegistry {
         if removed {
             self.generation += 1;
         }
-        self.record_removal(keyseq, keymap);
+        self.record_removal(keyseq, Some(&wanted));
         removed
     }
 
@@ -322,22 +363,23 @@ impl BindRegistry {
     /// own function bindings join the list. The merged list is sorted
     /// by translated key bytes, which is the C scan's order.
     pub fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
-        let wanted = normalize_keymap_name(keymap.unwrap_or("emacs-standard"));
-        let mut seqs: Vec<String> = crate::builtins::bind::default_bindings_for_keymap(keymap)
-            .iter()
-            .filter(|(_, bound)| *bound == function)
-            .map(|(seq, _)| seq.to_string())
-            .filter(|seq| {
-                !self.is_removed(seq, keymap)
-                    && !self.entries.iter().any(|entry| {
-                        entry.keyseq == *seq
-                            && normalize_keymap_name(
-                                entry.keymap.as_deref().unwrap_or("emacs-standard"),
-                            ) == wanted
-                    })
-            })
-            .collect();
-        for entry in self.entries_for_keymap(keymap) {
+        let wanted = self.resolve_keymap(keymap);
+        let mut seqs: Vec<String> =
+            crate::builtins::bind::default_bindings_for_keymap(Some(&wanted))
+                .iter()
+                .filter(|(_, bound)| *bound == function)
+                .map(|(seq, _)| seq.to_string())
+                .filter(|seq| {
+                    !self.is_removed(seq, Some(&wanted))
+                        && !self.entries.iter().any(|entry| {
+                            entry.keyseq == *seq
+                                && normalize_keymap_name(
+                                    entry.keymap.as_deref().unwrap_or("emacs-standard"),
+                                ) == wanted
+                        })
+                })
+                .collect();
+        for entry in self.entries_for_keymap(Some(&wanted)) {
             if let BindKind::Function { name } = &entry.kind {
                 if name == function {
                     seqs.push(entry.keyseq.clone());
@@ -357,9 +399,14 @@ impl BindRegistry {
 }
 
 /// The five keymaps with default tables, as selectors for
-/// [`crate::builtins::bind::default_bindings_for_keymap`].
+/// [`crate::builtins::bind::default_bindings_for_keymap`]. The first
+/// names the emacs-standard table explicitly (it used to be `None`,
+/// back when `None` resolved to emacs-standard unconditionally;
+/// since rubash#2386 `None` resolves to the CURRENT keymap, the
+/// all-keymaps unbind sweeps must name this table to record their
+/// tombstones against the map they actually checked).
 const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
-    None,
+    Some("emacs-standard"),
     Some("emacs-meta"),
     Some("emacs-ctlx"),
     Some("vi-insert"),
@@ -576,6 +623,79 @@ mod tests {
         assert!(registry
             .invoking_keyseqs("backward-char", Some("vi"))
             .is_empty());
+    }
+
+    #[test]
+    fn invoking_keyseqs_follow_the_current_keymap() {
+        // rubash#2386: with no -m, GNU's dumpers read the CURRENT
+        // keymap (_rl_keymap). `set editing-mode vi` moves it to
+        // vi-insert (sv_editmode, bind.c:2097), so the same query
+        // answers from the vi-insert table.
+        let mut registry = BindRegistry::default();
+        registry.set_readline_variable("editing-mode", "vi");
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\eOD", r"\e[D"]
+        );
+        // The `keymap` variable selects the map directly (bind.c:2517),
+        // and reads back under its canonical name (bind.c:3018).
+        registry.set_readline_variable("keymap", "vi-command");
+        assert_eq!(registry.variable_value("keymap"), Some("vi"));
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\C-h", r"\eOD", r"\e[D", "h"]
+        );
+        registry.set_readline_variable("editing-mode", "emacs");
+        assert_eq!(
+            registry.invoking_keyseqs("backward-char", None),
+            vec![r"\C-b", r"\eOD", r"\e[D"]
+        );
+    }
+
+    #[test]
+    fn registration_lands_in_the_keymap_current_at_bind_time() {
+        // rubash#2386: rl_parse_and_bind writes into the current map;
+        // the binding stays there when the mode later flips.
+        let mut registry = BindRegistry::default();
+        registry.set_readline_variable("editing-mode", "vi");
+        registry.register(BindEntry {
+            keyseq: r"\C-a".to_string(),
+            kind: BindKind::Function {
+                name: "kill-line".to_string(),
+            },
+            keymap: None,
+        });
+        assert_eq!(registry.entries[0].keymap.as_deref(), Some("vi-insert"));
+        assert_eq!(registry.invoking_keyseqs("kill-line", None), vec![r"\C-a"]);
+        // The emacs map is untouched by the vi registration: \C-a
+        // still invokes beginning-of-line there (a contains check —
+        // the exact list is the #2338 tables' business, not this
+        // routing test's).
+        assert!(registry
+            .invoking_keyseqs("beginning-of-line", Some("emacs"))
+            .iter()
+            .any(|seq| seq == r"\C-a"));
+        registry.set_readline_variable("editing-mode", "emacs");
+        assert_eq!(registry.invoking_keyseqs("kill-line", None), vec![r"\C-k"]);
+    }
+
+    #[test]
+    fn removal_tombstone_stays_in_its_keymap_across_mode_flips() {
+        // rubash#2386: `bind -r` in vi mode deletes from the vi-insert
+        // map only; flipping back to emacs must not reinterpret the
+        // tombstone as an emacs removal.
+        let mut registry = BindRegistry::default();
+        registry.set_readline_variable("editing-mode", "vi");
+        registry.unbind_keyseq_for_keymap(r"\C-a", None);
+        assert!(registry
+            .invoking_keyseqs("self-insert", Some("vi-insert"))
+            .iter()
+            .all(|seq| seq != r"\C-a"));
+        registry.set_readline_variable("editing-mode", "emacs");
+        assert!(registry
+            .invoking_keyseqs("beginning-of-line", None)
+            .iter()
+            .any(|seq| seq == r"\C-a"));
     }
 
     #[test]

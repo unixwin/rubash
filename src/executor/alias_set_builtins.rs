@@ -123,6 +123,15 @@ impl Executor {
         // the prior state read on), the FLAG_ON re-arm load runs.
         let history_prior =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
+        // GNU builtins/set.def:424-447 set_edit_mode: turning the
+        // `vi` or `emacs` option ON runs rl_variable_bind
+        // ("editing-mode", ...) — readline's current keymap (and the
+        // bind registry's variable-table mirror of it) follows the
+        // option. Only a FLAG_ON transition fires it; turning a mode
+        // OFF never touches the variable, so capture the priors.
+        let vi_prior = crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi");
+        let emacs_prior =
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs");
         let status = crate::builtins::set::set_with_io(
             cmd.words[1..].iter().map(String::as_str),
             &mut self.shell_state.env_vars,
@@ -134,6 +143,18 @@ impl Executor {
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history")
         {
             self.reload_history_file_on_rearm();
+        }
+        if !vi_prior && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi")
+        {
+            self.bind_registry()
+                .borrow_mut()
+                .set_readline_variable("editing-mode", "vi");
+        } else if !emacs_prior
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs")
+        {
+            self.bind_registry()
+                .borrow_mut()
+                .set_readline_variable("editing-mode", "emacs");
         }
         if cmd.words.len() == 1 && !self.posix_mode_enabled() {
             // GNU set.def set_builtin with no arguments calls
