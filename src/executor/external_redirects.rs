@@ -224,15 +224,20 @@ impl Executor {
             None => self.external_stdio_outcome = None,
         }
         // GNU redir.c r_close_this (do_redirection_internal): a closed fd
-        // 1/2 stays closed in the child, its write() fails EBADF, and the
-        // shell reports `write error: Bad file descriptor` with status 1
-        // (builtins/common.c:320-334 sh_chkwrite folds the failed write
-        // into the status). The child itself writes into these pipes; the
-        // parent routes the bytes through the ordered state
-        // (write_external_captured_streams), which produces the diagnostic
-        // and the status. A null-device Stdio instead would silently
-        // swallow the writes (fd_redirects
-        // c_external_command_reports_write_error_for_closed_stdout).
+        // 1/2 stays closed in the child, its write() fails EBADF inside
+        // the child, and the shell reports NOTHING — the child's own
+        // exit status stands (sh_chkwrite, builtins/common.c:320-334,
+        // folds only a BUILTIN's flush failure into a status; a foreign
+        // child's failed writes are invisible to the parent). The child
+        // here writes into these pipes instead; the parent routes the
+        // drained bytes through the ordered state
+        // (write_external_captured_streams) in foreign-drain mode,
+        // which discards bytes bound for a closed target and likewise
+        // leaves the child's status alone (rubash#2378). A null-device
+        // Stdio instead would silently swallow the writes (fd_redirects
+        // c_external_command_reports_write_error_for_closed_stdout —
+        // that pin's helper is an ENOEXEC script whose write error is
+        // the script-internal builtin's, a different shape).
         if self.external_output_fds_closed(cmd) {
             process.stdout(Stdio::piped());
             process.stderr(Stdio::piped());
@@ -1157,10 +1162,12 @@ impl Executor {
     /// state (route_builtin_buffered_output / apply_ordered_output_
     /// redirects) so the bytes land where the command's `>&N` dups point —
     /// the fd table's live bindings — with the plain fd-1/fd-2 defaults
-    /// only when the walk declines. The closed-output shapes report the
-    /// sh_chkwrite `write error: Bad file descriptor` through the same
-    /// ordered state instead (the child's writes cannot reach a closed fd,
-    /// so the routing outcome IS the observable behavior, status 1).
+    /// only when the walk declines. The routing runs in foreign-drain
+    /// mode: bytes bound for a closed target are discarded silently,
+    /// because in GNU the child's write to that closed fd failed inside
+    /// the child and the shell reports nothing (rubash#2378) — the
+    /// sh_chkwrite `write error` verdict belongs to builtins, whose own
+    /// buffered route keeps it.
     pub(in crate::executor) fn write_external_captured_streams(
         &mut self,
         cmd: &CommandNode,

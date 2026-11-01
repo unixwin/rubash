@@ -300,6 +300,18 @@ struct OutputFdState {
     /// are flushed by the routing caller, never written by the
     /// element through a delivered descriptor).
     resolve_only_numbered: bool,
+    /// Post-external drain mode (the same routes that set
+    /// resolve_only_numbered): the bytes being routed were produced by
+    /// a FOREIGN child that already executed with real descriptors.
+    /// GNU never reports a foreign child's failed writes — with a
+    /// closed target fd the child's own write fails inside the child
+    /// (redir.c r_close_this leaves it closed) and the shell keeps the
+    /// child's exit status; the sh_chkwrite verdict
+    /// (builtins/common.c:320-334) folds only a BUILTIN's flush
+    /// failure. A Closed target in this mode therefore DISCARDS the
+    /// drained bytes silently instead of manufacturing the builtin
+    /// verdict in the parent (rubash#2378).
+    foreign_drain: bool,
     /// Pipeline-stage preflight mode (pipeline_stage_output_redirect_
     /// fails): the walk stands in for the element's do_redirections,
     /// which GNU runs AFTER execute_pipeline bound the element's
@@ -1788,8 +1800,12 @@ impl Executor {
         // Post-external routing only (see
         // route_builtin_buffered_output_resolve_only_numbered): the
         // numbered bindings were the child's real descriptors, so the
-        // walk resolves them without re-opening (rubash#2368).
+        // walk resolves them without re-opening (rubash#2368). The
+        // same routes drain a FOREIGN child's bytes, so a closed
+        // target discards instead of reporting the builtin sh_chkwrite
+        // verdict (rubash#2378; see the field's doc).
         state.resolve_only_numbered = resolve_only_numbered;
+        state.foreign_drain = resolve_only_numbered;
         // A failed open in THIS route keeps its historical channel:
         // the error returns as ExecuteError::IoError and the top-level
         // handler renders/routes it (rubash#1844 keeps the walk's
@@ -1804,6 +1820,15 @@ impl Executor {
                     .fd_target(1)
                     .is_some_and(|target| *target == OutputTarget::Closed)
             {
+                if state.foreign_drain {
+                    // rubash#2378: the foreign child's write to the
+                    // closed fd already failed inside the child; drop
+                    // the drained bytes, route stderr on its own
+                    // binding, and leave the child's status alone.
+                    self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
+                    self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
+                    return Ok(true);
+                }
                 if builtin_output_write_is_unchecked(cmd) {
                     return Ok(true);
                 }
@@ -1865,10 +1890,15 @@ impl Executor {
             if builtin_output_write_is_unchecked(cmd) {
                 return Ok(true);
             }
-            self.write_bad_output_fd_diagnostic(cmd, &state)?;
-            self.exit_code = 1;
-            self.last_builtin_write_failed.set(true);
-            return Ok(true);
+            if !state.foreign_drain {
+                self.write_bad_output_fd_diagnostic(cmd, &state)?;
+                self.exit_code = 1;
+                self.last_builtin_write_failed.set(true);
+                return Ok(true);
+            }
+            // rubash#2378 (foreign drain): fall through to the ordered
+            // writes below — write_state_output_or_diagnostic drops the
+            // closed stream silently and still routes the other one.
         }
         // A closed fd 2 (rubash#699 R1.3) is not special-cased here: the
         // ordered walk below writes stdout, then re-visits fd 2 where the
@@ -1929,6 +1959,13 @@ impl Executor {
                     // no status change (rubash#699 R1.3).
                     return Ok(());
                 }
+                if state.foreign_drain {
+                    // rubash#2378: a foreign child's drained stream —
+                    // its write to the closed fd already failed inside
+                    // the child; discard with no diagnostic and no
+                    // status change.
+                    return Ok(());
+                }
                 if builtin_output_write_is_unchecked(cmd) {
                     return Ok(());
                 }
@@ -1982,6 +2019,7 @@ impl Executor {
             diagnostics_muted: false,
             open_failure_via_error: false,
             resolve_only_numbered: false,
+            foreign_drain: false,
             preflight_stage_stdio: false,
             first_open_error: std::cell::RefCell::new(None),
             shared_with: HashMap::new(),
