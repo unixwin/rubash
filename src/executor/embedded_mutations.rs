@@ -2771,6 +2771,49 @@ fn arith_sub_parens_balanced(s: &str) -> bool {
 pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {
+    let (expression, closed) = collect_dollar_bracket_arithmetic_expansion_inner(chars);
+    if !closed {
+        return (expression, false);
+    }
+    // The collected body is an arithmetic string in GNU's alphabet
+    // (subst.c:1301 extract_arithmetic_subst returns plain text), but
+    // the word channels spell a quote character with data carriers —
+    // the C0 DATA_* family and the assignment channel's ASSIGN_* family
+    // (see markers.rs). Restore the plain characters so the evaluation
+    // pipeline's quote machinery (expand_arith_string, subst.c:3981)
+    // sees the same string GNU sees: without this an assignment-context
+    // body reached evalexp still wearing ASSIGN_DATA_DQUOTE around the
+    // text and named the raw carrier as the error token (rubash#2375).
+    // The ASSIGN_ESCAPED_* carriers deliberately keep their spelling:
+    // they denote a CTLESC-quoted character, not a plain one.
+    if !expression.chars().any(|ch| {
+        matches!(
+            ch,
+            crate::executor::markers::ASSIGN_DATA_DQUOTE
+                | crate::executor::markers::ASSIGN_DATA_SQUOTE
+                | crate::executor::markers::ASSIGN_HOISTED_SQUOTE
+                | crate::executor::markers::ASSIGN_DATA_BACKTICK
+                | crate::executor::markers::DATA_DQUOTE
+                | crate::executor::markers::DATA_SQUOTE
+                | crate::executor::markers::DATA_BACKTICK
+        )
+    }) {
+        return (expression, true);
+    }
+    let decoded = expression
+        .replace(crate::executor::markers::ASSIGN_DATA_DQUOTE, "\"")
+        .replace(crate::executor::markers::ASSIGN_DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::ASSIGN_HOISTED_SQUOTE, "'")
+        .replace(crate::executor::markers::ASSIGN_DATA_BACKTICK, "`")
+        .replace(crate::executor::markers::DATA_DQUOTE, "\"")
+        .replace(crate::executor::markers::DATA_SQUOTE, "'")
+        .replace(crate::executor::markers::DATA_BACKTICK, "`");
+    (decoded, true)
+}
+
+fn collect_dollar_bracket_arithmetic_expansion_inner(
+    chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+) -> (String, bool) {
     let mut expression = String::new();
     let mut depth: usize = 1;
     let mut pending: Option<char> = None;
@@ -2784,6 +2827,13 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
             },
         };
         match ch {
+            // GNU subst.c:1420-1425 (extract_delimited_string): a
+            // backslash or CTLESC passes the next character — it can
+            // neither delimit nor nest — and the pair is copied
+            // verbatim (extract_delimited_string's result is a raw
+            // substring, subst.c:1512-1518); what the pair MEANS is
+            // decided later by expand_arith_string's route, not by
+            // the extraction (rubash#2374).
             '\\' | '\u{11}' => {
                 expression.push(ch);
                 match chars.next() {
@@ -2791,13 +2841,26 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
                     None => return (expression, false),
                 }
             }
-            '\'' => {
+            '\''
+            | crate::executor::markers::DATA_SQUOTE
+            | crate::executor::markers::ASSIGN_DATA_SQUOTE
+            | crate::executor::markers::ASSIGN_HOISTED_SQUOTE => {
                 expression.push(ch);
                 loop {
                     match chars.next() {
                         Some(next) => {
                             expression.push(next);
-                            if next == '\'' {
+                            // The closer may wear any of the family's
+                            // carrier spellings — the channels do not
+                            // spell the opener and closer alike (a raw
+                            // `'` opening inside double quotes can
+                            // close as DATA_SQUOTE, rubash#2374).
+                            if matches!(
+                                next,
+                                '\'' | crate::executor::markers::DATA_SQUOTE
+                                    | crate::executor::markers::ASSIGN_DATA_SQUOTE
+                                    | crate::executor::markers::ASSIGN_HOISTED_SQUOTE
+                            ) {
                                 break;
                             }
                         }
@@ -2805,13 +2868,37 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
                     }
                 }
             }
-            '"' | '`' => {
-                let closer = ch;
+            '"'
+            | '`'
+            | crate::executor::markers::DATA_DQUOTE
+            | crate::executor::markers::DATA_BACKTICK
+            | crate::executor::markers::ASSIGN_DATA_DQUOTE
+            | crate::executor::markers::ASSIGN_DATA_BACKTICK => {
+                // Quote/backquote unit, skipped whole (subst.c:1361
+                // via skip_double_quoted / string_extract). The closer
+                // may wear any of the family's carrier spellings.
+                let family: &[char] = if matches!(
+                    ch,
+                    '`' | crate::executor::markers::DATA_BACKTICK
+                        | crate::executor::markers::ASSIGN_DATA_BACKTICK
+                ) {
+                    &[
+                        '`',
+                        crate::executor::markers::DATA_BACKTICK,
+                        crate::executor::markers::ASSIGN_DATA_BACKTICK,
+                    ]
+                } else {
+                    &[
+                        '"',
+                        crate::executor::markers::DATA_DQUOTE,
+                        crate::executor::markers::ASSIGN_DATA_DQUOTE,
+                    ]
+                };
                 expression.push(ch);
                 loop {
                     match chars.next() {
-                        Some('\\') => {
-                            expression.push('\\');
+                        Some(pass @ ('\\' | '\u{11}')) => {
+                            expression.push(pass);
                             match chars.next() {
                                 Some(next) => expression.push(next),
                                 None => return (expression, false),
@@ -2819,7 +2906,7 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
                         }
                         Some(next) => {
                             expression.push(next);
-                            if next == closer {
+                            if family.contains(&next) {
                                 break;
                             }
                         }

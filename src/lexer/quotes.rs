@@ -525,10 +525,15 @@ fn dollar_bracket_body_end(bytes: &[u8], start: usize) -> Option<usize> {
     let mut index = start;
     while index < bytes.len() {
         match bytes[index] {
+            // subst.c:1420-1425: a backslash or CTLESC passes the next
+            // byte. DATA_BACKSLASH (0x14) does NOT pass: it is one
+            // already-quoted backslash unit (a collapsed `\\` pair),
+            // so the byte after it delimits freely (rubash#2374).
             b'\\' | 0x11 => index += 2,
-            b'\'' => {
+            b'\'' | 0x17 => {
                 index += 1;
-                while index < bytes.len() && bytes[index] != b'\'' {
+                // The closer may be spelled raw or as DATA_SQUOTE.
+                while index < bytes.len() && bytes[index] != b'\'' && bytes[index] != 0x17 {
                     index += 1;
                 }
                 if index >= bytes.len() {
@@ -536,14 +541,19 @@ fn dollar_bracket_body_end(bytes: &[u8], start: usize) -> Option<usize> {
                 }
                 index += 1;
             }
-            b'"' | b'`' => {
-                let closer = bytes[index];
+            b'"' | b'`' | 0x18 | 0x1a => {
+                // The closer may wear the family's data spelling
+                // (DATA_DQUOTE 0x18 / DATA_BACKTICK 0x1a).
+                let closers: &[u8] = match bytes[index] {
+                    b'`' | 0x1a => &[b'`', 0x1a],
+                    _ => &[b'"', 0x18],
+                };
                 index += 1;
                 let mut closed = false;
                 while index < bytes.len() {
                     match bytes[index] {
-                        b'\\' => index += 2,
-                        byte if byte == closer => {
+                        b'\\' | 0x11 => index += 2,
+                        byte if closers.contains(&byte) => {
                             index += 1;
                             closed = true;
                             break;
@@ -610,18 +620,25 @@ fn copy_dollar_bracket_verbatim_cursor<'a>(out: &mut String, rest: &'a str) -> &
 /// re-extract the body with GNU's machine (subst.c:1361, see
 /// dollar_bracket_body_end above) before evaluating it.
 ///
-/// With `deescape_dq` (the double-quote cookers) the two escape pairs
-/// GNU's read_token_word resolves inside double quotes before
-/// expansion — `\\` and `\"` — are emitted as the single escaped
-/// character: GNU's arithmetic diagnostics expose the post-resolution
-/// string (`$[1\\+1]` inside quotes errors on `1\+1`, and `$[\"1+1\"]`
-/// evaluates the quote-stripped `1+1`), and rubash's arithmetic
-/// pre-expansion strips a bare `"` pair exactly like the unquoted
-/// form. `\$` and `` \` `` deliberately stay raw: the pre-expansion
-/// already treats them as quoted dollars/backticks, matching GNU's
-/// CTLESC-quoted outcome (`$[\$x+1]` errors on the unexpanded `$x+1`
-/// in both). The raw copiers pass false — their spans are re-cooked
-/// later, and translating there would double-apply.
+/// With `deescape_dq` (the double-quote cookers) the `\"` pair GNU's
+/// read_token_word resolves inside double quotes before expansion is
+/// emitted as the single escaped character: `$[\"1+1\"]` evaluates the
+/// quote-stripped `1+1`, and rubash's arithmetic pre-expansion strips
+/// a bare `"` pair exactly like the unquoted form. The `\\` pair
+/// deliberately stays RAW: it is extraction pass structure
+/// (subst.c:1420-1425 — the first backslash passes the second, so the
+/// `]` after `$[1\\` is the free delimiter), and collapsing it here
+/// left a lone backslash that passed that `]` in the collectors and
+/// the span never closed (`"t6=$[1\\]+2"` printed literally,
+/// rubash#2374). The pair's post-resolution collapse to one backslash
+/// is expand_arith_string's job (string_quote_removal drops a
+/// backslash before a backslash), and its diagnostics still expose
+/// the resolved string (`$[1\\+1]` inside quotes errors on `1\+1`).
+/// `\$` and `` \` `` also stay raw: the pre-expansion already treats
+/// them as quoted dollars/backticks, matching GNU's CTLESC-quoted
+/// outcome (`$[\$x+1]` errors on the unexpanded `$x+1` in both). The
+/// raw copiers pass false — their spans are re-cooked later, and
+/// translating there would double-apply.
 fn copy_dollar_bracket_body_raw_cursor<'a>(
     out: &mut String,
     rest: &'a str,
@@ -633,7 +650,7 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
     let mut seg_start = 0usize;
     while idx < bytes.len() {
         let b = bytes[idx];
-        if deescape_dq && b == b'\\' && matches!(bytes.get(idx + 1), Some(b'\\') | Some(b'"')) {
+        if deescape_dq && b == b'\\' && matches!(bytes.get(idx + 1), Some(b'"')) {
             out.push_str(&rest[seg_start..idx]);
             out.push(char::from(bytes[idx + 1]));
             idx += 2;
@@ -1531,7 +1548,7 @@ fn copy_dollar_bracket_body_raw(
 ) {
     let mut depth = 1usize;
     while let Some(ch) = chars.next() {
-        if deescape_dq && ch == '\\' && matches!(chars.peek(), Some('\\') | Some('"')) {
+        if deescape_dq && ch == '\\' && matches!(chars.peek(), Some('"')) {
             out.push(chars.next().expect("peeked escape char"));
             continue;
         }

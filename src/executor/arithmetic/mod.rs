@@ -100,6 +100,41 @@ pub(super) fn arith_write_recorded(name: &str) -> bool {
     ARITH_WRITES.with(|log| log.borrow().iter().any(|(written, _)| written == name))
 }
 
+impl Executor {
+    /// Rebuild the PIPESTATUS env mirror from the live cell before an
+    /// evaluation. GNU has ONE store (the array object
+    /// variables.c:6291 set_pipestatus_array writes); rubash's pipeline
+    /// completion writes only the live cell in shell_state, so the env
+    /// mirror — the base an indexed arithmetic write renders from and
+    /// the store reads consult once a write is recorded — can hold an
+    /// older assignment-era render. Without the rebuild,
+    /// `false | true` followed by `((PIPESTATUS=3, r1=PIPESTATUS[1]))`
+    /// read element 1 of the stale render, and a `$((PIPESTATUS[0]=3))`
+    /// write in the next word rendered from it (rubash#2384). Skipped
+    /// while a PIPESTATUS write is already recorded: a nested
+    /// evaluation then shares the outer evaluation's mirror, whose base
+    /// IS the outer written state.
+    pub(in crate::executor) fn reconcile_pipestatus_mirror(&mut self) {
+        if self.shell_state.pipestatus_shape != crate::shell::state::PipestatusShape::LiveArray
+            || arith_write_recorded("PIPESTATUS")
+        {
+            return;
+        }
+        let entries: std::collections::BTreeMap<usize, String> = self
+            .shell_state
+            .pipestatus
+            .iter()
+            .map(|(index, status)| (*index as usize, status.to_string()))
+            .collect();
+        let render = crate::executor::arrays::format_indexed_array_storage(entries);
+        if self.shell_state.env_vars.get("PIPESTATUS") != Some(&render) {
+            self.shell_state
+                .env_vars
+                .insert("PIPESTATUS".to_string(), render);
+        }
+    }
+}
+
 fn take_arith_writes() -> Vec<(String, Option<String>)> {
     ARITH_WRITES.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
@@ -771,6 +806,10 @@ impl Executor {
         // evaluation; the state gate proved it empty on entry, so the
         // pre-evaluation clear is a no-op on the fast ticket and skipped.
         if !fast_ticket {
+            // rubash#2384: the PIPESTATUS mirror must reflect the live
+            // cell before the snapshot/write base is taken (checked
+            // before the clear: a recorded write means a nested entry).
+            self.reconcile_pipestatus_mirror();
             ARITH_WRITES.with(|log| log.borrow_mut().clear());
         }
         // Fast ticket: the state gate proved no operand can observe the
@@ -993,6 +1032,9 @@ impl Executor {
             }
         }
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
+        // rubash#2384: mirror coherence before the snapshot (see
+        // reconcile_pipestatus_mirror; checked before the clear).
+        self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
@@ -1213,8 +1255,27 @@ impl Executor {
             false,
             crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
         );
-        let expanded = self.expand_arithmetic_expression_mut(&with_assoc_keys);
-        let expanded = arith_string_quote_removal(&expanded);
+        // GNU expand_arith_string (subst.c:3981) chooses the route on
+        // the EXTRACTED string, before expansion: a string carrying an
+        // expansion character (ARITH_EXP_CHAR, subst.c:3802) goes
+        // through word expansion + dequote and string_quote_removal
+        // NEVER runs on it; a string without one goes through
+        // string_quote_removal (subst.c:12199) on the extracted string
+        // itself and is never word-expanded. The two routes are
+        // exclusive: running the expansion pass first dequotes `\"`
+        // into grouping quotes that a later removal then strips
+        // (`$[\"1+1\"]` evaluated `1+1` where GNU's `"1+1"` is an
+        // operand error, rubash#2375), and routing a plain body away
+        // from removal leaks its raw backslash pairs into diagnostics
+        // (`$(( 1\] ))` reported token `\]` for GNU's `]`,
+        // rubash#2374). Every step of the expansion pass keys on `$`
+        // or an expansion carrier, so a removal-route string has
+        // nothing for it to do.
+        let expanded = if arith_expansion_char_present(&with_assoc_keys) {
+            self.expand_arithmetic_expression_mut(&with_assoc_keys)
+        } else {
+            arith_string_quote_removal(&with_assoc_keys).into_owned()
+        };
         let expression = normalize_arithmetic_quotes(&expanded);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
@@ -1233,6 +1294,9 @@ impl Executor {
             return None;
         }
         // Save a snapshot to detect variable changes from arithmetic side effects
+        // rubash#2384: mirror coherence before the snapshot (see
+        // reconcile_pipestatus_mirror; checked before the clear).
+        self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
         // GNU expr.c: the expansion pass above already ran, so the parser
         // evaluates under evalexp's already-expanded rules — a surviving
@@ -2536,6 +2600,24 @@ fn has_bare_single_quote(expression: &str, _env_vars: &crate::shell::var_table::
         index += 1;
     }
     false
+}
+
+/// Whether an extracted arithmetic string carries an expansion
+/// character in GNU's sense — ARITH_EXP_CHAR (subst.c:3802): `$`,
+/// backquote, or CTLESC. Rubash spellings: `$` and the backtick carriers
+/// are literal, CTLESC is `\u{11}`. A raw backslash pair is NOT an
+/// expansion character: it is what the removal branch's
+/// string_quote_removal adjudicates (subst.c:12199 — dropped before
+/// `[`/`]`/`~` and the CBSDQUOTE set, kept before anything else), and
+/// counting it here routed plain bodies like `1\]` away from that
+/// branch, leaking the raw pair into diagnostics (rubash#2374/#2375).
+pub(in crate::executor) fn arith_expansion_char_present(input: &str) -> bool {
+    input.chars().any(|ch| {
+        matches!(
+            ch,
+            '$' | '`' | '\u{11}' | crate::executor::markers::DATA_BACKTICK
+        )
+    })
 }
 
 /// GNU subst.c:3981 expand_arith_string's quote-removal branch, applied to

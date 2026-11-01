@@ -1051,6 +1051,15 @@ impl Executor {
                             &mut chars,
                         );
                     if closed {
+                        // GNU expand_arith_string (subst.c:3981) picks
+                        // its route on the extracted string: an
+                        // expansion character (ARITH_EXP_CHAR,
+                        // subst.c:3802) sends it through word expansion
+                        // + dequote, and string_quote_removal runs only
+                        // in the no-expansion-character branch
+                        // (rubash#2375).
+                        let route_has_expansion_char =
+                            crate::executor::arithmetic::arith_expansion_char_present(&expression);
                         let expression = self.expand_arithmetic_special_parameters(&expression);
                         // Same unterminated-`${` verdict as the `$((` arm
                         // above: the arithmetic string is parameter-expanded
@@ -1070,9 +1079,13 @@ impl Executor {
                         }
                         // GNU expand_arith_string's quote-removal branch
                         // (subst.c:3981/12199) runs on the expanded string
-                        // before evalexp (rubash#2374).
-                        let expression =
-                            crate::executor::arithmetic::arith_string_quote_removal(&expression);
+                        // before evalexp — only on the route the gate
+                        // above selected (rubash#2374/#2375).
+                        let expression = if route_has_expansion_char {
+                            std::borrow::Cow::Borrowed(expression.as_str())
+                        } else {
+                            crate::executor::arithmetic::arith_string_quote_removal(&expression)
+                        };
                         if let Some(value) =
                             eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
                         {
