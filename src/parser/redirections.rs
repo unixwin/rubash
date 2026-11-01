@@ -317,10 +317,6 @@ pub(super) fn collect_trailing_redirections(
     }
 }
 
-pub(super) fn take_heredoc_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
-    take_redirect_fd_prefix(cmd)
-}
-
 pub(super) fn assign_here_string_redirect(
     command: &mut CommandNode,
     operator: &str,
