@@ -336,7 +336,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use self::path::{
     adopt_orphan_console, apply_required_windows_child_environment,
-    external_command_for_named_program, external_command_for_named_program_with_exec_name,
+    external_command_for_named_program_with_exec_name,
     find_shell, find_user_command, find_user_command_without_hash, shell_path_to_process,
     shell_path_to_windows, standard_path, suppress_orphan_console,
 };
