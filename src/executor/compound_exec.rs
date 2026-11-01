@@ -2766,7 +2766,16 @@ impl Executor {
                 // only admits newline_list after `&`, and `& ; }` is the
                 // syntax error that killed respawned background children
                 // (rubash#294). `&\n}` is the valid GNU spelling.
-                if body_text.ends_with('&') {
+                // Same delimiter-line rule when the body ends with a
+                // heredoc body (rubash#2388's closer logic in
+                // function_command_source_text): the delimiter must stand
+                // alone on its line, so `DELIM; }` leaves the heredoc
+                // unterminated and the respawned child dies at parse
+                // (rubash#2212 cell 118: bats' `usage()` heredoc broke
+                // every async respawn out of bats-main's table).
+                if body_text.ends_with('&')
+                    || crate::executor::command_text::render_ended_with_heredoc()
+                {
                     source.push_str("\n}; ");
                 } else {
                     source.push_str("; }; ");
