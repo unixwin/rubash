@@ -304,6 +304,34 @@ fn completion_merges_engine_and_provider_candidates() {
     );
 }
 
+/// The readline glob-completion source: `bashline.c:4039 glob_complete_word`
+/// calls `shell_glob_filename`, so the public face is the executor's
+/// pathname expansion over the session cwd, not a second glob engine.
+#[test]
+fn glob_filename_uses_engine_pathname_expansion() {
+    let dir = temp_dir("glob-api");
+    for name in ["alpha.txt", "alpine.txt", "beta.log"] {
+        std::fs::write(dir.join(name), name).expect("fixture file");
+    }
+    let mut session = Session::builder()
+        .working_directory(dir)
+        .build()
+        .expect("session builds");
+
+    assert_eq!(
+        session.glob_filename("al*"),
+        vec!["alpha.txt".to_string(), "alpine.txt".to_string()]
+    );
+    assert_eq!(session.glob_filename("*.log"), vec!["beta.log".to_string()]);
+    // Unmatched patterns are an empty list (GLOB_FAILED in the C path).
+    assert!(session.glob_filename("no-such-*").is_empty());
+    // A backslash-quoted star is not a pattern at all.
+    assert!(session.glob_filename("al\\*").is_empty());
+    // `set -f` reaches the same source, since this is pathname expansion.
+    session.run("set -f", &opts()).expect("noglob run");
+    assert!(session.glob_filename("al*").is_empty());
+}
+
 // ---------------------------------------------------------------------------
 // Parse: the tier-B syntax view, and diagnostics as values.
 // ---------------------------------------------------------------------------
