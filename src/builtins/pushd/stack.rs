@@ -1,7 +1,9 @@
 use super::DIR_STACK;
-use crate::executor::path::shell_path_to_windows;
+use crate::builtins::cd::paths::validated_logical_pwd;
+use crate::executor::path::{shell_path_to_windows, shell_pwd_display_path};
 use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
+use std::path::Path;
 
 const SEP: char = crate::executor::markers::DIR_STACK_FIELD_SEP;
 
@@ -12,41 +14,67 @@ pub(super) fn is_stack_index(arg: &str) -> bool {
     !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
 }
 
-pub(crate) fn load_stack(env_vars: &HashMap<String, String>) -> Vec<String> {
-    if let Some(value) = env_vars.get(DIR_STACK) {
-        if !value.is_empty() {
-            // GNU pushd.def:301 pushes the RAW -n operand word (savestring),
-            // so a blank element is a real stack member (`HOME=; pushd -n ~`
-            // yields `<cwd> ""`) and must survive the round trip. Only the
-            // fully-emptied representation (`dirs -c` saving []) falls back
-            // to the live cwd: GNU get_directory_stack
-            // (builtins/pushd.def:669) always appends the working directory
-            // after the pushed entries, so `dirs -c; declare -p DIRSTACK`
-            // prints ([0]="<cwd>") and ${#DIRSTACK[@]} stays 1.
-            return value.split(SEP).map(str::to_string).collect();
-        }
+pub(crate) fn load_stack(env_vars: &HashMap<String, String>, cwd: &Path) -> Vec<String> {
+    let carrier = load_stack_carrier(env_vars);
+    if !carrier.is_empty() {
+        // GNU pushd.def:301 pushes the RAW -n operand word (savestring),
+        // so a blank element is a real stack member (`HOME=; pushd -n ~`
+        // yields `<cwd> ""`) and must survive the round trip. Only the
+        // fully-emptied representation (`dirs -c` saving []) falls back
+        // to the live cwd: GNU get_directory_stack
+        // (builtins/pushd.def:669) always appends the working directory
+        // after the pushed entries, so `dirs -c; declare -p DIRSTACK`
+        // prints ([0]="<cwd>") and ${#DIRSTACK[@]} stays 1.
+        return carrier;
     }
 
-    vec![env_vars
-        .get("PWD")
-        .cloned()
-        .unwrap_or_else(|| "/".to_string())]
+    vec![validated_stack_top(env_vars, cwd)]
+}
+
+/// Element 0 when no stack carrier exists. GNU never stores the current
+/// directory: get_directory_stack (builtins/pushd.def:669) appends
+/// get_working_directory ("dirstack") — the cd.def:610-validated logical
+/// cwd, which honors $PWD only while it still names the working
+/// directory and otherwise reports the physical cwd (the validation
+/// surface `pwd -L` uses, rubash#2143). Reading the raw $PWD variable
+/// here let a forged `PWD=/elsewhere` leak into dirs / ${DIRSTACK[0]} /
+/// ${#DIRSTACK[@]} even though no directory change ever happened
+/// (rubash#2408).
+fn validated_stack_top(env_vars: &HashMap<String, String>, cwd: &Path) -> String {
+    let validated = validated_logical_pwd(env_vars, cwd);
+    shell_pwd_display_path(&validated.to_string_lossy())
+}
+
+/// The stored carrier alone, without the synthesized element 0. GNU's
+/// tilde dirstack lookup (builtins/pushd.def get_dirstack_from_string)
+/// consults pushd_directory_list and $PWD, never the working directory,
+/// so the tilde layer composes from this plus $PWD rather than from
+/// load_stack's validated element 0 (rubash#2408).
+pub(crate) fn load_stack_carrier(env_vars: &HashMap<String, String>) -> Vec<String> {
+    match env_vars.get(DIR_STACK) {
+        Some(value) if !value.is_empty() => value.split(SEP).map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
 }
 
 pub(crate) fn save_stack(env_vars: &mut VarTable, stack: &[String]) {
     env_vars.insert(DIR_STACK.to_string(), stack.join(&SEP.to_string()));
 }
 
-pub(crate) fn stack_value(env_vars: &HashMap<String, String>, index: usize) -> Option<String> {
-    load_stack(env_vars).get(index).cloned()
+pub(crate) fn stack_value(
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+    index: usize,
+) -> Option<String> {
+    load_stack(env_vars, cwd).get(index).cloned()
 }
 
-pub(crate) fn stack_words(env_vars: &HashMap<String, String>) -> String {
-    load_stack(env_vars).join(" ")
+pub(crate) fn stack_words(env_vars: &HashMap<String, String>, cwd: &Path) -> String {
+    load_stack(env_vars, cwd).join(" ")
 }
 
-pub(crate) fn set_stack_value(env_vars: &mut VarTable, index: usize, value: String) {
-    let mut stack = load_stack(env_vars);
+pub(crate) fn set_stack_value(env_vars: &mut VarTable, cwd: &Path, index: usize, value: String) {
+    let mut stack = load_stack(env_vars, cwd);
     if index < stack.len() {
         stack[index] = value;
         save_stack(env_vars, &stack);

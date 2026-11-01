@@ -44,7 +44,7 @@ pub(super) fn current_logical_pwd(env_vars: &HashMap<String, String>, cwd: &Path
 /// (ABSPATH + same_file(temp_string, ".")): $PWD when it names the
 /// session's current directory, the physical session cwd otherwise
 /// (rubash#2143).
-pub(super) fn validated_logical_pwd(env_vars: &HashMap<String, String>, cwd: &Path) -> PathBuf {
+pub(crate) fn validated_logical_pwd(env_vars: &HashMap<String, String>, cwd: &Path) -> PathBuf {
     if let Some(logical) = crate::builtins::pwd::logical_pwd_if_current(cwd, env_vars) {
         return PathBuf::from(logical);
     }

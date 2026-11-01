@@ -1264,7 +1264,7 @@ impl Executor {
 
     pub(in crate::executor) fn dirstack_storage(&self) -> String {
         format_indexed_array_storage(
-            crate::builtins::pushd::load_stack(&self.shell_state.env_vars)
+            crate::builtins::pushd::load_stack(&self.shell_state.env_vars, &self.shell_state.cwd)
                 .into_iter()
                 .enumerate()
                 .collect(),

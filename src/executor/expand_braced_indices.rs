@@ -404,6 +404,7 @@ impl Executor {
         if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
             return Some(crate::builtins::pushd::stack_words(
                 &self.shell_state.env_vars,
+                &self.shell_state.cwd,
             ));
         }
         if let Some(index) = name
@@ -412,8 +413,12 @@ impl Executor {
             .and_then(|index| self.dirstack_subscript(index))
         {
             return Some(
-                crate::builtins::pushd::stack_value(&self.shell_state.env_vars, index)
-                    .unwrap_or_default(),
+                crate::builtins::pushd::stack_value(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    index,
+                )
+                .unwrap_or_default(),
             );
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {

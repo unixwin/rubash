@@ -4,7 +4,12 @@
 //! - builtins/cd.def (`cd_builtin`)
 
 use std::collections::HashMap;
-mod paths;
+
+// `paths` is crate-visible so the directory-stack accessors can consume
+// the ONE validated logical cwd (paths::validated_logical_pwd — the
+// cd.def:610 validation, rubash#2143) for their synthesized element 0
+// instead of trusting a possibly-forged $PWD (rubash#2408).
+pub(crate) mod paths;
 
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 
@@ -193,7 +198,7 @@ where
         } else {
             set_shell_env(env_vars, "PWD", shell_pwd_display_path(&logical_dir));
         }
-        refresh_dirstack_top(env_vars, &shell_pwd_display_path(&logical_dir));
+        refresh_dirstack_top(env_vars, cwd, &shell_pwd_display_path(&logical_dir));
         env_vars.insert("__RUBASH_PHYSICAL_PWD".to_string(), logical_dir.to_string());
         match target.print {
             PrintPath::Always | PrintPath::CdPath => writeln!(stdout, "{logical_dir}")?,
@@ -289,7 +294,7 @@ where
     // The move has committed (the session cwd field above), so the
     // directory stack's top slot follows it now — even when a readonly
     // bind below fails, since GNU's chdir stands in that case too.
-    refresh_dirstack_top(env_vars, &pwd_value);
+    refresh_dirstack_top(env_vars, cwd, &pwd_value);
     // GNU builtins/cd.def:136-175 bindpwd: if PWD or OLDPWD is readonly,
     // bind_variable/setpwd fails and cd returns EXECUTION_FAILURE.
     // The error is emitted by err_readonly (error.c:455) via report_error,
@@ -376,11 +381,17 @@ where
 /// Only a stored stack is touched — with none, load_stack's [PWD]
 /// fallback already tracks every move. pushd/popd maintain their own
 /// slot 0 through their own stack surgery and never pass through here.
-fn refresh_dirstack_top(env_vars: &mut crate::shell::var_table::VarTable, new_pwd: &str) {
+/// (rubash#2408: the no-carrier fallback is the validated logical cwd,
+/// not the raw $PWD variable.)
+fn refresh_dirstack_top(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    cwd: &Path,
+    new_pwd: &str,
+) {
     if env_vars.get(DIR_STACK).is_none_or(|value| value.is_empty()) {
         return;
     }
-    let mut stack = load_stack(env_vars);
+    let mut stack = load_stack(env_vars, cwd);
     match stack.first_mut() {
         Some(top) => *top = new_pwd.to_string(),
         None => stack.push(new_pwd.to_string()),
