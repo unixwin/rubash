@@ -914,21 +914,35 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 // never the "from `(' command" wording (`v=(<(echo` reports
                 // the EOF line, #551 C6, 2026-10-12 WSL GNU 5.3.0 probe).
                 let procsub = i > 0 && matches!(chars[i - 1], '<' | '>');
+                // rubash#2404: a bare `(` inside a P_ARITH body is a
+                // grouping paren of the SAME arithmetic matched pair —
+                // parse_matched_pair (parse.y:3877) only counts it toward
+                // the pair that opened at the arithmetic opener, whose
+                // start_lineno (parse.y:3908-3915) is the EOF report line.
+                // It opens no command context: the pushed frame keeps the
+                // pair's open line with report_open set and stays arith
+                // text, instead of posing as a command subshell whose
+                // yyerror report lands on the EOF line.
+                let arith_group = !procsub && top.is_some_and(|d| d.arith);
                 stack.push(UnclosedDelim {
                     close: ')',
-                    open_line: line,
+                    open_line: if arith_group {
+                        top.map_or(line, |d| d.open_line)
+                    } else {
+                        line
+                    },
                     escapes: true,
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: !procsub && i > 0 && chars[i - 1] == '(',
+                    report_open: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                     funsub: false,
-                    command: !procsub && !(i > 0 && chars[i - 1] == '('),
+                    command: !arith_group && !procsub && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: case_depth,
                     array_list: false,
                     pattern_paren: case_depth > 0 && case_pattern_region,
-                    arith: !procsub && i > 0 && chars[i - 1] == '(',
+                    arith: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                 });
                 comment_start = true;
             }
@@ -5330,21 +5344,32 @@ pub(crate) fn close_char_residuals_advance(
                 // EOF inside it takes the yyerror route — "matching `)'" at
                 // the EOF line. Mirror of the one-shot scan's arm (#551 C6).
                 let procsub = i > 0 && matches!(chars[i - 1], '<' | '>');
+                // rubash#2404: mirror of the one-shot scan's arith-group
+                // rule — a bare `(` inside a P_ARITH body is a grouping
+                // paren of the same arithmetic matched pair
+                // (parse.y:3877 parse_matched_pair counts it; the pair's
+                // start_lineno, parse.y:3908-3915, is the report line),
+                // never a command subshell.
+                let arith_group = !procsub && top.is_some_and(|d| d.arith);
                 state.stack.push(UnclosedDelim {
                     close: ')',
-                    open_line: state.line,
+                    open_line: if arith_group {
+                        top.map_or(state.line, |d| d.open_line)
+                    } else {
+                        state.line
+                    },
                     escapes: true,
                     // `((x` arithmetic takes parse_matched_pair's
                     // start_lineno report like `$((` does; a real nested
                     // subshell reports the EOF line (yyerror).
-                    report_open: !procsub && i > 0 && chars[i - 1] == '(',
+                    report_open: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                     funsub: false,
-                    command: !procsub && !(i > 0 && chars[i - 1] == '('),
+                    command: !arith_group && !procsub && !(i > 0 && chars[i - 1] == '('),
                     term_ready: false,
                     case_depth_at_push: state.case_depth,
                     array_list: false,
                     pattern_paren: state.case_depth > 0 && state.case_pattern_region,
-                    arith: !procsub && i > 0 && chars[i - 1] == '(',
+                    arith: arith_group || (!procsub && i > 0 && chars[i - 1] == '('),
                 });
                 state.comment_start = true;
             }

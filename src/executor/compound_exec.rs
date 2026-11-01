@@ -6285,23 +6285,128 @@ impl Executor {
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
         if !case_pattern_raw_has_quotes(&pattern.raw_text) {
-            // Backslashes in a case pattern are escape characters, not quote
-            // removal subjects (bash execute_cmd.c: patterns do not undergo
-            // quote removal). Protect every `\` (and the legacy `\x18` marker)
-            // through expansion and decode_parameter_pattern_quotes, then
-            // restore the real backslash so case_pattern_matches can apply its
-            // escape semantics (`\]` is a bracket member, `\"` matches `"`).
-            let protected = pattern.text.replace(
-                |c| c == '\\' || c == crate::executor::markers::DATA_DQUOTE,
-                &PROTECTED_CASE_PATTERN_BACKSLASH.to_string(),
-            );
+            // Backslashes in a case pattern are escape characters, not
+            // quote-removal subjects: GNU performs no quote removal on the
+            // pattern (execute_cmd.c:3733-3736) because read_token_word
+            // consumes `\X` as ONE quoted unit at read time
+            // (parse.y:5366-5398: the backslash branch sets
+            // pass_next_character; parse.y:5358-5362 routes the next char
+            // to got_escaped_character, which CTLESC-marks it), and
+            // quote_string_for_globbing (pathexp.c:212) re-emits that
+            // quoting for strmatch after expand_word_leave_quoted
+            // (execute_cmd.c:3712-3725).
+            //
+            // The escape pair must therefore never be split before the
+            // expander. Protecting only the `\` (the former guard scheme)
+            // left the quoted character bare, and the expander re-read it
+            // as syntax: `\"` opened a quote span that quote removal then
+            // deleted (the glob after it collapsed to a literal), `\$`
+            // started a parameter expansion that ate the `$`, and a `\`
+            // inside a `${...}` default was rewritten before the unit's
+            // own grammar could see it (rubash#2421). Walk the text the
+            // way quote_aware_glob_rhs walks a `[[ == ]]` RHS instead:
+            // `\X` pairs outside nested expansion units are emitted
+            // verbatim for the matcher, the runs between them go through
+            // expansion, and a `\` INSIDE a `$(...)`/`${...}`/backtick
+            // unit belongs to that unit's own grammar
+            // (parse.y:3877 parse_matched_pair), so units stay whole
+            // inside their run. The lexer's data-quote carriers
+            // (DATA_DQUOTE / DATA_SQUOTE — its spelling of `\"` / `\'`
+            // in word text) are decoded below to the matcher's escape
+            // spelling for the literal quote.
+            //
             // Use the mutable expander: case pattern expansion is not an
-            // isolated sub-expression — `$((x=1))` in a pattern must keep its
-            // assignment side effects (bash execute_cmd.c evaluates patterns
-            // with the current variable state; case.tests `;&` fall-through).
-            let expanded = self.expand_word_mut(&protected);
-            let decoded = decode_parameter_pattern_quotes(&expanded);
-            let restored = decoded.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
+            // isolated sub-expression — `$((x=1))` in a pattern must keep
+            // its assignment side effects (bash execute_cmd.c evaluates
+            // patterns with the current variable state; case.tests `;&`
+            // fall-through).
+            let chars: Vec<char> = pattern.text.chars().collect();
+            let mut output = String::new();
+            let mut run_start = 0usize;
+            let mut index = 0usize;
+            while index < chars.len() {
+                // Nested expansion units ride inside the current run.
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                    if let Some(close) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                    {
+                        index = close.min(chars.len());
+                        continue;
+                    }
+                }
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    if let Some(close) = skip_braced_case_pattern_unit(&chars, index + 1) {
+                        index = close + 1;
+                        continue;
+                    }
+                }
+                if chars[index] == '`' {
+                    index += 1;
+                    while index < chars.len() && chars[index] != '`' {
+                        if chars[index] == '\\' && index + 1 < chars.len() {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                    if index < chars.len() {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if chars[index] == '\\' {
+                    if run_start < index {
+                        let run: String = chars[run_start..index].iter().collect();
+                        output.push_str(&self.expand_case_pattern_run(&run));
+                    }
+                    // Emit the pair verbatim; a trailing lone `\` emits
+                    // alone (the matcher reads it as a literal backslash).
+                    output.push('\\');
+                    if index + 1 < chars.len() {
+                        output.push(chars[index + 1]);
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                    run_start = index;
+                    continue;
+                }
+                if chars[index] == crate::executor::markers::DATA_DQUOTE
+                    || chars[index] == crate::executor::markers::DATA_SQUOTE
+                {
+                    // The lexer spells an escaped quote in word text as
+                    // the data-quote carrier (markers.rs DATA_DQUOTE /
+                    // DATA_SQUOTE): the backslash was consumed at read
+                    // time and the quote is DATA — exactly GNU's
+                    // CTLESC-marked char (parse.y:5358-5362
+                    // got_escaped_character). Emit the matcher's escape
+                    // spelling for the literal quote. The former scheme
+                    // guarded this carrier as if it were a backslash,
+                    // which collapsed `\"*` to `\*` (rubash#2421). The
+                    // pattern-domain PATTERN_LITERAL_BACKSLASH reading
+                    // of \x18 belongs to strings the parameter machinery
+                    // hands the matcher directly, not to lexer word text
+                    // passing through expansion here.
+                    if run_start < index {
+                        let run: String = chars[run_start..index].iter().collect();
+                        output.push_str(&self.expand_case_pattern_run(&run));
+                    }
+                    output.push('\\');
+                    output.push(if chars[index] == crate::executor::markers::DATA_DQUOTE {
+                        '"'
+                    } else {
+                        '\''
+                    });
+                    index += 1;
+                    run_start = index;
+                    continue;
+                }
+                index += 1;
+            }
+            if run_start < chars.len() {
+                let run: String = chars[run_start..].iter().collect();
+                output.push_str(&self.expand_case_pattern_run(&run));
+            }
+            let restored = output.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
             return std::borrow::Cow::Owned(strip_surrounding_quotes(&restored));
         }
 
@@ -6311,6 +6416,15 @@ impl Executor {
             |word| self.expand_word_mut(word),
             &array_at,
         ))
+    }
+
+    /// One unquoted run of a quote-free case pattern (the text between
+    /// two escape pairs): full mutable expansion plus the pattern quote
+    /// decode, exactly the pipeline the former whole-string guard scheme
+    /// applied to the protected text (rubash#2421).
+    fn expand_case_pattern_run(&mut self, run: &str) -> String {
+        let expanded = self.expand_word_mut(run);
+        decode_parameter_pattern_quotes(&expanded)
     }
 
     /// First element + element count for every `${name[@]}` unit in a
@@ -7491,6 +7605,47 @@ mod case_arm_static_tests {
         match executor.expand_case_pattern(&CasePattern::new("$V".to_string(), 0, 0)) {
             Cow::Owned(text) => assert_eq!(text, "foo"),
             Cow::Borrowed(_) => panic!("dynamic $V borrowed"),
+        }
+    }
+
+    #[test]
+    fn escquote_2421_shapes_expand_like_gnu() {
+        // rubash#2421: an escape pair in a quote-free case pattern must
+        // reach the matcher intact (GNU execute_cmd.c:3712-3736 +
+        // pathexp.c:212 quote_string_for_globbing): the quoted character
+        // is literal, an unquoted `*` after it stays a live glob. Before
+        // the fix the guard scheme detached the `\`, the expander ate
+        // the bare `"`/`$`, and `\"*` collapsed to `\*` (literal star).
+        for arm in [
+            "\\\"*", "\\$*", "\\a*", "\\\\*", "\\\"", "a\\\"b", "\\\"a", "*\\\"", "\\*", "\\[*",
+            "\\`*",
+        ] {
+            let pattern = CasePattern::new(arm.to_string(), 0, 0);
+            let mut executor = Executor::new();
+            assert_eq!(
+                executor.expand_case_pattern(&pattern).into_owned(),
+                arm,
+                "arm {arm:?} must survive expansion verbatim"
+            );
+        }
+        // The lexer spells `\"` / `\'` in word text as the data-quote
+        // carriers \x18 / \x17 (the backslash is consumed at read time);
+        // both must decode to the matcher's escape spelling.
+        for (text, expected) in [
+            ("\u{18}*", "\\\"*"),
+            ("a\u{18}b", "a\\\"b"),
+            ("\u{18}", "\\\""),
+            ("*\u{18}x", "*\\\"x"),
+            ("\u{17}*", "\\'*"),
+            ("a\u{17}b", "a\\'b"),
+        ] {
+            let pattern = CasePattern::new(text.to_string(), 0, 0);
+            let mut executor = Executor::new();
+            assert_eq!(
+                executor.expand_case_pattern(&pattern).into_owned(),
+                expected,
+                "carrier arm {text:?} must decode to {expected:?}"
+            );
         }
     }
 
