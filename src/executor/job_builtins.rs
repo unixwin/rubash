@@ -2432,7 +2432,10 @@ impl Executor {
         )?;
         let status = match action {
             crate::builtins::disown::DisownAction::Complete(status) => status,
-            crate::builtins::disown::DisownAction::All { nohup_only } => {
+            crate::builtins::disown::DisownAction::All {
+                nohup_only,
+                running_only,
+            } => {
                 if nohup_only {
                     // GNU jobs.c:5111 nohup_all_jobs: mark, never delete.
                     for job in self.shell_state.job_table.jobs.values_mut() {
@@ -2440,6 +2443,18 @@ impl Executor {
                     }
                     0
                 } else {
+                    // GNU delete_all_jobs (jobs.c:5091) deletes with
+                    // DEL_WARNSTOPPED: one report per stopped job, in
+                    // slot order. The -r form deletes running jobs
+                    // only, so a stopped job is never reported there
+                    // (rubash#2489).
+                    if !running_only {
+                        let job_ids: Vec<u32> =
+                            self.shell_state.job_table.jobs.keys().copied().collect();
+                        for job_id in job_ids {
+                            self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                        }
+                    }
                     let pids: Vec<u32> = self
                         .shell_state
                         .job_table
@@ -2463,11 +2478,22 @@ impl Executor {
                 }
             }
             crate::builtins::disown::DisownAction::Current { nohup_only } => {
-                let acted = if nohup_only {
-                    self.nohup_current_job()
-                } else {
-                    self.disown_current_job()
-                };
+                let acted =
+                    if nohup_only {
+                        self.nohup_current_job()
+                    } else {
+                        // GNU disown with no spec deletes the current job
+                        // through the same delete_job (job, DEL_WARNSTOPPED)
+                        // as an explicit spec (builtins/jobs.def
+                        // disown_builtin), so a stopped current job is
+                        // reported before it leaves the table (rubash#2489).
+                        if let Some(job_id) = self.shell_state.last_background_pid.and_then(|pid| {
+                            self.shell_state.job_table.pid_to_job.get(&pid).copied()
+                        }) {
+                            self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                        }
+                        self.disown_current_job()
+                    };
                 if acted {
                     0
                 } else {
@@ -2535,6 +2561,15 @@ impl Executor {
                                     }
                                 }
                             } else {
+                                // GNU builtins/jobs.def disown_builtin:
+                                // delete_job (job, DEL_WARNSTOPPED) —
+                                // a stopped job is reported as it is
+                                // deleted (jobs.c:1495, rubash#2489).
+                                if let Some(job_id) =
+                                    self.shell_state.job_table.pid_to_job.get(&pid).copied()
+                                {
+                                    self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                                }
                                 self.background_children.remove(&pid);
                                 self.close_coproc_endpoints(pid);
                                 self.fd_table.close(pid);
@@ -2592,6 +2627,36 @@ impl Executor {
     /// 127 "not a child of this shell" (rubash#1304). (DisownAction::All
     /// is the exception: GNU `disown -a` leaves nothing waitable, which
     /// clear_jobs' purge of completed_statuses already models.)
+    /// GNU jobs.c:1495-1496: delete_job's DEL_WARNSTOPPED report,
+    /// `warning: deleting stopped job %d with process group %ld`,
+    /// emitted when a job is deleted while stopped. Every disown
+    /// deletion path carries the flag (builtins/jobs.def: delete_job
+    /// (job, 1) per spec; jobs.c:5091 delete_all_jobs), and the report
+    /// is gated on subshell_environment == 0 — a deletion inside a
+    /// subshell or command substitution never warns. Plain shell exit
+    /// is not a delete_job path and never warns (rubash#2489).
+    fn warn_deleting_stopped_job(
+        &self,
+        job_id: u32,
+        stderr: &mut Vec<u8>,
+    ) -> Result<(), ExecuteError> {
+        if self.shell_state.subshell_depth.get() != 0 {
+            return Ok(());
+        }
+        if let Some(entry) = self.shell_state.job_table.jobs.get(&job_id) {
+            if entry.state == crate::jobs::ProcessState::Stopped {
+                writeln!(
+                    stderr,
+                    "{}warning: deleting stopped job {} with process group {}",
+                    self.diagnostic_prefix(),
+                    entry.id,
+                    entry.pgrp
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn disown_job_by_pid(&mut self, pid: u32) {
         let job_pids: Vec<u32> = self
             .shell_state
