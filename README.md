@@ -100,7 +100,7 @@ The shells that call themselves bash replacements deserve the same measurement. 
 - Exit codes and diagnostics are home-grown end to end (rc 99, ANSI color codes inside pipes) — programs and agents that decide from exit status and stderr get silently misled.
 - Its headline platform is missing: Windows support is self-described "Preview", and the v0.4.0 release ships no Windows binary at all.
 
-Lightweight is no excuse for missing limbs. Rubash's 385,618 lines (static-audit caliber, 2026-10-25) — 474,985 together with niubash's 89,367 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
+Lightweight is no excuse for missing limbs. Rubash's 292,309 net lines (tests excluded — the docs/code-size.md caliber; GNU Bash's tree nets 162,815) — 345,093 together with niubash's 52,784 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
 
 ## Compatibility at a Glance
 
