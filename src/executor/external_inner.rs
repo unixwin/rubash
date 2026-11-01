@@ -356,13 +356,15 @@ impl Executor {
         // environment carries no PATH at all. A set-but-empty PATH is
         // a different shape and keeps the plain lookup — the ruling's
         // scope is the unset form only.
-        let program = if crate::executor::path::path_is_unset(&env_map) {
-            let mut lookup_env = env_map.clone();
-            lookup_env.insert("PATH".to_string(), standard_path(&env_map));
-            find_user_command(&config.command[0], &lookup_env)
+        let mut stdpath_lookup;
+        let resolution_env = if crate::executor::path::path_is_unset(&env_map) {
+            stdpath_lookup = env_map.clone();
+            stdpath_lookup.insert("PATH".to_string(), standard_path(&env_map));
+            &stdpath_lookup
         } else {
-            find_user_command(&config.command[0], &env_map)
+            &env_map
         };
+        let program = find_user_command(&config.command[0], resolution_env);
         let Some(program) = program else {
             let mut stderr = Vec::new();
             writeln!(
@@ -391,7 +393,24 @@ impl Executor {
             Some(program.as_path()),
             &env_map,
         );
-        let (mut process, used_shell) = external_command_for_named_program(
+        // rubash#2442: GNU env hands its command to execvp, whose
+        // execve filename is the same search join this resolution
+        // produced (the typed word itself for a slash name) — derive
+        // it through the shared funnel. An `env -C DIR` child is
+        // born in DIR rather than the session cwd this resolution
+        // ran against, so a relative join would resolve against the
+        // wrong directory there; the anchored program stands for
+        // that shape.
+        let exec_name = if config.chdir.is_none() {
+            crate::executor::path::spawn_exec_name(
+                &config.command[0],
+                &program,
+                resolution_env,
+            )
+        } else {
+            None
+        };
+        let (mut process, used_shell) = external_command_for_named_program_with_exec_name(
             &program,
             Some(&config.command[0]),
             &proc_args,
@@ -399,6 +418,7 @@ impl Executor {
             env_map
                 .get("BASH_ARGV0")
                 .is_some_and(|value| !value.is_empty()),
+            exec_name.as_deref(),
         );
         // GNU env (coreutils) runs the command through execvp under the
         // name as typed, so the child's argv[0] is the bare word, not
@@ -1098,18 +1118,14 @@ impl Executor {
         // in the session cwd (next line), which is what a relative
         // join resolves against. Hash-recorded resolutions keep the
         // anchored path (exec_name_for_program declines them).
-        #[cfg(unix)]
-        let exec_name = if cmd.words[0].contains('/') {
-            Some(cmd.words[0].clone())
-        } else {
-            crate::executor::path::exec_name_for_program(
-                &cmd.words[0],
-                &program,
-                &self.shell_state.env_vars,
-            )
-        };
-        #[cfg(not(unix))]
-        let exec_name: Option<String> = None;
+        // rubash#2442: this computation is the shared funnel
+        // (path::spawn_exec_name) — every spawn route derives its
+        // filename through it, not just this foreground one.
+        let exec_name = crate::executor::path::spawn_exec_name(
+            &cmd.words[0],
+            &program,
+            &self.shell_state.env_vars,
+        );
         let (mut process, used_shell) = external_command_for_named_program_with_exec_name(
             &program,
             Some(&cmd.words[0]),

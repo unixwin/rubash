@@ -301,15 +301,120 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            let Some(index) = index.trim_end_matches(']').parse::<usize>().ok() else {
+            // GNU arrayfunc.c:420-434 assign_array_element_internal: the
+            // subscript feeds array_expand_index (arithmetic evaluation),
+            // a negative result counts back from the materialized array's
+            // max index, and only a still-negative index is the
+            // err_badarraysub failure. For DIRSTACK the materialized
+            // array is get_dirstack's rebuild of the live stack
+            // (variables.c:1619-1630, run by find_variable before the
+            // resolution), so negatives resolve against the live stack
+            // length. The old door parsed the subscript as a bare usize,
+            // so every negative or arithmetic subscript failed silently
+            // with status 1 and no element ever resolved (rubash#2432).
+            let index = index.strip_suffix(']').unwrap_or(index);
+            // Only a truly EMPTY subscript is bad outright (the generic
+            // arm's pre-check below): whitespace still evaluates to 0.
+            if index.trim().is_empty() && raw_subscript.is_none_or(str::is_empty) {
+                self.report_bad_array_subscript(&lhs_as_written());
+                self.evalerror_subscript_pending.set(true);
                 self.exit_code = 1;
                 return true;
+            }
+            // The subscript evaluation mirrors the generic indexed arm
+            // below verbatim in miniature: the cooked `index` is the one
+            // expand_arith_string pass's product, a clean decimal literal
+            // takes the fast lane, everything else re-enters
+            // eval_indexed_subscript over the raw-derived arith text.
+            let literal_index = match raw_subscript {
+                Some(raw) if raw.contains('\'') => None,
+                _ => super::arithmetic::literal_decimal_subscript(index),
+            };
+            let computed_index = if let Some(index) = literal_index {
+                index
+            } else {
+                let eval_text;
+                let mut eval_input = match raw_subscript {
+                    Some(raw) if raw.contains('\'') => {
+                        eval_text = self.expand_arithmetic_special_parameters(raw);
+                        eval_text.as_str()
+                    }
+                    Some(raw) if crate::lexer::remove_shell_quotes(raw) == index => {
+                        eval_text = super::arithmetic::arith_subscript_text(raw);
+                        eval_text.as_str()
+                    }
+                    Some(raw) => {
+                        eval_text = super::arithmetic::arith_subscript_text(raw);
+                        eval_text.as_str()
+                    }
+                    _ => index,
+                };
+                if eval_input.trim().is_empty() {
+                    eval_input = "0";
+                }
+                // arrayfunc.c:355-360: ALL_ELEMENT_SUB is rejected
+                // before the arith eval, exactly as in the generic arm.
+                if matches!(eval_input.trim(), "*" | "@") {
+                    self.report_bad_array_subscript(&lhs_as_written());
+                    self.evalerror_subscript_pending.set(true);
+                    self.exit_code = 1;
+                    return true;
+                }
+                match self.eval_indexed_subscript(SubscriptSource::Protected(eval_input)) {
+                    IndexedSubscript::Index(index) => index,
+                    IndexedSubscript::Empty => {
+                        self.report_bad_array_subscript(&lhs_as_written());
+                        self.evalerror_subscript_pending.set(true);
+                        self.exit_code = 1;
+                        return true;
+                    }
+                    IndexedSubscript::Error => {
+                        if self.raise_nounset_subscript_abort() {
+                            return true;
+                        }
+                        self.exit_code = 1;
+                        return true;
+                    }
+                }
+            };
+            let index = if computed_index < 0 {
+                let len = crate::builtins::pushd::load_stack(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                )
+                .len();
+                // ind = (len - 1) + 1 + ind == len + ind; a still-negative
+                // result is err_badarraysub (arrayfunc.c:431-435).
+                let resolved = i128::try_from(len).unwrap_or(i128::MAX) + computed_index;
+                if resolved < 0 {
+                    self.report_bad_array_subscript(&lhs_as_written());
+                    self.evalerror_subscript_pending.set(true);
+                    self.exit_code = 1;
+                    return true;
+                }
+                usize::try_from(resolved).unwrap_or(usize::MAX)
+            } else {
+                usize::try_from(computed_index).unwrap_or(usize::MAX)
+            };
+            // GNU make_variable_value with ASS_APPEND reads the current
+            // element and concatenates before the bind; the setter then
+            // applies its own slot rules (0 and out-of-range dropped).
+            let new_value = if append {
+                let old = crate::builtins::pushd::stack_value(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    index,
+                )
+                .unwrap_or_default();
+                format!("{old}{value}")
+            } else {
+                value.to_string()
             };
             crate::builtins::pushd::set_stack_value(
                 &mut self.shell_state.env_vars,
                 &self.shell_state.cwd,
                 index,
-                value.to_string(),
+                new_value,
             );
             self.exit_code = 0;
             return true;
@@ -721,18 +826,55 @@ impl Executor {
                 }
             }
         };
-        if computed_index < 0
-            && resolve_indexed_array_subscript(
-                &self
-                    .shell_state
-                    .env_vars
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_default(),
-                computed_index,
-            )
-            .is_none()
-        {
+        // GNU arrayfunc.c:425-434 + 262-290: subscript resolution and
+        // the element store both run against the variable as it stands
+        // BEFORE bind_array_variable converts a scalar target with
+        // convert_var_to_array (arrayfunc.c:74-100) — the conversion
+        // preserves the old scalar value VERBATIM as element 0, so a
+        // not-yet-array target resolves negative subscripts against
+        // its single implicit element (array_p == 0 -> max index 0; an
+        // absent entry resolves nothing) and seeds the store from that
+        // one element. Parsing the scalar's text as array storage
+        // instead word-split it (rubash#2433: `x="(a b)"; x[1]=z`
+        // stored element 0 `a`, and `x[-2]=z` resolved against the
+        // phantom second element instead of failing).
+        let target_is_indexed_array = is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, name)
+            || self
+                .shell_state
+                .variables
+                .indexed_array_shape(name)
+                .is_some();
+        let scalar_text: Option<String> = if target_is_indexed_array {
+            None
+        } else {
+            self.shell_state.env_vars.get(name).cloned().or_else(|| {
+                match self.shell_state.variables.get(name) {
+                    Some(variable) => match &variable.value {
+                        crate::shell::ShellValue::Scalar(value) => Some(value.clone()),
+                        _ => None,
+                    },
+                    None => None,
+                }
+            })
+        };
+        let resolve_negative = |computed: i128| -> Option<usize> {
+            if scalar_text.is_some() {
+                // Max index 0: resolved = 0 + 1 + computed.
+                let resolved = computed + 1;
+                (resolved >= 0).then(|| usize::try_from(resolved).unwrap_or(usize::MAX))
+            } else {
+                resolve_indexed_array_subscript(
+                    &self
+                        .shell_state
+                        .env_vars
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default(),
+                    computed,
+                )
+            }
+        };
+        if computed_index < 0 && resolve_negative(computed_index).is_none() {
             eprintln!(
                 "{}{}: bad array subscript",
                 self.error_prefix(),
@@ -745,13 +887,7 @@ impl Executor {
         }
 
         let index = if computed_index < 0 {
-            let current = self
-                .shell_state
-                .env_vars
-                .get(name)
-                .cloned()
-                .unwrap_or_default();
-            let Some(index) = resolve_indexed_array_subscript(&current, computed_index) else {
+            let Some(index) = resolve_negative(computed_index) else {
                 eprintln!(
                     "{}{}: bad array subscript",
                     self.error_prefix(),
@@ -793,6 +929,15 @@ impl Executor {
                         _ => None,
                     })
                     .unwrap_or_default()
+            } else if let Some(scalar) = &scalar_text {
+                // Conversion pending (rubash#2433): the pre-conversion
+                // array has exactly one element — the verbatim scalar
+                // at index 0 (arrayfunc.c:74-100 convert_var_to_array).
+                if index == 0 {
+                    scalar.clone()
+                } else {
+                    String::new()
+                }
             } else {
                 let current = self
                     .shell_state
@@ -956,7 +1101,15 @@ impl Executor {
                 .get(name)
                 .cloned()
                 .unwrap_or_default();
-            let mut entries = indexed_array_entries(&current);
+            // Scalar -> array conversion (rubash#2433): the seed is
+            // the verbatim old value at element 0 (arrayfunc.c:74-100
+            // convert_var_to_array, reached from bind_array_variable),
+            // never a re-parse of the scalar's text as array storage.
+            let mut entries = if let Some(scalar) = &scalar_text {
+                BTreeMap::from([(0usize, scalar.clone())])
+            } else {
+                indexed_array_entries(&current)
+            };
             entries.insert(index, element);
             // rubash#616 (plan Phase 1a): the structured cell follows the
             // mirror in lockstep so `${#a[@]}` reads the count in O(1) (GNU

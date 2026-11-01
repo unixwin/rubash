@@ -2829,6 +2829,147 @@ impl Executor {
     /// IFS=$'\n' stored four elements instead of GNU's two, an empty IFS
     /// still split, a quoted `"$v"` element split, and non-whitespace IFS
     /// chars never split (probes 2026-09-27, WSL GNU Bash 5.3.0).
+    /// rubash#2417: a compound element word with a quoted list span
+    /// GLUED to other text (`pre"${arr[@]}"post`, `pre"${!foo_@}"post`,
+    /// `pre"$@"post`): GNU expand_word_internal returns a word LIST for
+    /// the element (subst.c word expansion -> string_list_pos_params /
+    /// array value list), so the span contributes one element per
+    /// member with the adjacent text glued to the first/last member —
+    /// the fan-out the whole-word arms above apply when the span is the
+    /// entire token. The plain-element path below expands the token to
+    /// ONE string (the quoted span joins its members), collapsing the
+    /// element. Returns the storage-serialized fields, or None when the
+    /// token holds no glued quoted list span.
+    fn glued_quoted_list_element_fields(
+        &self,
+        token_raw: &str,
+        changed: &mut bool,
+    ) -> Option<Vec<String>> {
+        if !token_raw.contains('"')
+            && !token_raw.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE)
+        {
+            return None;
+        }
+        let chars: Vec<char> = token_raw.chars().collect();
+        let mut fields: Vec<String> = Vec::new();
+        let mut cur = String::new();
+        let mut segment_start = 0usize;
+        let mut found = false;
+        while let Some(span) = find_glued_list_span(&chars, segment_start) {
+            let prefix: String = chars[segment_start..span.prefix_end].iter().collect();
+            cur.push_str(&self.expand_glued_compound_text(&prefix));
+            let members = self.glued_list_span_members(&span.kind)?;
+            found = true;
+            match members.len() {
+                0 => {}
+                1 => cur.push_str(&members[0]),
+                _ => {
+                    cur.push_str(&members[0]);
+                    fields.push(std::mem::take(&mut cur));
+                    let last = members.len() - 1;
+                    fields.extend(members[1..last].iter().cloned());
+                    cur = members[last].clone();
+                }
+            }
+            segment_start = span.resume;
+        }
+        if !found {
+            return None;
+        }
+        let suffix: String = chars[segment_start..].iter().collect();
+        cur.push_str(&self.expand_glued_compound_text(&suffix));
+        fields.push(cur);
+        *changed = true;
+        Some(
+            fields
+                .into_iter()
+                .map(|field| quote_array_value(&field))
+                .collect(),
+        )
+    }
+
+    /// Members of one glued quoted list span, from the same sources the
+    /// whole-word fan-out arms use (array storage / dynamic stack view,
+    /// array keys, the ${!prefix@} name list, positional parameters).
+    fn glued_list_span_members(&self, kind: &GluedListKind) -> Option<Vec<String>> {
+        match kind {
+            GluedListKind::Positional => {
+                Some(self.shell_state.positional_window_cloned())
+            }
+            GluedListKind::ArrayAt(name) => {
+                if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
+                    if let Some(members) = self.dynamic_stack_array_values(name) {
+                        return Some(members);
+                    }
+                }
+                match self.parameter_array_storage(name) {
+                    Some(storage) => Some(array_values(&storage)),
+                    // An unset array contributes zero members; the glued
+                    // text still forms one element.
+                    None => Some(Vec::new()),
+                }
+            }
+            GluedListKind::IndirectKeys(name) => {
+                let values = self.indirect_compound_assignment_values(name, true)?;
+                Some(
+                    values
+                        .iter()
+                        .map(|value| unquote_storage_value(value))
+                        .collect(),
+                )
+            }
+            GluedListKind::IndirectNames(prefix) => {
+                // GNU subst.c:9978-10007: all_variables_matching_prefix
+                // in sort_variables (strcmp) order.
+                let mut names: Vec<&str> = self
+                    .shell_state
+                    .env_vars
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| is_shell_name(name) && name.starts_with(prefix.as_str()))
+                    .collect();
+                names.sort_unstable();
+                Some(names.iter().map(|name| name.to_string()).collect())
+            }
+        }
+    }
+
+    /// Expand one text segment between glued list spans with the same
+    /// pipeline the plain-element path applies to a whole token
+    /// (compound walker + element text + carrier decode), then drop the
+    /// quote delimiters the walker preserved: inside a glued field the
+    /// segment's quoting is syntax, its content is data. Bare E302
+    /// carriers are the hoisted spelling of those delimiters (value
+    /// data quotes travel as DATA_DQUOTE and were already restored to
+    /// `"` by compound_element_expansion_text); raw `"` pairs toggle
+    /// out the same way.
+    fn expand_glued_compound_text(&self, segment: &str) -> String {
+        if segment.is_empty() {
+            return String::new();
+        }
+        // Provenance gate for the delimiter drop below: only quote
+        // spellings the raw segment itself carried as syntax are
+        // dropped from the expanded text; a quote spelling the segment
+        // never had can only be expansion-result data.
+        let had_hoisted_dquote =
+            segment.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE);
+        let had_raw_dquote = segment.contains('"');
+        let expanded = self.expand_embedded_parameters_compound(segment);
+        let text = compound_element_expansion_text(&expanded);
+        let text = decode_compound_expansion_carriers(
+            &text.replace(crate::executor::markers::IFS_GLUE, ""),
+        );
+        let mut output = String::new();
+        for ch in text.chars() {
+            match ch {
+                crate::executor::markers::ASSIGN_DATA_DQUOTE if had_hoisted_dquote => {}
+                '"' if had_raw_dquote => {}
+                _ => output.push(ch),
+            }
+        }
+        output
+    }
+
     fn compound_plain_element_value_fields(
         &self,
         token_raw: &str,
@@ -2838,6 +2979,9 @@ impl Executor {
         if bare {
             // Bare (eval-argument) flatten keeps the raw token verbatim.
             return vec![token_raw.to_string()];
+        }
+        if let Some(fields) = self.glued_quoted_list_element_fields(token_raw, changed) {
+            return fields;
         }
         let expanded = self.expand_embedded_parameters_compound(token_raw);
         if expanded == token_raw {
@@ -3736,6 +3880,187 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
 /// (single-quote spans E307, double-quote spans E302, hoisted `\\` E308) —
 /// source quoting whose removal belongs to this element pass, not to the
 /// storage tokenizer (see compound_plain_element_value_fields).
+/// The list a glued quoted span expands to (rubash#2417).
+enum GluedListKind {
+    /// `${name[@]}` — the array's values.
+    ArrayAt(String),
+    /// `${!name[@]}` — the array's keys (name carries the `[@]`).
+    IndirectKeys(String),
+    /// `${!prefix@}` — variable names with the prefix.
+    IndirectNames(String),
+    /// `"${@}"` / `"$@"` — positional parameters.
+    Positional,
+}
+
+/// One quoted list span located in a compound element token: the text
+/// before the span ends at `prefix_end` (char index), the text after
+/// the span resumes at `resume`.
+struct GluedListSpan {
+    prefix_end: usize,
+    resume: usize,
+    kind: GluedListKind,
+}
+
+fn glued_list_kind(body: &str) -> Option<GluedListKind> {
+    if body == "@" {
+        return Some(GluedListKind::Positional);
+    }
+    if let Some(rest) = body.strip_prefix('!') {
+        if let Some(name) = rest.strip_suffix("[@]") {
+            return is_shell_name(name)
+                .then(|| GluedListKind::IndirectKeys(rest.to_string()));
+        }
+        if let Some(prefix) = rest.strip_suffix('@') {
+            return (!prefix.is_empty() && is_shell_name(prefix))
+                .then(|| GluedListKind::IndirectNames(prefix.to_string()));
+        }
+        return None;
+    }
+    if let Some(name) = body.strip_suffix("[@]") {
+        return is_shell_name(name).then(|| GluedListKind::ArrayAt(name.to_string()));
+    }
+    None
+}
+
+/// Match a list span at the `$` position `dollar` (a `${...}` with a
+/// simple list body, or `$@`): returns the index just past the span's
+/// closing `}` (or past the `@`) and the list kind. Bodies with
+/// operators, slices or patterns are not list spans — other arms own
+/// those shapes.
+fn match_glued_list_span_at(chars: &[char], dollar: usize) -> Option<(usize, GluedListKind)> {
+    if chars.get(dollar + 1) == Some(&'@') {
+        return Some((dollar + 2, GluedListKind::Positional));
+    }
+    if chars.get(dollar + 1) != Some(&'{') {
+        return None;
+    }
+    let mut body = String::new();
+    let mut index = dollar + 2;
+    while let Some(&ch) = chars.get(index) {
+        if ch == '}' {
+            return glued_list_kind(&body).map(|kind| (index + 1, kind));
+        }
+        if !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '[' | ']' | '@' | '*' | '!')) {
+            return None;
+        }
+        body.push(ch);
+        index += 1;
+    }
+    None
+}
+
+/// Find the first quoted list span in a compound element token at or
+/// after char index `from`. Delimiter spellings: raw `"`, the hoisted
+/// ASSIGN_DATA_DQUOTE carrier, and `\"` (whose quote character is data
+/// and stays in the glued text — only the span is syntax there).
+/// Single-quoted text, backquote units and $( )/${ } units are skipped
+/// whole: a span inside one belongs to that unit, not to the element.
+fn find_glued_list_span(chars: &[char], from: usize) -> Option<GluedListSpan> {
+    let mut index = from;
+    let mut single = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                if chars.get(index + 1) == Some(&'"') {
+                    if let Some((after, kind)) = match_glued_list_span_at(chars, index + 2) {
+                        if chars.get(after) == Some(&'\\')
+                            && chars.get(after + 1) == Some(&'"')
+                        {
+                            return Some(GluedListSpan {
+                                prefix_end: index + 2,
+                                resume: after,
+                                kind,
+                            });
+                        }
+                    }
+                }
+                index += 2;
+            }
+            '\'' => {
+                single = true;
+                index += 1;
+            }
+            '`' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+                index += 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = crate::lexer::skip_parenthesized_unit_corrected(chars, index + 1)?;
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                index = skip_braced_case_pattern_unit(chars, index + 1)? + 1;
+            }
+            '"' | '\u{E302}' => {
+                // A list span anywhere inside this quoted region is a
+                // glued quoted span; the region's own text on either
+                // side of it rides in the fold's text segments (the
+                // delimiters included — the segment expansion drops
+                // them again). Nested units inside the region are
+                // skipped whole.
+                let mut inner = index + 1;
+                while inner < chars.len() && chars[inner] != ch {
+                    if chars[inner] == '\\' && ch == '"' {
+                        inner += 2;
+                        continue;
+                    }
+                    if chars[inner] == '$'
+                        && chars.get(inner + 1) == Some(&'(')
+                    {
+                        match crate::lexer::skip_parenthesized_unit_corrected(
+                            chars,
+                            inner + 1,
+                        ) {
+                            Some(end) => {
+                                inner = end;
+                                continue;
+                            }
+                            None => return None,
+                        }
+                    }
+                    if chars[inner] == '$' {
+                        if let Some((after, kind)) =
+                            match_glued_list_span_at(chars, inner)
+                        {
+                            return Some(GluedListSpan {
+                                prefix_end: inner,
+                                resume: after,
+                                kind,
+                            });
+                        }
+                        if chars.get(inner + 1) == Some(&'{') {
+                            match skip_braced_case_pattern_unit(chars, inner + 1) {
+                                Some(close) => {
+                                    inner = close + 1;
+                                    continue;
+                                }
+                                None => return None,
+                            }
+                        }
+                    }
+                    inner += 1;
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 pub(in crate::executor) fn token_has_hoisted_quote_carriers(token_raw: &str) -> bool {
     // BARE sentinels only: the escaped member of an `E400 + c` pair is
     // user data, not a hoisted carrier (rubash#840).

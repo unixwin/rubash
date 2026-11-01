@@ -85,6 +85,44 @@ where
     W: Write,
     E: Write,
 {
+    execute_with_io_tracked(args, env_vars, stdout, stderr, None)
+}
+
+/// [`execute_with_io`] plus a sink for the `-o` binary-option WRITES
+/// (name, enabled) in operand order. GNU builtins/shopt.def:594-606
+/// set_shopt_o_options routes every `-o` operand through
+/// builtins/set.def:476-491 set_minus_o_option, whose vi/emacs setter
+/// (set.def:424-447 set_edit_mode) fires on EVERY FLAG_ON write — even
+/// a redundant `shopt -s -o vi` with the option already on rebinds
+/// `editing-mode` (oracle-verified) — so a caller mirroring the option
+/// funnel's side effects needs the writes themselves, not a before/
+/// after state diff (rubash#2435). Print/list modes never write and
+/// record nothing.
+pub(crate) fn execute_with_io_and_o_writes<W, E>(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+    stdout: &mut W,
+    stderr: &mut E,
+    o_writes: &mut Vec<(String, bool)>,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_with_io_tracked(args, env_vars, stdout, stderr, Some(o_writes))
+}
+
+fn execute_with_io_tracked<W, E>(
+    args: &[String],
+    env_vars: &mut crate::shell::var_table::VarTable,
+    stdout: &mut W,
+    stderr: &mut E,
+    o_writes: Option<&mut Vec<(String, bool)>>,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     // `shopt` lists human-readable states by default; `-p` switches to
     // reusable `shopt -s/-u` commands.  An empty argument list is not `-p`.
     let mut print = false;
@@ -149,7 +187,9 @@ where
     }
 
     if use_set_options {
-        return execute_set_option_mode(mode, print, quiet, &names, env_vars, stdout, stderr);
+        return execute_set_option_mode(
+            mode, print, quiet, &names, env_vars, stdout, stderr, o_writes,
+        );
     }
 
     if names.is_empty() {
@@ -229,6 +269,7 @@ where
     Ok(status)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_set_option_mode<W, E>(
     mode: ShoptMode,
     print: bool,
@@ -237,6 +278,7 @@ fn execute_set_option_mode<W, E>(
     env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
+    mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -322,9 +364,15 @@ where
         match mode {
             ShoptMode::Set if !print => {
                 crate::builtins::set::set_shell_option(env_vars, name, true);
+                if let Some(writes) = o_writes.as_deref_mut() {
+                    writes.push((name.to_string(), true));
+                }
             }
             ShoptMode::Unset if !print => {
                 crate::builtins::set::set_shell_option(env_vars, name, false);
+                if let Some(writes) = o_writes.as_deref_mut() {
+                    writes.push((name.to_string(), false));
+                }
             }
             _ if print || mode == ShoptMode::List => {
                 if mode == ShoptMode::List

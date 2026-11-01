@@ -1309,8 +1309,13 @@ impl Executor {
                 }
                 Some('[') => {
                     chars.next();
+                    // rubash#2441: in_double marks a raw-text walk
+                    // inside a double-quoted segment — the collector
+                    // then runs segment-bounded (a raw `"` truncates
+                    // the string the extraction sees, subst.c:1014
+                    // skip_double_quoted).
                     let (expression, matched) =
-                        collect_dollar_bracket_arithmetic_expansion(&mut chars);
+                        collect_dollar_bracket_arithmetic_expansion(&mut chars, in_double);
                     if matched {
                         if let Some(value) = self.eval_arithmetic_expansion_value(&expression) {
                             let value = value.to_string();
@@ -1356,8 +1361,19 @@ impl Executor {
                             }
                         }
                     } else {
-                        output.push_str("$[");
-                        output.push_str(&expression);
+                        // rubash#2441: extraction found no closing `]`
+                        // in the string handed to this expansion level —
+                        // GNU reports `bad substitution: no closing `]'`
+                        // and discards the command (subst.c
+                        // extract_delimited_string failure site). A
+                        // heredoc walk names the whole body; any other
+                        // walk names its string through the failing span.
+                        let string = if heredoc {
+                            word.to_string()
+                        } else {
+                            dollar_bracket_no_closing_string(word, &expression)
+                        };
+                        self.no_closing_bracket_verdict(&string);
                     }
                 }
                 Some(first) if first.is_ascii_digit() => {
@@ -2770,8 +2786,10 @@ fn arith_sub_parens_balanced(s: &str) -> bool {
 /// end of the string.
 pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    segment_bounded: bool,
 ) -> (String, bool) {
-    let (expression, closed) = collect_dollar_bracket_arithmetic_expansion_inner(chars);
+    let (expression, closed) =
+        collect_dollar_bracket_arithmetic_expansion_inner(chars, segment_bounded);
     if !closed {
         return (expression, false);
     }
@@ -2813,12 +2831,30 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
 
 fn collect_dollar_bracket_arithmetic_expansion_inner(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
+    segment_bounded: bool,
 ) -> (String, bool) {
     let mut expression = String::new();
     let mut depth: usize = 1;
     let mut pending: Option<char> = None;
+    // rubash#2441: in segment-bounded mode the body scan runs inside a
+    // double-quoted segment of a raw-text walk, where GNU delimits the
+    // segment BEFORE extraction (subst.c:1014 skip_double_quoted has no
+    // $[...] case): a raw `"` at the body's top level ends the string
+    // the extractor sees, so the span is unclosed there — it must not
+    // open a quote unit. Quotes inside nested $( )/${ } units belong to
+    // the unit (the segment scanner skips those units whole), tracked
+    // by unit_depth; quote/backquote arms consume their own units as
+    // before.
+    let mut unit_depth: usize = 0;
 
     loop {
+        if segment_bounded
+            && unit_depth == 0
+            && (pending == Some('"')
+                || (pending.is_none() && chars.peek() == Some(&'"')))
+        {
+            return (expression, false);
+        }
         let ch = match pending.take() {
             Some(ch) => ch,
             None => match chars.next() {
@@ -2921,6 +2957,14 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
                         expression.push('[');
                         depth += 1;
                     }
+                    // Segment-bounded mode: a $( )/${ } opener starts a
+                    // nested unit the segment scanner skips whole, so
+                    // consume it here (counted) instead of re-dispatching
+                    // it through pending (rubash#2441).
+                    Some(unit_open @ ('(' | '{')) if segment_bounded => {
+                        expression.push(unit_open);
+                        unit_depth += 1;
+                    }
                     Some(other) => pending = Some(other),
                     None => return (expression, false),
                 }
@@ -2936,7 +2980,16 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
                 }
                 expression.push(ch);
             }
-            _ => expression.push(ch),
+            _ => {
+                if segment_bounded && unit_depth > 0 {
+                    match ch {
+                        '(' | '{' => unit_depth += 1,
+                        ')' | '}' => unit_depth -= 1,
+                        _ => {}
+                    }
+                }
+                expression.push(ch);
+            }
         }
     }
 }

@@ -1280,6 +1280,48 @@ pub(crate) fn exec_name_for_program(
     (anchored == program).then_some(as_written)
 }
 
+/// rubash#2442: the one filename-resolution funnel every external
+/// spawn route passes through. GNU has exactly one resolution point
+/// per disk command — execute_disk_command's `search_for_command`
+/// call (execute_cmd.c:5810) — and its result is the execve filename
+/// for EVERY spawn shape: pipeline members reach the same function
+/// (execute_cmd.c:2620 routes each element through
+/// execute_simple_command), as do command-substitution, background
+/// and coproc children, and shell_execve (execute_cmd.c:6133) hands
+/// that string to execve unchanged. A name carrying a slash is never
+/// searched (findcmd.c:385-387 `absolute_program => savestring
+/// (pathname)`), so the typed word itself is the filename; a
+/// slash-less name takes the PATH-search join when that join anchors
+/// to the resolved program ([`exec_name_for_program`]). Every route
+/// below resolves `program` from `name` under `env_vars` and births
+/// the child in the session cwd, which is what a relative join
+/// resolves against. The exec builtin is the one deliberate
+/// exception: exec.def:151 resolves through search_for_command but
+/// exec.def:172 then rebinds the target with `full_pathname` before
+/// shell_execve (exec.def:231), so its filename is the anchored
+/// absolute path and builtins/exec.rs stays off this funnel.
+#[cfg(unix)]
+pub(crate) fn spawn_exec_name(
+    name: &str,
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if name.contains('/') {
+        Some(name.to_string())
+    } else {
+        exec_name_for_program(name, program, env_vars)
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn spawn_exec_name(
+    _name: &str,
+    _program: &Path,
+    _env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    None
+}
+
 pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
     if cfg!(windows) {
         if configured_shell_root(_env_vars).is_some() {
@@ -1656,9 +1698,12 @@ pub fn external_command_for_named_program(
 /// both what gets executed and what a script child sees as its name
 /// (the kernel hands it to the interpreter as the script pathname);
 /// rubash anchors a copy for its own probes and parent-side reads,
-/// which stay on `program`. Only the plain foreground spawn passes a
-/// name (see `exec_name_for_program`); every other route keeps the
-/// anchored status quo.
+/// which stay on `program`. Callers derive the name from the single
+/// funnel, [`spawn_exec_name`] (rubash#2442): every spawn route that
+/// resolves its program from a typed word passes one — plain
+/// foreground, pipeline stages, command substitution, the `env`
+/// wrapper. The exec builtin is the documented exception (see
+/// [`spawn_exec_name`]).
 pub fn external_command_for_named_program_with_exec_name(
     program: &Path,
     command_name: Option<&str>,

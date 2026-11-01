@@ -586,6 +586,257 @@ fn dollar_bracket_body_end(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// Skip a quote unit starting at `open` in a byte slice (index just
+/// past the closer, or bytes.len() when unterminated). The closer may
+/// wear the family's data spelling; backslash passes apply only where
+/// the quoted syntax has escapes (not in single quotes).
+fn skip_quote_unit_bytes(bytes: &[u8], open: usize, closers: &[u8], backslash_passes: bool) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        if backslash_passes && matches!(bytes[index], b'\\' | 0x11) {
+            index += 2;
+            continue;
+        }
+        if closers.contains(&bytes[index]) {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_paren_unit_bytes(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' | 0x11 => index += 2,
+            b'\'' | 0x17 => index = skip_quote_unit_bytes(bytes, index, &[b'\'', 0x17], false),
+            b'"' | 0x18 => index = skip_quote_unit_bytes(bytes, index, &[b'"', 0x18], true),
+            b'`' | 0x1a => index = skip_quote_unit_bytes(bytes, index, &[b'`', 0x1a], true),
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+fn skip_braced_unit_bytes(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' | 0x11 => index += 2,
+            b'\'' | 0x17 => index = skip_quote_unit_bytes(bytes, index, &[b'\'', 0x17], false),
+            b'"' | 0x18 => index = skip_quote_unit_bytes(bytes, index, &[b'"', 0x18], true),
+            b'`' | 0x1a => index = skip_quote_unit_bytes(bytes, index, &[b'`', 0x1a], true),
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// End of the double-quoted segment whose content starts at `start` in
+/// a byte slice: the index of the segment-closing `"`, or bytes.len()
+/// at EOF. GNU subst.c:1014 skip_double_quoted delimits the segment
+/// BEFORE extraction runs on it: a backslash passes the next byte,
+/// backquote units and $( ) / ${ } units are skipped whole, and
+/// $[...] is NOT special — a quote after `$[` closes the segment.
+/// That asymmetry is rubash#2441: extraction over the truncated
+/// segment then finds no `]`.
+fn dquote_segment_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' | 0x11 => index += 2,
+            b'`' | 0x1a => index = skip_quote_unit_bytes(bytes, index, &[b'`', 0x1a], true),
+            b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                index = skip_paren_unit_bytes(bytes, index + 1);
+            }
+            b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                index = skip_braced_unit_bytes(bytes, index + 1);
+            }
+            b'"' => return index,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Char-slice form of `dollar_bracket_body_end` (same extraction
+/// machine, subst.c:1361 via subst.c:1301).
+fn dollar_bracket_body_end_chars(chars: &[char], start: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = start;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' | '\u{11}' => index += 2,
+            '\'' | '\u{17}' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' && chars[index] != '\u{17}' {
+                    index += 1;
+                }
+                if index >= chars.len() {
+                    return None;
+                }
+                index += 1;
+            }
+            '"' | '`' | '\u{18}' | '\u{1a}' => {
+                let closers: &[char] = match chars[index] {
+                    '`' | '\u{1a}' => &['`', '\u{1a}'],
+                    _ => &['"', '\u{18}'],
+                };
+                index += 1;
+                let mut closed = false;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' | '\u{11}' => index += 2,
+                        ch if closers.contains(&ch) => {
+                            index += 1;
+                            closed = true;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+                if !closed {
+                    return None;
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'[') => {
+                depth += 1;
+                index += 2;
+            }
+            '[' => {
+                depth += 1;
+                index += 1;
+            }
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn skip_quote_unit_chars(chars: &[char], open: usize, closers: &[char], backslash_passes: bool) -> usize {
+    let mut index = open + 1;
+    while index < chars.len() {
+        if backslash_passes && matches!(chars[index], '\\' | '\u{11}') {
+            index += 2;
+            continue;
+        }
+        if closers.contains(&chars[index]) {
+            return index + 1;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+fn skip_paren_unit_chars(chars: &[char], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' | '\u{11}' => index += 2,
+            '\'' | '\u{17}' => {
+                index = skip_quote_unit_chars(chars, index, &['\'', '\u{17}'], false)
+            }
+            '"' | '\u{18}' => index = skip_quote_unit_chars(chars, index, &['"', '\u{18}'], true),
+            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '(' => {
+                depth += 1;
+                index += 1;
+            }
+            ')' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    chars.len()
+}
+
+fn skip_braced_unit_chars(chars: &[char], open: usize) -> usize {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' | '\u{11}' => index += 2,
+            '\'' | '\u{17}' => {
+                index = skip_quote_unit_chars(chars, index, &['\'', '\u{17}'], false)
+            }
+            '"' | '\u{18}' => index = skip_quote_unit_chars(chars, index, &['"', '\u{18}'], true),
+            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '{' => {
+                depth += 1;
+                index += 1;
+            }
+            '}' => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    chars.len()
+}
+
+/// Char-slice form of `dquote_segment_end` (subst.c:1014
+/// skip_double_quoted; see the byte form for the rules).
+fn dquote_segment_end_chars(chars: &[char], start: usize) -> usize {
+    let mut index = start;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' | '\u{11}' => index += 2,
+            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                index = skip_paren_unit_chars(chars, index + 1);
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                index = skip_braced_unit_chars(chars, index + 1);
+            }
+            '"' => return index,
+            _ => index += 1,
+        }
+    }
+    chars.len()
+}
+
 /// Cursor copier for a `$[...]` span in the unquoted word walk (rest at
 /// the `$`): the whole span is pushed verbatim — `$`, `[`, body, `]` —
 /// with no carrier cooking of the body bytes. GNU read_token_word hands
@@ -644,6 +895,51 @@ fn copy_dollar_bracket_body_raw_cursor<'a>(
     rest: &'a str,
     deescape_dq: bool,
 ) -> &'a str {
+    if deescape_dq {
+        // rubash#2441: this copier serves a double-quoted segment, and
+        // GNU delimits the segment before extracting the span
+        // (subst.c:1014 skip_double_quoted has no $[...] case, so a
+        // quote after `$[` closes the segment). When the extraction
+        // end (subst.c:1361) lies inside the segment, copy exactly the
+        // extracted span with the `\"` deescape as before. When it
+        // does not — the span is cut by the segment's closing quote or
+        // unterminated — copy the body bytes up to the segment end
+        // verbatim plus the closing quote itself (left unconsumed, so
+        // the enclosing segment cooker closes there) and stop: the
+        // cooked word then hands the expansion walker a span whose
+        // collector runs off the string, which is what raises GNU's
+        // `bad substitution: no closing `]'` verdict. Plain bracket
+        // counting diverged on both halves: it cut the span at a `]`
+        // inside the body's own quotes and let the segment close at
+        // the wrong quote.
+        let bytes = rest.as_bytes();
+        let seg_end = dquote_segment_end(bytes, 0);
+        match dollar_bracket_body_end(bytes, 0) {
+            Some(end) if end <= seg_end => {
+                let mut idx = 0usize;
+                let mut seg_start = 0usize;
+                while idx < end {
+                    if bytes[idx] == b'\\' && bytes.get(idx + 1) == Some(&b'"') {
+                        out.push_str(&rest[seg_start..idx]);
+                        out.push('"');
+                        idx += 2;
+                        seg_start = idx;
+                        continue;
+                    }
+                    idx += 1;
+                }
+                out.push_str(&rest[seg_start..end]);
+                return &rest[end..];
+            }
+            _ => {
+                out.push_str(&rest[..seg_end]);
+                if seg_end < bytes.len() {
+                    out.push('"');
+                }
+                return &rest[seg_end..];
+            }
+        }
+    }
     let bytes = rest.as_bytes();
     let mut depth = 1usize;
     let mut idx = 0usize;
@@ -1540,12 +1836,55 @@ fn copy_dollar_bracket_arithmetic(
 
 /// Char form of `copy_dollar_bracket_body_raw_cursor` (chars just past
 /// the `$[`): copy through the matching `]` by plain bracket counting,
-/// with the same `deescape_dq` rule as the cursor form.
+/// with the same `deescape_dq` rule as the cursor form. In a
+/// double-quoted segment (`deescape_dq`) the segment containment rule
+/// of the cursor form applies (rubash#2441): the span is copied
+/// through its extraction end only when that end lies inside the
+/// segment; otherwise the body is copied up to the segment end plus
+/// the segment-closing quote (left unconsumed so the enclosing cooker
+/// closes there), which makes the expansion walker report the span
+/// unclosed, as GNU does.
 fn copy_dollar_bracket_body_raw(
     out: &mut String,
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
     deescape_dq: bool,
 ) {
+    if deescape_dq {
+        let snapshot: Vec<char> = chars.clone().collect();
+        let seg_end = dquote_segment_end_chars(&snapshot, 0);
+        match dollar_bracket_body_end_chars(&snapshot, 0) {
+            Some(end) if end <= seg_end => {
+                let mut consumed = 0usize;
+                while consumed < end {
+                    let Some(ch) = chars.next() else {
+                        break;
+                    };
+                    consumed += 1;
+                    if ch == '\\'
+                        && consumed < end
+                        && matches!(chars.peek(), Some('"'))
+                    {
+                        out.push(chars.next().expect("peeked escape char"));
+                        consumed += 1;
+                        continue;
+                    }
+                    out.push(ch);
+                }
+            }
+            _ => {
+                for _ in 0..seg_end {
+                    match chars.next() {
+                        Some(ch) => out.push(ch),
+                        None => break,
+                    }
+                }
+                if seg_end < snapshot.len() {
+                    out.push('"');
+                }
+            }
+        }
+        return;
+    }
     let mut depth = 1usize;
     while let Some(ch) = chars.next() {
         if deescape_dq && ch == '\\' && matches!(chars.peek(), Some('"')) {

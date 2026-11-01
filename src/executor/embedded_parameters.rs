@@ -1046,9 +1046,14 @@ impl Executor {
                     // GNU subst.c:1301 extract_arithmetic_subst extraction
                     // (quote-unit aware, backslash-passed) — the shared
                     // collector in embedded_mutations (rubash#2374).
+                    // rubash#2441: in_double marks a raw-text walk inside
+                    // a double-quoted segment — the collector then runs
+                    // segment-bounded (a raw `"` truncates the string the
+                    // extraction sees, subst.c:1014 skip_double_quoted).
                     let (expression, closed) =
                         crate::executor::embedded_mutations::collect_dollar_bracket_arithmetic_expansion(
                             &mut chars,
+                            in_double,
                         );
                     if closed {
                         // GNU expand_arith_string (subst.c:3981) picks
@@ -1097,9 +1102,27 @@ impl Executor {
                                 output.push_str(&value);
                             }
                         }
-                    } else {
+                    } else if double_quoted {
+                        // @P containment: GNU subst.c:4407 runs prompt
+                        // expansion under no_longjmp_on_fatal_error, so a
+                        // failed extraction falls back to the passed
+                        // string with no diagnostic (subst.c:4413-4418).
                         output.push_str("$[");
                         output.push_str(&expression);
+                    } else {
+                        // rubash#2441: extraction found no closing `]`
+                        // in the string handed to this expansion level —
+                        // GNU reports `bad substitution: no closing `]'`
+                        // and discards the command (subst.c
+                        // extract_delimited_string failure site). A
+                        // heredoc walk names the whole body; any other
+                        // walk names its string through the failing span.
+                        let string = if heredoc {
+                            word.to_string()
+                        } else {
+                            dollar_bracket_no_closing_string(word, &expression)
+                        };
+                        self.no_closing_bracket_verdict(&string);
                     }
                 }
                 Some(first) if first.is_ascii_digit() => {
