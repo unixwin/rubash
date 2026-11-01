@@ -1428,16 +1428,27 @@ impl Executor {
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
 
-    /// True while a plain binding shadows the dynamic DIRSTACK variable:
-    /// a frame local created by `local`/`declare` (GNU make_local_variable
-    /// builds a brand-new SHELL_VAR with no get/assign funcs, so the local
-    /// is an ordinary variable) or a temporary-environment tempvar (GNU
-    /// assign_in_env likewise creates a fresh scalar in temporary_env and
-    /// never reaches assign_dirstack). While a shadow is live, every
-    /// dynamic face of DIRSTACK -- the stack setter routing, the
+    /// True while the dynamic DIRSTACK variable does NOT own its name,
+    /// so every dynamic face -- the stack setter routing, the
     /// get_dirstack materialization, the carrier-derived read views --
-    /// must defer to the plain binding, exactly as find_variable finding
-    /// the shadowing variable first defers in GNU (rubash#2424).
+    /// must defer to the plain binding (or to no binding). Two states
+    /// displace the dynamic variable:
+    ///
+    /// - A plain binding shadows it: a frame local created by
+    ///   `local`/`declare` (GNU make_local_variable builds a brand-new
+    ///   SHELL_VAR with no get/assign funcs, so the local is an ordinary
+    ///   variable) or a temporary-environment tempvar (GNU assign_in_env
+    ///   likewise creates a fresh scalar in temporary_env and never
+    ///   reaches assign_dirstack) — exactly as find_variable finding the
+    ///   shadowing variable first defers in GNU (rubash#2424).
+    /// - `unset DIRSTACK` unbound it: variables.c:3839 unbind_variable
+    ///   removes the dynamic SHELL_VAR itself, and variables.c:1197-1198
+    ///   warns that a special variable so unset "loses its special
+    ///   meaning, even if you subsequently set it" — the unbind is
+    ///   permanent for the shell's lifetime (recorded in
+    ///   UNSET_DYNAMIC_VARS by the unset paths), pushd/popd keep
+    ///   maintaining the real stack for `dirs`, and later binds create
+    ///   an ordinary variable (rubash#2434).
     pub(in crate::executor) fn dirstack_shadowed(&self) -> bool {
         self.tempenv_names.iter().any(|name| name == "DIRSTACK")
             || self
@@ -1445,6 +1456,7 @@ impl Executor {
                 .local_var_scopes
                 .iter()
                 .any(|scope| scope.contains_key("DIRSTACK"))
+            || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "DIRSTACK")
     }
 
     /// Materializes the DIRSTACK array cell from the live directory stack.
@@ -1457,6 +1469,14 @@ impl Executor {
     /// local or tempenv shadow suppresses the materialization, because
     /// the shadowing binding is what named accesses see (rubash#2424).
     pub(in crate::executor) fn sync_dirstack_cell(&mut self) {
+        // An unset-unbound DIRSTACK (rubash#2434) has no dynamic
+        // variable left to materialize: callers that sync through a
+        // force-global door must not resurrect the cell from the
+        // carrier either (variables.c:1197-1198 — the special meaning
+        // is lost for the shell's lifetime).
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "DIRSTACK") {
+            return;
+        }
         let storage = self.dirstack_storage();
         self.shell_state
             .env_vars

@@ -892,6 +892,14 @@ impl Executor {
         command_name: &str,
         allow_subscripts: bool,
     ) -> (Vec<String>, bool, bool, Vec<String>) {
+        // While the dynamic variable does not own its name the builtin
+        // keeps every operand: a live shadow binds plainly, and after
+        // `unset DIRSTACK` the name is an ordinary variable for good
+        // (variables.c:1197-1198; rubash#2434) — routing its binds to
+        // the stack setter would write a carrier no read face may use.
+        if self.dirstack_shadowed() {
+            return (args.to_vec(), false, false, Vec::new());
+        }
         let mut kept: Vec<String> = Vec::new();
         let mut routed = false;
         let mut failed = false;
