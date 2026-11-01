@@ -1042,14 +1042,54 @@ impl Executor {
             self.shell_state.function_depth -= 1;
             self.restore_function_locals();
             self.set_positional_params(old_positional_params);
-            if !self.shell_state.function_name_stack.is_empty() {
-                self.shell_state.function_name_stack.remove(0);
-            }
-            if !self.shell_state.bash_lineno_stack.is_empty() {
-                self.shell_state.bash_lineno_stack.remove(0);
-            }
-            if !self.shell_state.bash_source_stack.is_empty() {
-                self.shell_state.bash_source_stack.remove(0);
+            // rubash#2482: an ExitCode/LastpipeExit unwind while
+            // `set -e` is live is GNU's longjmp to the top level —
+            // execute_function's frame pop (the uw_restore_funcarray_
+            // state unwind protect, execute_cmd.c:5329, run by
+            // run_unwind_frame at :5418 on the normal return) never
+            // runs on that path, so the EXIT trap action executes
+            // with the dying call stack still installed (the reader
+            // loop's ERREXIT case, eval.c:102-106, documents the
+            // intent: "keep the execution context in a shell function
+            // if we were executing one"). Mirror it: leave this frame
+            // on the three stacks and count the leak; the EXIT trap
+            // funnel (drop_exit_unwind_leaked_frames) removes the
+            // leaked frames once the action has run, and fork-boundary
+            // state restores roll them back with the stacks.
+            //
+            // The gate is exactly GNU's live errexit flag
+            // (flags.c:263: exit_immediately_on_error = errexit_flag),
+            // sampled here at the dying frame: with `-e` live at the
+            // failure point the frames stay (probes: errexit failure,
+            // expansion DISCARD, and the DISCARD under a `||`
+            // suppression — suppression is a per-command ignore_return
+            // flag and does NOT clear exit_immediately_on_error);
+            // with `-e` off (or turned off inside the dying function)
+            // the expansion DISCARD unwind runs the protects first
+            // (subst.c exp_jump_to_top_level -> sig.c:387
+            // top_level_cleanup -> run_unwind_protects) and the EXIT
+            // trap sees a clean stack. An `exit` builtin's own unwind
+            // needs no leak — its trap already ran at the dispatch
+            // site with the frames in place — and a leak there is
+            // dropped unused by the funnel, so it is harmless.
+            let exit_unwind = matches!(
+                result,
+                Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
+            ) && self.errexit_enabled();
+            if exit_unwind {
+                self.shell_state
+                    .exit_unwind_leaked_frames
+                    .set(self.shell_state.exit_unwind_leaked_frames.get() + 1);
+            } else {
+                if !self.shell_state.function_name_stack.is_empty() {
+                    self.shell_state.function_name_stack.remove(0);
+                }
+                if !self.shell_state.bash_lineno_stack.is_empty() {
+                    self.shell_state.bash_lineno_stack.remove(0);
+                }
+                if !self.shell_state.bash_source_stack.is_empty() {
+                    self.shell_state.bash_source_stack.remove(0);
+                }
             }
             if pushed_bash_args {
                 if !self.shell_state.bash_argc_stack.is_empty() {

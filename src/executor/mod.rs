@@ -332,9 +332,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use self::path::{
     adopt_orphan_console, apply_required_windows_child_environment,
-    external_command_for_named_program_with_exec_name,
-    find_shell, find_user_command, find_user_command_without_hash, shell_path_to_process,
-    shell_path_to_windows, standard_path, suppress_orphan_console,
+    external_command_for_named_program_with_exec_name, find_shell, find_user_command,
+    find_user_command_without_hash, shell_path_to_process, shell_path_to_windows, standard_path,
+    suppress_orphan_console,
 };
 
 // version.c:90 show_shell_version(): the --version banner prints the same
@@ -892,6 +892,27 @@ pub struct Executor {
     /// to re-enter while it is set — an ERR trap action that itself fails
     /// must not recursively re-trigger the ERR trap (niubash #121).
     error_trap_running: bool,
+    /// The EXIT trap action's execution window (trap.c:1027
+    /// run_exit_trap sets running_trap for the action's duration).
+    /// Consulted by the DEBUG funnel for exactly one thing: while ANY
+    /// trap action runs, BASH_COMMAND stays frozen at the last
+    /// non-trap command (execute_cmd.c:4498 refreshes
+    /// the_printed_command_except_trap only when running_trap == 0).
+    /// It is NOT a DEBUG-firing gate: execute_cmd.c:4506 calls
+    /// run_debug_trap unconditionally for simple commands, so
+    /// commands inside the EXIT action DO take DEBUG firings —
+    /// wearing the frozen command (rubash#2482 face a).
+    exit_trap_running: bool,
+    /// rubash#2482 face b: the subshell_depth at which a pipeline
+    /// stage's root `( )` element was dispatched (set by
+    /// execute_compound_pipeline_stage on the stage clone, cleared
+    /// when the element's execute_command returns). GNU dispatches a
+    /// pipeline element from execute_pipeline — there is no wait_for
+    /// frame for the element itself, so the execute_command tail's
+    /// wait-side ERR adjudication (the :769 model) must not fire for
+    /// the element's own completion; nested `( )` commands inside the
+    /// body run at a greater subshell_depth and keep their fire.
+    subshell_element_root_depth: std::cell::Cell<Option<usize>>,
     /// GNU execute_cmd.c:1799-1806 (execute_in_subshell): a user-subshell
     /// child whose whole body is a single simple or subshell command marks
     /// that body CMD_NO_FORK; execute_cmd.c:662-663 then dispatches a
