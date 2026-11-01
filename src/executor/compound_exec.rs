@@ -3870,6 +3870,13 @@ impl Executor {
         // alongside the depth bump; saved_state's wholesale restore
         // reverts it at the boundary (rubash#2438).
         self.shell_state.subshell_login_cleared.set(true);
+        // jobs.c:5356-5366 without_job_control (via
+        // execute_in_subshell): the job_control variable is erased
+        // with the login state; the monitor flag letter stays in `$-`
+        // and a `set -m` inside re-arms the variable through
+        // flags.c:257 (rubash#2487). saved_state's wholesale restore
+        // reverts it at the boundary.
+        self.shell_state.job_control.set(false);
         // rubash#1493: GNU's signal-death notice for a job killed inside
         // the parens names the WHOLE subshell command (jobs.c:4625
         // pretty_print_job on the dead job). Record the node's print_cmd
@@ -4050,10 +4057,7 @@ impl Executor {
                     // to ExitCode(1) after the parent list continued.
                     if executor.evalerror_exit_toomany_pending.get()
                         && (executor.discard_fold_frame()
-                            || executor
-                                .shell_state
-                                .env_vars
-                                .contains_key("__RUBASH_IS_C"))
+                            || executor.shell_state.env_vars.contains_key("__RUBASH_IS_C"))
                     {
                         executor.evalerror_exit_toomany_pending.set(false);
                         executor.exit_code = 1;

@@ -1191,6 +1191,17 @@ impl Executor {
 
     pub fn set_shell_option(&mut self, name: &str, enabled: bool) {
         crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
+        // The startup/API funnel for the flag is also where the
+        // job_control variable follows it: shell.c:647 seeds
+        // set_job_control(interactive_shell), shell.c:1858 seeds it
+        // from a `-m` invocation, and initialize_job_control's
+        // terminal failure drops it again (jobs.c:4845-4869 — the
+        // main.rs normalization that turns the option back off).
+        // Runtime `set` writes take the builtin dispatch instead and
+        // never pass through here (rubash#2487).
+        if name == "monitor" {
+            self.shell_state.job_control.set(enabled);
+        }
         // The set_edit_mode bridge (builtins/set.def:427), same as
         // the runtime `set` builtin's: flipping the editing-mode
         // option ON is an rl_variable_bind("editing-mode", ...), so
@@ -1463,10 +1474,7 @@ impl Executor {
     /// about where `/` lives.
     pub(crate) fn proc_link_forms(
         &self,
-    ) -> (
-        crate::proc_vfs::ProcSelfCwd,
-        crate::proc_vfs::ProcSelfRoot,
-    ) {
+    ) -> (crate::proc_vfs::ProcSelfCwd, crate::proc_vfs::ProcSelfRoot) {
         let cwd = crate::proc_vfs::self_cwd_forms(self.session_cwd());
         let root_native = crate::executor::path::shell_path_to_windows(
             "/",
