@@ -292,10 +292,14 @@ impl Executor {
                 }
             }
             SpecialPathClass::SyntheticLink => {
-                match crate::special_paths::synthetic_link_target(
-                    target,
-                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-                ) {
+                match {
+                    let (cwd_forms, root_forms) = self.proc_link_forms();
+                    crate::special_paths::synthetic_link_target(
+                        target,
+                        Some(&cwd_forms),
+                        Some(&root_forms),
+                    )
+                } {
                     Some(link) => {
                         return OpenOptions::new().read(true).write(true).open(&link.native);
                     }
@@ -532,15 +536,20 @@ impl Executor {
             }
             return None;
         }
-        // SyntheticLink (rubash#1900): /proc/<pid>/exe and .../cwd are
-        // magic links — the open goes to the resolved target file. The
-        // session cwd (G-02; never the process-global cwd) answers for
-        // self/cwd. A directory target (cwd) fails the OS open here,
-        // which the caller reports like any unreadable redirect source.
-        if let Some(link) = crate::special_paths::synthetic_link_target(
-            target,
-            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-        ) {
+        // SyntheticLink (rubash#1900): /proc/<pid>/exe, .../cwd and
+        // .../root are magic links — the open goes to the resolved
+        // target file. The session cwd (G-02; never the process-global
+        // cwd) answers for self/cwd, the payload root for root. A
+        // directory target (cwd, root) fails the OS open here, which
+        // the caller reports like any unreadable redirect source.
+        if let Some(link) = {
+            let (cwd_forms, root_forms) = self.proc_link_forms();
+            crate::special_paths::synthetic_link_target(
+                target,
+                Some(&cwd_forms),
+                Some(&root_forms),
+            )
+        } {
             return Some(open_redirect_input_file(std::path::Path::new(&link.native)));
         }
         // Q11 /proc P1 (docs/proc-vfs-plan.md hook B): synthetic /proc files
@@ -2439,10 +2448,14 @@ impl Executor {
                 }
             }
             SpecialPathClass::SyntheticLink => {
-                match crate::special_paths::synthetic_link_target(
-                    target,
-                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-                ) {
+                match {
+                    let (cwd_forms, root_forms) = self.proc_link_forms();
+                    crate::special_paths::synthetic_link_target(
+                        target,
+                        Some(&cwd_forms),
+                        Some(&root_forms),
+                    )
+                } {
                     Some(link) => crate::executor::execution_misc::open_redirect_append(
                         &std::path::PathBuf::from(&link.native),
                     ),

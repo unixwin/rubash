@@ -1479,6 +1479,28 @@ impl Executor {
         }
     }
 
+    /// The caller-fed forms the synthetic-link face resolves through
+    /// (rubash#1900, niubash#758): the session cwd's spellings for
+    /// /proc/self/cwd and the payload root's spellings for
+    /// /proc/<pid>/root. The root's native form is the one mapping
+    /// that defines the namespace — `shell_path_to_windows("/")` —
+    /// so the link target and the path mapper can never disagree
+    /// about where `/` lives.
+    pub(crate) fn proc_link_forms(
+        &self,
+    ) -> (
+        crate::proc_vfs::ProcSelfCwd,
+        crate::proc_vfs::ProcSelfRoot,
+    ) {
+        let cwd = crate::proc_vfs::self_cwd_forms(self.session_cwd());
+        let root_native = crate::executor::path::shell_path_to_windows(
+            "/",
+            self.shell_state.env_vars.values_map(),
+        );
+        let root = crate::proc_vfs::self_root_forms(&root_native);
+        (cwd, root)
+    }
+
     pub fn env_vars(&self) -> &HashMap<String, String> {
         self.shell_state.env_vars.values_map()
     }
