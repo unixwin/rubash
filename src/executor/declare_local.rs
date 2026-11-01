@@ -1053,9 +1053,16 @@ impl Executor {
                 let Some(index) = self.resolve_declare_dirstack_subscript(inner) else {
                     // A negative index before the stack start is the
                     // arrayfunc.c bad-subscript failure (the elements
-                    // bound by earlier operands stay bound); other
-                    // unresolvable text keeps the builtin's paths.
-                    if inner.parse::<i64>().is_ok_and(|v| v < 0) {
+                    // bound by earlier operands stay bound); the empty
+                    // subscript and the ALL_ELEMENT_SUB spellings are
+                    // the same failure at arrayfunc.c:355-360 (checked
+                    // on the expanded operand declare hands over), and
+                    // the builtin's generic path swallows all three for
+                    // DIRSTACK (rubash#2432). Other unresolvable text
+                    // keeps the builtin's paths.
+                    if inner.parse::<i64>().is_ok_and(|v| v < 0)
+                        || matches!(inner, "" | "@" | "*")
+                    {
                         routed = true;
                         failed = true;
                         diagnostics.push(format!(

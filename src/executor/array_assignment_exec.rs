@@ -301,15 +301,120 @@ impl Executor {
                 self.exit_code = 1;
                 return true;
             }
-            let Some(index) = index.trim_end_matches(']').parse::<usize>().ok() else {
+            // GNU arrayfunc.c:420-434 assign_array_element_internal: the
+            // subscript feeds array_expand_index (arithmetic evaluation),
+            // a negative result counts back from the materialized array's
+            // max index, and only a still-negative index is the
+            // err_badarraysub failure. For DIRSTACK the materialized
+            // array is get_dirstack's rebuild of the live stack
+            // (variables.c:1619-1630, run by find_variable before the
+            // resolution), so negatives resolve against the live stack
+            // length. The old door parsed the subscript as a bare usize,
+            // so every negative or arithmetic subscript failed silently
+            // with status 1 and no element ever resolved (rubash#2432).
+            let index = index.strip_suffix(']').unwrap_or(index);
+            // Only a truly EMPTY subscript is bad outright (the generic
+            // arm's pre-check below): whitespace still evaluates to 0.
+            if index.trim().is_empty() && raw_subscript.is_none_or(str::is_empty) {
+                self.report_bad_array_subscript(&lhs_as_written());
+                self.evalerror_subscript_pending.set(true);
                 self.exit_code = 1;
                 return true;
+            }
+            // The subscript evaluation mirrors the generic indexed arm
+            // below verbatim in miniature: the cooked `index` is the one
+            // expand_arith_string pass's product, a clean decimal literal
+            // takes the fast lane, everything else re-enters
+            // eval_indexed_subscript over the raw-derived arith text.
+            let literal_index = match raw_subscript {
+                Some(raw) if raw.contains('\'') => None,
+                _ => super::arithmetic::literal_decimal_subscript(index),
+            };
+            let computed_index = if let Some(index) = literal_index {
+                index
+            } else {
+                let eval_text;
+                let mut eval_input = match raw_subscript {
+                    Some(raw) if raw.contains('\'') => {
+                        eval_text = self.expand_arithmetic_special_parameters(raw);
+                        eval_text.as_str()
+                    }
+                    Some(raw) if crate::lexer::remove_shell_quotes(raw) == index => {
+                        eval_text = super::arithmetic::arith_subscript_text(raw);
+                        eval_text.as_str()
+                    }
+                    Some(raw) => {
+                        eval_text = super::arithmetic::arith_subscript_text(raw);
+                        eval_text.as_str()
+                    }
+                    _ => index,
+                };
+                if eval_input.trim().is_empty() {
+                    eval_input = "0";
+                }
+                // arrayfunc.c:355-360: ALL_ELEMENT_SUB is rejected
+                // before the arith eval, exactly as in the generic arm.
+                if matches!(eval_input.trim(), "*" | "@") {
+                    self.report_bad_array_subscript(&lhs_as_written());
+                    self.evalerror_subscript_pending.set(true);
+                    self.exit_code = 1;
+                    return true;
+                }
+                match self.eval_indexed_subscript(SubscriptSource::Protected(eval_input)) {
+                    IndexedSubscript::Index(index) => index,
+                    IndexedSubscript::Empty => {
+                        self.report_bad_array_subscript(&lhs_as_written());
+                        self.evalerror_subscript_pending.set(true);
+                        self.exit_code = 1;
+                        return true;
+                    }
+                    IndexedSubscript::Error => {
+                        if self.raise_nounset_subscript_abort() {
+                            return true;
+                        }
+                        self.exit_code = 1;
+                        return true;
+                    }
+                }
+            };
+            let index = if computed_index < 0 {
+                let len = crate::builtins::pushd::load_stack(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                )
+                .len();
+                // ind = (len - 1) + 1 + ind == len + ind; a still-negative
+                // result is err_badarraysub (arrayfunc.c:431-435).
+                let resolved = i128::try_from(len).unwrap_or(i128::MAX) + computed_index;
+                if resolved < 0 {
+                    self.report_bad_array_subscript(&lhs_as_written());
+                    self.evalerror_subscript_pending.set(true);
+                    self.exit_code = 1;
+                    return true;
+                }
+                usize::try_from(resolved).unwrap_or(usize::MAX)
+            } else {
+                usize::try_from(computed_index).unwrap_or(usize::MAX)
+            };
+            // GNU make_variable_value with ASS_APPEND reads the current
+            // element and concatenates before the bind; the setter then
+            // applies its own slot rules (0 and out-of-range dropped).
+            let new_value = if append {
+                let old = crate::builtins::pushd::stack_value(
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    index,
+                )
+                .unwrap_or_default();
+                format!("{old}{value}")
+            } else {
+                value.to_string()
             };
             crate::builtins::pushd::set_stack_value(
                 &mut self.shell_state.env_vars,
                 &self.shell_state.cwd,
                 index,
-                value.to_string(),
+                new_value,
             );
             self.exit_code = 0;
             return true;
