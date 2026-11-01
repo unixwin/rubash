@@ -108,7 +108,42 @@ fn set_args_enable_history(args: &str) -> bool {
 /// inert for the entire file (rubash#414: `-o posix` + `alias for=echo`
 /// let the fast path miss GNU's parse-time reserved-word decision).
 pub fn script_uses_aliases(contents: &str, alias_live_at_start: bool) -> bool {
-    alias_live_at_start || contents.contains("expand_aliases") || contents.contains("set -o posix")
+    alias_live_at_start
+        || contents.contains("expand_aliases")
+        || contents.contains("set -o posix")
+        || script_runs_foreign_text(contents)
+}
+
+/// Textual markers for commands that execute FOREIGN text: `. file`,
+/// `source file`, `eval string`. GNU's reader is incremental —
+/// builtins/evalstring.c:359 `while (*(bash_input.location.string) ||
+/// parser_expanding_alias ())` parses one complete command only after the
+/// previous commands EXECUTED — and the alias gate is consulted live on
+/// every token (parse.y:5759 `if (expand_aliases && quoted == 0)`;
+/// `shopt -s expand_aliases` flips it at runtime through
+/// builtins/shopt.def:630 shopt_set_expaliases). So foreign text sourced
+/// or eval'd mid-script can open alias expansion for the LATER commands of
+/// THIS file (rubash#2480: modernish's adj/std.sh:121 runs `shopt -s
+/// expand_aliases` while bin/modernish is being sourced, and the script's
+/// own text never mentions the option). A whole-file upfront parse cannot
+/// reproduce that: it would hand those later commands to the executor's
+/// word-level alias fallback, which flattens alias-introduced reserved
+/// words into plain words — `{ { { _Msh_loop ...` became one simple
+/// command with command name `{` (the modernish LOOP/DO/DONE failure).
+/// Refuse the fast path for every script that can pull in foreign text.
+/// Like the existing text scans this over-admits (a false positive only
+/// costs the grouped driver's speed, never semantics); a dynamically
+/// constructed command name still evades it — the same documented
+/// limitation `script_uses_runtime_parse_gates` carries.
+fn script_runs_foreign_text(contents: &str) -> bool {
+    contents.contains("eval")
+        || contents.contains("source")
+        // `.` as the source builtin: always followed by whitespace before
+        // its operand (`.  file`, `.\tfile`, `.` at end of a CRLF/LF line).
+        || contents.contains(". ")
+        || contents.contains(".\t")
+        || contents.contains(".\n")
+        || contents.contains(".\r")
 }
 
 /// True when the script may flip a parse-time gate at runtime, so the
