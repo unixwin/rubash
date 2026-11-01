@@ -1297,7 +1297,23 @@ impl Executor {
         // Heredoc bodies are raw text: quote characters are literal data
         // (redir.c heredoc expansion has no quote removal), so the scan must
         // keep treating every `${` as an expansion start.
-        self.parameter_expansion_error_in_word_context(body, false)
+        //
+        // But the scan must run on the SAME escape-processed text the real
+        // expansion walker sees (rubash#2486). GNU consumes `\x` atomically
+        // in expand_word_internal's backslash branch (subst.c:11614-11661):
+        // under Q_HERE_DOCUMENT (redir.c:374 heredoc_expand) the escape set is
+        // CBSHDOC = `\ ` $ (syntax.h:27 slashify_in_here_document,
+        // syntax.h:59; tflag selection subst.c:11628-11629), and the escaped
+        // `$`/`` ` `` become CTLESC-protected data (subst.c:11659-11661
+        // final else) — parameter expansion, and with it the nounset verdict,
+        // is never entered for them. Scanning the RAW body let `\$PREFIX`
+        // reach the nounset check as `$PREFIX` and report it unbound.
+        // prepare_unquoted_heredoc_expansion is the one owner of that class:
+        // `\$`→DATA_DOLLAR, `\``→DATA_BACKTICK, `\\`→DATA_BACKSLASH, so an
+        // odd backslash run before `$`/`` ` `` can never open an expansion
+        // here, while `\\$name` (collapsed `\` + real `$name`) still does.
+        let prepared = super::command_input_scope::prepare_unquoted_heredoc_expansion(body);
+        self.parameter_expansion_error_in_word_context(&prepared, false)
     }
 
     pub(in crate::executor) fn parameter_expansion_error_in_word(
