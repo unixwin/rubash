@@ -75,6 +75,61 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
 const EX_USAGE: i32 = 2;
 
+/// Written spellings of declare operands whose subscripts the executor's
+/// declare pass already evaluated, keyed by the operand's REWRITTEN
+/// `name[subscript]` prefix (see `element_word_prefix`) with one queue
+/// entry per occurrence. GNU's bad-subscript diagnostic (error.c:440-443
+/// err_badarraysub) prints the operand as the user wrote it (`a[abc]`),
+/// but by the time the builtin sees the operand the subscript has been
+/// replaced by its value (`a[-5]`). The executor is the one place that
+/// still holds both forms (positionally aligned right after the
+/// rewrite), so it hands the pairing down and the builtin pops the
+/// written form for exactly the operand it is failing on. Keying by the
+/// `name[subscript]` prefix rather than the whole operand keeps the
+/// pairing valid across the executor's later value-side rewrites
+/// (integer RHS evaluation replaces the text after the `=`).
+pub(crate) type WrittenOperandHints =
+    std::collections::HashMap<String, std::collections::VecDeque<String>>;
+
+/// The `name[...]` prefix of an operand: scan from the first `[` to its
+/// matching `]`, counting nested pairs and skipping quoted/escaped
+/// characters (the same span rule as GNU parse_matched_pair P_ARRAYSUB,
+/// parse.y:3906). The append `+` and the `=value` tail are not part of
+/// the prefix (`a[abc]+=x` keys and reports as `a[abc]`).
+pub(crate) fn element_word_prefix(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let open = text.find('[')?;
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(text[..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Synchronize indexed declarations into the typed variable owner after the
 /// legacy builtin path has applied its attribute and encoding rules.
 pub(crate) fn sync_typed_assignments(
@@ -98,6 +153,19 @@ pub(crate) fn sync_typed_assignments(
         let Some(value) = variables.get(base) else {
             continue;
         };
+        if variables.is_marked(DECLARED_UNSET_VARS, base) {
+            // A declared-but-unset variable has no value: its mirror
+            // entry is an empty placeholder, and parsing it as an
+            // implicit scalar would seed a phantom [0]="" element the
+            // mirror does not have (GNU: the variable simply has no
+            // cell contents — ${#a[@]} is 0). It reaches this sync when
+            // an element bind FAILED and left it unset (rubash#2462);
+            // any typed cell is stale by definition, so drop it.
+            if variables.is_marked(ARRAY_VARS, base) {
+                crate::executor::drop_typed_indexed_array(store, base);
+            }
+            continue;
+        }
         if variables.is_marked(ARRAY_VARS, base) {
             let entries = indexed_array_entries(value);
             // rubash#616: preserve sparse keys — a values-only replace
@@ -435,6 +503,7 @@ where
         &[],
         &crate::shell::var_table::TempenvListingUnderlay::new(),
         oob_word,
+        &mut WrittenOperandHints::default(),
     )
 }
 
@@ -454,6 +523,7 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
     dynamic_views: &[(String, String)],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     oob_word: &mut Option<String>,
+    written_hints: &mut WrittenOperandHints,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -1151,6 +1221,7 @@ where
         &mut deleted_names,
         stderr,
         oob_word,
+        written_hints,
     )? != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
