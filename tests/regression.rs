@@ -3114,28 +3114,53 @@ mod issue_753 {
 /// through get_numeric_arg (builtins/common.c:501-505 sh_neednumarg,
 /// get_numeric_arg returns 0 and shift_builtin answers
 /// `return (EX_USAGE)`) and a surplus operand through no_args
-/// (`set_exit_status (EX_BADUSAGE)`); only the shift-count-erange path
-/// returns EXECUTION_FAILURE.
-/// GNU 5.3.0 differential (WSL stdin probes 2026-10-18):
-///   ( set -- 1 2; shift x )    -> 2   (was 1)
-///   ( set -- 1 2; shift 1 2 )  -> 2   (was 1)
-///   ( set -- 1 2; shift -1 )   -> 1
-///   set -- 1 2 3; shift 99     -> 1
+/// (builtins/common.c:511 calls no_args, builtins/common.c:139-151:
+/// `set_exit_status (EX_BADUSAGE)` then `jump_to_top_level (DISCARD)`);
+/// only the shift-count-erange path returns EXECUTION_FAILURE.
+/// The surplus-operand DISCARD dies at the `( )` region's own top level,
+/// so the status the parent sees depends on the framing the region's
+/// execution hangs from — the same split rubash#2439 pins for suspend's
+/// identical no_args DISCARD: a `-c` process (run_one_command's
+/// parse_and_execute framing, shell.c:1477) folds the region status to
+/// EXECUTION_FAILURE 1, while the reader framings (script file, stdin)
+/// keep the pre-set EX_BADUSAGE 2. The plain-return cells (shiftx,
+/// shiftneg, shiftbig) do not ride the DISCARD and agree everywhere.
+/// GNU 5.3.20 differential (oracle probes, both framings, 2026-11-01;
+/// the 2026-10-18 table below was stdin-framed while this pin ran `-c`,
+/// which enshrined the reader value 2 for the `-c` shift12 cell):
+///   framing -c:      shiftx 2, shift12 1, shiftneg 1, shiftbig 1
+///   framing script:  shiftx 2, shift12 2, shiftneg 1, shiftbig 1
 #[test]
 fn shift_bad_operand_status_matches_gnu() {
     let dir = case_scratch("759.shift");
+    let code = "( set -- 1 2; shift x ) 2>/dev/null; echo \"shiftx:$?\"\n\
+         ( set -- 1 2; shift 1 2 ) 2>/dev/null; echo \"shift12:$?\"\n\
+         ( set -- 1 2; shift -1 ) 2>/dev/null; echo \"shiftneg:$?\"\n\
+         set -- 1 2 3; shift 99 2>/dev/null; echo \"shiftbig:$?\"";
     let run = |code: &str| {
         let out = run_rubash_in(&dir, &["-c", code], Duration::from_secs(30));
         String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     };
 
-    let statuses = run("( set -- 1 2; shift x ) 2>/dev/null; echo \"shiftx:$?\"\n\
-         ( set -- 1 2; shift 1 2 ) 2>/dev/null; echo \"shift12:$?\"\n\
-         ( set -- 1 2; shift -1 ) 2>/dev/null; echo \"shiftneg:$?\"\n\
-         set -- 1 2 3; shift 99 2>/dev/null; echo \"shiftbig:$?\"");
     assert_eq!(
-        statuses, "shiftx:2\nshift12:2\nshiftneg:1\nshiftbig:1",
-        "shift statuses"
+        run(code),
+        "shiftx:2\nshift12:1\nshiftneg:1\nshiftbig:1",
+        "shift statuses under -c framing"
+    );
+
+    // The identical text as a script file keeps the pre-set EX_BADUSAGE
+    // for the surplus-operand region (see the header comment).
+    let script = dir.join("shift_case.sh");
+    std::fs::write(&script, format!("{code}\n")).expect("write shift script");
+    let out = run_rubash_in(
+        &dir,
+        &[script.to_str().expect("utf8 script path")],
+        Duration::from_secs(30),
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string(),
+        "shiftx:2\nshift12:2\nshiftneg:1\nshiftbig:1",
+        "shift statuses under script framing"
     );
 
     // The diagnostics themselves keep GNU's wording (only the status
