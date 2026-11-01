@@ -278,7 +278,7 @@ impl Executor {
                         for (name, value) in &parsed.variables {
                             registry.set_readline_variable(name, value);
                         }
-                        for (keyseq, spec) in &parsed.bindings {
+                        for (index, (keyseq, spec)) in parsed.bindings.iter().enumerate() {
                             let kind = match spec {
                                 crate::builtins::bind::BindingSpec::Function { name } => {
                                     BindKind::Function { name: name.clone() }
@@ -290,7 +290,20 @@ impl Executor {
                             registry.register(BindEntry {
                                 keyseq: keyseq.clone(),
                                 kind,
-                                keymap: keymap.clone(),
+                                // The keymap the binding was parsed
+                                // under: an in-file `set editing-mode`
+                                // / `set keymap` moves the live keymap
+                                // mid-file (sv_editmode, lib/readline/
+                                // bind.c:2092-2110), so the stamp is
+                                // per-binding; entries the file never
+                                // moved belong to this invocation's
+                                // resolved map (rubash#2447).
+                                keymap: parsed
+                                    .binding_keymaps
+                                    .get(index)
+                                    .cloned()
+                                    .flatten()
+                                    .or_else(|| keymap.clone()),
                             });
                         }
                     }
@@ -710,13 +723,25 @@ impl Executor {
                 diagnostic.file, diagnostic.line, diagnostic.core
             );
         }
+        // The keymap in effect as the file starts: bindings the file
+        // never moves (no in-file `set editing-mode` / `set keymap`)
+        // belong to it, while entries parsed after an in-file move
+        // carry their own stamp — captured BEFORE the variables are
+        // applied, since applying them moves the registry's current
+        // keymap to the file's final map (rubash#2447).
+        let start_keymap = crate::shell::bind_registry::normalize_keymap_name(
+            self.bind_readline_variable("keymap")
+                .as_deref()
+                .unwrap_or("emacs"),
+        )
+        .to_string();
         {
             let registry = self.bind_registry();
             let mut registry = registry.borrow_mut();
             for (name, value) in &parsed.variables {
                 registry.set_readline_variable(name, value);
             }
-            for (keyseq, spec) in &parsed.bindings {
+            for (index, (keyseq, spec)) in parsed.bindings.iter().enumerate() {
                 let kind = match spec {
                     crate::builtins::bind::BindingSpec::Function { name } => {
                         BindKind::Function { name: name.clone() }
@@ -725,10 +750,16 @@ impl Executor {
                         BindKind::Macro { text: text.clone() }
                     }
                 };
+                let entry_keymap = parsed
+                    .binding_keymaps
+                    .get(index)
+                    .cloned()
+                    .flatten()
+                    .unwrap_or_else(|| start_keymap.clone());
                 registry.register(BindEntry {
                     keyseq: keyseq.clone(),
                     kind,
-                    keymap: None,
+                    keymap: Some(entry_keymap),
                 });
             }
         }
