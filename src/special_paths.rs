@@ -89,7 +89,8 @@ pub enum SpecialPathClass {
     /// A synthetic /proc file whose bytes the engine generates
     /// (Windows-only simulation; the class is empty off Windows).
     SyntheticProc,
-    /// A synthetic /proc LINK entry (`/proc/self/exe`, `/proc/<pid>/cwd`):
+    /// A synthetic /proc LINK entry (`/proc/self/exe`, `/proc/<pid>/cwd`,
+    /// `/proc/<pid>/root`):
     /// the entry has no bytes of its own; it resolves to a target path
     /// elsewhere in the filesystem (rubash#1900). Resolution is
     /// `proc_vfs::proc_link_target`; this class is the classification of
@@ -318,17 +319,19 @@ pub fn is_synthetic_link_path(target: &str) -> bool {
 /// Resolve a synthetic-link path to its target (rubash#1900): both
 /// spellings — the OS-native one for opens/metadata and the
 /// shell-namespace display one for readlink-style answers. The
-/// caller supplies the session cwd's forms for the self/cwd entry.
+/// caller supplies the session cwd's forms for the self/cwd entry
+/// and the payload root's forms for the root entry (niubash#758).
 /// None when the path is not a live synthetic link or its target
 /// cannot be resolved (dead pid, protected process).
 pub fn synthetic_link_target(
     target: &str,
     self_cwd: Option<&crate::proc_vfs::ProcSelfCwd>,
+    self_root: Option<&crate::proc_vfs::ProcSelfRoot>,
 ) -> Option<crate::proc_vfs::ProcLinkTarget> {
     if !is_synthetic_link_path(target) {
         return None;
     }
-    crate::proc_vfs::proc_link_target(target, self_cwd)
+    crate::proc_vfs::proc_link_target(target, self_cwd, self_root)
 }
 
 /// The registry's enumeration face for synthetic /proc directories:
@@ -483,7 +486,7 @@ mod tests {
             );
         }
         // Link faces.
-        for spelling in ["/proc/self/exe", "/proc/self/cwd"] {
+        for spelling in ["/proc/self/exe", "/proc/self/cwd", "/proc/self/root"] {
             assert_eq!(
                 classify_special_path(spelling),
                 expected_link(),
@@ -573,8 +576,10 @@ mod tests {
             // the filesystem and fail loudly there.
             ("/proc/self/exe", expected_link()),
             ("/proc/self/cwd", expected_link()),
+            ("/proc/self/root", expected_link()),
             ("/proc/4294967294/exe", Filesystem),
             ("/proc/4294967294/cwd", Filesystem),
+            ("/proc/4294967294/root", Filesystem),
             ("/proc/self/exe/child", Filesystem),
             ("/proc/self/status/child", Filesystem),
             // The one overlap family: the fd-alias reading wins over
@@ -755,14 +760,41 @@ mod tests {
     fn link_target_resolution_matches_classification() {
         if cfg!(windows) {
             let cwd = crate::proc_vfs::self_cwd_forms(std::path::Path::new("C:\\session"));
-            let target = synthetic_link_target("/proc/self/cwd", Some(&cwd))
+            let target = synthetic_link_target("/proc/self/cwd", Some(&cwd), None)
                 .expect("self/cwd resolves through the session forms");
             assert_eq!(target.native, "C:\\session");
             assert_eq!(target.display, cwd.display);
-            assert!(synthetic_link_target("/proc/self/exe", None).is_some());
+            assert!(synthetic_link_target("/proc/self/exe", None, None).is_some());
         }
-        assert!(synthetic_link_target("/proc/self/status", None).is_none());
-        assert!(synthetic_link_target("/etc/passwd", None).is_none());
+        assert!(synthetic_link_target("/proc/self/status", None, None).is_none());
+        assert!(synthetic_link_target("/etc/passwd", None, None).is_none());
+    }
+
+    /// niubash#758: the registry face for the root link — it resolves
+    /// through the caller's payload-root forms (and only with them),
+    /// classifies exactly like its sibling links, and stays a plain
+    /// filesystem spelling off Windows, where the real procfs serves
+    /// it.
+    #[test]
+    fn issue758_root_link_registry_face() {
+        if cfg!(windows) {
+            let root = crate::proc_vfs::self_root_forms(std::path::Path::new("C:\\payload"));
+            let target = synthetic_link_target("/proc/self/root", None, Some(&root))
+                .expect("self/root resolves through the payload-root forms");
+            assert_eq!(target.native, "C:\\payload");
+            assert_eq!(target.display, "/");
+            assert!(synthetic_link_target("/proc/self/root", None, None).is_none());
+            assert_eq!(
+                classify_special_path("/proc/self/root"),
+                SpecialPathClass::SyntheticLink
+            );
+        } else {
+            assert!(synthetic_link_target("/proc/self/root", None, None).is_none());
+            assert_eq!(
+                classify_special_path("/proc/self/root"),
+                SpecialPathClass::Filesystem
+            );
+        }
     }
 
     /// niubash#627 (vfs audit §6.5): the listable /dev table must
