@@ -1910,6 +1910,52 @@ impl Executor {
                     }
                     None => values.push(store!(&token, token_raw)),
                 }
+            } else if let Some(prefix) = whole_word_braced_parameter_body(&token)
+                .or_else(|| {
+                    token
+                        .strip_prefix(STORAGE_WORD_PREFIX)
+                        .and_then(whole_word_braced_parameter_body)
+                })
+                .or_else(|| {
+                    whole_word_braced_parameter_body(
+                        crate::executor::markers::trim_bare_sentinel_suffix(
+                            token.trim_start_matches('\u{E302}'),
+                            crate::executor::markers::ASSIGN_DATA_DQUOTE,
+                        ),
+                    )
+                })
+                .and_then(|body| body.strip_prefix('!'))
+                .and_then(|rest| rest.strip_suffix('@'))
+                .filter(|prefix| !prefix.is_empty() && is_shell_name(prefix))
+            {
+                // GNU subst.c:9978-10007 parameter_brace_expand: a
+                // whole-word "${!PREFIX@}" is the variable-name list
+                // (all_variables_matching_prefix -> sort_variables,
+                // strcmp order — variables.c:4250-4262) delivered with
+                // string_list_dollar_at semantics, so inside a compound
+                // assignment it contributes ONE ELEMENT PER NAME, like
+                // a quoted "${arr[@]}" — an empty match contributes
+                // zero elements, like "$@". The generic String path
+                // joins the names with IFS[0] into a single element
+                // (rubash#2387: ble.sh's teardown captures names into
+                // an array this way; the joined element later reaches
+                // `unset "${names[@]}"` as one space-joined word,
+                // which unset rejects as an invalid identifier). The
+                // `*` form stays on the generic path:
+                // string_list_dollar_star is a single IFS[0]-joined
+                // word in every context. Name elements are shell
+                // identifiers, so the quoted fan-out and the unquoted
+                // join-then-split coincide; this arm serves both.
+                changed = true;
+                let mut names: Vec<&str> = self
+                    .shell_state
+                    .env_vars
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| is_shell_name(name) && name.starts_with(prefix))
+                    .collect();
+                names.sort_unstable();
+                values.extend(names.iter().map(|name| store!(*name)));
             } else if let Some((array_name, at_list_quoted)) = token
                 .strip_prefix(STORAGE_WORD_PREFIX)
                 .and_then(whole_word_braced_parameter_body)

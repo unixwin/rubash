@@ -130,7 +130,27 @@ impl Executor {
                 return 1;
             }
         }
-        let keymap = flags.keymap.clone();
+        // bind.def:205-216: with -m, that map becomes the current
+        // keymap for the duration of the builtin (saved/restored
+        // around it); without -m, every listing, query, unbind and
+        // registration below reads the CURRENT keymap — readline's
+        // _rl_keymap (bind.c:2743 rl_function_dumper, :2753
+        // rl_print_keybinding, bind.def:386 unbind_command) — which
+        // the registry's `keymap` variable mirrors (sv_editmode /
+        // sv_keymap keep the two in step). Resolve it once here so
+        // the whole invocation layers over the one effective map
+        // (rubash#2386: this used to fall through to emacs-standard
+        // unconditionally, so a vi-mode shell's `bind -p` dumped the
+        // emacs factory table).
+        let keymap = Some(match &flags.keymap {
+            Some(name) => crate::shell::bind_registry::normalize_keymap_name(name).to_string(),
+            None => crate::shell::bind_registry::normalize_keymap_name(
+                self.bind_readline_variable("keymap")
+                    .as_deref()
+                    .unwrap_or("emacs"),
+            )
+            .to_string(),
+        });
 
         if flags.list_functions {
             for name in crate::builtins::bind::READLINE_FUNCTIONS {

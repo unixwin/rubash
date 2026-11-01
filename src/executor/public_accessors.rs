@@ -1216,6 +1216,16 @@ impl Executor {
 
     pub fn set_shell_option(&mut self, name: &str, enabled: bool) {
         crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, name, enabled);
+        // The set_edit_mode bridge (builtins/set.def:427), same as
+        // the runtime `set` builtin's: flipping the editing-mode
+        // option ON is an rl_variable_bind("editing-mode", ...), so
+        // the bind registry's current keymap follows a startup/API
+        // flip too (rubash#2386).
+        if enabled && (name == "vi" || name == "emacs") {
+            self.bind_registry()
+                .borrow_mut()
+                .set_readline_variable("editing-mode", name);
+        }
         // Startup-facing entry (CLI --posix/-o, invocation apply, sh
         // argv0): GNU initialize_bashopts (shopt.def) snapshots $BASHOPTS
         // AFTER startup option processing, so a startup posix flip lands
