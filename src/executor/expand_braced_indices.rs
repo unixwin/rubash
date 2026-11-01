@@ -401,25 +401,33 @@ impl Executor {
         &self,
         name: &str,
     ) -> Option<String> {
+        // A plain local/tempenv shadow owns the name (rubash#2424):
+        // the carrier-derived faces below are the dynamic variable's
+        // reads and must not answer for the shadowing binding.
         if name == "DIRSTACK[@]" || name == "DIRSTACK[*]" {
+            if self.dirstack_shadowed() {
+                return None;
+            }
             return Some(crate::builtins::pushd::stack_words(
                 &self.shell_state.env_vars,
                 &self.shell_state.cwd,
             ));
         }
-        if let Some(index) = name
-            .strip_prefix("DIRSTACK[")
-            .and_then(|rest| rest.strip_suffix(']'))
-            .and_then(|index| self.dirstack_subscript(index))
-        {
-            return Some(
-                crate::builtins::pushd::stack_value(
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    index,
-                )
-                .unwrap_or_default(),
-            );
+        if !self.dirstack_shadowed() {
+            if let Some(index) = name
+                .strip_prefix("DIRSTACK[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|index| self.dirstack_subscript(index))
+            {
+                return Some(
+                    crate::builtins::pushd::stack_value(
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        index,
+                    )
+                    .unwrap_or_default(),
+                );
+            }
         }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
             name.strip_suffix("[@]")

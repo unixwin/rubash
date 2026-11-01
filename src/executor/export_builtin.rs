@@ -47,6 +47,37 @@ impl Executor {
             }
             self.raise_evalerror_abort();
         }
+        // rubash#2424: DIRSTACK operands route through the stack
+        // setter door, exactly as in execute_declare — setattr.def
+        // shares declare.def's operand handling and GNU's bind lands
+        // in variables.c:1612 assign_dirstack, while the pure builtin
+        // below would write the list into the mirror as a private
+        // cell the stack never sees. Skipped in -p listing mode
+        // (assignments are inert there), while a plain local/tempenv
+        // shadow owns the name, and while the variable is readonly
+        // (the builtin's own gates own that refusal).
+        let mut dirstack_failed = false;
+        let args = if !args.iter().any(|arg| arg == "-p")
+            && !self.dirstack_shadowed()
+            && !is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK")
+        {
+            let (kept, _routed, failed, diagnostics) =
+                self.route_declare_dirstack_operands(&args, "export", false);
+            for line in &diagnostics {
+                write!(stderr, "{line}")?;
+            }
+            dirstack_failed = failed;
+            kept
+        } else {
+            args
+        };
+        // Named-access materialization, as in execute_declare: the
+        // builtin's bare-name handling reads the synced mirror/cell.
+        if super::declare_local::declare_words_name_dirstack(&cmd.words[1..])
+            && !self.dirstack_shadowed()
+        {
+            self.sync_dirstack_cell();
+        }
         let mut oob_word = None;
         let mut traced_assignments = Vec::new();
         // rubash#1569: the -p listing renders the bindings underneath
@@ -118,7 +149,7 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(1);
         }
-        let status = if arith_eval_failure.is_some() {
+        let status = if arith_eval_failure.is_some() || dirstack_failed {
             status.max(1)
         } else {
             status

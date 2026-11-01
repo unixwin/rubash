@@ -59,6 +59,16 @@ pub(crate) fn load_stack_carrier(env_vars: &HashMap<String, String>) -> Vec<Stri
 
 pub(crate) fn save_stack(env_vars: &mut VarTable, stack: &[String]) {
     env_vars.insert(DIR_STACK.to_string(), stack.join(&SEP.to_string()));
+    // The carrier is the stack's truth; a materialized DIRSTACK typed
+    // cell is only a cache of it (GNU keeps ONE array object the
+    // stack builtins themselves maintain). Every carrier write —
+    // pushd/popd/cd and the assignment doors all funnel through here —
+    // must invalidate that cache, or cell-trusting reads keep serving
+    // the pre-write stack (rubash#2424: `declare -p DIRSTACK; pushd
+    // /x; echo ${DIRSTACK[0]}` read the old top). The mirror text is
+    // deliberately left stale: GNU materializes it only on the next
+    // named access, and the cell/mirror pair stays mutually coherent.
+    env_vars.note_mirror_write("DIRSTACK");
 }
 
 pub(crate) fn stack_value(
@@ -82,7 +92,9 @@ pub(crate) fn set_stack_value(env_vars: &mut VarTable, cwd: &Path, index: usize,
     // carrier, so the element-assignment door must refuse to rewrite
     // it: `DIRSTACK[0]=x` is a no-op, or every read face (dirs,
     // ${DIRSTACK[@]}, ~+0) desyncs from $PWD until the next cd/pushd
-    // refresh re-binds slot 0 (rubash#2407).
+    // refresh re-binds slot 0 (rubash#2407). Every DIRSTACK assignment
+    // door (plain, declare, subscript) inherits the skip from here,
+    // its one shared write path (rubash#2408, rubash#2424).
     if index == 0 {
         return;
     }

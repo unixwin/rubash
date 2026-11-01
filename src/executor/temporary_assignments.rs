@@ -1543,12 +1543,14 @@ impl Executor {
         if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
             return true;
         }
-        if base_name == "DIRSTACK" && !dynamic_unbound {
+        if base_name == "DIRSTACK" && !dynamic_unbound && !self.dirstack_shadowed() {
             // GNU variables.c:1612 assign_dirstack: every whole-
             // variable bind of DIRSTACK — scalar, compound, append —
             // routes through the dirstack setter, never through array
-            // storage (rubash#2408).
-            return self.apply_dirstack_assignment(&value, append);
+            // storage (rubash#2408). A plain local or tempenv shadow
+            // owns the name instead: the bind lands on the shadowing
+            // binding like any ordinary variable (rubash#2424).
+            return self.apply_dirstack_assignment(&value, append, false);
         }
         // GNU bind_variable_internal (variables.c:3130/3152): a plain
         // bind to an att_noassign variable is a silent no-op — the

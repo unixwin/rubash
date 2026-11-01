@@ -483,6 +483,27 @@ impl Executor {
                 return values.into_iter().next();
             }
         }
+        // rubash#2424: DIRSTACK carries the same #1282 shape with a
+        // different view owner — the unsubscripted read is element 0
+        // of the live directory stack (builtins/pushd.rs stack_value
+        // over the __RUBASH_DIR_STACK carrier), and falling through
+        // leaks the parked storage repr ("\u{1d}()") whenever the
+        // mirror was never materialized by a named access. The mirror
+        // presence gate keeps a lifetime `unset DIRSTACK` unbound
+        // (unset removes the mirror; nothing below resurrects it),
+        // and a plain local/tempenv shadow owns the read through its
+        // own cell further down.
+        if name == "DIRSTACK"
+            && !attrs.assoc
+            && !self.dirstack_shadowed()
+            && self.shell_state.env_vars.contains_key("DIRSTACK")
+        {
+            return crate::builtins::pushd::stack_value(
+                &self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                0,
+            );
+        }
         if let Some(value) = self.array_element_parameter_value(name) {
             return Some(value);
         }
@@ -880,7 +901,20 @@ impl Executor {
             set_var_attrs(&mut self.shell_state.env_vars, &name, attrs);
             // Only resync an existing typed cell — creating one for an unset
             // name would materialize `var=<unset>` bindings as `var=`.
-            if self.shell_state.variables.get(&name).is_some() {
+            // rubash#2424: DIRSTACK is exempt while its dynamic face owns
+            // the name — its env_vars mirror is a lazily materialized
+            // projection of the __RUBASH_DIR_STACK carrier, so syncing
+            // the cell from the mirror rebuilds it from stale text
+            // (the init `()`), stamps the empty cell fresh, and every
+            // cell-trusting read (${#DIRSTACK[@]}) reports 0 after any
+            // tempenv window. The reinstalled snapshot cell is already
+            // the correct pre-window state; the carrier materialization
+            // (sync_dirstack_cell) refreshes it on the next named
+            // access. While a plain local shadow owns the name the
+            // mirror IS the binding's storage and the sync stays.
+            if self.shell_state.variables.get(&name).is_some()
+                && !(name == "DIRSTACK" && !self.dirstack_shadowed())
+            {
                 crate::builtins::declare::sync_typed_attributes(
                     &[name],
                     &self.shell_state.env_vars,

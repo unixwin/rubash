@@ -462,6 +462,15 @@ impl Executor {
             let storage_assoc = self.parameter_array_storage(array_name).unwrap_or_default();
             return assoc_value_at(&storage_assoc, &key);
         }
+        // rubash#2424: while the dynamic face owns DIRSTACK, its typed
+        // cell is only a print materialization of the
+        // __RUBASH_DIR_STACK carrier — the stack builtins mutate the
+        // carrier without touching the cell, so no freshness verdict
+        // can admit the cell as a read source. The typed lanes below
+        // are closed to it; the storage path answers from the carrier
+        // render (parameter_array_storage's DIRSTACK arm). A plain
+        // local/tempenv shadow owns a real cell and keeps the lanes.
+        let dirstack_dynamic = storage_name == "DIRSTACK" && !self.dirstack_shadowed();
         // Negative-literal fast lane: a clean `-N` subscript normalizes to
         // `max_index + 1 - N` (GNU arrayfunc.c:1581 array_value_internal ->
         // `ind = array_max_index (array_cell (var)) + 1 + ind`, INDEX_ERROR
@@ -478,6 +487,7 @@ impl Executor {
         // falls through to the slow path below, which owns all diagnostics
         // byte-for-byte.
         if dynamic_values.is_none()
+            && !dirstack_dynamic
             && (!self.shell_state.env_vars.array_cells_dirty()
                 || self.shell_state.env_vars.cell_is_fresh(storage_name))
         {
@@ -731,9 +741,11 @@ impl Executor {
         // index is resolved preserves GNU's observable order while
         // skipping the per-read O(n) mirror clone on a typed hit.
         // Admission (rubash#1510): global dirty bit clear OR per-name
-        // fresh, same discipline as the assoc leg above.
-        let gate_trusted = !self.shell_state.env_vars.array_cells_dirty()
-            || self.shell_state.env_vars.cell_is_fresh(storage_name);
+        // fresh, same discipline as the assoc leg above. The dynamic
+        // DIRSTACK is never admitted (rubash#2424, see above).
+        let gate_trusted = !dirstack_dynamic
+            && (!self.shell_state.env_vars.array_cells_dirty()
+                || self.shell_state.env_vars.cell_is_fresh(storage_name));
         if gate_trusted {
             if let Ok(typed_index) = i64::try_from(index) {
                 if let Some(cell_value) = self
@@ -868,7 +880,11 @@ impl Executor {
         // write happened since the last executor sync.
         // rubash#914 (F3): the per-name freshness protocol also admits
         // the cell, as at the element read gates above.
+        // rubash#2424: the dynamic DIRSTACK's cell is a print
+        // materialization of the carrier, never a length source — the
+        // storage fallback below renders the live stack.
         if array_store_enabled(&self.shell_state.env_vars)
+            && !(name == "DIRSTACK" && !self.dirstack_shadowed())
             && (!self.shell_state.env_vars.array_cells_dirty()
                 || self.shell_state.env_vars.cell_is_fresh(name))
         {
@@ -941,6 +957,14 @@ impl Executor {
                 | Some(crate::shell::ShellValue::AssociativeArray(_))
         ) {
             return true;
+        }
+        // rubash#2424: the dynamic registry answers for the dynamic
+        // variable only while it is the visible binding. A plain
+        // local/tempenv shadow of DIRSTACK has already given its
+        // verdict through the marks and the typed cell above (a scalar
+        // shadow is not an array, whatever the name's dynamic face is).
+        if resolved == "DIRSTACK" && self.dirstack_shadowed() {
+            return false;
         }
         crate::executor::dynamic_arrays::is_dynamic_array_name(&resolved)
     }

@@ -281,11 +281,26 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "DIRSTACK" {
+        if name == "DIRSTACK" && !self.dirstack_shadowed() {
             // TODO(builtins/pushd.def/variables.c): Bash exposes the
             // directory stack as a dynamic array variable. Keep assignments
             // wired to the pushd module's stack storage until SHELL_VAR array
-            // attributes are ported.
+            // attributes are ported. A plain local/tempenv shadow owns the
+            // name instead (rubash#2424): the element store below writes
+            // the shadowing cell like any ordinary array.
+            // GNU bind_variable checks att_readonly before the assign
+            // function runs (variables.c): a readonly DIRSTACK refuses
+            // the element bind with the plain assignment diagnostic —
+            // the setter itself stays writable because pushd/popd/cd
+            // maintain the stack internally (rubash#2424).
+            if self.shell_state.env_vars.attr_of(name).readonly {
+                self.emit_assignment_diag(format!(
+                    "{}{name}: readonly variable\n",
+                    self.error_prefix()
+                ));
+                self.exit_code = 1;
+                return true;
+            }
             let Some(index) = index.trim_end_matches(']').parse::<usize>().ok() else {
                 self.exit_code = 1;
                 return true;
