@@ -670,8 +670,17 @@ impl Executor {
                             // execute_cmd.c:1821-1825). Only the too-many
                             // class pre-sets 2; every other DISCARD class
                             // here already carries 1.
+                            // rubash#2439: the `-c` process framing folds
+                            // the same way (run_one_command's
+                            // parse_and_execute catch, shell.c:1477):
+                            // `bash -c '(suspend foo); echo rc=$?'` gives
+                            // the region status 1, a script file gives 2.
                             if self.evalerror_exit_toomany_pending.get()
-                                && self.discard_fold_frame()
+                                && (self.discard_fold_frame()
+                                    || self
+                                        .shell_state
+                                        .env_vars
+                                        .contains_key("__RUBASH_IS_C"))
                             {
                                 self.exit_code = 1;
                             }

@@ -3952,8 +3952,23 @@ impl Executor {
                     // (builtins/evalstring.c:423-426). At the main level
                     // the same region keeps the pre-set EX_BADUSAGE 2
                     // (execute_in_subshell, execute_cmd.c:1821-1825).
+                    // rubash#2439: a `-c` process is the same fold class
+                    // one level up — run_one_command runs the string
+                    // through parse_and_execute (shell.c:1477), and GNU
+                    // folds the region's status to 1 there too
+                    // (`bash -c '(suspend foo); echo after rc=$?'`
+                    // prints rc=1, while the identical script file
+                    // prints rc=2 — verified GNU 5.3.20). Consuming the
+                    // pending here also keeps it from surviving the
+                    // region into execute_ast's depth-0 tail conversion,
+                    // which would otherwise convert the WHOLE `-c` run
+                    // to ExitCode(1) after the parent list continued.
                     if executor.evalerror_exit_toomany_pending.get()
-                        && executor.discard_fold_frame()
+                        && (executor.discard_fold_frame()
+                            || executor
+                                .shell_state
+                                .env_vars
+                                .contains_key("__RUBASH_IS_C"))
                     {
                         executor.evalerror_exit_toomany_pending.set(false);
                         executor.exit_code = 1;
