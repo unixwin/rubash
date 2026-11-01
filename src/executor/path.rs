@@ -1257,6 +1257,29 @@ pub fn find_user_command_as_written(
     }
 }
 
+/// rubash#2378: the execve filename for a resolved `program` — the
+/// as-written PATH-element join (`find_user_command_as_written`) when
+/// anchoring that join at the session cwd lands on exactly `program`,
+/// i.e. the search itself produced this file. A hash-table hit or any
+/// other resolution whose recorded name differs anchors differently
+/// and keeps the anchored path (None). A join without a `/` (an empty
+/// PATH element's bare name) also keeps the anchored path: std would
+/// re-run its own PATH search on a slash-less program name, in the
+/// wrong environment.
+#[cfg(unix)]
+pub(crate) fn exec_name_for_program(
+    name: &str,
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    let as_written = find_user_command_as_written(name, env_vars)?;
+    if !as_written.contains('/') {
+        return None;
+    }
+    let anchored = anchor_at_session_cwd(PathBuf::from(&as_written), env_vars);
+    (anchored == program).then_some(as_written)
+}
+
 pub fn standard_path(_env_vars: &HashMap<String, String>) -> String {
     if cfg!(windows) {
         if configured_shell_root(_env_vars).is_some() {
@@ -1616,6 +1639,34 @@ pub fn external_command_for_named_program(
     env_vars: &HashMap<String, String>,
     bash_argv0_supplied: bool,
 ) -> (Command, bool) {
+    external_command_for_named_program_with_exec_name(
+        program,
+        command_name,
+        args,
+        env_vars,
+        bash_argv0_supplied,
+        None,
+    )
+}
+
+/// `exec_name` variant: on unix, when `exec_name` is `Some`, it — not
+/// the anchored `program` — is handed to execve as the filename. GNU's
+/// find walk builds ONE string (findcmd.c find_in_path_element's
+/// sh_makepath join, verbatim PATH element + name) and that string is
+/// both what gets executed and what a script child sees as its name
+/// (the kernel hands it to the interpreter as the script pathname);
+/// rubash anchors a copy for its own probes and parent-side reads,
+/// which stay on `program`. Only the plain foreground spawn passes a
+/// name (see `exec_name_for_program`); every other route keeps the
+/// anchored status quo.
+pub fn external_command_for_named_program_with_exec_name(
+    program: &Path,
+    command_name: Option<&str>,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+    bash_argv0_supplied: bool,
+    exec_name: Option<&str>,
+) -> (Command, bool) {
     // Native command processors own slash-prefixed switches such as `/C`.
     // Do not reinterpret those switches as paths under Winuxsh's logical
     // shell root; doing so starts cmd.exe without its command string.
@@ -1811,7 +1862,17 @@ pub fn external_command_for_named_program(
         }
     }
 
-    let mut command = Command::new(program);
+    // The execve filename: the as-written search join when the caller
+    // supplied one (unix only — the name is relative to the session
+    // cwd the callers set as the child's working directory), else the
+    // anchored program path. Binary children are unaffected in their
+    // argv[0] (the arg0 below carries the typed word, as GNU's
+    // shell_execve does); the filename is what the kernel hands a
+    // script's interpreter as the script name.
+    let mut command = match exec_name {
+        Some(name) if cfg!(unix) && name.contains('/') => Command::new(name),
+        _ => Command::new(program),
+    };
     if is_winuxcmd_dispatcher(program) {
         if let Some(command_name) = command_name {
             let dispatch_name = dispatcher_command_name(command_name);

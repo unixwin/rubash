@@ -1090,12 +1090,33 @@ impl Executor {
             Some(program.as_path()),
             &self.shell_state.env_vars,
         );
-        let (mut process, used_shell) = external_command_for_named_program(
+        // rubash#2378: the execve filename is the name the search
+        // constructed (GNU findcmd.c's sh_makepath join — the typed
+        // word itself when it carries a slash, since a slash name is
+        // never searched, findcmd.c:385), so a script child's $0 is
+        // `./emit`, not the anchored absolute path. The child is born
+        // in the session cwd (next line), which is what a relative
+        // join resolves against. Hash-recorded resolutions keep the
+        // anchored path (exec_name_for_program declines them).
+        #[cfg(unix)]
+        let exec_name = if cmd.words[0].contains('/') {
+            Some(cmd.words[0].clone())
+        } else {
+            crate::executor::path::exec_name_for_program(
+                &cmd.words[0],
+                &program,
+                &self.shell_state.env_vars,
+            )
+        };
+        #[cfg(not(unix))]
+        let exec_name: Option<String> = None;
+        let (mut process, used_shell) = external_command_for_named_program_with_exec_name(
             &program,
             Some(&cmd.words[0]),
             &proc_args,
             &self.shell_state.env_vars,
             self.bash_argv0_env_supplied(&cmd.assignments),
+            exec_name.as_deref(),
         );
         // G-02: children are born in the session cwd, not the process cwd.
         process.current_dir(&self.shell_state.cwd);
