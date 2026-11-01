@@ -49,8 +49,8 @@ fn run_script(dir: &Path, script: &str) -> (String, String) {
         .output()
         .expect("run rubash");
     let normalize = |text: &str| {
-        text.replace(&dir.to_string_lossy().into_owned(), "WORK")
-            .replace(&script_path.to_string_lossy().into_owned(), "SCRIPT")
+        text.replace(&script_path.to_string_lossy().into_owned(), "SCRIPT")
+            .replace(&dir.to_string_lossy().into_owned(), "WORK")
     };
     (
         normalize(&String::from_utf8_lossy(&output.stdout)),
