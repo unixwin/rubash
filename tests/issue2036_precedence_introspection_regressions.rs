@@ -19,6 +19,14 @@
 //! `type X` -> "X is a shell emulation of <path>"), and the KD-1
 //! drift pins (compgen -b / enable lacking `env`) turned positive:
 //! every introspection face projects from the single registry.
+//!
+//! #2514 update (2026-11-02): the S2 describe disclosure is
+//! adjudicated to the Windows product face only (pinned in
+//! `issue2036_s2_introspection_windows`). On unix the describe faces
+//! follow GNU `describe_command` (builtins/type.def:211) exactly —
+//! a resolved name reports its PATH file, an unresolvable one is
+//! not found — so §3.1 below pins the file answers for the claim
+//! names too. Dispatch claims and stand-down behavior are unchanged.
 
 #![cfg(unix)]
 
@@ -423,8 +431,10 @@ fn issue2036_shape13_enable_faces() {
 // ------------------------------------------------------- §3.1 introspection
 
 /// Names whose simple-command claim the shell takes in-process
-/// (registry classes HiddenFastpath / Fastpath / EmulatedExternal):
-/// while the claim is live they must disclose it (S2 ruling).
+/// (registry classes HiddenFastpath / Fastpath / EmulatedExternal).
+/// The S2 ruling had the describe faces disclose the live claim;
+/// #2514 adjudicated the disclosure to the Windows face, so on unix
+/// these names describe as their PATH file like any other name.
 const SIMPLE_CLAIM_NAMES: &[&str] = &[
     "stty", "uname", "arch", "sleep", "dirname", "basename", "cat", "sed", "mkdir", "touch",
     "chmod", "cp", "rm", "rmdir", "mkfifo", "tty",
@@ -438,12 +448,15 @@ const SHAPE_SCOPED_NAMES: &[&str] = &[
     "head", "grep", "wc", "tr", "yes", "diff", "mktemp", "sort", "tput",
 ];
 
-/// §3.1 as adjudicated by S2: the zero-disclosure contract is
-/// reversed. A live simple-command claim reports `emulation` on
-/// type -t, the sentence "X is a shell emulation of <path>" on
-/// type / command -V, and the bare name on command -v (invoking the
-/// name reproduces the in-process behavior; invoking the path would
-/// not). Shape-scoped claims keep the file answer.
+/// §3.1 as adjudicated by S2, then re-adjudicated for the describe
+/// faces by #2514: S2 reversed the zero-disclosure contract (a live
+/// claim reported `emulation` / "X is a shell emulation of <path>" /
+/// the bare name); #2514 confines that disclosure to the Windows
+/// product face, because off Windows a resolution is a genuine OS
+/// PATH file and GNU describe_command (builtins/type.def:211) has
+/// no emulation kind — scripts read `command -v` as a PATH answer.
+/// On unix every resolved name below, claim or shape-scoped alike,
+/// reports the file answer on every describe face.
 #[test]
 fn issue2036_introspection_emulated_names_report_file() {
     let dir = scratch("intro");
@@ -455,8 +468,8 @@ fn issue2036_introspection_emulated_names_report_file() {
     let out = run(&dir, &path, &script);
     for n in SIMPLE_CLAIM_NAMES {
         assert!(
-            out.stdout.contains(&format!("{n}=emulation")),
-            "{n} must disclose its live claim, got: {}",
+            out.stdout.contains(&format!("{n}=file")),
+            "{n} must introspect as its PATH file (#2514), got: {}",
             out.stdout
         );
     }
@@ -467,32 +480,30 @@ fn issue2036_introspection_emulated_names_report_file() {
             out.stdout
         );
     }
-    // The verbose and reusable forms of the disclosure.
+    // The verbose and reusable forms are the GNU file forms.
     let out = run(
         &dir,
         &path,
         "type stty; command -V cat; echo v=$(command -v stty); type -p stty; echo p_rc=$?",
     );
+    assert!(out.stdout.contains("stty is /"), "{}", out.stdout);
+    assert!(out.stdout.contains("cat is /"), "{}", out.stdout);
+    assert!(out.stdout.contains("v=/"), "{}", out.stdout);
     assert!(
-        out.stdout.contains("stty is a shell emulation of /"),
-        "{}",
+        !out.stdout.contains("emulation"),
+        "no describe face may disclose the claim on unix (#2514): {}",
         out.stdout
     );
-    assert!(
-        out.stdout.contains("cat is a shell emulation of /"),
-        "{}",
-        out.stdout
-    );
-    assert!(out.stdout.contains("v=stty"), "{}", out.stdout);
-    // type -p on a claim is silent-but-found, like a builtin: the
-    // whole run prints exactly the four expected lines.
+    // type -p on a file prints the path: the whole run prints exactly
+    // the five expected lines (verbose, verbose, v=<path>, the -p
+    // path itself, p_rc).
     assert!(out.stdout.contains("p_rc=0"), "{}", out.stdout);
-    assert_eq!(out.stdout.lines().count(), 4, "{}", out.stdout);
-    // type -a prints the claim line AND the file line(s).
+    assert_eq!(out.stdout.lines().count(), 5, "{}", out.stdout);
+    // type -a prints the file line(s) only — no claim line (#2514).
     let out = run(&dir, &path, "type -a stty");
     assert!(
-        out.stdout.contains("stty is a shell emulation of /"),
-        "{}",
+        !out.stdout.contains("emulation"),
+        "type -a must not print a claim line on unix (#2514): {}",
         out.stdout
     );
     assert!(out.stdout.contains("stty is /"), "{}", out.stdout);

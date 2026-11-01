@@ -154,6 +154,13 @@ impl Executor {
         // G-02: no process-cwd save/restore — the stage subshell is a clone
         // with its own session cwd field.
         let mut subshell = self.command_substitution_executor();
+        // rubash#2487: a pipeline element is an execute_in_subshell
+        // child — its job_control variable starts erased
+        // (jobs.c:5356-5366 without_job_control) even when the
+        // enclosing shell ran `set -m`; the monitor flag letter
+        // stays in the element's `$-`, and a `set -m` inside the
+        // element re-arms the variable through flags.c:257.
+        subshell.shell_state.job_control.set(false);
         // GNU execute_cmd.c:6373 do_piping: an element that is not the
         // rightmost is forked with dup2(pipe_out, 1) — the pipe REPLACES
         // whatever fd 1 the enclosing context bound (a group/function
@@ -523,6 +530,13 @@ impl Executor {
 
         // G-02: no process-cwd save/restore (stage subshell clone, as above).
         let mut subshell = self.command_substitution_executor();
+        // rubash#2487: a pipeline element is an execute_in_subshell
+        // child — its job_control variable starts erased
+        // (jobs.c:5356-5366 without_job_control) even when the
+        // enclosing shell ran `set -m`; the monitor flag letter
+        // stays in the element's `$-`, and a `set -m` inside the
+        // element re-arms the variable through flags.c:257.
+        subshell.shell_state.job_control.set(false);
         // GNU execute_cmd.c:6373 do_piping: an element that is not the
         // rightmost is forked with dup2(pipe_out, 1) — the pipe REPLACES
         // whatever fd 1 the enclosing context bound (a function/group
@@ -896,6 +910,13 @@ impl Executor {
         });
 
         let mut subshell = self.command_substitution_executor();
+        // rubash#2487: a pipeline element is an execute_in_subshell
+        // child — its job_control variable starts erased
+        // (jobs.c:5356-5366 without_job_control) even when the
+        // enclosing shell ran `set -m`; the monitor flag letter
+        // stays in the element's `$-`, and a `set -m` inside the
+        // element re-arms the variable through flags.c:257.
+        subshell.shell_state.job_control.set(false);
         // GNU execute_cmd.c:6373 do_piping: EVERY element is forked with
         // its fd 1 bound to the pipeline — the pipe for a non-rightmost
         // element, the pipeline's own stdout for the rightmost — never to
@@ -1207,6 +1228,16 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#2502: a fresh command recomputes its own numbered
+        // input bindings (the rubash#2235 discipline the plain path
+        // applies in apply_external_redirects). The stage path never
+        // cleared the stash, so a binding materialized for one
+        // command's list (a temp carrier for `3<&6`, drained by that
+        // command's child) answered the NEXT command's `<&3` walk —
+        // `cat 3< /dev/fd/6 <&3 | wc -c` after any `3<&…` command
+        // read the previous command's drained carrier instead of
+        // this list's own fresh open.
+        self.own_input_bindings.clear();
         let Some(name) = command.words.first() else {
             return Ok(Some((String::new(), String::new(), 0)));
         };

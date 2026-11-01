@@ -677,10 +677,7 @@ impl Executor {
                             // the region status 1, a script file gives 2.
                             if self.evalerror_exit_toomany_pending.get()
                                 && (self.discard_fold_frame()
-                                    || self
-                                        .shell_state
-                                        .env_vars
-                                        .contains_key("__RUBASH_IS_C"))
+                                    || self.shell_state.env_vars.contains_key("__RUBASH_IS_C"))
                             {
                                 self.exit_code = 1;
                             }
@@ -994,6 +991,14 @@ impl Executor {
                 // builtins/exit.def:83) see it; the region's saved state
                 // clone above reverts it at the boundary (rubash#2438).
                 self.shell_state.subshell_login_cleared.set(true);
+                // jobs.c:5356-5366 without_job_control (via
+                // execute_in_subshell): the region also starts with
+                // the job_control variable erased, while the monitor
+                // flag letter stays in `$-`; a `set -m` inside the
+                // region re-arms it through flags.c:257
+                // (rubash#2487). The saved state clone reverts this
+                // with every other boundary write above.
+                self.shell_state.job_control.set(false);
                 // rubash#1493: record the region's whole `( ... )` text
                 // for the exec signal-death notice (jobs.c:4625 names
                 // the whole job command) — a node-form region renders

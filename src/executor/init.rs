@@ -1024,6 +1024,14 @@ impl Executor {
                 // (invocation_login above carries it); no subshell boundary
                 // has been crossed yet (rubash#2438).
                 subshell_login_cleared: Cell::new(false),
+                // shell.c:647: a fresh process starts with
+                // job_control == interactive_shell; the interactive
+                // and `-m` startup funnels raise it through
+                // Executor::set_shell_option's monitor sync
+                // (shell.c:1858), and a respawned child — GNU's
+                // forked subshell — must NOT inherit it across the
+                // process boundary (rubash#2487).
+                job_control: Cell::new(false),
                 subshell_source_text: None,
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),

@@ -1,8 +1,9 @@
 //! suspend module.
 //!
 //! GNU Bash source ownership:
-//! - builtins/suspend.def suspend_builtin (`killpg (shell_pgrp, SIGSTOP)`
-//!   on -f; `sh_nojobs` failure without job control otherwise)
+//! - builtins/suspend.def suspend_builtin (suspend.def:80-126: the
+//!   guards below in source order, then `killpg (shell_pgrp, SIGSTOP)`
+//!   and EXECUTION_SUCCESS)
 
 use std::io::{self, Write};
 
@@ -19,6 +20,8 @@ const EX_USAGE: i32 = 2;
 pub fn execute_with_io<E>(
     args: &[String],
     diagnostic_prefix: &str,
+    job_control: bool,
+    login_shell: bool,
     stderr: &mut E,
 ) -> io::Result<(i32, bool)>
 where
@@ -55,90 +58,110 @@ where
         return Ok((EX_USAGE, true));
     }
 
-    if force {
-        // GNU builtins/suspend.def suspend_builtin: with -f the login-shell
-        // and no-job-control guards are skipped and the shell stops its own
-        // process group — `killpg (shell_pgrp, SIGSTOP)` — returning SUCCESS
-        // once continued (rubash#1097). shell_pgrp is this process's group
-        // (jobs.c:4737 `shell_pgrp = getpgid (0)`); SIGSTOP/SIGCONT ride the
-        // kernel defaults (never in kill.rs's managed set), so no trap
-        // bookkeeping is needed. Non-unix has no SIGSTOP: keep the
-        // historical success no-op there.
-        #[cfg(unix)]
-        {
-            // SAFETY: getpgid/killpg with our own pgrp are pure queries.
-            let pgrp = unsafe { libc::getpgid(0) };
-            if pgrp > 0 {
-                // GNU is single-threaded: its killpg stop is dequeued by
-                // the executing thread at the killpg exit path, so the
-                // shell stops AT the builtin and one SIGCONT resumes it.
-                // In this multithreaded executor neither half holds for a
-                // bare killpg (measured on a two-thread harness and on
-                // this binary under load):
-                // - rubash#1474: a process-directed SIGSTOP is dequeued
-                //   by whichever thread the kernel wakes; a RUNNING
-                //   executing thread crosses many syscall exits without
-                //   joining the stop, so commands after `suspend -f`
-                //   execute before the stop lands (a whole `e1..e5`
-                //   tail). Only a THREAD-directed SIGSTOP stops the
-                //   executing thread deterministically, at that call's
-                //   own exit path.
-                // - rubash#2203: sending BOTH (killpg, then a
-                //   thread-directed SIGSTOP as the #1474 clamp did)
-                //   leaves two stop generations pending in this
-                //   process; the one the executing thread does not
-                //   dequeue survives the stop episode, so the first
-                //   SIGCONT (pid- or group-addressed — exactly what
-                //   `fg` sends) is followed by a re-stop and a second
-                //   SIGCONT is required (15/40 runs under load; the
-                //   #1637 harness note records the same lost wakeup).
-                // So: every OTHER process in the group gets its own
-                // process-directed SIGSTOP (for them, a single
-                // generation), and this process stops solely through
-                // the thread-directed SIGSTOP — prompt (#1474) and the
-                // only in-process generation, hence consumed by the
-                // episode: one SIGCONT resumes (#2203). A member that
-                // exits mid-enumeration is ignored (ESRCH); a process
-                // joining the group concurrently is the one corner
-                // where this differs from killpg's atomicity.
-                #[cfg(target_os = "linux")]
-                {
-                    if stop_other_group_members(pgrp) {
-                        unsafe {
-                            let pid = libc::getpid();
-                            let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
-                            libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
-                        }
-                    } else {
-                        // /proc unavailable: fall back to the historical
-                        // killpg + thread-directed clamp (prompt; the
-                        // #2203 second-generation corner returns only
-                        // in this degraded path).
-                        unsafe {
-                            libc::killpg(pgrp, libc::SIGSTOP);
-                            let pid = libc::getpid();
-                            let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
-                            libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
-                        }
-                    }
-                }
-                #[cfg(not(target_os = "linux"))]
-                unsafe {
-                    libc::killpg(pgrp, libc::SIGSTOP);
-                    // rubash#1474 clamp, unchanged on this platform:
-                    // stop the executing thread at a signal boundary.
-                    libc::pthread_kill(libc::pthread_self(), libc::SIGSTOP);
-                }
-            }
+    // builtins/suspend.def:101-114: without -f the guards fire in
+    // source order — the job_control variable first (jobs.c:223; fed
+    // by flags.c:257 when `set -m`/`set +m` runs, erased by
+    // without_job_control at fork boundaries — not the monitor flag,
+    // whose letter stays in the child's `$-` either way), then the
+    // login-shell refusal. With -f both guards are skipped.
+    if !force {
+        if !job_control {
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}suspend: cannot suspend: no job control"
+            )?;
+            return Ok((EXECUTION_FAILURE, false));
         }
-        return Ok((EXECUTION_SUCCESS, false));
+        if login_shell {
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}suspend: cannot suspend a login shell"
+            )?;
+            return Ok((EXECUTION_FAILURE, false));
+        }
     }
 
-    writeln!(
-        stderr,
-        "{diagnostic_prefix}suspend: cannot suspend: no job control"
-    )?;
-    Ok((EXECUTION_FAILURE, false))
+    stop_shell_group();
+    Ok((EXECUTION_SUCCESS, false))
+}
+
+/// GNU builtins/suspend.def:123: the shell stops its own process
+/// group — `killpg (shell_pgrp, SIGSTOP)` — and suspend_builtin
+/// returns EXECUTION_SUCCESS once continued (rubash#1097).
+/// shell_pgrp is this process's group (jobs.c:4737
+/// `shell_pgrp = getpgid (0)`); SIGSTOP/SIGCONT ride the kernel
+/// defaults (never in kill.rs's managed set), so no trap bookkeeping
+/// is needed — a trapped SIGCONT does not fire on resume, matching
+/// GNU's suspend_continue handler swap (suspend.def:119). Non-unix
+/// has no SIGSTOP: keep the historical success no-op there.
+fn stop_shell_group() {
+    #[cfg(unix)]
+    {
+        // SAFETY: getpgid/killpg with our own pgrp are pure queries.
+        let pgrp = unsafe { libc::getpgid(0) };
+        if pgrp > 0 {
+            // GNU is single-threaded: its killpg stop is dequeued by
+            // the executing thread at the killpg exit path, so the
+            // shell stops AT the builtin and one SIGCONT resumes it.
+            // In this multithreaded executor neither half holds for a
+            // bare killpg (measured on a two-thread harness and on
+            // this binary under load):
+            // - rubash#1474: a process-directed SIGSTOP is dequeued
+            //   by whichever thread the kernel wakes; a RUNNING
+            //   executing thread crosses many syscall exits without
+            //   joining the stop, so commands after `suspend -f`
+            //   execute before the stop lands (a whole `e1..e5`
+            //   tail). Only a THREAD-directed SIGSTOP stops the
+            //   executing thread deterministically, at that call's
+            //   own exit path.
+            // - rubash#2203: sending BOTH (killpg, then a
+            //   thread-directed SIGSTOP as the #1474 clamp did)
+            //   leaves two stop generations pending in this
+            //   process; the one the executing thread does not
+            //   dequeue survives the stop episode, so the first
+            //   SIGCONT (pid- or group-addressed — exactly what
+            //   `fg` sends) is followed by a re-stop and a second
+            //   SIGCONT is required (15/40 runs under load; the
+            //   #1637 harness note records the same lost wakeup).
+            // So: every OTHER process in the group gets its own
+            // process-directed SIGSTOP (for them, a single
+            // generation), and this process stops solely through
+            // the thread-directed SIGSTOP — prompt (#1474) and the
+            // only in-process generation, hence consumed by the
+            // episode: one SIGCONT resumes (#2203). A member that
+            // exits mid-enumeration is ignored (ESRCH); a process
+            // joining the group concurrently is the one corner
+            // where this differs from killpg's atomicity.
+            #[cfg(target_os = "linux")]
+            {
+                if stop_other_group_members(pgrp) {
+                    unsafe {
+                        let pid = libc::getpid();
+                        let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+                        libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
+                    }
+                } else {
+                    // /proc unavailable: fall back to the historical
+                    // killpg + thread-directed clamp (prompt; the
+                    // #2203 second-generation corner returns only
+                    // in this degraded path).
+                    unsafe {
+                        libc::killpg(pgrp, libc::SIGSTOP);
+                        let pid = libc::getpid();
+                        let tid = libc::syscall(libc::SYS_gettid) as libc::pid_t;
+                        libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGSTOP);
+                    }
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            unsafe {
+                libc::killpg(pgrp, libc::SIGSTOP);
+                // rubash#1474 clamp, unchanged on this platform:
+                // stop the executing thread at a signal boundary.
+                libc::pthread_kill(libc::pthread_self(), libc::SIGSTOP);
+            }
+        }
+    }
 }
 
 /// Linux: send a process-directed SIGSTOP to every process in `pgrp`
