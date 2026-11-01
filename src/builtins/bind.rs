@@ -1199,10 +1199,12 @@ pub const DEFAULT_BINDINGS_VI_MOVEMENT: &[(&str, &str)] = &[
 
 /// The default function-binding table for one keymap name (the `-m`
 /// names of bind.def:37-40, aliases folded by
-/// [`crate::shell::bind_registry::normalize_keymap_name`]). `None` (no
-/// `-m`) is the current keymap, emacs-standard in the default editing
-/// mode. Every name in
-/// [`crate::shell::bind_registry::KEYMAP_NAMES`] resolves here.
+/// [`crate::shell::bind_registry::normalize_keymap_name`]). `None`
+/// selects the emacs-standard table; callers resolving "the current
+/// keymap" (bind.def:205-216 — the no-`-m` case, rubash#2386) pass
+/// the registry's resolved current-keymap name explicitly. Every
+/// name in [`crate::shell::bind_registry::KEYMAP_NAMES`] resolves
+/// here.
 pub fn default_bindings_for_keymap(
     keymap: Option<&str>,
 ) -> &'static [(&'static str, &'static str)] {
@@ -1478,8 +1480,12 @@ pub fn apply_readline_variable(
         VariableKind::Keymap => {
             // A bad keymap name keeps the current value silently (GNU
             // probe: `set keymap bogus` → keymap stays emacs, no message).
+            // A good one stores the map's canonical name: the variable
+            // reads back as rl_get_keymap_name(_rl_keymap), the first
+            // name registered for the map (see
+            // [`canonical_keymap_variable_value`]).
             if crate::shell::bind_registry::KEYMAP_NAMES.contains(&value) {
-                store_variable(variables, name, value);
+                store_variable(variables, name, canonical_keymap_variable_value(value));
             }
             (SetVariableOutcome::Applied, None)
         }
@@ -1501,6 +1507,23 @@ pub fn apply_readline_variable(
             store_variable(variables, name, value);
             (SetVariableOutcome::Applied, None)
         }
+    }
+}
+
+/// The stored `keymap` variable value for a map: the variable reads
+/// back as `rl_get_keymap_name (_rl_keymap)` (lib/readline/bind.c:
+/// 3018-3023), the FIRST name registered for the map in
+/// builtin_keymap_names (bind.c:2404-2416) — `vi-command` and
+/// `vi-move` read back as `vi`, `emacs-standard` as `emacs` (GNU
+/// probe: `bind 'set keymap vi-command'; bind -v` prints
+/// `set keymap vi`).
+pub fn canonical_keymap_variable_value(value: &str) -> &'static str {
+    match crate::shell::bind_registry::normalize_keymap_name(value) {
+        "emacs-meta" => "emacs-meta",
+        "emacs-ctlx" => "emacs-ctlx",
+        "vi-movement" => "vi",
+        "vi-insert" => "vi-insert",
+        _ => "emacs",
     }
 }
 
