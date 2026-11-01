@@ -82,9 +82,10 @@ pub fn expand_word_prefix(word: &str, env_vars: &HashMap<String, String>) -> Opt
 /// preexpansion hook) + builtins/pushd.def:620 get_dirstack_from_string:
 /// the special tilde prefixes are `+` ($PWD), `-` ($OLDPWD), and a
 /// sign-or-digit-leading ALL-DIGIT prefix resolved against the
-/// directory stack (`+N` and bare `N` count from the top — 0 is the
-/// current directory — and `-N` counts from the bottom, so `-0` is the
-/// oldest entry). The whole prefix up to the first `/` must be the
+/// directory stack (`+N` and bare `N` count from the top — index 0
+/// binds $PWD itself, not the stored top — and `-N` counts from the
+/// bottom, so `-0` is the oldest entry and the count that reaches the
+/// list's far end binds $PWD again). The whole prefix up to the first `/` must be the
 /// sign+digits form; an out-of-range index fails the expansion and the
 /// caller keeps the word verbatim (get_dirstack_from_string returns
 /// NULL exactly like a failed getpwnam).
@@ -122,17 +123,35 @@ pub fn special_tilde_expansion(
                 return None;
             }
             let count: usize = digits.parse().ok()?;
-            let stack = crate::builtins::pushd::load_stack(env_vars);
-            let index = if from_right {
-                if count < stack.len() {
-                    stack.len() - 1 - count
-                } else {
-                    return Some(None);
-                }
+            // GNU get_dirstack_from_string (builtins/pushd.def:620)
+            // walks pushd_directory_list plus $PWD — never the working
+            // directory: an index landing on element 0 (ind==0 from the
+            // top, or ind==directory_list_offset counting the stored
+            // list from the bottom) binds $PWD verbatim, and only the
+            // pushed elements in between come from the stored list.
+            // Composing from the carrier + $PWD (rather than from
+            // load_stack's validated element 0) keeps a forged $PWD
+            // visible exactly where GNU shows it — ~+0 after
+            // `PWD=/elsewhere` expands to /elsewhere while dirs still
+            // shows the real cwd (rubash#2408).
+            let carrier = crate::builtins::pushd::load_stack_carrier(env_vars);
+            // The virtual stack: the carrier when one exists, else
+            // just the (unstored) current directory.
+            let stack_len = if carrier.is_empty() { 1 } else { carrier.len() };
+            let dir = if count == 0 && !from_right {
+                env_vars.get("PWD")
+            } else if from_right && count == stack_len - 1 {
+                env_vars.get("PWD")
+            } else if from_right && count < stack_len - 1 {
+                // list[count] read oldest-first is virtual index
+                // stack_len-1-count.
+                carrier.get(stack_len - 1 - count)
+            } else if !from_right {
+                carrier.get(count)
             } else {
-                count
+                None
             };
-            match stack.get(index) {
+            match dir {
                 Some(dir) => Some(dir.clone()),
                 None => return Some(None),
             }
@@ -432,15 +451,13 @@ pub fn expand_unquoted_tildes_in_raw_assignment_rhs(
             {
                 end += 1;
             }
-            let plain_prefix = end >= chars.len()
-                || matches!(chars[end], '/' | ':');
+            let plain_prefix = end >= chars.len() || matches!(chars[end], '/' | ':');
             if plain_prefix {
                 let probe: String = chars[index..end].iter().collect();
                 let resolved = expand_tilde_segment(&probe, env_vars);
                 if resolved != probe
                     && !resolved.chars().any(|c| {
-                        c.is_whitespace()
-                            || matches!(c, '\'' | '"' | '\\' | '$' | '`' | '~')
+                        c.is_whitespace() || matches!(c, '\'' | '"' | '\\' | '$' | '`' | '~')
                     })
                 {
                     out.push_str(&resolved);

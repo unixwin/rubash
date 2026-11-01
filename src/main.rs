@@ -50,6 +50,19 @@ static OWN_INTERACTIVE_SHELL: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static OWN_LOGIN_SHELL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// GNU shell.c set_shell_name's act_like_sh: this process was invoked
+/// under the name `sh` (a leading `-` login mark is stripped before
+/// the comparison). GNU's run_startup_files branches on it
+/// (shell.c:1216, 1238) — a sh shell reads $ENV when interactive and
+/// never reads $BASH_ENV — so the startup chain needs the fact beside
+/// the OWN_* shape statics, recorded by apply_invocation_shell_mode
+/// from this process's own invocation name, never from the env.
+static OWN_ACT_LIKE_SH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn own_act_like_sh() -> bool {
+    OWN_ACT_LIKE_SH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn own_interactive_shell() -> bool {
     OWN_INTERACTIVE_SHELL.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -328,6 +341,13 @@ fn apply_invocation_shell_mode(executor: &mut Executor, argv0: Option<&str>) {
         // runs sv_strict_posix (the posix_vars walk) — carried by
         // set::set_shell_option.
         executor.set_shell_option("posix", true);
+    }
+    // GNU shell.c set_shell_name: act_like_sh is set when the shell
+    // name is exactly "sh" (a leading '-' login mark is skipped
+    // before the comparison); run_startup_files branches on it
+    // (shell.c:1216, 1238-1239), so record it for the startup chain.
+    if name.strip_prefix('-').unwrap_or(name.as_str()) == "sh" {
+        OWN_ACT_LIKE_SH.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // GNU shell.c set_shell_name: an argv[0] whose first character is '-'
     // (after the basename) marks a login shell, independent of --login/-l.
@@ -1464,12 +1484,28 @@ fn run_command_string_with_init(
     // expand_aliases = posixly_correct) takes the incremental grouped
     // driver; GNU's reader is always command-by-command.
     let alias_live_at_start = executor.alias_expansion_enabled();
+    // rubash#2332: a respawned child's `-c` text IS its transported
+    // root body; arm the root-span re-seed for exactly this driver
+    // call (run_source_impl consumes the __RUBASH_FORK_ROOT_SPANS
+    // install unit by unit while armed). Ordinary `-c` strings carry
+    // no install and the re-seed is a no-op for them.
+    executor.set_root_line_span_run_armed(true);
+    // shell.c run_one_command executes the -c string through
+    // parse_and_execute (builtins/evalstring.c), whose DISCARD arm
+    // folds the pre-set status to EXECUTION_FAILURE and continues the
+    // string (evalstring.c:425-442) — unlike the script reader_loop
+    // (eval.c:111-118), which preserves the pre-set status. Enter the
+    // frame for the run so the discard catches fold the same way
+    // (rubash#2369: `bash -c 'echo ${BASH_SOURCE:=X}'` exits 1).
+    let saved_frame = executor.enter_parse_and_execute_frame();
     let status =
         if script_uses_history(&command) || script_uses_aliases(&command, alias_live_at_start) {
             run_script_with_history(executor, &command, None)
         } else {
             run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
         };
+    executor.exit_parse_and_execute_frame(saved_frame);
+    executor.set_root_line_span_run_armed(false);
     executor.set_command_string_mode(false);
     finish_shell(executor, status, interactive)
 }
@@ -1885,7 +1921,22 @@ fn run_stdin_script_with_init(
 /// --rcfile twice (issue312 gate test). True for the leftover shapes
 /// startup skips (empty HOME, non-interactive extension, login).
 fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
-    executor.get_env("__RUBASH_SOURCED_RC").as_deref() != Some(init_file)
+    if executor.get_env("__RUBASH_SOURCED_RC").as_deref() == Some(init_file) {
+        return false;
+    }
+    // GNU shell.c:1238-1239 / 1244-1245: an interactive shell in the
+    // $ENV arm — invoked as `sh`, or any posix-mode shell — has no
+    // rcfile slot at all; --rcfile belongs to the bash arm's
+    // execute_bashrc_file. The direct run is rubash's extension for
+    // the non-interactive/login/empty-HOME shapes above and must not
+    // leak an rcfile into an interactive $ENV-arm shell, whose whole
+    // startup contract is the $ENV file (rubash#2412).
+    if own_interactive_shell()
+        && (own_act_like_sh() || executor.shell_option_enabled("posix"))
+    {
+        return false;
+    }
+    true
 }
 
 /// GNU shell.c:1547 start_debugger: run the bashdb starter file once before
@@ -2059,7 +2110,21 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
         // login shell (own mark) keeps the carrier untouched.
         executor.remove_env("__RUBASH_LOGIN_SHELL");
     }
-    diagnose_bash_env_directory(executor, interactive);
+    // GNU shell.c run_startup_files branches on the invocation mode
+    // (act_like_sh at shell.c:1216/1238, posixly_correct at
+    // shell.c:1216/1223): read this process's own mode facts once —
+    // act_like_sh from the OWN_* statics, posix from the option state
+    // the invocation layer armed (POSIXLY_CORRECT import at
+    // Executor::new, --posix in option parsing, the sh binding in
+    // apply_invocation_shell_mode).
+    let act_like_sh = own_act_like_sh();
+    let posix = executor.shell_option_enabled("posix");
+    // The $BASH_ENV directory diagnosis belongs to the same gated
+    // branch that sources it: a sh/posix shell never touches
+    // $BASH_ENV, so it never diagnoses it either.
+    if !act_like_sh && !posix {
+        diagnose_bash_env_directory(executor, interactive);
+    }
     let no_profile = executor.get_env("__RUBASH_NO_PROFILE").as_deref() == Some("1");
     let no_rc = executor.get_env("__RUBASH_NO_RC").as_deref() == Some("1");
     let home = executor.get_env("HOME").unwrap_or_default();
@@ -2070,9 +2135,20 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
         Vec::new()
     } else {
         let exists = |path: &str| std::fs::metadata(executor.resolve_shell_path(path)).is_ok();
-        if login {
+        // GNU shell.c gates BOTH login profile blocks on
+        // posixly_correct == 0: the argv[0]-dash/--login block at
+        // shell.c:1196 and the interactive non-posix arm at
+        // shell.c:1223 (the posix arm, shell.c:1242-1245, sources
+        // $ENV only). A posix-mode login shell therefore never runs
+        // the profile chain — interactive it reads $ENV (the env-file
+        // step below), non-interactive it reads nothing (rubash#2411).
+        if login && !posix {
             login_profile_branch(&home, no_profile, exists)
-        } else if interactive && !no_rc {
+        } else if interactive && !no_rc && !act_like_sh && !posix {
+            // GNU shell.c:1235-1239 / 1242-1245: the bashrc chain is
+            // the plain-bash interactive arm only — an interactive
+            // shell invoked as `sh` or in posix mode sources $ENV
+            // (the env-file step below) instead of any rc file.
             rubash::invocation::nonlogin_interactive_files(&home, rc_override, exists)
         } else {
             Vec::new()
@@ -2095,15 +2171,19 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
             return Some(status);
         }
     }
-    // GNU shell.c run_startup_files / maybe_execute_env_file: every
-    // non-interactive shell — login shells included, after the profile
-    // chain — sources $BASH_ENV (rubash#1479).
-    if !interactive {
-        if let Some(file) = rubash::invocation::bash_env_file(executor) {
-            let status = run_init_file(executor, &file);
-            if executor.take_exit_jump_pending() {
-                return Some(status);
-            }
+    // GNU shell.c run_startup_files (shell.c:1214-1245): the env-file
+    // step is selected by invocation mode (see
+    // invocation::startup_env_file) — a non-interactive shell sources
+    // $BASH_ENV only when it is neither posix mode nor invoked as
+    // `sh` (rubash#2392; login shells included, after the profile
+    // chain, rubash#1479), and an interactive sh/posix shell sources
+    // $ENV in place of the rc chain suppressed above (rubash#2394).
+    if let Some(file) =
+        rubash::invocation::startup_env_file(executor, interactive, act_like_sh, posix)
+    {
+        let status = run_init_file(executor, &file);
+        if executor.take_exit_jump_pending() {
+            return Some(status);
         }
     }
     None

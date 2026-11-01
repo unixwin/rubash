@@ -61,7 +61,11 @@ impl Executor {
                     && redirect_target_fd_and_move(&target).is_none()
                     && !target.starts_with("<(")
                 {
-                    if let Err(error) = self.probe_input_redirect(&target) {
+                    // rubash#2329: positional — the spelling's
+                    // source may be bound by this command's own
+                    // list (redir.c:237).
+                    if let Err(error) = self.probe_input_redirect_positional(cmd, redirect, &target)
+                    {
                         let mut line = Vec::new();
                         let _ = writeln!(
                             &mut line,
@@ -708,9 +712,12 @@ impl Executor {
                 "-e" => {
                     index += 1;
                 }
-                // GNU read.def:308: `-E` disables readline (inverse of `-e`).
-                // Rubash has no readline editor for read, so it's a no-op
-                // (rubash#1407).
+                // GNU read.def:326-328: `-E` ALSO sets edit (with bash's
+                // completion flavor, use_bash_completion) — it is not an
+                // inverse of `-e`. Both arm the line editor (rubash#2339);
+                // the flag itself is derived from the option words below
+                // beside `silent`, because the combined-option arms
+                // consume these letters without tracking them.
                 "-E" => {
                     index += 1;
                 }
@@ -2236,12 +2243,15 @@ impl Executor {
 
         // GNU read.def:331-336: `-i text` only fills the readline edit
         // buffer — `itext = list_optarg` is consumed exclusively by the
-        // edit path (-e/-E set `edit`, read.def:316-327), which itself only
-        // engages on an interactive terminal. Without a real readline
-        // editor the initial text never reaches the variable
-        // (`printf '\n' | { read -i init v; }` leaves v empty). Rubash's
-        // read builtin has no readline editor, so the option parses and
-        // stays inert (rubash#270).
+        // edit path (-e/-E set `edit`, read.def:321-328), which itself only
+        // engages on an interactive terminal. Without the editor the
+        // initial text never reaches the variable
+        // (`printf '\n' | { read -i init v; }` leaves v empty,
+        // rubash#270). The editor hook in the input funnel owns the
+        // text (rubash#2339); every plain-scanner path must keep NOT
+        // seeing it, so capture the editor's copy here and null the
+        // working variable exactly as before.
+        let edit_initial_text = initial_text.clone();
         initial_text = None;
 
         // Bash displays read -p prompts only for interactive stdin.
@@ -2361,6 +2371,24 @@ impl Executor {
             .take_while(|word| word.as_str() != "--")
             .any(|word| word.starts_with('-') && word.contains('s'));
 
+        // read.def:321-328: `-e` and `-E` both set edit. Derived with a
+        // getopt-faithful scan (unlike `silent`'s letter search, an
+        // argument word must never arm it: `read -p "edit: " v` is not
+        // an editor read) — option letters are walked word by word, an
+        // argument-taking letter (a,d,i,n,p,t,u,N) consumes the rest of
+        // its word or the next word, and the scan stops at `--`.
+        self.read_edit_armed = Self::read_edit_armed(&cmd.words);
+        self.read_edit_initial_text = if self.read_edit_armed {
+            edit_initial_text
+        } else {
+            None
+        };
+        self.read_edit_prompt = if self.read_edit_armed {
+            prompt.as_deref().map(|text| self.expand_word(text))
+        } else {
+            None
+        };
+
         if timeout_zero {
             // GNU builtins/read.def:395-398: a `-t 0` read returns
             // input_avail(fd) ? 0 : 1 immediately after option parsing —
@@ -2400,6 +2428,12 @@ impl Executor {
                         "{}{name}: readonly variable",
                         self.diagnostic_prefix()
                     );
+                    return self.finish_read_error(cmd, &stderr, 1);
+                }
+                // GNU read.def:960-966 (builtin_find_indexed_array with
+                // the assignment flag): an att_noassign -a target fails
+                // the same way but silently (rubash#2369).
+                if !invalid_name && self.assignment_target_is_noassign(&name) {
                     return self.finish_read_error(cmd, &stderr, 1);
                 }
                 if !invalid_name {
@@ -2473,6 +2507,11 @@ impl Executor {
                     "{}{name}: readonly variable",
                     self.diagnostic_prefix()
                 );
+                return self.finish_read_error(cmd, &stderr, 1);
+            }
+            // GNU read.def:960-966: an att_noassign -a target fails the
+            // same way but silently (rubash#2369).
+            if !invalid_name && self.assignment_target_is_noassign(&name) {
                 return self.finish_read_error(cmd, &stderr, 1);
             }
             let final_line = match (&line, &initial_text) {
@@ -3122,6 +3161,47 @@ impl Executor {
         self.read_sigint_guard_armed = false;
         self.fd_table.read_deadline = deadline;
         self.fd_table.read_timed_out = false;
+    }
+
+    /// Whether this `read` carries `-e`/`-E` (read.def:321-328 — both
+    /// set `edit`). A getopt-faithful scan of the option words:
+    /// argument-taking letters (a,d,i,n,p,t,u,N — read.def's optstring
+    /// "Eersa:d:i:n:p:t:u:N:") consume the rest of their word or the
+    /// next word, so an argument's text can never arm the editor, and
+    /// the scan stops at `--`. (The combined-option parse arms consume
+    /// these letters without tracking them, the same reason `silent`
+    /// is derived post-hoc.)
+    fn read_edit_armed(words: &[String]) -> bool {
+        let mut index = 1; // words[0] is the command name
+        let mut armed = false;
+        while let Some(word) = words.get(index) {
+            index += 1;
+            if word == "--" {
+                break;
+            }
+            let Some(letters) = word.strip_prefix('-') else {
+                continue;
+            };
+            if letters.is_empty() {
+                continue;
+            }
+            let mut rest = letters.chars().peekable();
+            let mut takes_next_word = false;
+            while let Some(letter) = rest.next() {
+                match letter {
+                    'e' | 'E' => armed = true,
+                    'a' | 'd' | 'i' | 'n' | 'p' | 't' | 'u' | 'N' => {
+                        takes_next_word = rest.peek().is_none();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if takes_next_word {
+                index += 1;
+            }
+        }
+        armed
     }
 
     /// Merge and clear the rubash#1250 interrupt flag: an untrapped

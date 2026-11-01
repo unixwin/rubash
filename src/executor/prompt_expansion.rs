@@ -558,6 +558,13 @@ impl Executor {
         self.command_string_final_pending.set(armed);
     }
 
+    /// rubash#2332: arms the root-body line-span re-seed for the
+    /// `-c` root driver call (see root_line_span_run_armed);
+    /// run_source_impl consumes the transported spans while armed.
+    pub fn set_root_line_span_run_armed(&mut self, armed: bool) {
+        self.root_line_span_run_armed.set(armed);
+    }
+
     pub(in crate::executor) fn prompt_time(&self, format: &str) -> String {
         crate::builtins::printf::time::format_current_time(format, &self.shell_state.env_vars)
     }

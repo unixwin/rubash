@@ -104,9 +104,19 @@ pub(in crate::executor) const FORK_IN_FUNCTION_TRANSPORT: &str = "__RUBASH_FORK_
 pub(in crate::executor) const FORK_MAIN_FRAME_TRANSPORT: &str = "__RUBASH_FORK_MAIN_FRAME";
 pub(in crate::executor) const FORK_PIPESTATUS_TRANSPORT: &str = "__RUBASH_FORK_PIPESTATUS";
 pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_SPANS";
+/// rubash#2332: source-line spans of the respawned child's ROOT body —
+/// the inline TEXT body that becomes the child's main `-c` source
+/// (an async `( list ) &` / coproc compound body), sibling to the
+/// per-function carrier above. Element 0 of the value is the count of
+/// prelude function-definition commands ahead of the body in the
+/// child's source (0 for coproc children); element 1 is the body's
+/// comma-joined `line.end_line.logical_line` triples in
+/// collect_command_line_spans order. See
+/// docs/design/respawn-root-line-spans.md.
+pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_ROOT_SPANS";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 10] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 11] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -117,6 +127,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 10] = [
     FORK_MAIN_FRAME_TRANSPORT,
     FORK_PIPESTATUS_TRANSPORT,
     FORK_FN_SPANS_TRANSPORT,
+    FORK_ROOT_SPANS_TRANSPORT,
 ];
 
 impl Executor {
@@ -231,6 +242,64 @@ impl Executor {
     }
 }
 
+/// rubash#2332: one span slot of the FN/ROOT span codecs — `0`
+/// encodes None, any other value is the line itself.
+fn parse_span_slot(text: &str) -> Option<Option<usize>> {
+    match text.parse::<usize>() {
+        Ok(0) => Some(None),
+        Ok(line) => Some(Some(line)),
+        Err(_) => None,
+    }
+}
+
+/// rubash#2332: parse a comma-joined `line.end_line.logical_line`
+/// triple list (the encoding both span carriers share). Returns None
+/// when any triple is malformed — a span that cannot be parsed must
+/// never reach a re-seed. The empty string is an empty vector.
+fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
+    let mut spans = Vec::new();
+    if !text.is_empty() {
+        for triple in text.split(',') {
+            let fields: Vec<&str> = triple.split('.').collect();
+            if fields.len() != 3 {
+                return None;
+            }
+            match (
+                parse_span_slot(fields[0]),
+                parse_span_slot(fields[1]),
+                parse_span_slot(fields[2]),
+            ) {
+                (Some(line), Some(end_line), Some(logical_line)) => {
+                    spans.push(crate::parser::CommandLineSpan {
+                        line,
+                        end_line,
+                        logical_line,
+                    });
+                }
+                _ => return None,
+            }
+        }
+    }
+    Some(spans)
+}
+
+/// rubash#2332: format spans in the triple-list encoding
+/// parse_line_span_triples reads (None renders as 0).
+fn format_line_span_triples(spans: &[crate::parser::CommandLineSpan]) -> String {
+    spans
+        .iter()
+        .map(|span| {
+            format!(
+                "{}.{}.{}",
+                span.line.unwrap_or(0),
+                span.end_line.unwrap_or(0),
+                span.logical_line.unwrap_or(0)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// rubash#2202: decode a __RUBASH_FORK_FN_SPANS stamp value into the
 /// per-function span map the child's definition path consumes
 /// (init.rs). Malformed entries are dropped individually — a span
@@ -238,51 +307,43 @@ impl Executor {
 pub(in crate::executor) fn decode_function_line_spans(
     value: &str,
 ) -> std::collections::HashMap<String, Vec<crate::parser::CommandLineSpan>> {
-    fn parse_slot(text: &str) -> Option<Option<usize>> {
-        match text.parse::<usize>() {
-            Ok(0) => Some(None),
-            Ok(line) => Some(Some(line)),
-            Err(_) => None,
-        }
-    }
     let mut map = std::collections::HashMap::new();
     for entry in array_values(value) {
         let Some((name, nodes)) = entry.split_once('=') else {
             continue;
         };
-        let mut spans = Vec::new();
-        let mut valid = true;
-        if !nodes.is_empty() {
-            for triple in nodes.split(',') {
-                let fields: Vec<&str> = triple.split('.').collect();
-                if fields.len() != 3 {
-                    valid = false;
-                    break;
-                }
-                match (
-                    parse_slot(fields[0]),
-                    parse_slot(fields[1]),
-                    parse_slot(fields[2]),
-                ) {
-                    (Some(line), Some(end_line), Some(logical_line)) => {
-                        spans.push(crate::parser::CommandLineSpan {
-                            line,
-                            end_line,
-                            logical_line,
-                        });
-                    }
-                    _ => {
-                        valid = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if valid {
+        if let Some(spans) = parse_line_span_triples(nodes) {
             map.insert(name.to_string(), spans);
         }
     }
     map
+}
+
+/// rubash#2332: encode a __RUBASH_FORK_ROOT_SPANS stamp value —
+/// element 0 is the count of prelude function-definition commands
+/// ahead of the body in the child's `-c` source, element 1 the root
+/// body's span triples.
+pub(in crate::executor) fn encode_root_line_spans(
+    prelude_defs: usize,
+    spans: &[crate::parser::CommandLineSpan],
+) -> String {
+    format_indexed_array_values(vec![
+        prelude_defs.to_string(),
+        format_line_span_triples(spans),
+    ])
+}
+
+/// rubash#2332: decode a __RUBASH_FORK_ROOT_SPANS stamp value into
+/// (prelude definition count, root span vector). Any malformation
+/// drops the whole stamp: the root body is one unit, and a partially
+/// decoded span vector would misalign every command after the gap.
+pub(in crate::executor) fn decode_root_line_spans(
+    value: &str,
+) -> Option<(usize, Vec<crate::parser::CommandLineSpan>)> {
+    let values = array_values(value);
+    let prelude_defs: usize = values.first()?.parse().ok()?;
+    let spans = parse_line_span_triples(values.get(1)?)?;
+    Some((prelude_defs, spans))
 }
 
 /// The parent-source line of the first command that will execute from
@@ -1462,6 +1523,15 @@ impl Executor {
         let strip_parens = background_paren_absorbable(&background_command.command, &consumed);
         let mut child_command = background_command.command.clone();
         strip_consumed_redirects(&mut child_command, &consumed);
+        // rubash#2332: the root body's line spans ride along with the
+        // source built here — collect them over exactly the nodes each
+        // form renders (the absorbed inner list, or the single
+        // transported command after redirect stripping), so the
+        // child's re-parse can be re-seeded onto the parent's parse
+        // lines (see docs/design/respawn-root-line-spans.md). The
+        // prelude count is background_function_prelude's own
+        // definition count, taken over the same map and filter.
+        let mut root_spans = Vec::new();
         let source = if strip_parens {
             // SAFETY: strip gate guarantees subshell_command.is_some().
             let inner = child_command
@@ -1469,10 +1539,27 @@ impl Executor {
                 .as_ref()
                 .map(|subshell| subshell.body.clone())
                 .unwrap_or_default();
+            crate::parser::collect_command_line_spans(&inner, &mut root_spans);
             self.background_command_source_for_body(&inner)
         } else {
+            crate::parser::collect_command_line_spans(
+                std::slice::from_ref(&child_command),
+                &mut root_spans,
+            );
             self.background_command_source(&child_command)
         };
+        if !root_spans.is_empty() {
+            let prelude_defs = self
+                .shell_state
+                .functions
+                .keys()
+                .filter(|name| is_exportable_function_name(name))
+                .count();
+            env_map.insert(
+                FORK_ROOT_SPANS_TRANSPORT.to_string(),
+                encode_root_line_spans(prelude_defs, &root_spans),
+            );
+        }
         env_map.insert(
             "__RUBASH_BG_DEPTH".to_string(),
             (if strip_parens || background_command.command.subshell_command.is_none() {
@@ -1655,10 +1742,21 @@ impl Executor {
             }
         }
 
+        // rubash#2356: the composed environment itself is a state
+        // channel — the fork-context stamp and the attribute lists
+        // scale with this shell's function table, and a single entry
+        // past MAX_ARG_STRLEN fails the whole execve (E2BIG) even
+        // with the `-c` script already on the file transport. Move
+        // oversized entries onto the state-file transport before the
+        // spawn; the child's import splices them back.
+        let argv_bytes =
+            exe.as_os_str().len() + spawn_args.iter().map(|arg| arg.len() + 1).sum::<usize>();
+        let (env_entries, state_temp) =
+            self.spill_respawn_env_entries(env_map.into_iter().collect(), argv_bytes);
         let spawn_result = crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
             program: exe.clone(),
             args: spawn_args,
-            env: env_map.into_iter().collect(),
+            env: env_entries,
             std_handles,
             extra_handles,
             // G-02: the respawned child starts in the session cwd.
@@ -1680,6 +1778,9 @@ impl Executor {
             Ok(child) => child,
             Err(error) => {
                 if let Some(path) = &respawn_temp {
+                    let _ = fs::remove_file(path);
+                }
+                if let Some(path) = &state_temp {
                     let _ = fs::remove_file(path);
                 }
                 return Err(error.into());
@@ -2467,8 +2568,42 @@ impl Executor {
     /// gives a forked async subshell.
     fn materialize_virtual_stdin_fd0(&mut self, bytes: &[u8]) -> Option<std::fs::File> {
         let path = self.process_substitution_temp_path().ok()?;
-        fs::write(&path, bytes).ok()?;
+        // rubash#2409: GNU's here_document_to_fd (redir.c:423) makes the
+        // document "really temporary" (redir.c:548-551): the scratch
+        // file is written through one handle, re-opened by name for
+        // reading, and the name is unlinked before the descriptor is
+        // ever used — the temp file has no directory entry for its
+        // whole working life. The previous body wrote the file and
+        // opened it but never unlinked, so every async subshell that
+        // inherited a virtual fd 0 (FUNCTION_STDIN text channel or a
+        // Text/ProcessSubstitution fd-0 endpoint) leaked a named
+        // rubash-process-subst*.tmp into the temp dir — the #2395 leak
+        // class on this face (the exec face's fix in
+        // materialize_exec_stdin_bytes is the sibling). Mirror GNU:
+        // scratch write handle, read re-open while it is alive,
+        // immediate unlink on Unix; FILE_FLAG_DELETE_ON_CLOSE carries
+        // the same lifetime on Windows (the re-opened handle keeps the
+        // delete pending until fd 0 itself closes).
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let mut scratch = options.open(&path).ok()?;
+        {
+            use std::io::Write as _;
+            scratch.write_all(bytes).ok()?;
+        }
         let file_fd = FileFd::open_read(path).ok()?;
+        #[cfg(unix)]
+        {
+            // The descriptor stays valid after the name is unlinked.
+            let _ = std::fs::remove_file(&file_fd.path);
+        }
+        drop(scratch);
         let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()?;
         self.set_fd_input_file(0, file_fd, false);
         Some(crate::fd::handle_to_file(dup))
@@ -2508,12 +2643,21 @@ impl Executor {
                     return None;
                 }
                 if want_string {
-                    if command.here_string_carrier.is_some() {
-                        Some(self.expand_here_string_mut_from_carrier(&command.here_string_carrier))
+                    // rubash#2409 (same-wave residual): a here-string's
+                    // bytes are the expanded word PLUS a trailing
+                    // newline (GNU heredoc_expand for r_reading_string,
+                    // redir.c:396-397; the correlated path above appends
+                    // it in expand_heredoc_redirect_text). The legacy
+                    // fallback returned the bare word, so every async
+                    // here-string (`cat <<<word &`) lost its newline.
+                    let mut expanded = if command.here_string_carrier.is_some() {
+                        self.expand_here_string_mut_from_carrier(&command.here_string_carrier)
                     } else {
                         let body = command.here_string.clone()?;
-                        Some(self.expand_here_string_mut(&body))
-                    }
+                        self.expand_here_string_mut(&body)
+                    };
+                    expanded.push('\n');
+                    Some(expanded)
                 } else if command.heredoc_body.is_some() {
                     Some(self.expand_heredoc_body_mut_from_carrier(&command.heredoc_body))
                 } else {
@@ -2522,8 +2666,37 @@ impl Executor {
                 }
             })?;
         let path = self.process_substitution_temp_path().ok()?;
-        fs::write(&path, expanded.as_bytes()).ok()?;
-        std::fs::File::open(&path).ok().map(|file| (file, path))
+        // rubash#2409: same leak class as materialize_virtual_stdin_fd0
+        // above — the carrier was created by name and never unlinked,
+        // so every background command carrying its own heredoc /
+        // here-string redirect left a rubash-process-subst*.tmp in the
+        // temp dir. GNU's here_document_to_fd (redir.c:423) unlinks
+        // the name before the descriptor is used (redir.c:548-551);
+        // mirror it here so both callers (the background-stdio face,
+        // which discarded the path, and the redirect-replay face,
+        // which keeps it only as the FileFd name record) inherit the
+        // anonymous lifetime. The returned path is a name record only
+        // from here on.
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let mut scratch = options.open(&path).ok()?;
+        {
+            use std::io::Write as _;
+            scratch.write_all(expanded.as_bytes()).ok()?;
+        }
+        let file = std::fs::File::open(&path).ok()?;
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        drop(scratch);
+        Some((file, path))
     }
 
     fn background_command_source(&self, command: &CommandNode) -> String {
@@ -3834,11 +4007,11 @@ impl Executor {
                     // instead of deep-cloning the whole command node for
                     // every subshell execution.
                     let trap_redirect_arg = if !executor.exec_replaced
-                        && crate::builtins::trap::get_trap_action(
+                        && crate::builtins::trap::active_trap_action_ref(
                             &executor.shell_state.env_vars,
                             "EXIT",
                         )
-                        .is_some_and(|action| !action.is_empty())
+                        .is_some()
                     {
                         trap_stdio_redirect_cmd = Some(subshell_stdio_redirect_cmd(redirect_cmd));
                         trap_stdio_redirect_cmd.as_ref()
@@ -4534,6 +4707,11 @@ impl Executor {
         // environment, not the shell-state snapshot a `rubash -c`
         // child re-imports).
         let direct_plan = self.plan_direct_coproc_command(cmd, coproc_cmd);
+        // rubash#2356: byte size of the respawn argv, for the
+        // state-channel spill's aggregate budget (the respawn route
+        // gathers its environment into a Vec first — see the
+        // direct_plan.is_none() block below).
+        let mut respawn_argv_bytes = exe.as_os_str().len() + 16;
         let mut child = if let Some((program, argv)) = &direct_plan {
             let mut command = Command::new(program);
             command.args(&argv[1..]);
@@ -4542,6 +4720,7 @@ impl Executor {
         } else if let Some(body) = &coproc_cmd.body {
             // Compound command body: coproc [NAME] { body; } or ( body )
             let body_text = bash_command_sequence_text(body);
+            respawn_argv_bytes += body_text.len();
             let mut child = Command::new(&exe);
             child.arg("-c").arg(&body_text);
             child
@@ -4554,6 +4733,7 @@ impl Executor {
                 .is_some_and(|word| word.starts_with('-'))
             {
                 for word in &coproc_cmd.words {
+                    respawn_argv_bytes += word.len() + 1;
                     child.arg(word);
                 }
             } else {
@@ -4577,9 +4757,9 @@ impl Executor {
                 {
                     metadata[0].raw = "'time'".to_string();
                 }
-                child
-                    .arg("-c")
-                    .arg(command_words_source_text(&coproc_cmd.words, &metadata));
+                let words_text = command_words_source_text(&coproc_cmd.words, &metadata);
+                respawn_argv_bytes += words_text.len();
+                child.arg("-c").arg(words_text);
             }
             child
         } else {
@@ -4595,10 +4775,19 @@ impl Executor {
         // the respawn route's inheritance transport; a direct child
         // (rubash#1584) is a foreign program and already received
         // the ordinary external environment at construction.
+        //
+        // rubash#2356: the respawn route gathers its entries into a
+        // Vec first (a Command's env cannot be read back), so the
+        // state-channel spill can move oversized entries onto the
+        // state-file transport before anything is applied. Entry
+        // order is preserved exactly; the spill + apply happen just
+        // before the spawn, so no temp file exists on the
+        // redirect-error / pipe-failure paths in between.
+        let mut env_entries: Vec<(String, String)> = Vec::new();
         if direct_plan.is_none() {
             for (key, value) in &self.shell_state.env_vars {
                 if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                    child.env(key, value);
+                    env_entries.push((key.clone(), value.clone()));
                 }
             }
             // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
@@ -4620,15 +4809,15 @@ impl Executor {
                     .get(name)
                     .map(|info| info.def_redirects.as_slice())
                     .unwrap_or(&[]);
-                child.env(
+                env_entries.push((
                     exported_function_env_name(name),
                     exported_function_env_value(&body.commands, def_redirects),
-                );
+                ));
             }
             // Preserve the parent script location for diagnostics emitted by the
             // coprocess shell, while keeping internal executor state isolated.
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
-                child.env("__RUBASH_SCRIPT_NAME", script);
+                env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script.clone()));
                 // rubash#2058: seed where the transported body text
                 // starts (first leaf command's line), not the coproc
                 // node's own line. Simple-command coprocs keep the
@@ -4647,45 +4836,68 @@ impl Executor {
                             .cloned()
                     })
                     .unwrap_or_else(|| "1".to_string());
-                child.env("__RUBASH_CURRENT_LINE", line.clone());
+                env_entries.push(("__RUBASH_CURRENT_LINE".to_string(), line.clone()));
                 // The child re-parses `-c` source from line 1. Preserve the
                 // parent's physical call-site line when assigning child AST lines.
                 let line_offset = line.parse::<usize>().unwrap_or(1).saturating_sub(1);
-                child.env("__RUBASH_LINE_OFFSET", line_offset.to_string());
+                env_entries.push(("__RUBASH_LINE_OFFSET".to_string(), line_offset.to_string()));
             }
             // rubash#2032: the coproc child is a GNU fork (execute_cmd.c
             // coproc_getfd -> make_child), so it inherits the parent's
             // positional parameters like every other fork-shaped respawn
             // (POSITIONAL_PARAMS_TRANSPORT).
-            child.env(
-                POSITIONAL_PARAMS_TRANSPORT,
+            env_entries.push((
+                POSITIONAL_PARAMS_TRANSPORT.to_string(),
                 self.positional_params_transport_value(),
-            );
+            ));
             // rubash#2058: the fork-context stamp, like every other
             // fork-shaped respawn (see fork_context_transport_entries).
             for (key, value) in self.fork_context_transport_entries() {
-                child.env(key, value);
+                env_entries.push((key, value));
+            }
+            // rubash#2332: the compound body's line spans, collected
+            // over the same list bash_command_sequence_text rendered
+            // into the child's `-c` source above; prelude count 0 —
+            // coproc children take their functions via the BASH_FUNC
+            // entries, not prelude text. Simple-command coprocs have
+            // no body statements to re-seed (the command IS the body
+            // and keeps the node-line seed above). The stamp joins
+            // env_entries (not a direct child.env) so it rides the
+            // rubash#2356 state-channel spill with every sibling
+            // transport entry at this site.
+            if let Some(body) = &coproc_cmd.body {
+                let mut root_spans = Vec::new();
+                crate::parser::collect_command_line_spans(body, &mut root_spans);
+                if !root_spans.is_empty() {
+                    env_entries.push((
+                        FORK_ROOT_SPANS_TRANSPORT.to_string(),
+                        encode_root_line_spans(0, &root_spans),
+                    ));
+                }
             }
             // rubash#2058: this site never stamped the shell-pid
             // carrier, so the coproc child's $$ projected neither the
             // parent shell's pid (the #1582 projection its sibling
             // spawn sites produce) nor its own BASHPID.
-            child.env("__RUBASH_SHELL_PID", self.shell_pid.to_string());
+            env_entries.push(("__RUBASH_SHELL_PID".to_string(), self.shell_pid.to_string()));
             // Coprocess children own a shell-created stdin pipe. Keep builtin
             // readers attached to it and let TERM use native termination when a
             // blocked read cannot consume the shell signal mailbox.
-            child.env(INHERIT_PROCESS_STDIN, "1");
-            child.env("__RUBASH_COPROC_CHILD", "1");
+            env_entries.push((INHERIT_PROCESS_STDIN.to_string(), "1".to_string()));
+            env_entries.push(("__RUBASH_COPROC_CHILD".to_string(), "1".to_string()));
             // rubash#2136: provenance stamp — the child's init validates
             // the coproc claim against its actual parent (init.rs).
-            child.env(super::RESPAWN_SPAWNER_PID_KEY, super::spawner_stamp_value());
+            env_entries.push((
+                super::RESPAWN_SPAWNER_PID_KEY.to_string(),
+                super::spawner_stamp_value(),
+            ));
             // rubash#1074: the coproc body runs in a forked subshell
             // (execute_in_subshell: subshell_level++), so the child's
             // BASH_SUBSHELL starts at this shell's depth + 1.
-            child.env(
-                "__RUBASH_SUBSHELL_DEPTH",
+            env_entries.push((
+                "__RUBASH_SUBSHELL_DEPTH".to_string(),
                 (self.shell_state.subshell_depth.get() + 1).to_string(),
-            );
+            ));
             // rubash#1582: the same fork makes the coproc child's own
             // pid the pid of the seeded level (variables.c:1511
             // get_bashpid = getpid), so the BASHPID origin base rides
@@ -4693,10 +4905,10 @@ impl Executor {
             // stamp the pair, and without the base this child's
             // $BASHPID read its real pid + 1 while its own children
             // observed the real pid as $PPID.
-            child.env(
-                "__RUBASH_BG_BASHPID_BASE",
+            env_entries.push((
+                "__RUBASH_BG_BASHPID_BASE".to_string(),
                 (self.shell_state.subshell_depth.get() + 1).to_string(),
-            );
+            ));
         }
 
         // Create pipes for bidirectional communication
@@ -4846,6 +5058,19 @@ impl Executor {
             }
             suppress_orphan_console(&mut child);
             child.current_dir(&self.shell_state.cwd);
+            // rubash#2356: spill + apply the gathered respawn
+            // environment (see the gather at the construction site).
+            // A direct (foreign) child gathered nothing and keeps
+            // the ordinary external environment from construction.
+            let mut state_temp: Option<PathBuf> = None;
+            if direct_plan.is_none() {
+                let (entries, temp) =
+                    self.spill_respawn_env_entries(env_entries, respawn_argv_bytes);
+                state_temp = temp;
+                for (key, value) in entries {
+                    child.env(key, value);
+                }
+            }
             match child.spawn() {
                 Ok(mut child_proc) => {
                     // Rubash does not expose real coproc file descriptors yet,
@@ -5114,6 +5339,9 @@ impl Executor {
                     self.exit_code = 0;
                 }
                 Err(e) => {
+                    if let Some(path) = &state_temp {
+                        let _ = fs::remove_file(path);
+                    }
                     eprintln!("{}coproc: failed to spawn: {}", self.diagnostic_prefix(), e);
                     self.exit_code = 126;
                 }
@@ -6057,23 +6285,128 @@ impl Executor {
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
         if !case_pattern_raw_has_quotes(&pattern.raw_text) {
-            // Backslashes in a case pattern are escape characters, not quote
-            // removal subjects (bash execute_cmd.c: patterns do not undergo
-            // quote removal). Protect every `\` (and the legacy `\x18` marker)
-            // through expansion and decode_parameter_pattern_quotes, then
-            // restore the real backslash so case_pattern_matches can apply its
-            // escape semantics (`\]` is a bracket member, `\"` matches `"`).
-            let protected = pattern.text.replace(
-                |c| c == '\\' || c == crate::executor::markers::DATA_DQUOTE,
-                &PROTECTED_CASE_PATTERN_BACKSLASH.to_string(),
-            );
+            // Backslashes in a case pattern are escape characters, not
+            // quote-removal subjects: GNU performs no quote removal on the
+            // pattern (execute_cmd.c:3733-3736) because read_token_word
+            // consumes `\X` as ONE quoted unit at read time
+            // (parse.y:5366-5398: the backslash branch sets
+            // pass_next_character; parse.y:5358-5362 routes the next char
+            // to got_escaped_character, which CTLESC-marks it), and
+            // quote_string_for_globbing (pathexp.c:212) re-emits that
+            // quoting for strmatch after expand_word_leave_quoted
+            // (execute_cmd.c:3712-3725).
+            //
+            // The escape pair must therefore never be split before the
+            // expander. Protecting only the `\` (the former guard scheme)
+            // left the quoted character bare, and the expander re-read it
+            // as syntax: `\"` opened a quote span that quote removal then
+            // deleted (the glob after it collapsed to a literal), `\$`
+            // started a parameter expansion that ate the `$`, and a `\`
+            // inside a `${...}` default was rewritten before the unit's
+            // own grammar could see it (rubash#2421). Walk the text the
+            // way quote_aware_glob_rhs walks a `[[ == ]]` RHS instead:
+            // `\X` pairs outside nested expansion units are emitted
+            // verbatim for the matcher, the runs between them go through
+            // expansion, and a `\` INSIDE a `$(...)`/`${...}`/backtick
+            // unit belongs to that unit's own grammar
+            // (parse.y:3877 parse_matched_pair), so units stay whole
+            // inside their run. The lexer's data-quote carriers
+            // (DATA_DQUOTE / DATA_SQUOTE — its spelling of `\"` / `\'`
+            // in word text) are decoded below to the matcher's escape
+            // spelling for the literal quote.
+            //
             // Use the mutable expander: case pattern expansion is not an
-            // isolated sub-expression — `$((x=1))` in a pattern must keep its
-            // assignment side effects (bash execute_cmd.c evaluates patterns
-            // with the current variable state; case.tests `;&` fall-through).
-            let expanded = self.expand_word_mut(&protected);
-            let decoded = decode_parameter_pattern_quotes(&expanded);
-            let restored = decoded.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
+            // isolated sub-expression — `$((x=1))` in a pattern must keep
+            // its assignment side effects (bash execute_cmd.c evaluates
+            // patterns with the current variable state; case.tests `;&`
+            // fall-through).
+            let chars: Vec<char> = pattern.text.chars().collect();
+            let mut output = String::new();
+            let mut run_start = 0usize;
+            let mut index = 0usize;
+            while index < chars.len() {
+                // Nested expansion units ride inside the current run.
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+                    if let Some(close) =
+                        crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+                    {
+                        index = close.min(chars.len());
+                        continue;
+                    }
+                }
+                if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+                    if let Some(close) = skip_braced_case_pattern_unit(&chars, index + 1) {
+                        index = close + 1;
+                        continue;
+                    }
+                }
+                if chars[index] == '`' {
+                    index += 1;
+                    while index < chars.len() && chars[index] != '`' {
+                        if chars[index] == '\\' && index + 1 < chars.len() {
+                            index += 1;
+                        }
+                        index += 1;
+                    }
+                    if index < chars.len() {
+                        index += 1;
+                    }
+                    continue;
+                }
+                if chars[index] == '\\' {
+                    if run_start < index {
+                        let run: String = chars[run_start..index].iter().collect();
+                        output.push_str(&self.expand_case_pattern_run(&run));
+                    }
+                    // Emit the pair verbatim; a trailing lone `\` emits
+                    // alone (the matcher reads it as a literal backslash).
+                    output.push('\\');
+                    if index + 1 < chars.len() {
+                        output.push(chars[index + 1]);
+                        index += 2;
+                    } else {
+                        index += 1;
+                    }
+                    run_start = index;
+                    continue;
+                }
+                if chars[index] == crate::executor::markers::DATA_DQUOTE
+                    || chars[index] == crate::executor::markers::DATA_SQUOTE
+                {
+                    // The lexer spells an escaped quote in word text as
+                    // the data-quote carrier (markers.rs DATA_DQUOTE /
+                    // DATA_SQUOTE): the backslash was consumed at read
+                    // time and the quote is DATA — exactly GNU's
+                    // CTLESC-marked char (parse.y:5358-5362
+                    // got_escaped_character). Emit the matcher's escape
+                    // spelling for the literal quote. The former scheme
+                    // guarded this carrier as if it were a backslash,
+                    // which collapsed `\"*` to `\*` (rubash#2421). The
+                    // pattern-domain PATTERN_LITERAL_BACKSLASH reading
+                    // of \x18 belongs to strings the parameter machinery
+                    // hands the matcher directly, not to lexer word text
+                    // passing through expansion here.
+                    if run_start < index {
+                        let run: String = chars[run_start..index].iter().collect();
+                        output.push_str(&self.expand_case_pattern_run(&run));
+                    }
+                    output.push('\\');
+                    output.push(if chars[index] == crate::executor::markers::DATA_DQUOTE {
+                        '"'
+                    } else {
+                        '\''
+                    });
+                    index += 1;
+                    run_start = index;
+                    continue;
+                }
+                index += 1;
+            }
+            if run_start < chars.len() {
+                let run: String = chars[run_start..].iter().collect();
+                output.push_str(&self.expand_case_pattern_run(&run));
+            }
+            let restored = output.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
             return std::borrow::Cow::Owned(strip_surrounding_quotes(&restored));
         }
 
@@ -6083,6 +6416,15 @@ impl Executor {
             |word| self.expand_word_mut(word),
             &array_at,
         ))
+    }
+
+    /// One unquoted run of a quote-free case pattern (the text between
+    /// two escape pairs): full mutable expansion plus the pattern quote
+    /// decode, exactly the pipeline the former whole-string guard scheme
+    /// applied to the protected text (rubash#2421).
+    fn expand_case_pattern_run(&mut self, run: &str) -> String {
+        let expanded = self.expand_word_mut(run);
+        decode_parameter_pattern_quotes(&expanded)
     }
 
     /// First element + element count for every `${name[@]}` unit in a
@@ -7263,6 +7605,47 @@ mod case_arm_static_tests {
         match executor.expand_case_pattern(&CasePattern::new("$V".to_string(), 0, 0)) {
             Cow::Owned(text) => assert_eq!(text, "foo"),
             Cow::Borrowed(_) => panic!("dynamic $V borrowed"),
+        }
+    }
+
+    #[test]
+    fn escquote_2421_shapes_expand_like_gnu() {
+        // rubash#2421: an escape pair in a quote-free case pattern must
+        // reach the matcher intact (GNU execute_cmd.c:3712-3736 +
+        // pathexp.c:212 quote_string_for_globbing): the quoted character
+        // is literal, an unquoted `*` after it stays a live glob. Before
+        // the fix the guard scheme detached the `\`, the expander ate
+        // the bare `"`/`$`, and `\"*` collapsed to `\*` (literal star).
+        for arm in [
+            "\\\"*", "\\$*", "\\a*", "\\\\*", "\\\"", "a\\\"b", "\\\"a", "*\\\"", "\\*", "\\[*",
+            "\\`*",
+        ] {
+            let pattern = CasePattern::new(arm.to_string(), 0, 0);
+            let mut executor = Executor::new();
+            assert_eq!(
+                executor.expand_case_pattern(&pattern).into_owned(),
+                arm,
+                "arm {arm:?} must survive expansion verbatim"
+            );
+        }
+        // The lexer spells `\"` / `\'` in word text as the data-quote
+        // carriers \x18 / \x17 (the backslash is consumed at read time);
+        // both must decode to the matcher's escape spelling.
+        for (text, expected) in [
+            ("\u{18}*", "\\\"*"),
+            ("a\u{18}b", "a\\\"b"),
+            ("\u{18}", "\\\""),
+            ("*\u{18}x", "*\\\"x"),
+            ("\u{17}*", "\\'*"),
+            ("a\u{17}b", "a\\'b"),
+        ] {
+            let pattern = CasePattern::new(text.to_string(), 0, 0);
+            let mut executor = Executor::new();
+            assert_eq!(
+                executor.expand_case_pattern(&pattern).into_owned(),
+                expected,
+                "carrier arm {text:?} must decode to {expected:?}"
+            );
         }
     }
 

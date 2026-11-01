@@ -824,6 +824,291 @@ impl Executor {
             .collect()
     }
 
+    /// rubash#2424: partition a global declare/typeset operand list,
+    /// routing every DIRSTACK assignment operand through the stack
+    /// setter door and returning the operands the builtin still owns.
+    /// Returns (kept, routed_any, failed). GNU ground: declare's
+    /// operand binds run through bind_variable (declare.def:704-806
+    /// sequential processing), and DIRSTACK's bind always lands in
+    /// variables.c:1612 assign_dirstack -> builtins/pushd.def:657
+    /// set_dirstack_element — element 0 ignored, in-bounds elements
+    /// replaced, out-of-range dropped, never cleared or grown. The
+    /// builtin's own array walker instead wrote the list into the
+    /// mirror as a private array cell: `dirs` kept showing the carrier
+    /// while ${DIRSTACK[1]} read the phantom, and the next named
+    /// access panicked on the cell/mirror disagreement.
+    ///
+    /// Whole-variable operands (scalar, compound, append) reuse the
+    /// plain-assignment door (`apply_dirstack_assignment`) whole —
+    /// one setter path for every DIRSTACK write. Subscript operands
+    /// arrive with the subscript already evaluated by the rewrite
+    /// pass; a resolved index routes to set_stack_value (an append
+    /// concatenates onto the live element, GNU bind_array_element's
+    /// ASS_APPEND computation; a negative index counts back from the
+    /// live stack end, and one before the start is the arrayfunc.c
+    /// bad-subscript failure). Unresolvable subscript text (the
+    /// failed-subscript sentinel, assoc-shaped keys) stays with the
+    /// builtin's existing diagnostic paths.
+    ///
+    /// A routed operand leaves its bare name in the kept list: the
+    /// builtin still applies this call's attribute marks (-i/-l/-u/
+    /// -x/-r) to the variable, exactly as GNU's sequential operand
+    /// processing does after the bind. The value transforms those
+    /// attributes imply run HERE, before the setter, because the
+    /// builtin never sees the value: -i evaluates (the door receives
+    /// the verdict and the compound scanner applies it per element;
+    /// a subscript value is evaluated directly), -l/-u case-convert
+    /// (the compound scanner reads the conversion from the variable's
+    /// marks, so the net option state is pre-applied to the marks —
+    /// the builtin's own attribute pass then asserts the same state).
+    /// Option state is tracked per operand: GNU applies the flags in
+    /// effect at each operand's position.
+    /// Resolve a declare-operand DIRSTACK subscript against the live
+    /// stack: a non-negative index passes through (the setter drops
+    /// out-of-range writes), a negative index counts back from the
+    /// stack end (GNU bind_array_element resolves it against the
+    /// array object — here the live stack), and anything else —
+    /// non-numeric text, a negative index before the stack start —
+    /// is None for the caller to adjudicate.
+    fn resolve_declare_dirstack_subscript(&self, inner: &str) -> Option<usize> {
+        let value: i64 = inner.parse().ok()?;
+        if value >= 0 {
+            return usize::try_from(value).ok();
+        }
+        let len =
+            crate::builtins::pushd::load_stack(&self.shell_state.env_vars, &self.shell_state.cwd)
+                .len();
+        let back = usize::try_from(value.checked_neg()?).ok()?;
+        if back <= len {
+            Some(len - back)
+        } else {
+            None
+        }
+    }
+
+    pub(in crate::executor) fn route_declare_dirstack_operands(
+        &mut self,
+        args: &[String],
+        command_name: &str,
+        allow_subscripts: bool,
+    ) -> (Vec<String>, bool, bool, Vec<String>) {
+        let mut kept: Vec<String> = Vec::new();
+        let mut routed = false;
+        let mut failed = false;
+        // Builtin-phase diagnostics (readonly refusals, a standalone
+        // bad subscript): GNU reports these through the builtin's own
+        // output plumbing, so a `2>` redirect on the declare captures
+        // them — the caller writes them into the buffered stderr.
+        // (The compound door's own bad-subscript/failglob diagnostics
+        // are expansion-class and bypass redirects in GNU too; the
+        // door emits those itself.)
+        let mut diagnostics: Vec<String> = Vec::new();
+        let mut parse_options = true;
+        // Net -i/-l/-u state at the current operand position, seeded
+        // from the variable's existing attribute marks.
+        let mut opt_integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, "DIRSTACK");
+        let mut opt_lower = is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK");
+        let mut opt_upper = is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK");
+        for arg in args {
+            if parse_options && arg == "--" {
+                parse_options = false;
+                kept.push(arg.clone());
+                continue;
+            }
+            if parse_options
+                && (arg.starts_with('-') || arg.starts_with('+'))
+                && arg != "-"
+                && arg != "+"
+            {
+                let enable = arg.starts_with('-');
+                for letter in arg[1..].chars() {
+                    match letter {
+                        'i' => opt_integer = enable,
+                        'l' => {
+                            opt_lower = enable;
+                            if enable {
+                                opt_upper = false;
+                            }
+                        }
+                        'u' => {
+                            opt_upper = enable;
+                            if enable {
+                                opt_lower = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                kept.push(arg.clone());
+                continue;
+            }
+            parse_options = false;
+            let Some((lhs, value)) = arg.split_once('=') else {
+                kept.push(arg.clone());
+                continue;
+            };
+            let (lhs, append) = lhs
+                .strip_suffix('+')
+                .map(|lhs| (lhs, true))
+                .unwrap_or((lhs, false));
+            if lhs == "DIRSTACK" {
+                routed = true;
+                // GNU bind_variable refuses a readonly target before
+                // the assign function runs (variables.c). A scalar
+                // bind reports through the builtin's prolog
+                // (`declare: DIRSTACK: readonly variable`); a compound
+                // bind's diagnostic is owned by the expansion/declare
+                // layers that already produce it (at top level they
+                // pre-empt this router entirely), so the compound arm
+                // only records the failure. A refused operand is fully
+                // consumed — declare.def:881 suppresses the call's
+                // attribute application for it, so no bare name is kept
+                // (rubash#2424).
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK") {
+                    failed = true;
+                    let compound = value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                        || (value.starts_with('(') && value.ends_with(')'));
+                    if compound {
+                        // The compound bind failure is the DISCARD
+                        // class (bash_variable_assignment_error): in
+                        // the paths where this router runs (notably
+                        // declare -g inside a function, which the
+                        // expansion layer does not pre-empt) GNU
+                        // abandons the rest of the command list.
+                        self.raise_evalerror_abort();
+                    } else {
+                        diagnostics.push(format!(
+                            "{}{command_name}: DIRSTACK: readonly variable\n",
+                            self.error_prefix()
+                        ));
+                    }
+                    continue;
+                }
+                // Pre-apply the net case state to the marks: the
+                // compound scanner's ElementCase reads them, and the
+                // builtin's attribute pass (kept bare name below)
+                // asserts the same state afterwards.
+                if opt_lower
+                    != is_marked_var(&self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK")
+                {
+                    if opt_lower {
+                        mark_env_name(&mut self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK");
+                    } else {
+                        unmark_env_name(&mut self.shell_state.env_vars, LOWERCASE_VARS, "DIRSTACK");
+                    }
+                }
+                if opt_upper
+                    != is_marked_var(&self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK")
+                {
+                    if opt_upper {
+                        mark_env_name(&mut self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK");
+                    } else {
+                        unmark_env_name(&mut self.shell_state.env_vars, UPPERCASE_VARS, "DIRSTACK");
+                    }
+                }
+                // The door recognizes compound text by the marker the
+                // assignment funnel uses; a `(...)` value that reached
+                // declare unmarked (the -a/-A-hint or existing-array
+                // routes in the rewrite pass) is the same list text.
+                let value = if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+                    && value.starts_with('(')
+                    && value.ends_with(')')
+                {
+                    format!("{COMPOUND_ASSIGNMENT_MARKER}{value}")
+                } else {
+                    value.to_string()
+                };
+                if !self.apply_dirstack_assignment(&value, append, opt_integer) {
+                    failed = true;
+                }
+                kept.push("DIRSTACK".to_string());
+                continue;
+            }
+            if let Some(inner) = lhs
+                .strip_prefix("DIRSTACK[")
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                // setattr (export/readonly) has no subscript binds in
+                // GNU: the whole `DIRSTACK[1]' lhs fails its identifier
+                // check in the builtin. Only declare/typeset route
+                // subscripts through the setter (rubash#2424).
+                if !allow_subscripts {
+                    kept.push(arg.clone());
+                    continue;
+                }
+                // A readonly DIRSTACK refuses the bind before the
+                // assign function runs (variables.c), reported through
+                // the builtin's prolog; the operand is fully consumed
+                // (declare.def:881 attribute suppression), so no bare
+                // name is kept for it (rubash#2424).
+                if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK") {
+                    routed = true;
+                    failed = true;
+                    diagnostics.push(format!(
+                        "{}{command_name}: DIRSTACK: readonly variable\n",
+                        self.error_prefix()
+                    ));
+                    continue;
+                }
+                let Some(index) = self.resolve_declare_dirstack_subscript(inner) else {
+                    // A negative index before the stack start is the
+                    // arrayfunc.c bad-subscript failure (the elements
+                    // bound by earlier operands stay bound); other
+                    // unresolvable text keeps the builtin's paths.
+                    if inner.parse::<i64>().is_ok_and(|v| v < 0) {
+                        routed = true;
+                        failed = true;
+                        diagnostics.push(format!(
+                            "{}DIRSTACK[{inner}]: bad array subscript\n",
+                            self.error_prefix()
+                        ));
+                        kept.push("DIRSTACK".to_string());
+                    } else {
+                        kept.push(arg.clone());
+                    }
+                    continue;
+                };
+                routed = true;
+                let mut new_value = if append {
+                    let old = crate::builtins::pushd::stack_value(
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        index,
+                    )
+                    .unwrap_or_default();
+                    format!("{old}{value}")
+                } else {
+                    value.to_string()
+                };
+                // GNU make_variable_value: the integer attribute
+                // preempts the case attributes (variables.c:2920-2986).
+                if opt_integer {
+                    if let Some(message) = self.integer_assignment_eval_failure(&new_value) {
+                        self.emit_assignment_diag(format!("{}{}\n", self.error_prefix(), message));
+                        failed = true;
+                        kept.push("DIRSTACK".to_string());
+                        continue;
+                    }
+                    new_value = self.eval_integer_assignment_value(&new_value).to_string();
+                } else if opt_upper {
+                    new_value = new_value.to_uppercase();
+                } else if opt_lower {
+                    new_value = new_value.to_lowercase();
+                }
+                crate::builtins::pushd::set_stack_value(
+                    &mut self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    index,
+                    new_value,
+                );
+                kept.push("DIRSTACK".to_string());
+                continue;
+            }
+            kept.push(arg.clone());
+        }
+        (kept, routed, failed, diagnostics)
+    }
+
     pub(in crate::executor) fn execute_declare(
         &mut self,
         cmd: &CommandNode,
@@ -831,10 +1116,12 @@ impl Executor {
         self.sync_dynamic_assoc_vars();
         // GNU materializes the DIRSTACK cell only when the command names
         // DIRSTACK itself; a bare list-all `declare -a` must keep the cell
-        // empty (variables.c get_dirstack runs on named access only).
-        if declare_words_name_dirstack(&cmd.words[1..]) {
-            self.sync_dirstack_cell();
-        }
+        // empty (variables.c get_dirstack runs on named access only). The
+        // materialization runs just before the builtin call below, not
+        // here: by then the frame-local save has established whether a
+        // plain local/tempenv shadow owns the name, and a shadowed
+        // DIRSTACK must not be re-materialized from the stack
+        // (rubash#2424).
         let mut args = self.expand_declare_assignment_args(&cmd.words[1..]);
         let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
         let mut args = match self.rewrite_declare_operand_subscripts(
@@ -859,6 +1146,32 @@ impl Executor {
             args = evaluated;
             arith_eval_failure = failure;
         }
+        // rubash#2424: a GLOBAL declare/typeset bind of DIRSTACK routes
+        // through the stack setter door (GNU variables.c:1612
+        // assign_dirstack — declare's bind_variable reaches the same
+        // assign_func as a plain assignment), never through the
+        // builtin's mirror array walker, which wrote a phantom typed
+        // cell the stack never saw (split-brain reads, and a
+        // mirror-disagreement panic on the next named access). Local
+        // binds (function scope without -g) are NOT routed: GNU
+        // make_local_variable creates a plain variable, and the generic
+        // machinery below owns it. A failed door bind (bad subscript /
+        // failglob inside the list) fails the command like the plain
+        // assignment route; operands are routed in order, and on
+        // failure the builtin never runs for the remaining ones.
+        let mut dirstack_routed = false;
+        let mut dirstack_failed = false;
+        let mut dirstack_diagnostics: Vec<String> = Vec::new();
+        if !declare_args_request_print(&args)
+            && (self.shell_state.function_depth == 0 || declare_args_force_global(&args))
+        {
+            let (kept, routed, failed, diagnostics) =
+                self.route_declare_dirstack_operands(&args, command_name, true);
+            args = kept;
+            dirstack_routed = routed;
+            dirstack_failed = failed;
+            dirstack_diagnostics = diagnostics;
+        }
         // GNU variables.c:2651-2665 (make_local_variable): a local may not
         // shadow a readonly binding at context 0 — "disallow local copies of
         // readonly global variables ... Readonly copies of calling function
@@ -876,6 +1189,26 @@ impl Executor {
             args.retain(|arg| {
                 local_assignment_name(arg)
                     .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
+            });
+        }
+        // GNU variables.c:2654-2665 (make_local_variable): an
+        // att_noassign operand may not be made local either — same
+        // drop + any_failed handling as the readonly block above, with
+        // the "variable may not be assigned value" diagnostic
+        // (rubash#2369).
+        let noassign_blocked: Vec<(String, String)> = if self.shell_state.function_depth > 0
+            && !declare_args_force_global(&args)
+            && !declare_args_request_print(&args)
+        {
+            self.global_noassign_local_blocks(&args)
+        } else {
+            Vec::new()
+        };
+        if !noassign_blocked.is_empty() {
+            args.retain(|arg| {
+                local_assignment_name(arg).map_or(true, |name| {
+                    !noassign_blocked.iter().any(|(b, _)| b == name)
+                })
             });
         }
         // Names that were already local at this frame BEFORE this command's
@@ -959,13 +1292,47 @@ impl Executor {
             }
         }
 
+        // The DIRSTACK materialization deferred from the head of this
+        // function (see the note there): the frame-local save above has
+        // settled the shadow state, so sync unless a plain shadow owns
+        // the name — a force-global command addresses the global
+        // variable through the unshadowing above and always syncs.
+        if declare_words_name_dirstack(&cmd.words[1..])
+            && (!self.dirstack_shadowed() || declare_args_force_global(&args))
+        {
+            self.sync_dirstack_cell();
+        }
+        // The router leaves a bare DIRSTACK name in the operand list
+        // for every operand it consumed, so the builtin below always
+        // has the name to apply this call's attribute marks to. The
+        // one exception is a refused operand (readonly bind): it is
+        // fully consumed with no name kept, and if nothing else
+        // remains the builtin would degrade to list mode on the
+        // leftover option words alone — GNU prints nothing there, so
+        // the closure takes the door's status instead.
+        let skip_builtin = dirstack_routed && local_names(&args).is_empty();
+
         let result = (|| -> Result<i32, ExecuteError> {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
+            // rubash#2424: the DIRSTACK router's builtin-phase
+            // diagnostics (readonly refusals, a standalone bad
+            // subscript) — written here so the command's redirections
+            // capture them exactly like the builtin's own errors.
+            for line in &dirstack_diagnostics {
+                write!(stderr, "{line}")?;
+            }
             for name in &local_blocked {
                 writeln!(
                     stderr,
                     "{}{command_name}: {name}: readonly variable",
+                    self.diagnostic_prefix()
+                )?;
+            }
+            for (_, display) in &noassign_blocked {
+                writeln!(
+                    stderr,
+                    "{}{command_name}: {display}: variable may not be assigned value",
                     self.diagnostic_prefix()
                 )?;
             }
@@ -981,7 +1348,15 @@ impl Executor {
             }
             // Every operand blocked: GNU skips the operand loop entirely —
             // no list-mode output even though only option args remain.
-            let status = if !local_blocked.is_empty() && local_names(&args).is_empty() {
+            let status = if skip_builtin {
+                if dirstack_failed {
+                    1
+                } else {
+                    0
+                }
+            } else if (!local_blocked.is_empty() || !noassign_blocked.is_empty())
+                && local_names(&args).is_empty()
+            {
                 1
             } else {
                 // rubash#183: GNU's FUNCNAME is a real dynamic array
@@ -1135,7 +1510,7 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(1);
                 }
-                if local_blocked.is_empty() {
+                if local_blocked.is_empty() && noassign_blocked.is_empty() {
                     status
                 } else {
                     status.max(1)
@@ -1216,6 +1591,12 @@ impl Executor {
         // when the surviving prefix operands all bound cleanly.
         if arith_eval_failure.is_some() {
             return result.map(|_| 1);
+        }
+        // rubash#2424: a failed DIRSTACK door bind fails the declare
+        // (GNU any_failed) even when the surviving operands bound
+        // cleanly; the door already emitted its diagnostic.
+        if dirstack_failed {
+            return result.map(|status| status.max(1));
         }
         result
     }
@@ -1412,6 +1793,27 @@ impl Executor {
                         .map_or(true, |name| !local_blocked.iter().any(|b| b == name))
                 });
             }
+            // GNU variables.c:2654-2665 (make_local_variable): an
+            // att_noassign operand may not be made local — dropped
+            // with the "variable may not be assigned value" diagnostic
+            // and any_failed status, like the readonly block above.
+            // Unlike the readonly twin this IS gated on -g: with -g no
+            // local is made and the global bind is a silent swallow in
+            // GNU, while a readonly -g bind still prints err_readonly
+            // (rubash#2369).
+            let noassign_blocked: Vec<(String, String)> =
+                if !declare_args_request_print(&args) && !declare_args_force_global(&args) {
+                    self.global_noassign_local_blocks(&args)
+                } else {
+                    Vec::new()
+                };
+            if !noassign_blocked.is_empty() {
+                args.retain(|arg| {
+                    local_assignment_name(arg).map_or(true, |name| {
+                        !noassign_blocked.iter().any(|(b, _)| b == name)
+                    })
+                });
+            }
             // GNU builtins/declare.def (local is declare with
             // variable_context forced): `-g` suppresses the local creation
             // and makes the builtin operate on the global variable
@@ -1467,6 +1869,13 @@ impl Executor {
                     self.diagnostic_prefix()
                 )?;
             }
+            for (_, display) in &noassign_blocked {
+                writeln!(
+                    stderr,
+                    "{}local: {display}: variable may not be assigned value",
+                    self.diagnostic_prefix()
+                )?;
+            }
             // rubash#1471: under -g, unshadow same-named outer locals for
             // the duration of the builtin call (the declare path's
             // begin/finish pair); a no-op vec when -g is absent.
@@ -1475,10 +1884,14 @@ impl Executor {
                 && (had_dash_operand
                     || dash_printed
                     || !local_blocked.is_empty()
+                    || !noassign_blocked.is_empty()
                     || !print_missing.is_empty())
             {
                 (
-                    if local_blocked.is_empty() && print_missing.is_empty() {
+                    if local_blocked.is_empty()
+                        && noassign_blocked.is_empty()
+                        && print_missing.is_empty()
+                    {
                         0
                     } else {
                         1
@@ -1525,7 +1938,10 @@ impl Executor {
                     &underlay,
                     &mut oob_word,
                 )?;
-                let status = if local_blocked.is_empty() && print_missing.is_empty() {
+                let status = if local_blocked.is_empty()
+                    && noassign_blocked.is_empty()
+                    && print_missing.is_empty()
+                {
                     builtin_status
                 } else {
                     builtin_status.max(1)
@@ -1815,6 +2231,28 @@ impl Executor {
     /// tempenv (context == variable_context) may still be shadowed. Returns
     /// the operand names to drop; declare.def:669-673 counts each as a
     /// failure and skips the operand entirely.
+    /// GNU variables.c:2654-2665 (make_local_variable): a variable with
+    /// the noassign attribute may not be made local — builtin_error
+    /// "%s: variable may not be assigned value" and the operand is
+    /// dropped (declare.def:669-673 any_failed + NEXT_VARIABLE). The
+    /// name tested (and printed) is the nameref-transformed one
+    /// (declare.def:667 passes newname), so resolve before testing.
+    /// Returns (written base, display base) pairs: callers drop
+    /// operands by the written name and diagnose by the resolved one
+    /// (rubash#2369).
+    fn global_noassign_local_blocks(&self, args: &[String]) -> Vec<(String, String)> {
+        local_names(args)
+            .into_iter()
+            .filter_map(|name| {
+                let resolved = self
+                    .nameref_target_name(&name)
+                    .unwrap_or_else(|| name.clone());
+                let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
+                is_noassign_bash_array(resolved_base).then(|| (name, resolved_base.to_string()))
+            })
+            .collect()
+    }
+
     fn global_readonly_local_blocks(&self, args: &[String]) -> Vec<String> {
         local_names(args)
             .into_iter()
@@ -1843,7 +2281,7 @@ impl Executor {
 /// the dynamic getter -- materializing the stored array cell -- only on
 /// named access; a bare list-all `declare -a` shows the last materialized
 /// cell, which stays empty when DIRSTACK was never named.
-fn declare_words_name_dirstack(words: &[String]) -> bool {
+pub(in crate::executor) fn declare_words_name_dirstack(words: &[String]) -> bool {
     let mut options_ended = false;
     for word in words {
         if !options_ended {
@@ -1857,6 +2295,12 @@ fn declare_words_name_dirstack(words: &[String]) -> bool {
         }
         let base = word.split('=').next().unwrap_or(word);
         let base = base.split('[').next().unwrap_or(base);
+        // An append operand's base carries its `+` (`DIRSTACK+=(...)`);
+        // it still names the variable (rubash#2424: without the strip
+        // the materialization sync skipped every declare append, and
+        // the builtin's bare-name handling rebuilt the typed cell
+        // from the stale init mirror).
+        let base = base.strip_suffix('+').unwrap_or(base);
         if base == "DIRSTACK" {
             return true;
         }

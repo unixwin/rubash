@@ -145,7 +145,7 @@ impl ConditionalArithParser<'_> {
         }
         match lvalue {
             ArithLValue::Scalar(name) => self.variable_value(name),
-            ArithLValue::Indexed { name, index } => {
+            ArithLValue::Indexed { name, index, .. } => {
                 let value = self.indexed_element_text(name, *index);
                 // GNU get_array_value -> array_value_internal
                 // INDEX_ERROR: an unresolvable negative subscript
@@ -698,6 +698,7 @@ impl ConditionalArithParser<'_> {
             ArithLValue::IndexedRaw { name, subscript } => {
                 let index = self.eval_subscript_index(subscript)?;
                 Some(ArithLValue::Indexed {
+                    bind_display: format!("{name}[{subscript}]"),
                     name: name.clone(),
                     index,
                 })
@@ -728,13 +729,27 @@ impl ConditionalArithParser<'_> {
                 .insert("__RUBASH_ARITH_READONLY_ERROR".to_string(), name.clone());
             return false;
         }
+        // GNU expr.c:350 (expr_bind_variable -> bind_variable): an
+        // att_noassign lvalue fails the evaluation the same way
+        // (sh_longjmp out of evalexp) but with NO diagnostic — the
+        // drain in arithmetic/mod.rs latches the failure silently
+        // (rubash#2369).
+        if is_noassign_bash_array(name) {
+            self.env_vars
+                .insert("__RUBASH_ARITH_NOASSIGN_ERROR".to_string(), name.clone());
+            return false;
+        }
         true
     }
 
     pub(super) fn set_lvalue(&mut self, lvalue: &ArithLValue, value: i128) {
         match lvalue {
             ArithLValue::Scalar(name) => self.set_variable(name, value),
-            ArithLValue::Indexed { name, index } => self.set_array_element(name, *index, value),
+            ArithLValue::Indexed {
+                name,
+                index,
+                bind_display,
+            } => self.set_array_element(name, *index, value, bind_display),
             ArithLValue::IndexedRaw { .. } => {
                 // Should have been resolved by resolve_raw_subscript; no-op.
             }
@@ -871,6 +886,7 @@ impl ConditionalArithParser<'_> {
                             elem_base,
                             index,
                             value.parse::<i128>().unwrap_or(0),
+                            &format!("{elem_base}[{subscript}]"),
                         );
                         return;
                     }
@@ -880,6 +896,15 @@ impl ConditionalArithParser<'_> {
             if is_marked_var(self.env_vars, READONLY_VARS, base_target) {
                 self.env_vars.insert(
                     "__RUBASH_ARITH_READONLY_ERROR".to_string(),
+                    base_target.to_string(),
+                );
+                return;
+            }
+            // GNU expr.c:350: a nameref chain ending at an att_noassign
+            // variable fails the bind silently (rubash#2369).
+            if is_noassign_bash_array(base_target) {
+                self.env_vars.insert(
+                    "__RUBASH_ARITH_NOASSIGN_ERROR".to_string(),
                     base_target.to_string(),
                 );
                 return;
@@ -897,7 +922,7 @@ impl ConditionalArithParser<'_> {
         // m=([0]="5" [y]="2" [x]="1")).
         if is_marked_var(self.env_vars, ARRAY_VARS, name) {
             let numeric = value.parse::<i128>().unwrap_or(0);
-            self.set_array_element(name, 0, numeric);
+            self.set_array_element(name, 0, numeric, &format!("{name}[0]"));
             return;
         }
         if is_marked_var(self.env_vars, ASSOC_VARS, name) {
@@ -920,7 +945,13 @@ impl ConditionalArithParser<'_> {
         }
     }
 
-    pub(super) fn set_array_element(&mut self, name: &str, index: i128, value: i128) {
+    pub(super) fn set_array_element(
+        &mut self,
+        name: &str,
+        index: i128,
+        value: i128,
+        bind_display: &str,
+    ) {
         if is_noassign_bash_array(name) {
             return;
         }
@@ -932,6 +963,15 @@ impl ConditionalArithParser<'_> {
         let index = if index < 0 {
             let storage = format_indexed_array_storage(entries.clone());
             let Some(index) = resolve_indexed_array_subscript(&storage, index) else {
+                // GNU assign_array_element_internal (arrayfunc.c:425-435):
+                // a negative subscript that stays negative after the
+                // count-back-from-end wrap fails the bind with
+                // err_badarraysub on the full lvalue token as written
+                // (`a[0-4]`, `a[ -4 ]` — the name assign_array_element
+                // received) and stores nothing (rubash#2341; the read
+                // side's bare-name INDEX_ERROR line is a separate diag).
+                self.diags
+                    .push(ArithEvalDiag::BadSubscript(bind_display.to_string()));
                 return;
             };
             index

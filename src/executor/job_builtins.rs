@@ -158,6 +158,143 @@ impl Executor {
         }
     }
 
+    /// GNU's `interactive` gate for the exit path (shell.c: the C
+    /// global is 1 only for a reader-phase interactive shell),
+    /// projected onto the engine's established faces — the same
+    /// condition set as the exit banner echo (printf_path_builtins):
+    /// the session is invocation-interactive, the host's
+    /// not-really-interactive flag is off, no startup/sourced file is
+    /// running (GNU reads interactive == 0 while startup files run),
+    /// and this is not a `( )` subshell environment (rubash#2397).
+    pub(in crate::executor) fn exit_job_check_applies(&self) -> bool {
+        self.invocation_interactive()
+            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+            && self.get_env("__RUBASH_IN_SOURCE").is_none()
+            && self.shell_state.subshell_depth.get() == 0
+    }
+
+    /// builtins/exit.def `exit_or_logout`'s `exit_immediate_okay`:
+    /// the exit proceeds without a job scan when the previously
+    /// dispatched builtin was exit, logout or jobs (the roll at this
+    /// dispatch has already moved that class into last_builtin_class).
+    pub(in crate::executor) fn exit_is_immediate(&self) -> bool {
+        matches!(
+            self.shell_state.last_builtin_class,
+            crate::shell::BuiltinDispatchClass::Exit
+                | crate::shell::BuiltinDispatchClass::Logout
+                | crate::shell::BuiltinDispatchClass::Jobs
+        )
+    }
+
+    /// The job scan of builtins/exit.def `exit_or_logout`: any STOPPED
+    /// job blocks (whether or not checkjobs is set); otherwise, with
+    /// checkjobs set, any RUNNING job blocks. Returns the message
+    /// noun ("stopped" / "running") when the exit must defer. The
+    /// table is refreshed first — the engine's reap-observation point,
+    /// the same one the `jobs` builtin uses (GNU's table is kept
+    /// current by waitchld at reader/notification points).
+    pub(in crate::executor) fn jobs_exit_block(
+        &mut self,
+    ) -> Result<Option<&'static str>, ExecuteError> {
+        self.refresh_background_jobs()?;
+        let mut any_running = false;
+        for job in self.shell_state.job_table.jobs.values() {
+            match job.state {
+                crate::jobs::ProcessState::Stopped => return Ok(Some("stopped")),
+                crate::jobs::ProcessState::Running => any_running = true,
+                crate::jobs::ProcessState::Completed => {}
+            }
+        }
+        if any_running
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "checkjobs")
+        {
+            return Ok(Some("running"));
+        }
+        Ok(None)
+    }
+
+    /// The `list_all_jobs (JLIST_STANDARD)` half of the deferral:
+    /// rendered only when checkjobs is set (exit.def: the listing is
+    /// gated on check_jobs_at_exit even for the stopped message).
+    fn jobs_exit_listing(&mut self) -> Result<String, ExecuteError> {
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "checkjobs") {
+            return Ok(String::new());
+        }
+        let mut listing_stderr = Vec::new();
+        let (listing, _status) = self.background_jobs_output(
+            crate::builtins::jobs::JobsListOptions::default(),
+            &[],
+            &mut listing_stderr,
+        )?;
+        Ok(listing)
+    }
+
+    /// The typed `exit`/`logout` deferral (builtins/exit.def
+    /// exit_or_logout): on block, print the banner (the caller passes
+    /// the same text execute_exit's echo would print; exit.def prints
+    /// it before the check), the `There are ... jobs.` line to stderr
+    /// and the job listing to stdout — all through the command's
+    /// buffered-output route so its redirections apply — then pin
+    /// this/last to the current builtin's class (exit.def pins
+    /// exit_builtin) so the NEXT exit is immediate, and report the
+    /// deferral. The exit argument is never parsed and no exit trap
+    /// runs; the caller leaves exit_code = 1.
+    pub(in crate::executor) fn defer_exit_for_jobs(
+        &mut self,
+        cmd: &CommandNode,
+        class: crate::shell::BuiltinDispatchClass,
+        banner: Option<&str>,
+    ) -> Result<bool, ExecuteError> {
+        if !self.exit_job_check_applies() || self.exit_is_immediate() {
+            return Ok(false);
+        }
+        let Some(kind) = self.jobs_exit_block()? else {
+            return Ok(false);
+        };
+        let listing = self.jobs_exit_listing()?;
+        let mut stderr = Vec::new();
+        if let Some(banner) = banner {
+            writeln!(stderr, "{banner}")?;
+        }
+        writeln!(stderr, "There are {kind} jobs.")?;
+        self.write_buffered_builtin_output(cmd, listing.as_bytes(), &stderr)?;
+        self.shell_state.last_builtin_class = class;
+        self.shell_state.this_builtin_class = class;
+        Ok(true)
+    }
+
+    /// The reader-EOF deferral: parse.y `handle_eof_input_unit` rolls
+    /// this/last with exit_builtin and runs the same exit_builtin, so
+    /// an interactive EOF can be deferred by the same job check. The
+    /// driver has already printed the banner echo; on block this
+    /// prints the message (stderr) and the listing (stdout) directly
+    /// and returns true — the driver then keeps reading, and the next
+    /// EOF is immediate because the deferral pins this = Exit. The
+    /// shell's exit status is untouched (an EOF deferral does not set
+    /// last_command_exit_value in GNU).
+    pub(crate) fn defer_interactive_eof_for_jobs(&mut self) -> bool {
+        self.shell_state.last_builtin_class = std::mem::replace(
+            &mut self.shell_state.this_builtin_class,
+            crate::shell::BuiltinDispatchClass::Exit,
+        );
+        if !self.exit_job_check_applies() || self.exit_is_immediate() {
+            return false;
+        }
+        let Ok(Some(kind)) = self.jobs_exit_block() else {
+            return false;
+        };
+        eprintln!("There are {kind} jobs.");
+        if let Ok(listing) = self.jobs_exit_listing() {
+            if !listing.is_empty() {
+                print!("{listing}");
+                let _ = std::io::stdout().flush();
+            }
+        }
+        self.shell_state.last_builtin_class = crate::shell::BuiltinDispatchClass::Exit;
+        self.shell_state.this_builtin_class = crate::shell::BuiltinDispatchClass::Exit;
+        true
+    }
+
     fn expand_jobs_x_words(
         &self,
         words: Vec<String>,
@@ -546,6 +683,17 @@ impl Executor {
             // left alone: GNU would block, but an unkillable block here
             // could hang the shell, so they stay signallable instead.
             self.sweep_procsub_placeholders();
+            // rubash#2340: GNU wait_for_background_pids' tail
+            // (jobs.c:2863-2864): mark_dead_jobs_as_notified(1) +
+            // cleanup_dead_jobs — every dead job is discarded except,
+            // non-interactively, the $! job (jobs.c:5197), whose entry
+            // stays listed until the next notification point. Jobs this
+            // wait reaped live were already marked by their per-pid pass,
+            // so the cleanup here collects them too.
+            let force_all = self.invocation_interactive();
+            self.shell_state
+                .job_table
+                .settle_bare_wait(self.shell_state.last_background_pid, force_all);
             self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
             // Bash's no-operand wait reports success after waiting for all
             // current jobs; individual statuses require an explicit operand.
@@ -1101,6 +1249,40 @@ impl Executor {
         Ok(())
     }
 
+    /// Render the stop notice for a job the job-control wait just
+    /// observed stopping (rubash#2398), in the shape GNU's
+    /// notify_of_job_status uses for a freshly stopped job — the
+    /// `jobs` short line (jobs.c:2207 pretty_print_job: `[%d]%c `,
+    /// state padded to LONGEST_SIGNAL_DESC 27):
+    /// `[1]+  Stopped                  sleep 30`. The waits print it
+    /// synchronously, where GNU's wait_for reports the foreground
+    /// job's stop as the wait completes (jobs.c:3385's
+    /// notify_and_cleanup inside wait_for) — the command-boundary
+    /// flush above runs a command later than the prompt this notice
+    /// precedes. None when the job is no longer stopped.
+    pub(in crate::executor) fn format_stopped_job_notice(&self, pid: u32) -> Option<String> {
+        let job = self
+            .shell_state
+            .job_table
+            .pid_to_job
+            .get(&pid)
+            .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))?;
+        if job.state != crate::jobs::ProcessState::Stopped {
+            return None;
+        }
+        let marker = if self.shell_state.job_table.current_job() == Some(job.id) {
+            '+'
+        } else if self.shell_state.job_table.previous_job() == Some(job.id) {
+            '-'
+        } else {
+            ' '
+        };
+        Some(format!(
+            "[{}]{}  {:<27}{}\n",
+            job.id, marker, "Stopped", job.command
+        ))
+    }
+
     /// End-of-stream notification step (rubash#1853). The per-command
     /// boundary flush above only runs when a NEXT top-level command is
     /// walked, so a signal death in the stream's LAST command — a
@@ -1143,8 +1325,8 @@ impl Executor {
                 continue;
             }
             let trapped = super::trap_exec::signal_trap_name(signal).is_some_and(|name| {
-                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &name)
-                    .is_some_and(|action| !action.is_empty())
+                crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, &name)
+                    .is_some()
             });
             let description = crate::builtins::kill::signal_death_description(signal);
             let padding = 27usize.saturating_sub(description.chars().count());
@@ -1688,7 +1870,7 @@ impl Executor {
     fn wait_for_background_pid(
         &mut self,
         pid: u32,
-        _retain_for_explicit_wait: bool,
+        retain_for_explicit_wait: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
         // GNU trap.c:604-611: a trapped signal arriving while the wait
         // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
@@ -1735,11 +1917,21 @@ impl Executor {
             // reports ESRCH like GNU's reaped procsub. The recorded status
             // stays in completed_statuses for repeat waits (bgpids parity).
             self.reap_procsub_placeholder(pid, true);
-            // Waiting consumes the jobs-table entry, but the completed status
-            // remains available for a later explicit wait of the same PID.
-            self.shell_state
-                .job_table
-                .remove_job_by_pid_preserve_status(pid);
+            // rubash#2340: waiting does NOT consume the jobs-table entry.
+            // The cleanup inside wait_for's notify_and_cleanup
+            // (jobs.c:3385 -> 3642) runs first, so a dead job that was
+            // already notified before this wait dies here; the waited job
+            // itself is then only MARKED notified for an explicit
+            // (operand) wait — wait_for_job, jobs.c:3434-3437 — and its
+            // entry leaves at the next cleanup point. A bare wait's
+            // per-pid pass marks nothing (wait_for_single_pid via
+            // wait_for_background_pids reports an already-dead job
+            // without consuming it); the bare-wait endgame
+            // (settle_bare_wait) owns the marking there.
+            self.shell_state.job_table.cleanup_dead_jobs();
+            if retain_for_explicit_wait {
+                self.shell_state.job_table.mark_job_notified_by_pid(pid);
+            }
             self.forget_background_runtime(pid);
             return Ok(WaitPidOutcome::Status(status));
         }
@@ -1797,8 +1989,116 @@ impl Executor {
         self.shell_state.job_table.mark_completed(pid, status);
         self.flush_timed_coproc_report(pid);
         self.run_sigchld_trap_for_reaped_child()?;
-        // Remove the visible job after any wait, while retaining the exit
-        // status for repeated explicit PID waits.
+        // rubash#2340: this wait reaped the child itself, so it follows
+        // the wait_for cadence exactly: the notify_and_cleanup cleanup
+        // pass (jobs.c:3385) collects dead jobs notified earlier, then
+        // the waited job is marked notified — wait_for_single_pid
+        // (jobs.c:2776-2779) and wait_for_job (jobs.c:3434-3437) both end
+        // with the mark, never a deletion — and its entry leaves at the
+        // next cleanup point. The exit status stays in
+        // completed_statuses for repeated explicit PID waits.
+        self.shell_state.job_table.cleanup_dead_jobs();
+        self.shell_state.job_table.mark_job_notified_by_pid(pid);
+        self.forget_background_runtime(pid);
+        Ok(WaitPidOutcome::Status(status))
+    }
+
+    /// rubash#2398: fg's wait while the job-control channel is live —
+    /// the twin of wait_for_background_pid with GNU wait_for's
+    /// WUNTRACED semantics (jobs.c:3064 via waitchld, jobs.c:4077).
+    /// The caller (execute_fg_jobs) already handed the terminal to
+    /// the job's pgrp and SIGCONT'd it, so the blocking waitpid needs
+    /// no signal forwarding: terminal signals address the job's group
+    /// alone, and a signal delivered to the SHELL surfaces as EINTR
+    /// and is adjudicated through the same pending-signal drain
+    /// wait_for_background_pid uses (trap.c:604-611 — the signal wins
+    /// the race, the job stays live and waitable). A re-stop is a
+    /// first-class outcome: the job goes back to Stopped in the
+    /// table, its handle returns to background_children, and the
+    /// caller prints the stop notice and maps the outcome to
+    /// 128 + stop-signal.
+    #[cfg(unix)]
+    fn wait_for_fg_job_control(&mut self, pid: u32) -> Result<WaitPidOutcome, ExecuteError> {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(interrupt) = self.wait_pending_signal_status()? {
+            return Ok(WaitPidOutcome::Interrupted(interrupt));
+        }
+        let Some(mut child) = self.background_children.remove(&pid) else {
+            // No live handle (a recorded completion, a procsub
+            // placeholder, ...): the poll-based wait owns those
+            // shapes exactly as before.
+            return self.wait_for_background_pid(pid, false);
+        };
+        self.procsub_stream_children.remove(&pid);
+        let raw = loop {
+            let mut raw_status: libc::c_int = 0;
+            let waited = unsafe { libc::waitpid(pid as i32, &mut raw_status, libc::WUNTRACED) };
+            if waited == pid as i32 {
+                break raw_status;
+            }
+            if waited < 0 {
+                let error = std::io::Error::last_os_error();
+                match error.raw_os_error() {
+                    Some(libc::EINTR) => match self.wait_pending_signal_status() {
+                        Ok(Some(interrupt)) => {
+                            self.background_children.insert(pid, child);
+                            return Ok(WaitPidOutcome::Interrupted(interrupt));
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            self.background_children.insert(pid, child);
+                            return Err(error);
+                        }
+                    },
+                    Some(libc::ECHILD) => match child.try_wait()? {
+                        Some(done) => break done.into_raw(),
+                        None => {
+                            self.background_children.insert(pid, child);
+                            return Ok(WaitPidOutcome::NotFound);
+                        }
+                    },
+                    _ => return Err(ExecuteError::IoError(error)),
+                }
+            }
+        };
+        if libc::WIFSTOPPED(raw) {
+            let stop_signal = libc::WSTOPSIG(raw);
+            let job_id = self.shell_state.job_table.job_id_for_pid(pid).unwrap_or(0);
+            self.shell_state
+                .job_table
+                .mark_stopped(pid, Some(stop_signal));
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+            self.background_children.insert(pid, child);
+            return Ok(WaitPidOutcome::Stopped {
+                job_id,
+                stop_signal,
+            });
+        }
+        let status = std::process::ExitStatus::from_raw(raw);
+        // The reap bookkeeping mirrors wait_for_background_pid's tail:
+        // signal-death notice while the job entry still exists, then
+        // completion, SIGCHLD trap, and status-preserving removal.
+        // (The Windows CHILDREN CPU sampling in the twin has no unix
+        // counterpart to mirror.)
+        if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status) {
+            let command = self
+                .shell_state
+                .job_table
+                .pid_to_job
+                .get(&pid)
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                .map(|job| job.command.clone())
+                .unwrap_or_default();
+            self.note_child_signal_death(pid, signal, command, false);
+        }
+        let status = crate::executor::wait_status::process_exit_status(&status);
+        self.join_coproc_stderr_forwarder(pid)?;
+        self.shell_state.job_table.mark_completed(pid, status);
+        self.flush_timed_coproc_report(pid);
+        self.run_sigchld_trap_for_reaped_child()?;
         self.shell_state
             .job_table
             .remove_job_by_pid_preserve_status(pid);
@@ -2535,6 +2835,29 @@ impl Executor {
             .map(|entry| (entry.command.clone(), entry.pids.clone()))
             .unwrap_or_default();
         writeln!(stdout, "{command}")?;
+        // rubash#2398: GNU start_job hands the terminal to the job's
+        // pgrp BEFORE the SIGCONT (jobs.c:3918 give_terminal_to, then
+        // jobs.c:3926-3928), and wait_for reclaims it for the shell
+        // when the wait ends (jobs.c:3253) — the reclaim below runs on
+        // every wait outcome. Only with the job-control channel live;
+        // otherwise fg keeps the shared-group delivery model.
+        #[cfg(unix)]
+        let fg_tty = if self.job_control_channel_active() {
+            let pgrp = self
+                .shell_state
+                .job_table
+                .jobs
+                .get(&job_id)
+                .map(|entry| entry.pgrp as i32)
+                .unwrap_or(pid as i32);
+            let tty = super::job_control_wait::controlling_tty();
+            if let Some(tty) = &tty {
+                super::job_control_wait::give_terminal_to(tty, pgrp);
+            }
+            tty
+        } else {
+            None
+        };
         // SIGCONT follows the target numbering (18 Linux / 19 Darwin) via
         // kill::SIGCONT_NUMBER — jobs.c:3928 `killpg (..., SIGCONT)` uses
         // the platform's own number, not a Linux literal.
@@ -2561,18 +2884,54 @@ impl Executor {
             super::external_inner::ForegroundBuiltinSigintGuard::hold_if_interactive_untrapped(
                 self,
             );
-        let wait_outcome = match self.wait_for_background_pid(pid, false) {
+        // rubash#2398: with the terminal handed over, the wait is the
+        // WUNTRACED one (wait_for_fg_job_control) — a re-stop of the
+        // job is a wait outcome, and the terminal ^C reaches the job's
+        // group alone, so the wait needs no SIGINT forwarding. The
+        // ExitCode conversion below is shared by both waits.
+        #[cfg(unix)]
+        let wait_result = if fg_tty.is_some() {
+            self.wait_for_fg_job_control(pid)
+        } else {
+            self.wait_for_background_pid(pid, false)
+        };
+        #[cfg(not(unix))]
+        let wait_result = self.wait_for_background_pid(pid, false);
+        // jobs.c:3253: the shell takes its terminal back on every way
+        // out of the wait.
+        #[cfg(unix)]
+        if let Some(tty) = &fg_tty {
+            super::job_control_wait::give_terminal_to(tty, super::job_control_wait::shell_pgrp());
+        }
+        let wait_outcome = match wait_result {
             Ok(outcome) => Ok(outcome),
             Err(ExecuteError::ExitCode(code)) if code > 128 => {
                 Ok(WaitPidOutcome::Interrupted(code))
             }
             Err(error) => Err(error),
         };
+        // fg drives a foreground wait (jobs.c start_job -> wait_for), not
+        // the wait builtin: a job fg consumed leaves the table with the
+        // wait, as it did before the background retention cadence
+        // (rubash#2340) moved deletion out of wait_for_background_pid.
+        if matches!(wait_outcome, Ok(WaitPidOutcome::Status(_))) {
+            self.shell_state
+                .job_table
+                .remove_job_by_pid_preserve_status(pid);
+        }
         match wait_outcome? {
             WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => Ok(status),
-            // Unreachable in practice: fg SIGCONTs and marks the job
-            // running above, before the wait. Mapped for exhaustiveness.
-            WaitPidOutcome::Stopped { stop_signal, .. } => Ok(128 + stop_signal),
+            // The job stopped again under fg's wait (reachable via
+            // wait_for_fg_job_control, rubash#2398): GNU reports the
+            // stop as fg's own output — the notice rides fg's stderr
+            // so it lands after the command text printed above, in
+            // the order wait_for's notify produces it.
+            WaitPidOutcome::Stopped { stop_signal, .. } => {
+                if let Some(line) = self.format_stopped_job_notice(pid) {
+                    let _ = stderr.write_all(line.as_bytes());
+                }
+                Ok(128 + stop_signal)
+            }
             WaitPidOutcome::NotFound => {
                 self.write_job_not_found("fg", job, stderr)?;
                 Ok(1)

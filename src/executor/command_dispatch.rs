@@ -660,6 +660,9 @@ impl Executor {
         // The fg builtin itself reports "no job control" when the monitor
         // option is off.
         if word.starts_with('%') {
+            // rubash#2397: execute_cmd.c:4753-4755 rolls this/last
+            // with the fg builtin's address for the jobspec dispatch.
+            self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
             let mut fg_cmd = cmd.clone();
             fg_cmd.words.insert(0, "fg".to_string());
             self.exit_code =

@@ -9,13 +9,16 @@
 //!
 //! reedline-upstream list (wt100 matrix rows that stay open because the
 //! HOST line editor must implement the behavior — the engine side of
-//! each is done here): the `-p`/`-P`/`-l` FULL GNU tables (reedline's
-//! keymaps cover a subset of GNU's 176 function names — listing more
-//! would claim bindings no host can deliver); multi-key sequences beyond
-//! what a host's key parser accepts; and APPLYING the readline variable
-//! table's behavior inside an editor (`editing-mode`/`keymap` are
-//! consumed by hosts today; the rest of the 48-variable table is a data
-//! plane hosts read, not an emulation).
+//! each is done here): multi-key sequences beyond what a host's key
+//! parser accepts; and APPLYING the readline variable table's behavior
+//! inside an editor (`editing-mode`/`keymap` are consumed by hosts
+//! today; the rest of the 48-variable table is a data plane hosts read,
+//! not an emulation). The `-p`/`-P`/`-l`/`-q` faces report GNU's full
+//! tables (rubash#2338: the 176-name funmap and the per-keymap default
+//! binding tables in [`crate::builtins::bind`]) over the effective map
+//! the registry computes — what a host can DELIVER for a given function
+//! stays the host's own concern, exactly as a GNU shell with a
+//! different readline build would report its own map.
 
 use std::io::Write;
 
@@ -136,49 +139,52 @@ impl Executor {
         }
 
         if flags.dump_readable {
-            // rl_function_dumper(1): readable bindings, defaults first
-            // then user-registered function bindings for this keymap.
-            let entries = self.bind_registry_snapshot();
-            for (seq, name) in crate::builtins::bind::DEFAULT_FUNCTION_BINDINGS {
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    crate::builtins::bind::format_function_readable(seq, name)
-                );
-            }
-            for entry in entries.iter().filter(|e| {
-                matches!(&e.kind, BindKind::Function { .. })
-                    && same_keymap(e.keymap.as_deref(), keymap.as_deref())
-            }) {
-                if let BindKind::Function { name } = &entry.kind {
+            // rl_function_dumper(1) (lib/readline/bind.c): a leading
+            // blank line, then for every funmap name in order either one
+            // `"seq": name` line per invoking sequence or the
+            // `# name (not bound)` comment — over the EFFECTIVE keymap
+            // (defaults + session registrations/removals).
+            let _ = writeln!(stdout);
+            for name in crate::builtins::bind::READLINE_FUNCTIONS {
+                let seqs = self.invoking_keyseqs(name, keymap.as_deref());
+                if seqs.is_empty() {
                     let _ = writeln!(
                         stdout,
                         "{}",
-                        crate::builtins::bind::format_function_readable(&entry.keyseq, name)
+                        crate::builtins::bind::format_function_readable_unbound(name)
                     );
+                } else {
+                    for seq in &seqs {
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            crate::builtins::bind::format_function_readable(seq, name)
+                        );
+                    }
                 }
             }
         }
 
         if flags.dump_plain {
-            // rl_function_dumper(0): `name can be found on "seq", "seq".`
-            let mut by_name: Vec<(String, Vec<String>)> = Vec::new();
-            for (seq, name) in crate::builtins::bind::DEFAULT_FUNCTION_BINDINGS {
-                push_keyseq(&mut by_name, name, seq.to_string());
-            }
-            for entry in self.bind_registry_snapshot() {
-                if let BindKind::Function { name } = &entry.kind {
-                    if same_keymap(entry.keymap.as_deref(), keymap.as_deref()) {
-                        push_keyseq(&mut by_name, name, entry.keyseq.clone());
-                    }
+            // rl_function_dumper(0): same iteration, plain form —
+            // `name can be found on "seq", "seq".` or
+            // `name is not bound to any keys` (no period).
+            let _ = writeln!(stdout);
+            for name in crate::builtins::bind::READLINE_FUNCTIONS {
+                let seqs = self.invoking_keyseqs(name, keymap.as_deref());
+                if seqs.is_empty() {
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        crate::builtins::bind::format_function_plain_unbound(name)
+                    );
+                } else {
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        crate::builtins::bind::format_function_plain(name, &seqs)
+                    );
                 }
-            }
-            for (name, seqs) in by_name {
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    crate::builtins::bind::format_function_plain(&name, &seqs)
-                );
             }
         }
 
@@ -273,7 +279,10 @@ impl Executor {
                     let _ = writeln!(
                         stderr,
                         "{prefix}bind: {}",
-                        crate::builtins::bind::format_cannot_read(file, &err.to_string())
+                        crate::builtins::bind::format_cannot_read(
+                            file,
+                            &crate::builtins::bind::cannot_read_reason(&err)
+                        )
                     );
                     return 1;
                 }
@@ -291,33 +300,12 @@ impl Executor {
                 );
                 return_code = Some(1);
             } else {
-                let mut seqs: Vec<String> = crate::builtins::bind::DEFAULT_FUNCTION_BINDINGS
-                    .iter()
-                    .filter(|(_, bound)| bound == name)
-                    .map(|(seq, _)| seq.to_string())
-                    .collect();
-                if name == "self-insert" {
-                    // self-insert is bound to every printable character in
-                    // the default keymaps; query_bindings lists the first
-                    // five and truncates (GNU probe: `self-insert can be
-                    // invoked via " ", "!", "\"", "#", "$", ...`).
-                    seqs = vec![
-                        " ".to_string(),
-                        "!".to_string(),
-                        "\"".to_string(),
-                        "#".to_string(),
-                        "$".to_string(),
-                        "%".to_string(),
-                    ];
-                }
-                for entry in self.bind_registry_snapshot() {
-                    if let BindKind::Function { name: bound } = &entry.kind {
-                        if bound == name && same_keymap(entry.keymap.as_deref(), keymap.as_deref())
-                        {
-                            seqs.push(entry.keyseq.clone());
-                        }
-                    }
-                }
+                // rl_invoking_keyseqs over the effective keymap: the
+                // default table (in scan order) merged with the session
+                // registrations — self-insert's hundreds of sequences
+                // fall out of the table itself, format_query applies
+                // query_bindings' five-and-ellipsis cap.
+                let seqs = self.invoking_keyseqs(name, keymap.as_deref());
                 if seqs.is_empty() {
                     let _ = writeln!(
                         stdout,
@@ -605,6 +593,26 @@ impl Executor {
         self.shell_state.bind_registry.borrow().snapshot()
     }
 
+    /// The `bind -r` / `bind -u` removals — (keyseq, keymap) pairs a
+    /// host must subtract from the DEFAULT key tables when mirroring
+    /// them, because GNU's unbind mutates the maps themselves,
+    /// defaults included (rubash#2337). Pairs with
+    /// [`Executor::bind_registry_snapshot`] and the registry
+    /// generation counter.
+    pub fn bind_removed_keyseqs(&self) -> Vec<(String, Option<String>)> {
+        self.shell_state.bind_registry.borrow().removals()
+    }
+
+    /// The invoking key sequences for one function in one keymap over
+    /// the effective map (see
+    /// [`crate::shell::bind_registry::BindRegistry::invoking_keyseqs`]).
+    fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
+        self.shell_state
+            .bind_registry
+            .borrow()
+            .invoking_keyseqs(function, keymap)
+    }
+
     /// Current registry generation (bumped on every mutation). Hosts
     /// compare it between prompts to notice runtime `bind` calls and
     /// rebuild their mirrored keymaps.
@@ -724,21 +732,13 @@ impl Executor {
 
     fn unbind_function_for_keymap(&mut self, name: &str, keymap: Option<&str>) {
         // unbind_command removes the bindings in the CURRENT keymap only
-        // (bind.def:375-393 rl_unbind_function_in_map).
-        let registry = self.shell_state.bind_registry.clone();
-        let mut registry = registry.borrow_mut();
-        let doomed: Vec<(String, Option<String>)> = registry
-            .entries
-            .iter()
-            .filter(|entry| {
-                matches!(&entry.kind, BindKind::Function { name: bound } if bound == name)
-                    && same_keymap(entry.keymap.as_deref(), keymap)
-            })
-            .map(|entry| (entry.keyseq.clone(), entry.keymap.clone()))
-            .collect();
-        for (keyseq, bound_keymap) in doomed {
-            registry.unbind_keyseq_for_keymap(&keyseq, bound_keymap.as_deref());
-        }
+        // (bind.def:375-393 rl_unbind_function_in_map) — session entries
+        // AND the keymap's defaults for the function (rubash#2337; the
+        // registry records the default removals).
+        self.shell_state
+            .bind_registry
+            .borrow_mut()
+            .unbind_function_for_keymap(name, keymap);
     }
 }
 
@@ -757,13 +757,6 @@ fn same_keymap(entry: Option<&str>, current: Option<&str>) -> bool {
         crate::shell::bind_registry::normalize_keymap_name(name.unwrap_or("emacs-standard"))
     }
     norm(entry) == norm(current)
-}
-
-fn push_keyseq(by_name: &mut Vec<(String, Vec<String>)>, name: &str, seq: String) {
-    match by_name.iter_mut().find(|(bound, _)| bound == name) {
-        Some((_, seqs)) => seqs.push(seq),
-        None => by_name.push((name.to_string(), vec![seq])),
-    }
 }
 
 /// Collect the positional (non-option) arguments — the inputrc-form

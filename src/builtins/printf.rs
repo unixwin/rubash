@@ -425,6 +425,16 @@ fn assign_printf_output(
         )?;
         return Ok(Some(1));
     }
+    // GNU printf.def:114: an att_noassign target (variables.c:1839
+    // FUNCNAME, 1886 GROUPS, 1889 BASH_ARGC, 1890 BASH_ARGV, 1892
+    // BASH_SOURCE, 1893 BASH_LINENO) fails the same ASSIGN_DISALLOWED
+    // test but silently (rubash#2369).
+    if matches!(
+        readonly_name,
+        "BASH_ARGC" | "BASH_ARGV" | "BASH_LINENO" | "BASH_SOURCE" | "FUNCNAME" | "GROUPS"
+    ) {
+        return Ok(Some(1));
+    }
     if let Some((base, subscript)) = parse_printf_array_target(name) {
         if is_marked(env_vars, "__RUBASH_ASSOC_VARS", base) {
             // The executor pre-resolved the operand under ExpandedOnce rules

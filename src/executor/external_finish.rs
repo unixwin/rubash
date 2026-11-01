@@ -50,6 +50,25 @@ impl Executor {
             if crate::executor::execution_misc::is_closed_redirect_target(&target) {
                 return Err(cat_closed_stdout_error());
             }
+            // rubash#2329: an fd-alias PATH spelling resolves against
+            // the descriptor bound at the entry's own list position
+            // (redir.c:237 do_redirections) — when this command's list
+            // bound the aliased fd to a plain file, the serve is a
+            // fresh open of THAT file, exactly like the mirror
+            // appliers' positional arm; the ambient resolver below
+            // cannot see an in-list binding and fell through to a
+            // literal open of the spelling (ENOENT).
+            if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                cmd,
+                self.output_entry_position(cmd, 1, &target),
+                &target,
+                false,
+                redirect.clobber,
+            ) {
+                let file = opened?;
+                crate::fd::write_file_all(&file, output)?;
+                return Ok(());
+            }
             // /dev/std*, /dev/fd/N: resolve as a dup of the aliased fd's
             // current binding (implicit std fds write their default stream)
             // instead of reopening the alias as a literal Windows path
@@ -63,6 +82,18 @@ impl Executor {
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
+            // rubash#2329: append twin of the positional arm above.
+            if let Some(opened) = self.open_alias_spelling_fresh_output_positional(
+                cmd,
+                self.output_entry_position(cmd, 1, &target),
+                &target,
+                true,
+                true,
+            ) {
+                let file = opened?;
+                crate::fd::write_file_all(&file, output)?;
+                return Ok(());
+            }
             if let Some(result) = self.write_dev_stdio_redirect_output(&target, output, true, true)
             {
                 return result;
@@ -365,7 +396,14 @@ impl Executor {
         // before dispatch, but GNU's one ordered walk
         // (redir.c:237) services them against the command's own
         // earlier binds.
-        let saved_numbered_inputs =
+        // rubash#2322: the segmented walk now binds the numbered
+        // outputs inside its segments as well (an output-side
+        // `{var}` entry must observe the command's own earlier
+        // output binds at its position), so its saves ARE the
+        // bound_output_fds the old separate
+        // open_compound_output_redirects pass produced — that pass
+        // no longer runs here.
+        let (saved_numbered_inputs, bound_output_fds) =
             match self.bind_script_numbered_inputs_and_fd_vars(cmd, &saved_numbered_heredocs) {
                 Ok(saved) => saved,
                 Err(error) => {
@@ -373,14 +411,6 @@ impl Executor {
                     return Err(error);
                 }
             };
-        let bound_output_fds = match self.open_compound_output_redirects(cmd) {
-            Ok(fds) => fds,
-            Err(error) => {
-                self.restore_compound_numbered_input_redirects(saved_numbered_inputs);
-                self.restore_numbered_heredoc_redirects(saved_numbered_heredocs);
-                return Err(error);
-            }
-        };
 
         let saved_env = self.shell_state.env_vars.clone();
         let this_shell_invocation = cmd.words.first().is_some_and(|command| {
@@ -884,6 +914,16 @@ impl Executor {
         } else {
             None
         };
+        // rubash#2352: the trap-entry status captured with the mark
+        // (see Executor::termsig_death_trap_status) parks with it —
+        // same discipline, same reason: the child's own verdicts
+        // record the child's capture, the boundary below drops it,
+        // and the parent's capture is handed back untouched.
+        let saved_termsig_trap_status = if contain_child_signals {
+            self.termsig_death_trap_status.take()
+        } else {
+            None
+        };
         let saved_shell_pid = self.shell_pid;
         if contain_child_signals {
             self.shell_pid = std::process::id();
@@ -924,7 +964,26 @@ impl Executor {
         let saved_fd_var_external_undo = std::mem::take(&mut self.fd_var_external_undo);
         let saved_fd_var_pending_closes = std::mem::take(&mut self.fd_var_pending_closes);
         let saved_fd_var_close_restore = std::mem::take(&mut self.fd_var_close_restore);
-        let result = if uses_history_driver && fresh_shell {
+        // GNU shell.c:722 run_startup_files in the fresh process: a
+        // fresh shell runs the startup chain before the script body —
+        // for this non-interactive child that is the env-file step
+        // (shell.c:1214-1220, $BASH_ENV unless invoked as `sh` or in
+        // posix mode). The fresh-shell initialization above rebuilt
+        // the environment but never ran this step, so a ${THIS_SH} /
+        // ENOEXEC child's $BASH_ENV was silently skipped and its
+        // definitions (and its `exit`) never reached the script
+        // (rubash#2393). An `exit` in the env file ends the child
+        // here, before the body; the EXIT-trap arm below still runs,
+        // as exit_shell's would.
+        let startup_exit = if fresh_shell {
+            self.run_fresh_child_startup_env_file(cmd)
+        } else {
+            None
+        };
+        let result = if let Some(status) = startup_exit {
+            self.exit_code = status;
+            Ok(())
+        } else if uses_history_driver && fresh_shell {
             // bashhist.c pre_process_line / shell.c reader loop: expand and
             // record history group-by-group so `!!`/`!str` see the entries
             // the child's earlier lines recorded. The child gets a fresh
@@ -993,6 +1052,7 @@ impl Executor {
         // hand the parent back its parked mark.
         if contain_child_signals {
             self.termsig_death_pending = saved_termsig_death;
+            self.termsig_death_trap_status = saved_termsig_trap_status;
         }
         self.shell_pid = saved_shell_pid;
 
@@ -1136,6 +1196,79 @@ impl Executor {
     /// Converts a fatal `ExecuteError` escaping an in-process child script
     /// into the child's exit status, mirroring how GNU's `exit_shell` /
     /// `jump_to_top_level` terminate only the child process.
+    /// The fresh-shell child's env-file startup step: GNU
+    /// run_startup_files (shell.c:722) in the exec'd process sources
+    /// $BASH_ENV for a non-interactive shell — gated on the CHILD's
+    /// own modes (shell.c:1216: not when invoked as `sh`, not in
+    /// posix mode), read from the child's rebuilt state: act_like_sh
+    /// from the invocation name as spelled, posix from the option
+    /// state the fresh-shell initialization replayed. The selection
+    /// itself is the shared invocation::startup_env_file the
+    /// standalone binary's run_startup_files uses. Returns
+    /// Some(status) when the env file ended the child with `exit`
+    /// (shell.c exit_shell: the script body never runs).
+    fn run_fresh_child_startup_env_file(&mut self, cmd: &CommandNode) -> Option<i32> {
+        let act_like_sh = cmd.words.first().is_some_and(|word| {
+            let expanded = self.expand_word(word);
+            let base = expanded
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            base.strip_prefix('-').unwrap_or(base.as_str()) == "sh"
+        });
+        let file = crate::invocation::startup_env_file(
+            self,
+            false,
+            act_like_sh,
+            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "posix"),
+        )?;
+        let status = self.run_child_startup_file(&file);
+        if self.take_exit_jump_pending() {
+            Some(status)
+        } else {
+            None
+        }
+    }
+
+    /// Source one startup file in the fresh child, with the sourced-
+    /// file context the standalone binary's run_init_file establishes
+    /// (rubash#1161): the file is the input stream for diagnostics, a
+    /// top-level `return` is legal, and a parse error aborts only
+    /// this file (evalstring.c:585-606 — EX_BADUSAGE as an ordinary
+    /// value, consumed here like the `source` builtin's arm) while a
+    /// real `exit` keeps its jump for the caller to observe.
+    fn run_child_startup_file(&mut self, file: &str) -> i32 {
+        let path = self.resolve_shell_path(file);
+        let contents = match crate::script_driver::read_script_bytes(&path) {
+            Ok(contents) => contents,
+            Err(e) => {
+                eprintln!("rubash: {}: {}", file, crate::posix_errors::message(&e));
+                return 1;
+            }
+        };
+        self.set_env("__RUBASH_INTERACTIVE_FLAG_OFF", "1");
+        let old_in_source = self.get_env("__RUBASH_IN_SOURCE").map(str::to_string);
+        let old_script_name = self.get_env("__RUBASH_SCRIPT_NAME").map(str::to_string);
+        self.set_env("__RUBASH_IN_SOURCE", "1");
+        self.set_env("__RUBASH_SCRIPT_NAME", file);
+        let _ = self.take_parse_error();
+        let status = crate::script_driver::run_source(self, &contents, false);
+        if self.take_parse_error() {
+            self.take_exit_jump_pending();
+        }
+        match old_in_source {
+            Some(value) => self.set_env("__RUBASH_IN_SOURCE", &value),
+            None => self.remove_env("__RUBASH_IN_SOURCE"),
+        }
+        match old_script_name {
+            Some(value) => self.set_env("__RUBASH_SCRIPT_NAME", &value),
+            None => self.remove_env("__RUBASH_SCRIPT_NAME"),
+        }
+        self.remove_env("__RUBASH_INTERACTIVE_FLAG_OFF");
+        status
+    }
+
     fn child_process_exit_status(&self, error: ExecuteError) -> Result<i32, ExecuteError> {
         match error {
             // `exit N`, errexit, and the lastpipe variant all terminate the

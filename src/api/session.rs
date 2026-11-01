@@ -528,6 +528,16 @@ impl Session {
         self.executor.expand_word(word)
     }
 
+    /// The expansion tail of GNU `shell-expand-line` (bashline.c:2982)
+    /// after the host's history/alias legs: expand the line's words,
+    /// field-split unquoted results on IFS, and rejoin with single
+    /// spaces (`expand_word` + `string_list`). No filename globbing —
+    /// GNU does not glob word/string expansion. The quoted form of a
+    /// variable keeps its spacing; the unquoted form splits.
+    pub fn expand_shell_words(&self, line: &str) -> String {
+        self.executor.expand_shell_words(line)
+    }
+
     /// Expand a prompt template and deliver the result through
     /// the event observer's prompt channel (§5.4: prompts are
     /// produced here and rendered by the host, never
@@ -590,6 +600,43 @@ impl Session {
     {
         self.executor
             .call_function(name, args)
+            .map_err(|error| SessionError::from_execute_error(&error))
+    }
+
+    /// Call a session function by name with arguments, with a
+    /// set of temporary variable bindings applied for the
+    /// call's duration (the env channel §8's mapping row covers
+    /// for this pair of faces, rubash#2001).
+    ///
+    /// Each named variable is bound to the given value while
+    /// the function runs and restored to its previous state
+    /// when the call returns — its old value, or unset if it
+    /// was unset — whatever the function itself did to it in
+    /// the meantime; the function's other effects on session
+    /// state persist, exactly as with [`Session::call_function`].
+    /// A name bound to the empty string is set-but-empty for
+    /// the call (`${name+x}` expands to `x`), distinct from a
+    /// name the channel does not mention, which the call
+    /// leaves untouched. This is the shape a host's
+    /// completion / widget callbacks use to hand the function
+    /// its input variables (niubash's compdef injection of
+    /// `NIU_COMP_WORDS` / `NIU_COMP_CWORD`) on the contract
+    /// surface itself, without the tier-C seam.
+    pub fn call_function_with_env<I, S, E, K, V>(
+        &mut self,
+        name: &str,
+        args: I,
+        temporary_env: E,
+    ) -> Result<i32, SessionError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+        E: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        self.executor
+            .call_function_with_env(name, args, temporary_env)
             .map_err(|error| SessionError::from_execute_error(&error))
     }
 

@@ -918,6 +918,15 @@ where
     }
     let mut valid_assign_names = Vec::new();
     for name in assign_names {
+        // GNU declare.def:389: with -p the builtin is display-only — the
+        // pflag branch runs before all making-variables machinery, so a
+        // type flag riding along on a query operand never triggers a
+        // conversion or its validation, and namerefs are never transformed
+        // (rubash#2335: `declare -p -A a` on an indexed array prints it).
+        if print {
+            valid_assign_names.push(name);
+            continue;
+        }
         let Some(var_name) = declare_base_name(name) else {
             valid_assign_names.push(name);
             continue;

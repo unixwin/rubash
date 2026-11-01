@@ -281,17 +281,33 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "DIRSTACK" {
+        if name == "DIRSTACK" && !self.dirstack_shadowed() {
             // TODO(builtins/pushd.def/variables.c): Bash exposes the
             // directory stack as a dynamic array variable. Keep assignments
             // wired to the pushd module's stack storage until SHELL_VAR array
-            // attributes are ported.
+            // attributes are ported. A plain local/tempenv shadow owns the
+            // name instead (rubash#2424): the element store below writes
+            // the shadowing cell like any ordinary array.
+            // GNU bind_variable checks att_readonly before the assign
+            // function runs (variables.c): a readonly DIRSTACK refuses
+            // the element bind with the plain assignment diagnostic —
+            // the setter itself stays writable because pushd/popd/cd
+            // maintain the stack internally (rubash#2424).
+            if self.shell_state.env_vars.attr_of(name).readonly {
+                self.emit_assignment_diag(format!(
+                    "{}{name}: readonly variable\n",
+                    self.error_prefix()
+                ));
+                self.exit_code = 1;
+                return true;
+            }
             let Some(index) = index.trim_end_matches(']').parse::<usize>().ok() else {
                 self.exit_code = 1;
                 return true;
             };
             crate::builtins::pushd::set_stack_value(
                 &mut self.shell_state.env_vars,
+                &self.shell_state.cwd,
                 index,
                 value.to_string(),
             );
@@ -302,12 +318,15 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        // PIPESTATUS element assignment is an ordinary array bind
-        // in GNU (arrayfunc.c assign_array_element converts any cell
-        // shape into a live array) — it must reach the readonly check
+        // GNU arrayfunc.c:518 (assign_array_element): an element bind
+        // to an att_noassign array returns the variable untouched —
+        // silent, status 0 at statement level. PIPESTATUS is not a
+        // carrier (variables.c:6299-6301), so its element assignment
+        // is an ordinary array bind that reaches the readonly check
         // and the store below, whose tail syncs the shape state
-        // (rubash#1364). The stack arrays stay swallowed.
-        if is_noassign_bash_array(name) && name != "PIPESTATUS" {
+        // (rubash#1364, rubash#2369). The carriers stay swallowed
+        // (the dedicated GROUPS arm above is subsumed by this check).
+        if is_noassign_bash_array(name) {
             self.exit_code = 0;
             return true;
         }

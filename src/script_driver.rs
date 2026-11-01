@@ -3329,6 +3329,76 @@ fn report_heredoc_overflow_fatal(
     2
 }
 
+/// rubash#2332: re-seed one reader unit's node lines from the
+/// respawn root-body span transport (see
+/// docs/design/respawn-root-line-spans.md). The unit's commands are
+/// walked in order: the stamped prelude-definition count is skipped
+/// first (those commands re-seed their bodies through the
+/// __RUBASH_FORK_FN_SPANS path instead), then the root spans apply —
+/// in one count-gated `apply_command_line_spans` call when this unit
+/// holds exactly the remaining body, or per top-level command from
+/// the cursor for a grouped unit. Any structural overrun drops the
+/// transport unapplied from that point on: a re-render that diverged
+/// from the parent's tree keeps the child's own parse lines rather
+/// than misaligned spans, exactly the #2202 safety posture.
+fn apply_respawn_root_line_spans(executor: &mut Executor, commands: &mut [CommandNode]) {
+    let state = &mut executor.shell_state;
+    let Some(spans) = state.respawn_root_line_spans.take() else {
+        return;
+    };
+    let total = spans.len();
+    let mut cursor = state.respawn_root_span_cursor;
+    let mut skip = state.respawn_root_span_skip;
+    let mut idx = 0;
+    while idx < commands.len() && skip > 0 {
+        skip -= 1;
+        idx += 1;
+    }
+    state.respawn_root_span_skip = skip;
+    // Retain the transport for the next reader unit unless it is
+    // fully consumed here or found misaligned.
+    let mut retain = true;
+    if idx < commands.len() && cursor < total {
+        let mut rest_spans = Vec::new();
+        crate::parser::collect_command_line_spans(&commands[idx..], &mut rest_spans);
+        let rest_count = rest_spans.len();
+        if cursor + rest_count == total {
+            // `spans`/`commands` are element slices (span records / AST
+            // nodes) and `cursor` an element index, not a byte/char
+            // offset — split_at states that tail without string-slice
+            // syntax (hygiene gate Check 3 keys on the name `cursor`).
+            let remaining_spans = spans.split_at(cursor).1;
+            if crate::parser::apply_command_line_spans(&mut commands[idx..], remaining_spans) {
+                cursor = total;
+            } else {
+                retain = false;
+            }
+        } else if cursor + rest_count < total {
+            for command in commands[idx..].iter_mut() {
+                let mut own_spans = Vec::new();
+                crate::parser::collect_command_line_spans(
+                    std::slice::from_ref(&*command),
+                    &mut own_spans,
+                );
+                let count = own_spans.len();
+                if cursor + count > total {
+                    retain = false;
+                    break;
+                }
+                let span_window = spans.split_at(cursor).1.split_at(count).0;
+                crate::parser::apply_command_line_spans(std::slice::from_mut(command), span_window);
+                cursor += count;
+            }
+        } else {
+            retain = false;
+        }
+    }
+    state.respawn_root_span_cursor = cursor;
+    if retain && cursor < total {
+        state.respawn_root_line_spans = Some(spans);
+    }
+}
+
 fn run_source_impl(
     executor: &mut Executor,
     input: &str,
@@ -3338,6 +3408,41 @@ fn run_source_impl(
     diagnostic_text: Option<&str>,
     pre_lexed: Option<Vec<Token>>,
     suppress_unclosed_diagnostic: bool,
+) -> i32 {
+    // rubash#2332: mark the call active for its whole duration so the
+    // root-span re-seed inside run_source_impl_inner fires only for
+    // the outermost reader unit — nested runs (a sourced file or eval
+    // inside this unit's execution, the unclosed-diagnostics prefix
+    // runs below) must never consume the root transport. The prior
+    // value is restored on exit; this wrapper is the single exit.
+    let source_run_prior = executor.source_run_active.get();
+    executor.source_run_active.set(true);
+    let status = run_source_impl_inner(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        pre_lexed,
+        suppress_unclosed_diagnostic,
+        !source_run_prior,
+    );
+    executor.source_run_active.set(source_run_prior);
+    status
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_source_impl_inner(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Option<Vec<Token>>,
+    suppress_unclosed_diagnostic: bool,
+    root_span_outermost: bool,
 ) -> i32 {
     // WP-8 (debugger design 5.1): take the file identity the
     // calling group driver set for this unit, if any (see
@@ -3493,8 +3598,11 @@ fn run_source_impl(
         // exits 2. The verdict shapes (WSL GNU 5.2.21/5.3.0 probes,
         // 2026-10-12): unquoted hunt -> `]'; a quote/backtick recursion
         // inside names ITSELF (a5: `echo $[\n'q` -> `'` line 2); a hunt
-        // bounded by a double-quoted span names the DQUOTE at the span's
-        // line (q2/w1-w4: `echo "$[1+2"` -> `"'`); reported ahead of the
+        // inside a double-quoted span is NOT bounded by the span — the
+        // span's closing quote opens a quote unit inside the hunt whose
+        // EOF names the DQUOTE at the UNIT's line (q2/w1-w4 sit on the
+        // span's line, where the two coincide; rubash#2227 face 2 splits
+        // them: `echo "a $[1+<NL>2"` -> `"'` at line 2); reported ahead of the
         // generic close-char path because the hunt owns the EOF even when a
         // `${` is also unclosed (`echo ${x[$[1}` -> `]', not `}').
         if let Some(eof) = crate::lexer::unclosed_dollar_bracket_eof(input) {
@@ -3801,6 +3909,15 @@ fn run_source_impl(
         executor.debugger_register_syntax(file, &ast);
     }
 
+    // rubash#2332: a respawned child running its transported `-c`
+    // text (main.rs arms the run) re-seeds this unit's node lines
+    // from the root-body span transport — the patch point both -c
+    // drivers share. Outermost units only: nested runs inside this
+    // unit's execution keep their own lines.
+    if root_span_outermost && executor.root_line_span_run_armed.get() {
+        apply_respawn_root_line_spans(executor, &mut ast.commands);
+    }
+
     let saved_final_frame = executor.exec_replace_final_frame.get();
     let final_unit = executor.command_string_final_pending.take() && executor.command_string_mode();
     executor.exec_replace_final_frame.set(final_unit);
@@ -3828,8 +3945,18 @@ fn run_source_impl(
             code
         }
         // ExpansionFailure is GNU's DISCARD: the command list aborted but
-        // the reader continues with the next complete command.
-        Err(ExecuteError::ExpansionFailure(code)) => code,
+        // the reader continues with the next complete command. When the
+        // text is a -c string, this catch is shell.c run_one_command's:
+        // its DISCARD arm returns last_command_exit_value = 1
+        // (shell.c:1478-1479) regardless of the pre-set status, where
+        // the script reader_loop preserves it (eval.c:111-118).
+        Err(ExecuteError::ExpansionFailure(code)) => {
+            if executor.command_string_mode() {
+                1
+            } else {
+                code
+            }
+        }
         // SigintUnwind is the same DISCARD shape with a fixed verdict
         // (rubash#1639): GNU threw to the top-level reader on the
         // foreground job's SIGINT death — no diagnostic, the reader
@@ -4515,6 +4642,20 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
         // `pending` is exactly an open command/heredoc, so its prompt is the
         // expanded PS2 (WSL GNU 5.3.0 piped-`-i` renders `> ` for the
         // `then`/`fi` lines of an open `if`).
+        // rubash#1722: acquire the Unix tty edit mode BEFORE the
+        // prompt is rendered — readline's order (rl_prep_terminal,
+        // then the prompt display, then the read). Acquiring later
+        // leaves a cooked-mode window at every fresh prompt in which
+        // the kernel line discipline echoes typed input ahead of the
+        // dispatcher's own display (a doubled echo). The guard is
+        // consumed by the tty edit branch below; if that branch is
+        // not taken it restores the termios on drop.
+        #[cfg(unix)]
+        let mut tty_guard = if stdin_is_tty && console.is_none() {
+            UnixTtyEditGuard::acquire()
+        } else {
+            None
+        };
         let prompt_name = if pending.is_empty() { "PS1" } else { "PS2" };
         let prompt_text = executor
             .get_env(prompt_name)
@@ -4609,6 +4750,116 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             continue;
         }
 
+        // rubash#1722: on a real Unix terminal the standalone reader
+        // owns the tty while a line is edited — readline's
+        // rl_prep_terminal (lib/readline/terminal.c): ICANON and ECHO
+        // off so the dispatcher, not the kernel line discipline, sees
+        // every keystroke and `bind` keymaps can fire per key; IXON off
+        // so C-s/C-q are keys rather than flow control; VMIN=1/VTIME=0;
+        // ISIG kept, so C-c still raises SIGINT. The saved termios is
+        // restored before the accepted line executes (rl_deprep_terminal)
+        // so children see a line-discipline terminal — the same shape
+        // as the Windows RawConsole branch above. Without this the
+        // kernel line discipline owned editing on Unix ttys: registered
+        // bindings could never fire, and a framework driving the
+        // terminal itself (ble.sh) had its cursor-position-report
+        // replies read back as command text and executed.
+        #[cfg(unix)]
+        if stdin_is_tty && console.is_none() {
+            if let Some(mut guard) = tty_guard.take() {
+                let mut prev_frame: Option<(String, usize)> = None;
+                tty_redraw(&guard, &prompt_tail, &st, &mut prev_frame);
+                // The #1662 pre-dispatch, duplicated for this branch —
+                // INSIDE the raw-mode region: the guard is acquired
+                // before the wait, because a cooked-mode wait would
+                // let the kernel line discipline echo the line's first
+                // bytes before the dispatcher ever sees them (the
+                // doubled-echo shape). A pending delivery aborts the
+                // fresh prompt read exactly as on the cooked path.
+                let aborted = if pending.is_empty() && st.buffer.is_empty() {
+                    matches!(prompt_wait_for_input(executor), PromptWait::Aborted)
+                } else {
+                    executor.run_pending_signal_traps().is_err()
+                };
+                if aborted {
+                    guard.restore();
+                    pending.clear();
+                    group.clear();
+                    st = EditState::default();
+                    continue;
+                }
+                let mut operate_next: Option<Option<usize>> = None;
+                let mut eof_now = false;
+                let mut read_dead = false;
+                'tty_read: loop {
+                    match guard.next_key() {
+                        Ok(Some(c)) => match apply_edit_char(executor, &mut st, c) {
+                            EditOutcome::None => {
+                                tty_redraw(&guard, &prompt_tail, &st, &mut prev_frame);
+                            }
+                            EditOutcome::Eof => {
+                                eof_now = true;
+                                break 'tty_read;
+                            }
+                            EditOutcome::Accept {
+                                line,
+                                operate_and_get_next,
+                            } => {
+                                guard.restore();
+                                eprint!("\n");
+                                accept_line!(&line);
+                                operate_next = operate_and_get_next;
+                                break 'tty_read;
+                            }
+                        },
+                        Ok(None) => {
+                            read_dead = true;
+                            eof_now = true;
+                            break 'tty_read;
+                        }
+                        Err(_) => {
+                            read_dead = true;
+                            eof_now = true;
+                            break 'tty_read;
+                        }
+                    }
+                }
+                guard.restore();
+                if eof_now {
+                    if read_dead {
+                        // The terminal itself ended the input (pty
+                        // master closed / read error): classify a
+                        // pending untrapped SIGHUP before folding,
+                        // exactly like the cooked path's Ok(0)/Err
+                        // arms (rubash#2233).
+                        let hangup = executor.poll_untrapped_hangup()
+                            || (tty_fd_shows_hangup()
+                                && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET));
+                        if !hangup && executor.invocation_interactive() {
+                            let login = executor.invocation_login();
+                            eprintln!("{}", if login { "logout" } else { "exit" });
+                        }
+                    } else if st.buffer.is_empty() && executor.invocation_interactive() {
+                        // C-d on an empty buffer (bashline.c
+                        // bash_readline's synthesized `exit`).
+                        let login = executor.invocation_login();
+                        eprintln!("{}", if login { "logout" } else { "exit" });
+                    }
+                    if !st.buffer.is_empty() {
+                        // readline treats EOF on a nonempty buffer as
+                        // accept-line.
+                        let line = std::mem::take(&mut st.buffer);
+                        st.cursor = 0;
+                        accept_line!(&line);
+                    }
+                    eof = true;
+                } else if let Some(src_abs) = operate_next {
+                    preload_operate_and_get_next(executor, &mut st, src_abs);
+                }
+                continue;
+            }
+        }
+
         // rubash#1662: dispatch pending signals before blocking on the
         // next line, and while waiting for one at a fresh prompt (see
         // prompt_wait_for_input). A delivery that aborts here discards
@@ -4698,8 +4949,17 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if !hangup && executor.invocation_interactive() {
                     let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
+                    // parse.y handle_eof_input_unit: the EOF-synthesized
+                    // exit runs the same exit_builtin, so the job check
+                    // can defer it (rubash#2397) — keep reading instead
+                    // of folding; the next EOF is immediate because the
+                    // deferral pinned this_shell_builtin = exit_builtin.
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
                 }
-                eof = true;
             }
             Ok(_) => {}
             Err(err) => {
@@ -4730,8 +4990,14 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if !hangup && executor.invocation_interactive() {
                     let login = executor.invocation_login();
                     eprintln!("{}", if login { "logout" } else { "exit" });
+                    // rubash#2397: same EOF job-check deferral as the
+                    // Ok(0) arm above (parse.y handle_eof_input_unit).
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
                 }
-                eof = true;
             }
         }
         // readline's echo of the accepted line: the dumb-terminal
@@ -4804,6 +5070,19 @@ struct EditState {
     /// state machine rather than stream lookahead because the raw console
     /// path feeds one key event at a time.
     esc_stage: u8,
+    /// rubash#1722: chars accumulated toward a multi-char key sequence
+    /// registered through `bind` (readline's sub-sequence walk in
+    /// _rl_dispatch, lib/readline/readline.c:873 _rl_dispatch). Empty
+    /// whenever no partial sequence is in flight.
+    pending_keyseq: String,
+    /// rubash#1722: the region mark (readline's rl_mark), set by the
+    /// set-mark function binding; `None` until first set. Byte offset.
+    mark: Option<usize>,
+    /// rubash#1722: decoded bind-registry table for the active keymap
+    /// family, cached against the registry generation
+    /// (Executor::bind_registry_generation) so per-keystroke dispatch
+    /// does not re-decode every written keyseq.
+    bind_cache: Option<(u64, Vec<(Vec<char>, crate::shell::bind_registry::BindKind)>)>,
 }
 
 /// What one edit character did to the [`EditState`] (readline's
@@ -4911,7 +5190,7 @@ fn rubout_previous_char(st: &mut EditState) {
 /// Apply one edit character to the readline state (the dispatcher the
 /// cooked byte-stream path and the raw console path share — see the
 /// per-arm GNU references inside).
-fn apply_edit_char(executor: &Executor, st: &mut EditState, c: char) -> EditOutcome {
+fn apply_edit_char(executor: &mut Executor, st: &mut EditState, c: char) -> EditOutcome {
     if st.quoted_insert {
         st.buffer.insert(st.cursor, c);
         st.cursor += c.len_utf8();
@@ -5029,6 +5308,501 @@ fn apply_edit_char(executor: &Executor, st: &mut EditState, c: char) -> EditOutc
         }
     }
 
+    dispatch_edit_key(executor, st, c)
+}
+
+/// rubash#1722: decode one registry keyseq from its written form
+/// (`\C-x\C-f`, `\e[A`, `\M-b`, a literal char run) into the character
+/// sequence the terminal delivers (lib/readline/bind.c
+/// rl_parse_and_bind's keyseq grammar: \C- control, \M- meta as ESC
+/// prefix, \e, \d DEL, \s space, the C escapes, \nnn octal, \xHH hex;
+/// any other escaped char stands for itself).
+fn decode_bind_keyseq(written: &str) -> Vec<char> {
+    fn control_of(c: char) -> char {
+        if c == '?' {
+            return '\x7f';
+        }
+        char::from_u32((c as u32) & 0x1f).unwrap_or(c)
+    }
+    fn one_unit(chars: &[char], i: &mut usize) -> Option<char> {
+        let c = *chars.get(*i)?;
+        *i += 1;
+        if c != '\\' {
+            return Some(c);
+        }
+        let esc = *chars.get(*i)?;
+        *i += 1;
+        match esc {
+            'C' | 'c' if chars.get(*i) == Some(&'-') => {
+                *i += 1;
+                let inner = *chars.get(*i)?;
+                *i += 1;
+                Some(control_of(inner))
+            }
+            'M' | 'm' if chars.get(*i) == Some(&'-') => {
+                // Meta is a prefix, not a unit: decode_bind_keyseq's
+                // caller loop handles it; surface ESC so a nested call
+                // still yields the introducer.
+                Some('\x1b')
+            }
+            'e' => Some('\x1b'),
+            'd' => Some('\x7f'),
+            's' => Some(' '),
+            'a' => Some('\x07'),
+            'b' => Some('\x08'),
+            'f' => Some('\x0c'),
+            'n' => Some('\n'),
+            'r' => Some('\r'),
+            't' => Some('\t'),
+            'v' => Some('\x0b'),
+            '\\' => Some('\\'),
+            'x' => {
+                let mut value: u32 = 0;
+                let mut digits = 0;
+                while digits < 2 {
+                    match chars.get(*i).and_then(|d| d.to_digit(16)) {
+                        Some(d) => {
+                            value = value * 16 + d;
+                            *i += 1;
+                            digits += 1;
+                        }
+                        None => break,
+                    }
+                }
+                char::from_u32(value)
+            }
+            '0'..='7' => {
+                let mut value: u32 = esc as u32 - '0' as u32;
+                let mut digits = 1;
+                while digits < 3 {
+                    match chars.get(*i) {
+                        Some(d @ '0'..='7') => {
+                            value = value * 8 + (*d as u32 - '0' as u32);
+                            *i += 1;
+                            digits += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                char::from_u32(value)
+            }
+            other => Some(other),
+        }
+    }
+    let chars: Vec<char> = written.chars().collect();
+    let mut out = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        // \M- is the one prefix form: ESC, then the following unit
+        // decoded in place (which may itself be \C-x).
+        if chars[i] == '\\'
+            && matches!(chars.get(i + 1), Some('M') | Some('m'))
+            && chars.get(i + 2) == Some(&'-')
+        {
+            out.push('\x1b');
+            i += 3;
+            // A nested \C- after \M- decodes through one_unit's control
+            // arm; a plain char passes through.
+            if let Some(unit) = one_unit(&chars, &mut i) {
+                out.push(unit);
+            }
+            continue;
+        }
+        match one_unit(&chars, &mut i) {
+            Some(unit) => out.push(unit),
+            None => break,
+        }
+    }
+    out
+}
+
+/// rubash#1722: the decoded binding table for the editor's active
+/// keymap family, rebuilt when the bind registry's generation moves.
+/// Emacs mode (the default) matches the emacs-standard map plus the
+/// emacs-meta / emacs-ctlx submaps — in GNU those are reached through
+/// the ESC / C-x prefixes, which the flat sequence match subsumes.
+/// `set editing-mode vi` (registry state) switches to the vi-insert
+/// family; keymap-less entries always count (the registry records
+/// `None` for "the current keymap", which at bind time in a vi shell
+/// IS vi-insert, and in an emacs shell is emacs-standard).
+fn bind_table_for<'a>(
+    executor: &Executor,
+    st: &'a mut EditState,
+) -> &'a [(Vec<char>, crate::shell::bind_registry::BindKind)] {
+    use crate::shell::bind_registry::normalize_keymap_name;
+    let generation = executor.bind_registry_generation();
+    let stale = !matches!(&st.bind_cache, Some((gen, _)) if *gen == generation);
+    if stale {
+        let vi = executor.bind_editing_mode().as_deref() == Some("vi");
+        let table: Vec<(Vec<char>, crate::shell::bind_registry::BindKind)> = executor
+            .bind_registry_snapshot()
+            .into_iter()
+            .filter(|entry| {
+                let keymap = entry.keymap.as_deref().map(normalize_keymap_name);
+                match (vi, keymap) {
+                    (_, None) => true,
+                    (false, Some("emacs-standard" | "emacs-meta" | "emacs-ctlx")) => true,
+                    (true, Some("vi-insert")) => true,
+                    _ => false,
+                }
+            })
+            .map(|entry| (decode_bind_keyseq(&entry.keyseq), entry.kind))
+            .filter(|(seq, _)| !seq.is_empty())
+            .collect();
+        st.bind_cache = Some((generation, table));
+    }
+    match &st.bind_cache {
+        Some((_, table)) => table,
+        None => &[],
+    }
+}
+
+/// rubash#1722: readline's keymap dispatch (_rl_dispatch,
+/// lib/readline/readline.c:873 _rl_dispatch, driven per key from
+/// readline.c:690): a key sequence registered through `bind` fires
+/// before the built-in default bindings. An exact match runs its
+/// binding — a `bind -x` shell command through the READLINE_LINE /
+/// READLINE_POINT / READLINE_MARK protocol (bashline.c:4593
+/// bash_execute_unix_command, via Executor::run_bind_x_command), a
+/// readline function, or a macro (whose text re-enters the dispatch as
+/// if typed). A strict prefix of a longer binding parks the char
+/// until the sequence resolves; a sequence that matches nothing
+/// replays its parked chars through the default dispatch (an unbound
+/// ESC [ A still walks history) and re-dispatches the current char.
+fn dispatch_edit_key(executor: &mut Executor, st: &mut EditState, c: char) -> EditOutcome {
+    if st.pending_keyseq.is_empty() && bind_table_for(executor, st).is_empty() {
+        return apply_default_edit_char(executor, st, c);
+    }
+    let mut candidate: Vec<char> = st.pending_keyseq.chars().collect();
+    candidate.push(c);
+    let (exact, is_prefix) = {
+        let table = bind_table_for(executor, st);
+        let exact = table
+            .iter()
+            .find(|(seq, _)| *seq == candidate)
+            .map(|(_, kind)| kind.clone());
+        let is_prefix = table
+            .iter()
+            .any(|(seq, _)| seq.len() > candidate.len() && seq[..candidate.len()] == candidate[..]);
+        (exact, is_prefix)
+    };
+    match exact {
+        Some(kind) if !is_prefix => {
+            st.pending_keyseq.clear();
+            run_bound_kind(executor, st, &kind, c)
+        }
+        Some(_) => {
+            // Bound, but also the prefix of a longer binding: GNU
+            // waits for the disambiguating key.
+            st.pending_keyseq = candidate.iter().collect();
+            EditOutcome::None
+        }
+        None if is_prefix => {
+            st.pending_keyseq = candidate.iter().collect();
+            EditOutcome::None
+        }
+        None => {
+            if st.pending_keyseq.is_empty() {
+                return apply_default_edit_char(executor, st, c);
+            }
+            let parked: Vec<char> = std::mem::take(&mut st.pending_keyseq).chars().collect();
+            for parked_char in parked {
+                let outcome = apply_default_edit_char(executor, st, parked_char);
+                if !matches!(outcome, EditOutcome::None) {
+                    return outcome;
+                }
+            }
+            apply_edit_char(executor, st, c)
+        }
+    }
+}
+
+/// Run one fired binding (see dispatch_edit_key).
+fn run_bound_kind(
+    executor: &mut Executor,
+    st: &mut EditState,
+    kind: &crate::shell::bind_registry::BindKind,
+    key: char,
+) -> EditOutcome {
+    use crate::shell::bind_registry::BindKind;
+    match kind {
+        BindKind::Execute { command } => {
+            // bash_execute_unix_command's protocol, in the engine's
+            // character offsets: the command sees the current buffer
+            // and point, and its READLINE_LINE / READLINE_POINT writes
+            // replace them (Executor::run_bind_x_command owns the
+            // set/run/read-back/unbind cycle).
+            let point = st.buffer[..st.cursor.min(st.buffer.len())].chars().count();
+            let mark = st
+                .mark
+                .map(|m| st.buffer[..m.min(st.buffer.len())].chars().count())
+                .unwrap_or(point);
+            let command = command.clone();
+            let line = st.buffer.clone();
+            let outcome = executor.run_bind_x_command(&command, &line, point, mark);
+            if let Some(new_line) = outcome.line {
+                st.buffer = new_line;
+                st.history_index = None;
+            }
+            let line_chars = st.buffer.chars().count();
+            let point_chars = outcome.point.unwrap_or(line_chars).min(line_chars);
+            st.cursor = st
+                .buffer
+                .char_indices()
+                .nth(point_chars)
+                .map(|(byte, _)| byte)
+                .unwrap_or(st.buffer.len());
+            if let Some(mark_chars) = outcome.mark {
+                let mark_chars = mark_chars.min(line_chars);
+                st.mark = Some(
+                    st.buffer
+                        .char_indices()
+                        .nth(mark_chars)
+                        .map(|(byte, _)| byte)
+                        .unwrap_or(st.buffer.len()),
+                );
+            }
+            EditOutcome::None
+        }
+        BindKind::Function { name } => run_readline_function(executor, st, name, key),
+        BindKind::Macro { text } => {
+            // readline feeds macro text back through the dispatch as
+            // if it had been typed (rl_executing_macro).
+            let text = text.clone();
+            let mut outcome = EditOutcome::None;
+            for macro_char in text.chars() {
+                outcome = apply_edit_char(executor, st, macro_char);
+                if !matches!(outcome, EditOutcome::None) {
+                    break;
+                }
+            }
+            outcome
+        }
+    }
+}
+
+/// Word span helpers for the readline function bindings: a word is a
+/// run of alphanumeric-or-underscore chars (readline's rl_backward_word
+/// word definition, misc.c/word boundaries over rl_alphabetic plus the
+/// shell's `_`).
+fn edit_prev_boundary(buffer: &str, mut i: usize) -> usize {
+    i = i.saturating_sub(1).min(buffer.len());
+    while i > 0 && !buffer.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn edit_is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Start of the word rl_backward_word would move to: skip any non-word
+/// run backwards, then the word run itself.
+fn edit_word_start(buffer: &str, cursor: usize) -> usize {
+    let mut start = cursor.min(buffer.len());
+    while start > 0 {
+        let prev = edit_prev_boundary(buffer, start);
+        let ch = buffer[prev..].chars().next().unwrap_or(' ');
+        if edit_is_word_char(ch) {
+            break;
+        }
+        start = prev;
+    }
+    while start > 0 {
+        let prev = edit_prev_boundary(buffer, start);
+        let ch = buffer[prev..].chars().next().unwrap_or(' ');
+        if !edit_is_word_char(ch) {
+            break;
+        }
+        start = prev;
+    }
+    start
+}
+
+fn edit_word_end(buffer: &str, cursor: usize) -> usize {
+    let mut end = cursor.min(buffer.len());
+    // skip the non-word run, then the word run (rl_forward_word).
+    while end < buffer.len() {
+        let ch = buffer[end..].chars().next().unwrap_or(' ');
+        if ch.is_alphanumeric() || ch == '_' {
+            break;
+        }
+        end += ch.len_utf8();
+    }
+    while end < buffer.len() {
+        let ch = buffer[end..].chars().next().unwrap_or(' ');
+        if ch.is_alphanumeric() || ch == '_' {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    end
+}
+
+/// The readline function bindings this editor can perform, by name
+/// (bind.c's function table). Functions that only restyle the display
+/// (clear-screen, redraw-current-line) are no-ops here — the console
+/// path repaints after every key regardless, and the cooked path has
+/// no repaint channel, exactly like the default dispatch's treatment.
+/// Functions needing machinery this editor does not own (the kill
+/// ring: yank/yank-pop; undo; completion: complete/menu-complete and
+/// friends) consume the key without acting — the bounded residual,
+/// recorded in the #1722 finisher report.
+fn run_readline_function(
+    executor: &mut Executor,
+    st: &mut EditState,
+    name: &str,
+    key: char,
+) -> EditOutcome {
+    // One-char equivalents reuse the default dispatch arms verbatim.
+    match name {
+        "accept-line" | "newline" => apply_default_edit_char(executor, st, '\n'),
+        "beginning-of-line" => apply_default_edit_char(executor, st, '\x01'),
+        "end-of-line" => apply_default_edit_char(executor, st, '\x05'),
+        "backward-char" => apply_default_edit_char(executor, st, '\x02'),
+        "forward-char" => apply_default_edit_char(executor, st, '\x06'),
+        "delete-char" => apply_default_edit_char(executor, st, '\x04'),
+        "backward-delete-char" | "backward-rubout" => apply_default_edit_char(executor, st, '\x7f'),
+        "kill-line" => apply_default_edit_char(executor, st, '\x0b'),
+        "unix-line-discard" => apply_default_edit_char(executor, st, '\x15'),
+        "previous-history" => apply_default_edit_char(executor, st, '\x10'),
+        "next-history" => apply_default_edit_char(executor, st, '\x0e'),
+        "operate-and-get-next" => apply_default_edit_char(executor, st, '\x0f'),
+        "quoted-insert" => {
+            st.quoted_insert = true;
+            EditOutcome::None
+        }
+        "self-insert-command" | "self-insert" => {
+            st.buffer.insert(st.cursor, key);
+            st.cursor += key.len_utf8();
+            EditOutcome::None
+        }
+        "abort" => {
+            st.pending_keyseq.clear();
+            EditOutcome::None
+        }
+        "backward-word" => {
+            st.cursor = edit_word_start(&st.buffer, st.cursor);
+            EditOutcome::None
+        }
+        "forward-word" => {
+            st.cursor = edit_word_end(&st.buffer, st.cursor);
+            EditOutcome::None
+        }
+        "backward-kill-word" | "unix-word-rubout" => {
+            let start = edit_word_start(&st.buffer, st.cursor);
+            st.buffer.drain(start..st.cursor);
+            st.cursor = start;
+            EditOutcome::None
+        }
+        "kill-word" => {
+            let end = edit_word_end(&st.buffer, st.cursor);
+            st.buffer.drain(st.cursor..end);
+            EditOutcome::None
+        }
+        "transpose-chars" => {
+            // rl_transpose_chars (misc.c): at end of line swap the two
+            // chars before point (point stays); mid-line swap the
+            // chars around point and advance past both.
+            let chars: Vec<(usize, char)> = st.buffer.char_indices().collect();
+            if chars.len() >= 2 {
+                let idx_after = chars
+                    .iter()
+                    .position(|(byte, _)| *byte >= st.cursor)
+                    .unwrap_or(chars.len());
+                let (i, j, new_cursor) = if idx_after >= chars.len() {
+                    (chars.len() - 2, chars.len() - 1, st.cursor)
+                } else if idx_after == 0 {
+                    (0, 1, chars[1].0 + chars[1].1.len_utf8())
+                } else {
+                    (
+                        idx_after - 1,
+                        idx_after,
+                        chars[idx_after].0 + chars[idx_after].1.len_utf8(),
+                    )
+                };
+                let (byte_i, ch_i) = chars[i];
+                let (byte_j, ch_j) = chars[j];
+                let mut rebuilt = String::with_capacity(st.buffer.len());
+                rebuilt.push_str(&st.buffer[..byte_i]);
+                rebuilt.push(ch_j);
+                rebuilt.push_str(&st.buffer[byte_i + ch_i.len_utf8()..byte_j]);
+                rebuilt.push(ch_i);
+                rebuilt.push_str(&st.buffer[byte_j + ch_j.len_utf8()..]);
+                st.buffer = rebuilt;
+                st.cursor = new_cursor.min(st.buffer.len());
+            }
+            EditOutcome::None
+        }
+        "upcase-word" | "downcase-word" | "capitalize-word" => {
+            let end = edit_word_end(&st.buffer, st.cursor);
+            let word = st.buffer[st.cursor..end].to_string();
+            let transformed = match name {
+                "upcase-word" => word.to_uppercase(),
+                "downcase-word" => word.to_lowercase(),
+                _ => {
+                    // rl_capitalize_word: upcase the word's first
+                    // character, downcase the rest.
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            let mut out: String = first.to_uppercase().collect();
+                            out.push_str(&chars.as_str().to_lowercase());
+                            out
+                        }
+                        None => word,
+                    }
+                }
+            };
+            st.buffer.replace_range(st.cursor..end, &transformed);
+            st.cursor += transformed.len();
+            EditOutcome::None
+        }
+        "set-mark" => {
+            st.mark = Some(st.cursor);
+            EditOutcome::None
+        }
+        "exchange-point-and-mark" => {
+            if let Some(mark) = st.mark {
+                st.mark = Some(st.cursor);
+                st.cursor = mark.min(st.buffer.len());
+            }
+            EditOutcome::None
+        }
+        "beginning-of-history" => {
+            if session_entries_len(executor) > 0 {
+                if st.history_index.is_none() {
+                    st.saved_line = st.buffer.clone();
+                }
+                st.history_index = Some(0);
+                if let Some(session) = executor.get_session_history() {
+                    st.buffer = session.borrow().entries[0].clone();
+                }
+                st.cursor = st.buffer.len();
+            }
+            EditOutcome::None
+        }
+        "end-of-history" => {
+            if st.history_index.is_some() {
+                st.history_index = None;
+                st.buffer = st.saved_line.clone();
+                st.cursor = st.buffer.len();
+            }
+            EditOutcome::None
+        }
+        "reverse-search-history" => apply_edit_char(executor, st, '\x12'),
+        // Display-only and not-yet-owned machinery: consume the key.
+        _ => EditOutcome::None,
+    }
+}
+
+/// The built-in default dispatch (readline's factory keymap): the
+/// ESC-sequence stages and the control-char edit arms. Registered
+/// bindings are consulted first (dispatch_edit_key); this is the
+/// fallback every unbound or unresolvable key reaches.
+fn apply_default_edit_char(executor: &Executor, st: &mut EditState, c: char) -> EditOutcome {
     // ESC-sequence stages (see EditState::esc_stage).
     match st.esc_stage {
         1 => {
@@ -5251,6 +6025,152 @@ fn tty_fd_shows_hangup() -> bool {
     // process's own stdin descriptor.
     let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
     rc > 0 && (pfd.revents & (libc::POLLHUP | libc::POLLERR)) != 0
+}
+
+/// rubash#1722: readline's terminal ownership for one edited line on
+/// a Unix tty (rl_prep_terminal / rl_deprep_terminal,
+/// lib/readline/terminal.c): the saved termios is restored on
+/// `restore()`/drop, so the mode spans exactly the key-read loop.
+#[cfg(unix)]
+struct UnixTtyEditGuard {
+    saved: libc::termios,
+    raw: bool,
+    /// Bytes of a multi-byte UTF-8 char read so far (fd reads are one
+    /// byte at a time in VMIN=1 mode).
+    pending: Vec<u8>,
+}
+
+#[cfg(unix)]
+impl UnixTtyEditGuard {
+    fn acquire() -> Option<UnixTtyEditGuard> {
+        let mut saved: libc::termios = unsafe { std::mem::zeroed() };
+        if unsafe { libc::tcgetattr(0, &mut saved) } != 0 {
+            return None;
+        }
+        let mut raw_mode = saved;
+        raw_mode.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw_mode.c_iflag &= !(libc::IXON);
+        raw_mode.c_cc[libc::VMIN] = 1;
+        raw_mode.c_cc[libc::VTIME] = 0;
+        if unsafe { libc::tcsetattr(0, libc::TCSADRAIN, &raw_mode) } != 0 {
+            return None;
+        }
+        Some(UnixTtyEditGuard {
+            saved,
+            raw: true,
+            pending: Vec::new(),
+        })
+    }
+
+    fn restore(&mut self) {
+        if self.raw {
+            unsafe {
+                libc::tcsetattr(0, libc::TCSADRAIN, &self.saved);
+            }
+            self.raw = false;
+        }
+    }
+
+    /// Write one display frame to rl_outstream, which is stderr for
+    /// this reader.
+    fn write_bytes(&self, text: &str) {
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = err.write_all(text.as_bytes());
+        let _ = err.flush();
+    }
+
+    /// Read one key character. `Ok(None)` is fd-0 EOF; a read error
+    /// other than EINTR propagates (EINTR retries — the fd layer's
+    /// design lets the pending-signal queue dispatch at the next
+    /// command boundary).
+    fn next_key(&mut self) -> std::io::Result<Option<char>> {
+        loop {
+            if !self.pending.is_empty() {
+                match std::str::from_utf8(&self.pending) {
+                    Ok(text) => {
+                        let c = text.chars().next().expect("nonempty pending");
+                        self.pending.drain(..c.len_utf8());
+                        return Ok(Some(c));
+                    }
+                    Err(err) if err.error_len().is_some() => {
+                        // Not valid UTF-8: deliver the byte as its own
+                        // char (readline's 8-bit char treatment) and
+                        // resync on the following byte.
+                        let byte = self.pending[0];
+                        self.pending.drain(..1);
+                        return Ok(Some(char::from(byte)));
+                    }
+                    Err(_) => {
+                        // Incomplete sequence prefix: read more bytes.
+                    }
+                }
+            }
+            let mut byte = [0u8; 1];
+            let n = unsafe { libc::read(0, byte.as_mut_ptr() as *mut libc::c_void, 1) };
+            if n == 0 {
+                return Ok(None);
+            }
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            self.pending.push(byte[0]);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixTtyEditGuard {
+    fn drop(&mut self) {
+        self.restore();
+    }
+}
+
+/// rubash#1722: one repaint of the Unix tty edit line, readline's
+/// rl_redisplay shape (lib/readline/display.c): the common case — text
+/// inserted at the point, nothing else changed — emits ONLY the
+/// inserted text (the terminal already shows the rest of the line);
+/// an unchanged line emits nothing; anything else (motion, deletion,
+/// a widget rewrite) takes the full repaint
+/// (console_readline::redraw_line). `prev` carries the last painted
+/// (buffer, cursor) across the keys of one prompt.
+#[cfg(unix)]
+fn tty_redraw(
+    guard: &UnixTtyEditGuard,
+    prompt_tail: &str,
+    st: &EditState,
+    prev: &mut Option<(String, usize)>,
+) {
+    let frame = match prev.as_ref() {
+        Some((prev_buffer, prev_cursor))
+            if *prev_buffer == st.buffer && *prev_cursor == st.cursor =>
+        {
+            String::new()
+        }
+        Some((prev_buffer, prev_cursor)) => {
+            let pc = *prev_cursor;
+            let append_at_point = st.cursor > pc
+                && pc <= st.buffer.len()
+                && st.buffer.is_char_boundary(pc)
+                && st.buffer.is_char_boundary(st.cursor)
+                && st.buffer[..pc] == prev_buffer[..pc]
+                && st.buffer[st.cursor..] == prev_buffer[pc..];
+            if append_at_point {
+                st.buffer[pc..st.cursor].to_string()
+            } else {
+                crate::console_readline::redraw_line(prompt_tail, &st.buffer, st.cursor)
+            }
+        }
+        None => crate::console_readline::redraw_line(prompt_tail, &st.buffer, st.cursor),
+    };
+    *prev = Some((st.buffer.clone(), st.cursor));
+    if !frame.is_empty() {
+        guard.write_bytes(&frame);
+    }
 }
 
 /// Outcome of [`prompt_wait_for_input`].
@@ -5640,6 +6560,14 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // its only consumer — so a stale mark can never leak into a later
     // session in the same process.
     let termsig_death = executor.take_termsig_death_pending();
+    // rubash#2352: the EXIT trap's entry status under a termsig
+    // death — the value captured when the death was noted (the last
+    // command completed before the signal; trap.c:1036
+    // trap_saved_exit_value = last_command_exit_value), NOT this
+    // finish's 128+sig unwind status. Taken with the mark; a death
+    // noted without a capture (none should exist) falls back to the
+    // unwind status rather than inventing one.
+    let termsig_trap_status = executor.take_termsig_death_trap_status();
     // sig.c:621-622 gates the job hangup on SIGHUP reaching an
     // interactive (or comsub/procsub subshell) shell; a script shell
     // caught by its EXIT trap — and any shell dying by another
@@ -5656,7 +6584,17 @@ pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> 
     // wait_for; jobs.c:4723 maybe_print_job_notifications). This
     // runs before the EXIT trap below, matching GNU's order.
     let _ = executor.flush_job_notifications_at_stream_end();
-    let code = match executor.run_exit_trap_with_status(status) {
+    // rubash#2352: under a termsig death the trap runs with the
+    // captured pre-signal status; every other finish keeps the
+    // caller's status (a plain exit's status IS its trap entry
+    // status). The late-mark re-take below never re-runs the trap —
+    // GNU short-circuits a second terminating signal straight to
+    // kill_shell — so the capture belongs to this first take alone.
+    let trap_entry_status = match (termsig_death, termsig_trap_status) {
+        (Some(_), Some(saved)) => saved,
+        _ => status,
+    };
+    let code = match executor.run_exit_trap_with_status(trap_entry_status) {
         Ok(code) => code,
         Err(ExecuteError::ExitCode(code)) => code,
         Err(e) => {

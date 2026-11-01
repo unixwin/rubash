@@ -176,6 +176,302 @@ impl Executor {
         })
     }
 
+    /// rubash#2339: the `read -e`/`-E` editor acquisition — GNU
+    /// read.def:685-710 routes the read through edit_line when the
+    /// input descriptor is a terminal. Returns Some(result) when the
+    /// editor owned the acquisition (result mirrors the funnel: the
+    /// edited record, or None with the eof/timeout/interrupt flags
+    /// set), and None when the gate fails — edit was cleared by the
+    /// caller's circumstances exactly as read.def:489-497 clears it —
+    /// so the caller falls through to the raw transports untouched.
+    ///
+    /// The gate: no staged body may feed the read descriptor (a
+    /// heredoc/herestring IS the input, never a terminal), and the
+    /// descriptor must be the process's own stdin (or a `-u` dup of
+    /// it) with a real terminal behind it. A `< file`, a pipe, a
+    /// procsub or a `< /dev/tty` open all bind concrete endpoints and
+    /// stay on the raw path (the /dev/tty spelling is the known edge:
+    /// GNU would edit there; the endpoint cannot be told apart from
+    /// any other opened file here).
+    fn try_read_with_line_editor(
+        &mut self,
+        cmd: &CommandNode,
+        read_fd: Option<u32>,
+        silent: bool,
+        delimiter: char,
+        char_limit: Option<usize>,
+    ) -> Option<Option<String>> {
+        if matches!(read_fd, None | Some(0))
+            && (cmd.heredoc_body.is_some() || cmd.heredoc.is_some() || cmd.here_string.is_some())
+        {
+            return None;
+        }
+        let fd: i32 = match read_fd {
+            None | Some(0) => {
+                if self.fd_table.fd0_bound_away_from_process_stdin() {
+                    return None;
+                }
+                0
+            }
+            Some(n) => {
+                if !matches!(
+                    self.fd_table.read_endpoint(n),
+                    Some(FdReadEndpoint::InheritedProcessStdin)
+                ) {
+                    return None;
+                }
+                n as i32
+            }
+        };
+        let history: Vec<String> = self
+            .get_session_history()
+            .map(|history| history.borrow().entries.clone())
+            .unwrap_or_default();
+        let initial = self.read_edit_initial_text.as_deref().unwrap_or("");
+        let mut editor = crate::readline_editor::LineEditor::new(
+            initial,
+            history,
+            char_limit,
+            if delimiter == '\n' {
+                None
+            } else {
+                Some(delimiter)
+            },
+        );
+        let registry = self.shell_state.bind_registry.clone();
+        let mut kill_ring = registry.borrow().kill_ring.clone();
+        let outcome = self.pump_line_editor(&mut editor, &mut kill_ring, fd, silent);
+        registry.borrow_mut().kill_ring = kill_ring;
+        outcome
+    }
+
+    /// Repaint the edited line on stderr (readline's rl_redisplay
+    /// surface). Silent reads (-s) never repaint: the typed text must
+    /// not leak (the rs15/rs16 pins).
+    fn repaint_read_editor(&self, editor: &crate::readline_editor::LineEditor, clear: bool) {
+        use std::io::Write;
+        let prompt = self.read_edit_prompt.as_deref().unwrap_or("");
+        let mut stderr = std::io::stderr().lock();
+        if clear {
+            let _ = stderr.write_all(b"\x1b[H\x1b[2J");
+        }
+        let frame = crate::console_readline::redraw_line(prompt, editor.buffer(), editor.cursor());
+        let _ = stderr.write_all(frame.as_bytes());
+        let _ = stderr.flush();
+    }
+
+    /// Feed decoded characters into the editor until it ends the
+    /// session; returns the funnel-shaped outcome, or None when this
+    /// platform/fd has no terminal editor (gate failure — the caller
+    /// falls through to the raw transports).
+    #[cfg(unix)]
+    fn pump_line_editor(
+        &mut self,
+        editor: &mut crate::readline_editor::LineEditor,
+        kill_ring: &mut Vec<String>,
+        fd: i32,
+        silent: bool,
+    ) -> Option<Option<String>> {
+        use crate::readline_editor::{EditEnd, Feed};
+        if unsafe { libc::isatty(fd) } != 1 {
+            return None;
+        }
+        let _tty_guard = crate::readline_editor::TtyRawGuard::new(fd)?;
+        if !silent {
+            self.repaint_read_editor(editor, false);
+        }
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            // Slice discipline (the read loops' own): poll in short
+            // slices so an untrapped SIGINT and the -t deadline are
+            // honored while the editor waits (read.def's readline
+            // timeout/interrupt shape).
+            if self.take_read_sigint_abort() {
+                return Some(None);
+            }
+            if let Some(deadline) = self.read_deadline {
+                if std::time::Instant::now() >= deadline {
+                    self.read_timed_out = true;
+                    let partial = editor.buffer().to_string();
+                    if partial.is_empty() {
+                        return Some(None);
+                    }
+                    self.read_eof_no_delimiter = true;
+                    return Some(Some(partial));
+                }
+            }
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut pfd, 1, 50) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Some(self.read_editor_stream_eof(editor));
+            }
+            if ready == 0 {
+                continue;
+            }
+            if pfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 && pfd.revents & libc::POLLIN == 0
+            {
+                return Some(self.read_editor_stream_eof(editor));
+            }
+            let mut buf = [0u8; 4096];
+            let count = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+            if count < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Some(self.read_editor_stream_eof(editor));
+            }
+            if count == 0 {
+                return Some(self.read_editor_stream_eof(editor));
+            }
+            pending.extend_from_slice(&buf[..count as usize]);
+            let chars = drain_decoded_chars(&mut pending);
+            let mut clear = false;
+            let mut ended: Option<Option<String>> = None;
+            for c in chars {
+                match editor.feed(c, kill_ring) {
+                    Feed::Continue => {}
+                    Feed::ClearScreen => clear = true,
+                    Feed::End(EditEnd::Accepted(line)) => {
+                        if !silent {
+                            use std::io::Write;
+                            let _ = std::io::stderr().write_all(b"\n");
+                        }
+                        ended = Some(Some(line));
+                        break;
+                    }
+                    Feed::End(EditEnd::Eof) => {
+                        self.read_eof_no_delimiter = true;
+                        ended = Some(None);
+                        break;
+                    }
+                    Feed::End(EditEnd::EofPartial(partial)) => {
+                        self.read_eof_no_delimiter = true;
+                        ended = Some(Some(partial));
+                        break;
+                    }
+                }
+            }
+            if let Some(result) = ended {
+                return Some(result);
+            }
+            if !silent {
+                self.repaint_read_editor(editor, clear);
+            }
+        }
+    }
+
+    /// The Windows console pump: RawConsole delivers whole key events
+    /// as char batches (ENABLE_PROCESSED_INPUT is off in raw mode, so
+    /// Ctrl-C arrives as a 0x03 char rather than a signal — it aborts
+    /// the read like the Unix SIGINT path, 128+SIGINT, assigning
+    /// nothing). The deadline is checked between key events; a -t
+    /// expiry mid-wait resolves at the next keypress.
+    #[cfg(windows)]
+    fn pump_line_editor(
+        &mut self,
+        editor: &mut crate::readline_editor::LineEditor,
+        kill_ring: &mut Vec<String>,
+        fd: i32,
+        silent: bool,
+    ) -> Option<Option<String>> {
+        use crate::readline_editor::{EditEnd, Feed};
+        if fd != 0 {
+            return None;
+        }
+        let mut console = crate::console_readline::RawConsole::acquire()?;
+        if !silent {
+            self.repaint_read_editor(editor, false);
+        }
+        loop {
+            if let Some(deadline) = self.read_deadline {
+                if std::time::Instant::now() >= deadline {
+                    self.read_timed_out = true;
+                    let partial = editor.buffer().to_string();
+                    if partial.is_empty() {
+                        return Some(None);
+                    }
+                    self.read_eof_no_delimiter = true;
+                    return Some(Some(partial));
+                }
+            }
+            let batch = match console.next_key() {
+                Ok(Some(chars)) => chars,
+                Ok(None) => return Some(self.read_editor_stream_eof(editor)),
+                Err(_) => return Some(self.read_editor_stream_eof(editor)),
+            };
+            if batch.contains(&'\x03') {
+                self.read_interrupted_signal = Some(2);
+                return Some(None);
+            }
+            let mut clear = false;
+            let mut ended: Option<Option<String>> = None;
+            for c in batch {
+                match editor.feed(c, kill_ring) {
+                    Feed::Continue => {}
+                    Feed::ClearScreen => clear = true,
+                    Feed::End(EditEnd::Accepted(line)) => {
+                        if !silent {
+                            use std::io::Write;
+                            let _ = std::io::stderr().write_all(b"\n");
+                        }
+                        ended = Some(Some(line));
+                        break;
+                    }
+                    Feed::End(EditEnd::Eof) => {
+                        self.read_eof_no_delimiter = true;
+                        ended = Some(None);
+                        break;
+                    }
+                    Feed::End(EditEnd::EofPartial(partial)) => {
+                        self.read_eof_no_delimiter = true;
+                        ended = Some(Some(partial));
+                        break;
+                    }
+                }
+            }
+            if let Some(result) = ended {
+                return Some(result);
+            }
+            if !silent {
+                self.repaint_read_editor(editor, clear);
+            }
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn pump_line_editor(
+        &mut self,
+        _editor: &mut crate::readline_editor::LineEditor,
+        _kill_ring: &mut Vec<String>,
+        _fd: i32,
+        _silent: bool,
+    ) -> Option<Option<String>> {
+        None
+    }
+
+    /// The editor's input stream ended (read EOF, hangup, or a hard
+    /// read error): a non-empty buffer is the unterminated record
+    /// (read.def:949), an empty one is plain EOF.
+    fn read_editor_stream_eof(
+        &mut self,
+        editor: &crate::readline_editor::LineEditor,
+    ) -> Option<String> {
+        self.read_eof_no_delimiter = true;
+        let partial = editor.buffer();
+        if partial.is_empty() {
+            None
+        } else {
+            Some(partial.to_string())
+        }
+    }
+
     fn read_input_for_command_inner(
         &mut self,
         cmd: &CommandNode,
@@ -232,8 +528,14 @@ impl Executor {
         // ENOENT (`read -r z < /dev/fd/6` -> "/dev/fd/6: No such file or
         // directory", rc 1). The alias branch below stages an empty mirror,
         // which made `read` see plain EOF and return 1 with no diagnostic.
+        // rubash#2329: "closed" is judged at the spelling's own list
+        // position (redir.c:237 do_redirections): an entry earlier in
+        // THIS command's list may bind the source (a plain file, a
+        // materialized endpoint, or a chain ending at an ambient fd),
+        // and that binding — not the ambient table — decides whether
+        // the open dangles.
         if read_fd.is_none() {
-            for redirect in &cmd.redirects {
+            for (position, redirect) in cmd.redirects.iter().enumerate() {
                 if redirect.kind != crate::parser::RedirectKind::Input
                     || redirect.fd.unwrap_or(0) != 0
                     || redirect.fd_var.is_some()
@@ -244,11 +546,22 @@ impl Executor {
                 else {
                     continue;
                 };
-                if !super::redirection::dup_source_fd_open(
-                    &self.fd_table,
-                    source,
-                    &std::collections::HashMap::new(),
-                ) {
+                use crate::executor::external_setup::InListBinding;
+                let source_open = match self.in_list_binding(cmd, position, source) {
+                    InListBinding::File(_) | InListBinding::Other => true,
+                    InListBinding::AmbientOf(ambient_fd) => super::redirection::dup_source_fd_open(
+                        &self.fd_table,
+                        ambient_fd,
+                        &std::collections::HashMap::new(),
+                    ),
+                    InListBinding::Closed => false,
+                    InListBinding::NotBound => super::redirection::dup_source_fd_open(
+                        &self.fd_table,
+                        source,
+                        &std::collections::HashMap::new(),
+                    ),
+                };
+                if !source_open {
                     let mut stderr = Vec::new();
                     let _ = writeln!(
                         &mut stderr,
@@ -259,6 +572,19 @@ impl Executor {
                     let _ = self.write_redirected_command_stderr(cmd, &stderr);
                     return None;
                 }
+            }
+        }
+        // rubash#2339: `read -e`/`-E` with a terminal behind the read
+        // descriptor acquires through the line editor instead of the
+        // raw scanner (read.def:685-710 edit_line). The gate inside
+        // decides; on any non-terminal shape it declines and the
+        // transports below run untouched (read.def:489-497 clears
+        // edit/prompt/initial-text for non-tty input).
+        if self.read_edit_armed {
+            if let Some(result) =
+                self.try_read_with_line_editor(cmd, read_fd, silent, delimiter, char_limit)
+            {
+                return result;
             }
         }
         // An unnumbered heredoc is the last stdin redirect, so it overrides
@@ -611,15 +937,45 @@ impl Executor {
                 // `read x < /dev/fd/6` re-reads the first record
                 // instead of walking the shared offset.
                 if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                    // rubash#2329: the spelling resolves against the
+                    // descriptor as bound at THIS entry's position in
+                    // the command's own list (redir.c:237
+                    // do_redirections; the RF_DEVFD open, redir.c:603):
+                    // an in-list plain-file binding reopens THAT file
+                    // fresh — the ambient judgments below must not
+                    // speak for it (an ambient socket on the same
+                    // number is a different binding) — and a dup chain
+                    // ending at an ambient fd judges that fd instead.
+                    let position = cmd
+                        .redirects
+                        .iter()
+                        .rposition(|entry| {
+                            entry.fd.unwrap_or(0) == redirect.fd.unwrap_or(0)
+                                && entry.kind == redirect.kind
+                                && self.expand_redirect_target(entry) == expanded_target
+                        })
+                        .unwrap_or(cmd.redirects.len());
+                    use crate::executor::external_setup::InListBinding;
+                    let (judged_fd, in_list_path) = match self.in_list_binding(cmd, position, fd) {
+                        InListBinding::File(path) => (fd, Some(path)),
+                        InListBinding::AmbientOf(ambient_fd) => (ambient_fd, None),
+                        InListBinding::Other | InListBinding::Closed | InListBinding::NotBound => {
+                            (fd, None)
+                        }
+                    };
                     // rubash#2276: a socket endpoint's spelling-open
                     // fails ENXIO in GNU — decline the serve (the
                     // read reports no input, its failure shape; the
                     // dup machinery below is the `<&N` descriptor
                     // face and must keep streaming sockets).
-                    if self.fd_alias_spelling_open_error(fd).is_some() {
+                    if in_list_path.is_none()
+                        && self.fd_alias_spelling_open_error(judged_fd).is_some()
+                    {
                         return None;
                     }
-                    if let Some(path) = self.fd_alias_reopen_path(fd) {
+                    if let Some(path) =
+                        in_list_path.or_else(|| self.fd_alias_reopen_path(judged_fd))
+                    {
                         if let Ok(fresh) = FileFd::open_read(path) {
                             if let Some(scratch) = self.allocate_dynamic_fd() {
                                 self.fd_table.open_input(
@@ -2023,4 +2379,42 @@ impl Executor {
         }
         Some(output)
     }
+}
+
+/// Incremental UTF-8 decoding for the `read -e` editor pump
+/// (rubash#2339): complete characters are drained from the pending
+/// byte buffer, an incomplete trailing sequence stays buffered for
+/// the next chunk, and an invalid byte becomes U+FFFD (the editing
+/// surface is byte-tolerant in the REPL dispatcher's shape too).
+#[cfg(unix)]
+fn drain_decoded_chars(pending: &mut Vec<u8>) -> Vec<char> {
+    let mut out = Vec::new();
+    let mut consumed = 0;
+    while consumed < pending.len() {
+        match std::str::from_utf8(&pending[consumed..]) {
+            Ok(text) => {
+                out.extend(text.chars());
+                consumed = pending.len();
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    let text = std::str::from_utf8(&pending[consumed..consumed + valid])
+                        .expect("valid_up_to prefix is valid UTF-8");
+                    out.extend(text.chars());
+                    consumed += valid;
+                    continue;
+                }
+                match err.error_len() {
+                    Some(bad) => {
+                        out.push('\u{fffd}');
+                        consumed += bad;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+    pending.drain(..consumed);
+    out
 }

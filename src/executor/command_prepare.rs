@@ -436,8 +436,19 @@ impl Executor {
             return Ok(());
         }
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
-            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            // rubash#2369: an empty message is the silent att_noassign
+            // class — subst.c:8153's ASSIGN_DISALLOWED branch prints
+            // nothing for a noassign target (bind_variable_internal
+            // diagnoses only readonly), takes no print-time errexit
+            // exit (there is no report_error call) and never takes the
+            // POSIX fatal branch (subst.c:8156 requires readonly_p);
+            // it goes straight to the plain DISCARD below with the
+            // class-2 status.
+            let silent = message.is_empty();
+            if !silent {
+                let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
+                self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            }
             // rubash#402: the two arms leave different statuses behind.
             // GNU subst.c:8158-8166: a readonly target under `=`/`:=`
             // leaves last_command_exit_value = EX_BADUSAGE (2) before
@@ -455,7 +466,7 @@ impl Executor {
             // rubash#1542: `$?` before this arm overwrites it — the
             // status GNU's report_error would exit_shell with (below).
             let prev_status = self.exit_code;
-            let status = if matches!(message, "readonly variable" | "bad array subscript") {
+            let status = if matches!(message, "readonly variable" | "bad array subscript" | "") {
                 2
             } else {
                 1
@@ -467,8 +478,10 @@ impl Executor {
             // exits 1, nothing after runs; default keeps the DISCARD
             // contract — subshell exits with the status, script continues).
             // Only the readonly class is oracle-covered here; the positional
-            // arm keeps the historical status-1 discard.
-            if status == 2 && self.posix_assignment_failure_is_fatal() {
+            // arm keeps the historical status-1 discard. The silent
+            // noassign class is excluded (subst.c:8156 gates the POSIX
+            // branch on readonly_p).
+            if status == 2 && !silent && self.posix_assignment_failure_is_fatal() {
                 return Err(ExecuteError::ExitCode(1));
             }
             // rubash#1542: the diagnostic above is GNU's report_error
@@ -488,8 +501,10 @@ impl Executor {
             // exit_immediately_on_error — inside an eval/source
             // CMD_IGNORE_RETURN frame the diagnostic only prints, and the
             // DISCARD below carries the parse_and_execute catch's folded
-            // status (param_assign_discard_status).
-            if self.exit_immediately_on_error() {
+            // status (param_assign_discard_status). The silent noassign
+            // class prints no diagnostic, so there is no print-time
+            // exit to take (rubash#2369).
+            if !silent && self.exit_immediately_on_error() {
                 let code = self.param_assign_discard_status(status, prev_status);
                 self.exit_code = code;
                 // rubash#439: expansion error, not a failed command — no ERR trap.
@@ -897,8 +912,15 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
-            let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
-            self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            // rubash#2369: an empty message is the silent att_noassign
+            // class — no diagnostic line, no print-time errexit exit,
+            // no POSIX fatal branch; plain DISCARD, class-2 status
+            // (see the twin arm in execute_empty_words_command).
+            let silent = message.is_empty();
+            if !silent {
+                let line = format!("{}{}: {}\n", self.error_prefix(), name, message);
+                self.write_redirected_command_stderr(cmd, line.as_bytes())?;
+            }
             // Same GNU DISCARD class and same two-arm status split as
             // execute_empty_words_command above (rubash#402): readonly
             // target -> EX_BADUSAGE 2 (subst.c:8164); positional/special
@@ -907,7 +929,7 @@ impl Executor {
             // rubash#1542: same report_error errexit overlay as the
             // twin arm above — capture the pre-expansion `$?` first.
             let prev_status = self.exit_code;
-            let status = if matches!(message, "readonly variable" | "bad array subscript") {
+            let status = if matches!(message, "readonly variable" | "bad array subscript" | "") {
                 2
             } else {
                 1
@@ -919,16 +941,20 @@ impl Executor {
             // exits 1, nothing after runs; default keeps the DISCARD
             // contract — subshell exits with the status, script continues).
             // Only the readonly class is oracle-covered here; the positional
-            // arm keeps the historical status-1 discard.
-            if status == 2 && self.posix_assignment_failure_is_fatal() {
+            // arm keeps the historical status-1 discard. The silent
+            // noassign class is excluded (subst.c:8156 gates the POSIX
+            // branch on readonly_p).
+            if status == 2 && !silent && self.posix_assignment_failure_is_fatal() {
                 return Err(ExecuteError::ExitCode(1));
             }
             // rubash#1563: the print-time exit reads the DYNAMIC
             // exit_immediately_on_error — inside an eval/source
             // CMD_IGNORE_RETURN frame the diagnostic only prints, and the
             // DISCARD below carries the parse_and_execute catch's folded
-            // status (param_assign_discard_status).
-            if self.exit_immediately_on_error() {
+            // status (param_assign_discard_status). The silent noassign
+            // class prints no diagnostic, so there is no print-time
+            // exit to take (rubash#2369).
+            if !silent && self.exit_immediately_on_error() {
                 let code = self.param_assign_discard_status(status, prev_status);
                 self.exit_code = code;
                 // rubash#439: expansion error, not a failed command — no ERR trap.
@@ -3631,6 +3657,32 @@ impl Executor {
         // expansion does not reorder leading words).
         variable_expanded.words =
             self.expand_aliases_with_raw(&variable_expanded.words, original_raws);
+        // rubash#2410: alias VALUE text is re-lexed by GNU at parse time
+        // (parse.y push_string input stream), so a process substitution
+        // spelled by an alias value IS source syntax — but it reaches
+        // execution with no parse record, because expansion dropped the
+        // word metadata and the alias text was never parsed as a word.
+        // Record provenance for the alias-introduced leading words that
+        // carry a substitution, exactly as WordMetadata::new records a
+        // parsed word, so materialization serves them through the
+        // recorded-substitution arm instead of the text re-scan arm
+        // (which is now gated on parse provenance in
+        // command_with_process_substitution_files).
+        let introduced = self.alias_introduced_words.get();
+        for index in 0..introduced.min(variable_expanded.words.len()) {
+            let word = variable_expanded.words[index].clone();
+            let metadata = crate::parser::WordMetadata::new(index, word.clone(), word);
+            if metadata.process_substitutions.is_empty() {
+                continue;
+            }
+            variable_expanded
+                .word_metadata
+                .retain(|existing| existing.word_index != index);
+            variable_expanded
+                .process_substitutions
+                .extend(metadata.process_substitutions.iter().cloned());
+            variable_expanded.word_metadata.push(metadata);
+        }
         variable_expanded
     }
 
@@ -3812,6 +3864,9 @@ impl Executor {
         // them at entry, performs them inside the wraps, and
         // replays their snapshots before the wraps unwind.
         self.defer_fd_var_closes_for_function_call();
+        // rubash#2397: execute_cmd.c:4810-4813 — a function dispatch
+        // rolls this/last with this = NULL (the `Other` projection).
+        self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
         let result = self.execute_function(
             &function_name,
             &materialized_cmd.words[1..],

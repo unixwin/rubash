@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::expand_braced_ops::split_once_outside_subscript_str;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
@@ -424,13 +425,28 @@ impl Executor {
                             .unwrap_or_else(|| name.to_string())
                     });
                 let readonly = is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &target);
-                if (is_positional || readonly)
+                // GNU subst.c:8153 (parameter_brace_expand_rhs): the
+                // `=`/`:=` bind tests ASSIGN_DISALLOWED — an att_noassign
+                // target (variables.h:243) fails exactly like a readonly
+                // one (EX_BADUSAGE pre-set, expand_wdesc_error DISCARD)
+                // except that bind_variable_internal prints nothing for
+                // noassign (variables.c:3130/3152 diagnose only
+                // readonly). The empty message encodes that silent
+                // class: consumers skip the diagnostic line and keep
+                // the class-2 status (rubash#2369). Readonly is tested
+                // first — a user-marked readonly carrier reports
+                // err_readonly in GNU too.
+                let noassign = !readonly && is_noassign_bash_array(&target);
+                if (is_positional || readonly || noassign)
                     && self.parameter_assignment_required(name, require_non_empty)
                 {
                     if is_positional {
                         return Some((format!("${name}"), "cannot assign in this way"));
                     }
-                    return Some((target, "readonly variable"));
+                    if readonly {
+                        return Some((target, "readonly variable"));
+                    }
+                    return Some((target, ""));
                 }
             } else if let Some((name, require_non_empty)) = parse_special_assignment_operator(inner)
             {
@@ -591,6 +607,14 @@ impl Executor {
                 return None;
             }
             return Some(values.join(" "));
+        }
+        // GNU subst.c:10131: for the five dynamic stack arrays the
+        // operator fetch is element 0 of the live ARRAY object — NULL
+        // when the array has no element 0 (all five under `bash -c`
+        // before any function call), never a stored mirror's
+        // fabricated empty scalar (rubash#2334).
+        if let Some(fetch) = self.dynamic_stack_array_scalar(name) {
+            return fetch;
         }
         if is_shell_name(name) {
             return self
@@ -1438,10 +1462,11 @@ impl Executor {
                 .contains_key("__RUBASH_COMSUB_BODY")
     }
 
-    /// rubash#1563: enter a parse_and_execute body (an eval string or a
-    /// sourced file). Pushes the frame — GNU evalstring.c
-    /// parse_and_execute, reached from eval_builtin and from
-    /// evalfile.c source_file — and, when the invoking builtin was
+    /// rubash#1563: enter a parse_and_execute body (an eval string, a
+    /// sourced file, or the -c string — shell.c run_one_command runs
+    /// it through parse_and_execute too). Pushes the frame — GNU
+    /// evalstring.c parse_and_execute, reached from eval_builtin and
+    /// from evalfile.c source_file — and, when the invoking builtin was
     /// itself dispatched under CMD_IGNORE_RETURN (rubash's
     /// suppress_errexit raised at entry) outside a subshell environment,
     /// raises the errexit ignore frame for the body's duration
@@ -1450,7 +1475,7 @@ impl Executor {
     /// CMD_IGNORE_RETURN / CMD_COMMAND_BUILTIN). Returns the saved
     /// counters for exit_parse_and_execute_frame; every exit path of the
     /// body must restore them.
-    pub(crate) fn enter_parse_and_execute_frame(&mut self) -> (usize, usize) {
+    pub fn enter_parse_and_execute_frame(&mut self) -> (usize, usize) {
         let saved = (
             self.parse_and_execute_frames.len(),
             self.errexit_ignore_frame,
@@ -1463,7 +1488,7 @@ impl Executor {
         saved
     }
 
-    pub(crate) fn exit_parse_and_execute_frame(&mut self, saved: (usize, usize)) {
+    pub fn exit_parse_and_execute_frame(&mut self, saved: (usize, usize)) {
         self.parse_and_execute_frames.truncate(saved.0);
         self.errexit_ignore_frame = saved.1;
     }
@@ -1573,6 +1598,41 @@ impl Executor {
     /// body or a $(...) body is not an expansion start of THIS word
     /// (quote.tests:117 `echo \`echo '${'\```). Heredoc bodies keep the raw
     /// scan because quotes are literal there.
+    /// The nested-error verdict for the operator word of one `${...}`
+    /// span: GNU expands that word exactly when the operator selects it
+    /// (`-`/`=` when the parameter is unset, `:-`/`:=` when unset or
+    /// null, `+` when set, `:+` when set and non-null —
+    /// subst.c parameter_brace_expand / parameter_brace_expand_rhs), so
+    /// only then can an error inside the word fire. The `?`/`:?` message
+    /// word is NOT handled here: it is expanded by
+    /// parameter_brace_expand_error under its own rule, at the `:?`
+    /// check above. The operator is identified by the first split whose
+    /// left side is a valid parameter reference, which keeps
+    /// operator-shaped text inside a message or pattern from being
+    /// mistaken for the span's own operator (rubash#2343).
+    fn nested_operator_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+        for op in [":=", ":-", ":+", "=", "-", "+"] {
+            let Some((var_name, word)) = split_once_outside_subscript_str(inner, op) else {
+                continue;
+            };
+            if !is_parameter_error_name(var_name) {
+                continue;
+            }
+            let value = self.parameter_error_value(var_name);
+            let word_evaluated = match op {
+                ":=" | ":-" => value.as_deref().map(str::is_empty).unwrap_or(true),
+                "=" | "-" => value.is_none(),
+                ":+" => value.as_deref().is_some_and(|value| !value.is_empty()),
+                _ => value.is_some(),
+            };
+            if !word_evaluated {
+                return None;
+            }
+            return self.parameter_expansion_error_in_word(word);
+        }
+        None
+    }
+
     fn parameter_expansion_error_in_word_context(
         &self,
         word: &str,
@@ -2023,6 +2083,17 @@ impl Executor {
                     value.is_none()
                 };
                 if is_error {
+                    // GNU subst.c:8216-8230 parameter_brace_expand_error
+                    // expands the message word (expand_string) before it
+                    // reports; a `:?` failure inside that word is itself
+                    // fatal, pre-empts the outer report, and names the
+                    // INNER variable (rubash#2343: `${a:?${b:?inner}}`
+                    // reports `b: inner`, never `a: inner`).
+                    if !message.is_empty() {
+                        if let Some(nested) = self.parameter_expansion_error_in_word(message) {
+                            return Some(nested);
+                        }
+                    }
                     let message = if message.is_empty() {
                         if require_non_empty {
                             "parameter null or not set".to_string()
@@ -2042,6 +2113,16 @@ impl Executor {
                         Self::FATAL_PARAMETER_EXPANSION_STATUS,
                     ));
                 }
+            }
+            // GNU subst.c parameter_brace_expand: the word of a `-`/`+`/`=`
+            // family operator is expanded (parameter_brace_expand_rhs)
+            // exactly when the operator selects it, and a failure inside
+            // that word — a nested `${inner:?msg}` above all — is fatal
+            // and reported for the inner parameter (rubash#2343:
+            // `${a:-${b:?inner}}` with a unset reports `b: inner` and
+            // aborts; it never yields the message text as a value).
+            if let Some(nested) = self.nested_operator_word_error(inner) {
+                return Some(nested);
             }
             if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {
                 if length < 0 {
@@ -3289,6 +3370,13 @@ impl Executor {
             "-" => Some(self.shell_option_flags()),
             "0" => Some(self.script_name_value()),
             _ => {
+                // GNU subst.c:10131: the five dynamic stack arrays
+                // fetch element 0 of the live ARRAY object for the
+                // operator tests — NULL when it has no element 0
+                // (rubash#2334; see dynamic_stack_array_scalar).
+                if let Some(fetch) = self.dynamic_stack_array_scalar(name) {
+                    return fetch;
+                }
                 if let Some(value) = self.dynamic_parameter_value(name) {
                     return Some(value);
                 }

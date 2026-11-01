@@ -1,5 +1,31 @@
 use super::*;
 
+/// rubash#2329: the verdict of `Executor::in_list_binding` — what
+/// one fd is bound to by a command's own redirect list at a given
+/// position (GNU's single ordered walk, redir.c:237
+/// do_redirections).
+#[derive(Debug)]
+pub(in crate::executor) enum InListBinding {
+    /// Bound to a plain on-disk file at this session path; a
+    /// `/dev/fd/N` spelling open is a FRESH open of that path.
+    File(PathBuf),
+    /// Bound, but not to a plain file (heredoc body, process
+    /// substitution, socket, or a dup chain ending at a non-file
+    /// endpoint): the ambient table must NOT be consulted for
+    /// this fd — it holds a different binding.
+    Other,
+    /// Bound by a close entry: the descriptor dangles at this
+    /// position and a spelling open fails like an open of a
+    /// closed descriptor.
+    Closed,
+    /// Bound by a dup/spelling chain that ends at this fd, which
+    /// the list itself does not bind: resolve against the
+    /// ambient table for THAT fd.
+    AmbientOf(u32),
+    /// No list entry binds the fd: the ambient table governs.
+    NotBound,
+}
+
 #[derive(Debug, Default)]
 pub(in crate::executor) struct ProcessSubstitutionFiles {
     inputs: Vec<PathBuf>,
@@ -377,6 +403,118 @@ impl Executor {
     /// this scan replays the entries preceding the dup and opens
     /// the winning input binding. The opened description is stashed
     /// in `own_input_bindings` so the spawn stamps/pins the SAME
+    /// rubash#2329: what an fd is bound to by the entries of THIS
+    /// command's own redirect list before a given position. GNU
+    /// resolves a `/dev/fd/N` path spelling against the descriptor
+    /// as bound AT THAT LIST POSITION: do_redirections
+    /// (redir.c:237) is one ordered walk, and the spelling's
+    /// r_instruction performs an open of the aliased descriptor
+    /// (the RF_DEVFD spelling class, redir.c:603; the
+    /// non-HAVE_DEV_FD dup special case, redir.c:629). Appliers
+    /// that resolve a spelling must therefore consult the list
+    /// before the ambient fd table — the ambient table only knows
+    /// bindings installed by EARLIER commands.
+    pub(in crate::executor) fn in_list_binding(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+    ) -> InListBinding {
+        self.in_list_binding_depth(cmd, before, fd, 0)
+    }
+
+    fn in_list_binding_depth(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+        depth: u32,
+    ) -> InListBinding {
+        if depth > 32 {
+            return InListBinding::Other;
+        }
+        for position in (0..before).rev() {
+            let entry = &cmd.redirects[position];
+            // {var} bindings land in the fd table before dispatch;
+            // the ambient table is their service face.
+            if entry.fd_var.is_some() {
+                continue;
+            }
+            let binds_fd = match entry.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => matches!(fd, 1 | 2),
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString
+                | crate::parser::RedirectKind::ReadWrite => entry.fd.unwrap_or(0) == fd,
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => entry.fd.unwrap_or(1) == fd,
+                _ => false,
+            };
+            if !binds_fd {
+                continue;
+            }
+            match entry.kind {
+                crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::CloseOutput => return InListBinding::Closed,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString => {
+                    return InListBinding::Other
+                }
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target) {
+                        return InListBinding::Closed;
+                    }
+                    let Some((source_fd, _)) = redirect_target_fd_and_move(&target) else {
+                        return InListBinding::Other;
+                    };
+                    if source_fd == fd {
+                        return InListBinding::Other;
+                    }
+                    return match self.in_list_binding_depth(cmd, position, source_fd, depth + 1) {
+                        InListBinding::NotBound => InListBinding::AmbientOf(source_fd),
+                        verdict => verdict,
+                    };
+                }
+                _ => {
+                    let target = self.expand_redirect_target(entry);
+                    if is_closed_redirect_target(&target) {
+                        return InListBinding::Closed;
+                    }
+                    if let Some(alias_fd) = redirect_target_fd(&target) {
+                        // This entry itself spells another fd: the
+                        // binding is that fd's binding at THIS
+                        // entry's position.
+                        if alias_fd == fd {
+                            return InListBinding::Other;
+                        }
+                        return match self.in_list_binding_depth(cmd, position, alias_fd, depth + 1)
+                        {
+                            InListBinding::NotBound => InListBinding::AmbientOf(alias_fd),
+                            verdict => verdict,
+                        };
+                    }
+                    if crate::special_paths::is_net_redirect_target(&target)
+                        || target.starts_with("<(")
+                        || target.starts_with(">(")
+                    {
+                        return InListBinding::Other;
+                    }
+                    let path = self
+                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    return InListBinding::File(path);
+                }
+            }
+        }
+        InListBinding::NotBound
+    }
+
     /// description at N — one description, shared offset, like
     /// GNU's dup2. Returns None when no earlier entry binds N
     /// readably (the caller keeps its EBADF error).
@@ -459,14 +597,41 @@ impl Executor {
                         // the spawn stamps this one description at
                         // N and a same-list `<&N` dup shares it,
                         // exactly GNU's open-then-dup2 shape.
-                        if let Some(path) = self.fd_alias_reopen_path(alias_fd) {
+                        //
+                        // rubash#2329: the descriptor GNU opens is
+                        // the one bound AT THIS LIST POSITION
+                        // (redir.c:237) — when this command's own
+                        // earlier entries bound M, the in-list
+                        // binding decides and the ambient table
+                        // (which holds other commands' bindings)
+                        // must not be consulted for M.
+                        let ambient_fd = match self.in_list_binding(cmd, position, alias_fd) {
+                            InListBinding::File(path) => {
+                                if let Ok(fresh) = FileFd::open_read(path) {
+                                    self.own_input_bindings.insert(fd, fresh.clone());
+                                    return Some(fresh);
+                                }
+                                return None;
+                            }
+                            InListBinding::Closed => return None,
+                            InListBinding::Other => {
+                                // Bound in-list to a materialized
+                                // endpoint (heredoc body, procsub):
+                                // the replay resolves it directly.
+                                return self.own_input_binding_before(cmd, alias_fd, position);
+                            }
+                            InListBinding::AmbientOf(source_fd) => source_fd,
+                            InListBinding::NotBound => alias_fd,
+                        };
+                        if let Some(path) = self.fd_alias_reopen_path(ambient_fd) {
                             if let Ok(fresh) = FileFd::open_read(path) {
                                 self.own_input_bindings.insert(fd, fresh.clone());
                                 return Some(fresh);
                             }
                         }
-                        let endpoint = self.fd_table.read_endpoint(alias_fd)?;
-                        return self.endpoint_as_own_input_binding(fd, alias_fd, endpoint, &target);
+                        let endpoint = self.fd_table.read_endpoint(ambient_fd)?;
+                        return self
+                            .endpoint_as_own_input_binding(fd, ambient_fd, endpoint, &target);
                     }
                     let path = self
                         .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
@@ -1025,6 +1190,23 @@ impl Executor {
         let fold_is_ours = self.pending_stdin_fold.is_none();
         let (mut cmd, mut process_substitutions) =
             self.command_with_process_substitution_files(cmd)?;
+        // rubash#2396: GNU execute_cmd.c:4909-4917 — with autocd set,
+        // an interactive simple command whose first word names a
+        // directory (and which resolved to neither a builtin nor a
+        // function, or every dispatch funnel would have claimed it
+        // before reaching the disk-command entry) is rewritten to
+        // `cd -- <words...>` and run through the builtin path. The
+        // attempt sits after process-substitution materialization so
+        // the rewritten command's words are final.
+        if let Some(status) = self.try_autocd(&cmd)? {
+            self.exit_code = status;
+            if fold_is_ours {
+                self.settle_pending_stdin_fold();
+            }
+            self.undo_child_fd_var_redirects();
+            self.finish_process_substitutions(process_substitutions)?;
+            return Ok(());
+        }
         self.apply_default_external_stdin_file(&mut cmd, &mut process_substitutions)?;
         let result = self.execute_external_inner(&cmd);
         if fold_is_ours {
@@ -1036,6 +1218,84 @@ impl Executor {
         self.undo_child_fd_var_redirects();
         self.finish_process_substitutions(process_substitutions)?;
         result
+    }
+
+    /// GNU execute_cmd.c:4909-4917 (autocd): when the shopt is set
+    /// and the shell is interactive (the same `interactive`
+    /// projection as the exit banner/check), a first word that
+    /// `is_dirname` accepts rewrites the command to `cd -- <words>`
+    /// and dispatches it as a builtin — a `cd` FUNCTION wins over
+    /// the builtin (`func = find_function ("cd")`, goto run_builtin).
+    /// The `cd -- ...` line is printed to stderr through
+    /// xtrace_print_word_list (words, 0) at the transform site,
+    /// whether or not xtrace is on. Returns the cd dispatch's status
+    /// when the transform fired. The command's leading assignments
+    /// were classified for a disk command by the materializer and are
+    /// not re-bound as the builtin's tempenv — a known residual.
+    pub(in crate::executor) fn try_autocd(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<Option<i32>, ExecuteError> {
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "autocd") {
+            return Ok(None);
+        }
+        // GNU's condition is the C `interactive` global; reuse the
+        // exit path's projection of it (job_builtins).
+        if !self.exit_job_check_applies() {
+            return Ok(None);
+        }
+        let Some(word) = cmd.words.first() else {
+            return Ok(None);
+        };
+        if word.is_empty() || !self.autocd_is_dirname(word) {
+            return Ok(None);
+        }
+        let mut cd_cmd = cmd.clone();
+        let mut words = Vec::with_capacity(cmd.words.len() + 2);
+        words.push("cd".to_string());
+        words.push("--".to_string());
+        words.extend(cmd.words.iter().cloned());
+        cd_cmd.words = words;
+        let rendered = cd_cmd
+            .words
+            .iter()
+            .map(|word| super::prompt_expansion::xtrace_quote_word(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("{rendered}");
+        // The rewritten command is a builtin dispatch, not a disk
+        // command: undo the disk-class marks execute_external set on
+        // entry, and roll this/last like run_builtin (the cd builtin
+        // or, for a cd function, GNU's NULL — both project to Other).
+        self.external_dispatch_ran.set(false);
+        self.note_builtin_dispatch(crate::shell::BuiltinDispatchClass::Other);
+        if self.shell_state.functions.contains_key("cd") {
+            self.execute_function("cd", &cd_cmd.words[1..], &cd_cmd)?;
+            Ok(Some(self.exit_code))
+        } else {
+            Ok(Some(self.execute_cd(&cd_cmd)?))
+        }
+    }
+
+    /// GNU execute_cmd.c:4451-4462 `is_dirname`: the PATH search
+    /// result is tested when the search finds one (findcmd.c
+    /// search_for_command — a word containing a slash is its own
+    /// search result); otherwise the raw word, resolved against the
+    /// shell's cwd, is tested with file_isdir.
+    fn autocd_is_dirname(&self, word: &str) -> bool {
+        if !word.contains('/') {
+            if let Some(found) =
+                crate::executor::path::find_user_command(word, &self.shell_state.env_vars)
+            {
+                return std::fs::metadata(&found)
+                    .map(|md| md.is_dir())
+                    .unwrap_or(false);
+            }
+        }
+        let anchored = self.session_path(shell_path_to_windows(word, &self.shell_state.env_vars));
+        std::fs::metadata(&anchored)
+            .map(|md| md.is_dir())
+            .unwrap_or(false)
     }
 
     pub(in crate::executor) fn command_with_process_substitution_files(
@@ -1140,7 +1400,31 @@ impl Executor {
                 substitutions
             };
             if substitutions.is_empty() {
-                if metadata.is_none() {
+                // rubash#2410: the standalone arm re-scans the EXPANDED
+                // word text, but GNU recognizes a process substitution
+                // only while scanning the word's own characters at
+                // expansion time (subst.c:11365-11385
+                // expand_word_internal '<'/'>' cases, via
+                // extract_process_subst, subst.c:1311); a value that
+                // arrives through parameter expansion is appended as
+                // data and never re-scanned. Expansion drops
+                // word_metadata for most commands, so a data word whose
+                // VALUE spells `<(...)` (e.g. `x='<(echo hi)'; echo
+                // "$x"`) reached this arm with no metadata and was
+                // materialized as if it were source syntax. Gate the
+                // arm on parse provenance: the node's substitution
+                // aggregate is cloned through expansion, and a genuine
+                // word-position substitution is recorded there with no
+                // redirect fd and either this word index or this exact
+                // source word as its target. A data word has no record
+                // and stays literal.
+                if metadata.is_none()
+                    && rewritten.process_substitutions.iter().any(|substitution| {
+                        substitution.redirect_fd.is_none()
+                            && (substitution.word_index == Some(word_index)
+                                || substitution.target == rewritten.words[word_index])
+                    })
+                {
                     self.materialize_standalone_process_substitution_word(
                         &mut rewritten.words[word_index],
                         &mut files,
@@ -2446,6 +2730,91 @@ impl Executor {
         Ok(word)
     }
 
+    /// Materialize a for/select list word's process substitutions
+    /// from the substitutions the PARSER recorded for the word (the
+    /// quote-aware scan of the raw word text), splicing each span's
+    /// produced pathname into the word BEFORE any cooked expansion
+    /// runs on it.
+    ///
+    /// GNU subst.c:12582 expand_words expands each parser word on
+    /// its own, and expand_word_internal's `<`/`>` case
+    /// (subst.c:11369-11391) extracts the body verbatim
+    /// (extract_process_subst) and materializes it during that one
+    /// scan — a span inside double quotes never materializes, and a
+    /// span that only appears in an expansion RESULT (a variable's
+    /// value) is data, never a substitution. The for-list path used
+    /// to run expand_word FIRST and then re-scan the cooked string
+    /// with materialize_assignment_process_substitutions: quote
+    /// removal had already stripped the span's quoting (a quoted
+    /// `"<(...)"` materialized), the re-scan re-lexed the body and
+    /// joined its de-escaped token values (backslashes eaten), and
+    /// value-borne `<(...)` text materialized (rubash#2390). Splicing
+    /// the recorded spans up front makes the word an opaque produced
+    /// word for the cooked pass: its spans are already pathnames.
+    ///
+    /// Registration discipline mirrors
+    /// materialize_assignment_process_substitutions_from_raw
+    /// (rubash#1523): a span is registered and run only when its
+    /// splice lands in THIS word — a recorded span whose text is not
+    /// present (a brace-expansion sibling piece carries the other
+    /// spans of the original word) is skipped untouched, and a
+    /// duplicate record of an already-spliced span misses from the
+    /// advanced cursor and is skipped, so no body ever runs twice.
+    pub(in crate::executor) fn materialize_for_list_process_substitutions(
+        &mut self,
+        word: &str,
+        substitutions: &[crate::parser::ProcessSubstitution],
+    ) -> Result<String, ExecuteError> {
+        let mut word = word.to_string();
+        let mut cursor = 0usize;
+        for substitution in substitutions {
+            let Some((start, end)) = Self::assignment_procsub_splice_range(
+                &word,
+                cursor,
+                &substitution.target,
+                &substitution.operator,
+                &substitution.source,
+            ) else {
+                continue;
+            };
+            if substitution.output {
+                let path = self.empty_process_substitution_temp()?;
+                let word_form = self.process_substitution_output_fd_word(&path);
+                self.insert_assignment_output_process_substitution(
+                    word_form.clone(),
+                    substitution.source.clone(),
+                );
+                word.replace_range(start..end, &word_form);
+                cursor = start + word_form.len();
+            } else {
+                // rubash#1952: stream first (see
+                // materialize_process_substitution_word); the
+                // collected form below is the spawn-failure fallback.
+                if let Some(word_form) =
+                    self.process_substitution_child_fd_word(&substitution.source, None)
+                {
+                    word.replace_range(start..end, &word_form);
+                    cursor = start + word_form.len();
+                    continue;
+                }
+                let Some(output) = self.process_substitution_output_bytes(&substitution.source)
+                else {
+                    continue;
+                };
+                // rubash#1691: keep the carrier path — the per-command
+                // finish removes it (see the field docs); discarding
+                // it here leaked the file in $TMPDIR for good.
+                let carrier = self.write_process_substitution_temp_bytes(&output)?;
+                self.assignment_input_process_substitution_files
+                    .push(carrier);
+                let word_form = self.process_substitution_fd_word(&output);
+                word.replace_range(start..end, &word_form);
+                cursor = start + word_form.len();
+            }
+        }
+        Ok(word)
+    }
+
     fn apply_default_external_stdin_file(
         &mut self,
         rewritten: &mut CommandNode,
@@ -3100,10 +3469,19 @@ impl Executor {
                 ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
             }
         }
+        // rubash#2356: same state-channel spill as the `&` respawn —
+        // the composed environment can carry a single entry past
+        // MAX_ARG_STRLEN (the fork-context stamp scales with the
+        // function table); oversized entries ride the state file and
+        // the child's import splices them back.
+        let argv_bytes =
+            exe.as_os_str().len() + spawn_args.iter().map(|arg| arg.len() + 1).sum::<usize>();
+        let (env_entries, state_temp) =
+            self.spill_respawn_env_entries(env_map.into_iter().collect(), argv_bytes);
         let mut process = std::process::Command::new(&exe);
         process
             .args(&spawn_args)
-            .envs(&env_map)
+            .envs(env_entries)
             // rubash#2195: fds 1-2 follow the spawn plan (the
             // prefix state at the substitution's own redirect);
             // fd 0 stays the payload pipe — GNU's
@@ -3118,7 +3496,15 @@ impl Executor {
         for dup in parent_side_dups {
             crate::fd::close_handle(dup);
         }
-        let mut child = spawn_result?;
+        let mut child = match spawn_result {
+            Ok(child) => child,
+            Err(error) => {
+                if let Some(path) = &state_temp {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(error.into());
+            }
+        };
         let pid = child.id();
         adopt_orphan_console(pid);
         if let Some(mut stdin) = child.stdin.take() {
@@ -3346,6 +3732,119 @@ impl Executor {
     /// reading it (rubash::invocation::materialize_command_file).
     pub(in crate::executor) fn respawn_command_temp_path(&self) -> Result<PathBuf, ExecuteError> {
         self.shell_temp_path("rubash-respawn-cmd", ".sh")
+    }
+
+    pub(in crate::executor) fn respawn_state_temp_path(&self) -> Result<PathBuf, ExecuteError> {
+        self.shell_temp_path("rubash-respawn-state", ".bin")
+    }
+
+    /// rubash#2356: move oversized respawn-environment entries out of
+    /// the execve-bound environment into the state-file transport
+    /// (`crate::invocation::RESPAWN_STATE_FILE_ENV_KEY`). Applied by
+    /// every fork-shaped respawn builder (background `&`, coproc,
+    /// both process-substitution forms) to its fully composed entry
+    /// list, so NO state payload — function spans, positional
+    /// windows, attribute lists, exported values — rides a single
+    /// argv/env string past the OS per-string cap, and the aggregate
+    /// stays inside a conservative share of ARG_MAX. Two spill rules,
+    /// both by size class, never by key:
+    ///
+    /// * an entry whose `key=value` rendering exceeds
+    ///   [`RESPAWN_ENV_ENTRY_LIMIT`] bytes spills (MAX_ARG_STRLEN is
+    ///   128 KiB on Linux and CreateProcessW caps the whole
+    ///   environment block at 32767 units on Windows, so 8 KiB keeps
+    ///   every inline entry far from either cap);
+    /// * while the remaining inline total (plus `argv_bytes`)
+    ///   exceeds [`RESPAWN_ENV_TOTAL_LIMIT`], the largest remaining
+    ///   entry spills — many medium entries must not reassemble the
+    ///   same wall in aggregate.
+    ///
+    /// Returns the entries to spawn with (the state-file pointer
+    /// appended last, so it wins over any ambient copy) and the temp
+    /// file path when a file was written. The child removes the file
+    /// after reading it (Executor::new import); on spawn failure the
+    /// CALLER removes it, exactly the `__RUBASH_CMD_FILE` contract.
+    /// If the temp file cannot be written the entries go inline
+    /// unchanged — the pre-transport behavior — rather than failing a
+    /// spawn that might still fit.
+    ///
+    /// Ordering: spilled entries are spliced into the child's table
+    /// after the inline ones at import, in their original relative
+    /// order. Duplicate-key adjudication therefore still resolves to
+    /// the last writer for every pattern the builders produce: a
+    /// key's instances are either all inline (stamps and overrides
+    /// are small) or the oversized tail instance rides the file.
+    pub(in crate::executor) fn spill_respawn_env_entries(
+        &self,
+        entries: Vec<(String, String)>,
+        argv_bytes: usize,
+    ) -> (Vec<(String, String)>, Option<PathBuf>) {
+        const RESPAWN_ENV_ENTRY_LIMIT: usize = 8192;
+        const RESPAWN_ENV_TOTAL_LIMIT: usize = 1 << 20;
+        fn entry_size(entry: &(String, String)) -> usize {
+            // key + '=' + value + NUL, as execve accounts it.
+            entry.0.len() + entry.1.len() + 2
+        }
+        // A stale pointer never rides: the only legitimate value is
+        // the one this call is about to mint.
+        let entries: Vec<(String, String)> = entries
+            .into_iter()
+            .filter(|entry| entry.0 != crate::invocation::RESPAWN_STATE_FILE_ENV_KEY)
+            .collect();
+        let mut spilled_indexes: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry_size(entry) > RESPAWN_ENV_ENTRY_LIMIT)
+            .map(|(index, _)| index)
+            .collect();
+        let spilled_bytes: usize = spilled_indexes
+            .iter()
+            .map(|&index| entry_size(&entries[index]))
+            .sum();
+        let mut inline_total =
+            argv_bytes + entries.iter().map(entry_size).sum::<usize>() - spilled_bytes;
+        while inline_total > RESPAWN_ENV_TOTAL_LIMIT {
+            let Some((index, _)) = entries
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !spilled_indexes.contains(index))
+                .max_by_key(|(_, entry)| entry_size(entry))
+            else {
+                break;
+            };
+            inline_total -= entry_size(&entries[index]);
+            spilled_indexes.push(index);
+        }
+        if spilled_indexes.is_empty() {
+            return (entries, None);
+        }
+        spilled_indexes.sort_unstable();
+        let spilled: Vec<(String, String)> = spilled_indexes
+            .iter()
+            .map(|&index| entries[index].clone())
+            .collect();
+        let file = self.respawn_state_temp_path().ok().and_then(|path| {
+            fs::write(
+                &path,
+                crate::invocation::encode_respawn_state_entries(&spilled),
+            )
+            .ok()
+            .map(|()| path)
+        });
+        let Some(path) = file else {
+            return (entries, None);
+        };
+        let mut kept: Vec<(String, String)> = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !spilled_indexes.contains(index))
+            .map(|(_, entry)| entry)
+            .collect();
+        kept.push((
+            crate::invocation::RESPAWN_STATE_FILE_ENV_KEY.to_string(),
+            path.to_string_lossy().into_owned(),
+        ));
+        (kept, Some(path))
     }
 
     /// Resolve `$TMPDIR` (or the platform default) into a unique,
@@ -3673,6 +4172,81 @@ fn sync_ordered_redirect_targets(command: &mut CommandNode) {
 // verbatim copy of the same DFA.
 
 /// The file behind [`closed_stdin`], for the route seam: a
+#[cfg(test)]
+mod respawn_state_spill_tests {
+    use super::Executor;
+
+    fn entry(key: &str, value_len: usize) -> (String, String) {
+        (key.to_string(), "v".repeat(value_len))
+    }
+
+    #[test]
+    fn small_entries_stay_inline() {
+        let executor = Executor::new();
+        let entries = vec![entry("A", 10), entry("B", 100)];
+        let (kept, file) = executor.spill_respawn_env_entries(entries.clone(), 100);
+        assert_eq!(kept, entries);
+        assert!(file.is_none());
+    }
+
+    #[test]
+    fn oversized_entry_rides_the_state_file() {
+        let executor = Executor::new();
+        let entries = vec![entry("SMALL", 10), entry("HUGE", 200_000)];
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 100);
+        let path = file.expect("a state file must be written");
+        assert_eq!(kept.len(), 2, "small entry + pointer: {kept:?}");
+        assert_eq!(kept[0].0, "SMALL");
+        assert_eq!(
+            kept[1].0,
+            crate::invocation::RESPAWN_STATE_FILE_ENV_KEY,
+            "the pointer is appended last"
+        );
+        let bytes = std::fs::read(&path).expect("state file readable");
+        let _ = std::fs::remove_file(&path);
+        let decoded =
+            crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
+        assert_eq!(decoded, vec![entry("HUGE", 200_000)]);
+    }
+
+    #[test]
+    fn aggregate_budget_spills_largest_first() {
+        let executor = Executor::new();
+        // 300 entries of ~7 KiB each: none crosses the per-entry
+        // limit, but together they cross the aggregate budget.
+        let entries: Vec<(String, String)> = (0..300)
+            .map(|i| (format!("K{i:03}"), "v".repeat(7000)))
+            .collect();
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 0);
+        let path = file.expect("a state file must be written");
+        let inline: usize = kept.iter().map(|(k, v)| k.len() + v.len() + 2).sum();
+        assert!(
+            inline <= (1 << 20),
+            "inline env stays within the aggregate budget: {inline}"
+        );
+        let bytes = std::fs::read(&path).expect("state file readable");
+        let _ = std::fs::remove_file(&path);
+        let decoded =
+            crate::invocation::decode_respawn_state_entries(&bytes).expect("state file decodes");
+        assert_eq!(kept.len() - 1 + decoded.len(), 300, "no entry is lost");
+    }
+
+    #[test]
+    fn stale_pointer_is_dropped_not_carried() {
+        let executor = Executor::new();
+        let entries = vec![
+            (
+                crate::invocation::RESPAWN_STATE_FILE_ENV_KEY.to_string(),
+                "/planted/path".to_string(),
+            ),
+            entry("A", 10),
+        ];
+        let (kept, file) = executor.spill_respawn_env_entries(entries, 0);
+        assert!(file.is_none());
+        assert_eq!(kept, vec![entry("A", 10)]);
+    }
+}
+
 /// write-only null device on unix (reads fail EBADF, exactly the
 /// closed-fd child contract), the plain null device elsewhere.
 pub(in crate::executor) fn route_closed_stdin_file() -> Option<File> {

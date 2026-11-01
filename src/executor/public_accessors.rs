@@ -387,6 +387,15 @@ impl Executor {
         self.termsig_death_pending.take()
     }
 
+    /// rubash#2352: take-style read of the EXIT-trap entry status
+    /// captured alongside the termsig-death mark (see
+    /// Executor::termsig_death_trap_status); finish_shell takes it
+    /// with the mark and runs the trap with this status instead of
+    /// the 128+sig unwind status.
+    pub(crate) fn take_termsig_death_trap_status(&mut self) -> Option<i32> {
+        self.termsig_death_trap_status.take()
+    }
+
     /// Tier A signal face (Session API RFC section 6.4; PLAN row
     /// 11, M-3): queue `signal` for this process through the
     /// engine's own delivery machinery — the same queue the
@@ -1240,6 +1249,14 @@ impl Executor {
 
     pub fn is_shell_option(&self, name: &str) -> bool {
         crate::builtins::set::is_shell_option(name)
+    }
+
+    /// The current on/off state of a `set -o` option (the state twin
+    /// of [`Executor::set_shell_option`]): startup-mode decisions
+    /// (shell.c run_startup_files' posixly_correct test) read the
+    /// mode the invocation layer armed through this face.
+    pub fn shell_option_enabled(&self, name: &str) -> bool {
+        crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, name)
     }
 
     pub fn set_shopt_option(&mut self, name: &str, enabled: bool) -> bool {

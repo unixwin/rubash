@@ -1003,23 +1003,7 @@ impl Printer {
         redirect: &Redirect,
         heredoc_index: usize,
     ) -> HereDocRedirect {
-        if let Some(info) = cmd.heredoc_redirects.get(heredoc_index) {
-            return info.clone();
-        }
-        HereDocRedirect {
-            fd: redirect.fd,
-            fd_var: redirect.fd_var.clone(),
-            operator: redirect.operator.clone(),
-            operator_metadata: redirect.operator_metadata.clone(),
-            delimiter: redirect.target.clone(),
-            delimiter_metadata: redirect.target_metadata.clone(),
-            strip_tabs: redirect.operator.ends_with("<<-"),
-            quoted_delimiter: false,
-            here_string: false,
-            body: cmd.heredoc.clone(),
-            body_carrier: None,
-            gather_line: cmd.heredoc_gather_line,
-        }
+        heredoc_redirect_info(cmd, redirect, heredoc_index)
     }
 
     fn collect_redirects(&self, cmd: &CommandNode) -> Vec<Redirect> {
@@ -1236,7 +1220,37 @@ impl Printer {
     }
 }
 
-fn heredoc_header(info: &HereDocRedirect) -> String {
+/// The HereDocRedirect record for the `heredoc_index`-th HereDoc
+/// redirect of `cmd`: the parallel `heredoc_redirects` store when it
+/// has the entry, else a record synthesized from the redirect itself
+/// plus the legacy body fields. Shared by the parser-side printer and
+/// the executor's respawn text renderer (rubash#2388) so both correlate
+/// bodies to redirects the same way.
+pub(crate) fn heredoc_redirect_info(
+    cmd: &CommandNode,
+    redirect: &Redirect,
+    heredoc_index: usize,
+) -> HereDocRedirect {
+    if let Some(info) = cmd.heredoc_redirects.get(heredoc_index) {
+        return info.clone();
+    }
+    HereDocRedirect {
+        fd: redirect.fd,
+        fd_var: redirect.fd_var.clone(),
+        operator: redirect.operator.clone(),
+        operator_metadata: redirect.operator_metadata.clone(),
+        delimiter: redirect.target.clone(),
+        delimiter_metadata: redirect.target_metadata.clone(),
+        strip_tabs: redirect.operator.ends_with("<<-"),
+        quoted_delimiter: false,
+        here_string: false,
+        body: cmd.heredoc.clone(),
+        body_carrier: None,
+        gather_line: cmd.heredoc_gather_line,
+    }
+}
+
+pub(crate) fn heredoc_header(info: &HereDocRedirect) -> String {
     let mut prefix = String::new();
     if let Some(var) = &info.fd_var {
         prefix.push_str(&format!("{{{var}}}"));
@@ -1251,7 +1265,7 @@ fn heredoc_header(info: &HereDocRedirect) -> String {
     }
 }
 
-fn heredoc_body_text(cmd: &CommandNode, info: &HereDocRedirect) -> String {
+pub(crate) fn heredoc_body_text(cmd: &CommandNode, info: &HereDocRedirect) -> String {
     let body = info
         .body
         .clone()

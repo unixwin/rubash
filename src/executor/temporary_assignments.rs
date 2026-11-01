@@ -293,6 +293,16 @@ impl Executor {
                     Some(capture_var_attrs(&self.shell_state.env_vars, target)),
                 ));
             }
+            // GNU variables.c:3589 assign_in_env: an ASSIGN_DISALLOWED
+            // target (att_noassign carrier, resolved through namerefs)
+            // makes assign_in_env return 0 — the binding never enters
+            // the temporary environment at all: no store, no export,
+            // and the command still runs with its own status
+            // (rubash#2369). The previous-value snapshots above stay
+            // (restoring them is a no-op).
+            if self.assignment_target_is_noassign(resolved_target.as_deref().unwrap_or(base_name)) {
+                continue;
+            }
             // GNU variables.c:3564-3578 assign_in_env: when the name does not
             // resolve (find_variable NULL — e.g. a nameref with an empty or
             // invalid cell), the tempenv binding falls back to the literal
@@ -610,6 +620,54 @@ impl Executor {
                     continue;
                 }
             }
+            // rubash#2424: a scalar tempenv bind of DIRSTACK takes the
+            // same tempvar shadow as any other name. GNU assign_in_env
+            // (variables.c:3536) creates the binding in temporary_env and
+            // never calls bind_variable, so assign_dirstack never runs:
+            // the directory stack is untouched for the window, every
+            // read sees the scalar shadow, and the snapshot restore
+            // reinstalls the dynamic face whole. The permanent-bind
+            // funnel below instead routes through the #2408 setter
+            // intercept, which makes the bind a silent no-op and leaves
+            // the dynamic face visible in the window. (Compound words
+            // took the literal-scalar splice branch above; this block
+            // is the scalar/append remainder.)
+            {
+                let (_, append) = assignment_name_and_append(name);
+                let target = resolved_target
+                    .clone()
+                    .unwrap_or_else(|| base_name.to_string());
+                if target == "DIRSTACK" && !name.contains('[') {
+                    if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK") {
+                        let line = format!("{}{target}: readonly variable\n", self.error_prefix());
+                        self.emit_assignment_diag(line);
+                        assignments_failed = true;
+                        continue;
+                    }
+                    let window_value = if append {
+                        format!("{}{}", self.tempenv_scalar_view("DIRSTACK"), expanded_value)
+                    } else {
+                        expanded_value.clone()
+                    };
+                    self.shell_state
+                        .env_vars
+                        .insert(target.clone(), window_value.clone());
+                    let _ = self
+                        .shell_state
+                        .variables
+                        .set(target.clone(), crate::shell::Variable::scalar(window_value));
+                    set_var_attrs(
+                        &mut self.shell_state.env_vars,
+                        &target,
+                        VarAttrs {
+                            exported: true,
+                            ..VarAttrs::default()
+                        },
+                    );
+                    self.tempenv_names.push(target);
+                    continue;
+                }
+            }
             // GNU variables.c bind_variable (ASS_MKLOCAL tempenv path): a
             // failed bind (readonly violation via ASSIGN_DISALLOWED, expansion
             // error) reports and keeps going through the REST of the operand
@@ -653,6 +711,21 @@ impl Executor {
     /// element 0 of an indexed array, empty for an assoc array,
     /// the value itself for a scalar.
     pub(in crate::executor) fn tempenv_scalar_view(&self, target: &str) -> String {
+        // DIRSTACK's cell is a materialization artifact; its scalar
+        // view for an append is the live stack's element 0 (GNU
+        // make_variable_value with ASS_APPEND reads the array's
+        // element 0, and get_dirstack's element 0 is the working
+        // directory) — never the encoded storage text (rubash#2424).
+        // A live shadow owns the name instead and falls through to
+        // the generic arms, which read the shadowing cell.
+        if target == "DIRSTACK" && !self.dirstack_shadowed() {
+            return crate::builtins::pushd::stack_value(
+                &self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                0,
+            )
+            .unwrap_or_default();
+        }
         match self.shell_state.variables.get(target).map(|v| &v.value) {
             Some(crate::shell::ShellValue::IndexedArray(entries)) => {
                 entries.get(&0).cloned().unwrap_or_default()
@@ -1044,6 +1117,28 @@ impl Executor {
             Some(command) => format!("{}{command}: ", self.error_prefix()),
             None => self.error_prefix(),
         }
+    }
+
+    /// GNU variables.h:243 ASSIGN_DISALLOWED, the noassign half: the
+    /// bind target of `name` — nameref-resolved, subscript stripped —
+    /// carries att_noassign (variables.c:1839 FUNCNAME, 1886 GROUPS,
+    /// 1889 BASH_ARGC, 1890 BASH_ARGV, 1892 BASH_SOURCE, 1893
+    /// BASH_LINENO). The plain-statement funnel swallows such binds
+    /// silently (bind_variable_internal, variables.c:3130/3152), so
+    /// callers whose GNU counterpart inspects the bind result consult
+    /// this instead: read (read.def:1156 bind_read_variable), for /
+    /// select (execute_cmd.c:3082/3585), mapfile (mapfile.def:205),
+    /// printf -v (printf.def:114), make_local_variable
+    /// (variables.c:2654), assign_in_env (variables.c:3589) and the
+    /// parameter-brace `=`/`:=` rhs (subst.c:8153) all fail the
+    /// operation when the target is disallowed (rubash#2369).
+    pub(in crate::executor) fn assignment_target_is_noassign(&self, name: &str) -> bool {
+        let base = name.split('[').next().unwrap_or(name);
+        let resolved = self
+            .nameref_target_name(base)
+            .unwrap_or_else(|| base.to_string());
+        let resolved_base = resolved.split('[').next().unwrap_or(resolved.as_str());
+        is_noassign_bash_array(resolved_base)
     }
 
     pub(in crate::executor) fn apply_shell_assignment(
@@ -1511,15 +1606,27 @@ impl Executor {
         if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
             return true;
         }
-        // PIPESTATUS is the one noassign-list array whose cell is an
-        // ordinary bindable variable in GNU (variables.c:6291 gates
-        // only the status WRITER on the cell shape): a scalar or
-        // compound bind creates a real cell the writer then respects,
-        // so it takes the generic store below and the caller's
+        if base_name == "DIRSTACK" && !dynamic_unbound && !self.dirstack_shadowed() {
+            // GNU variables.c:1612 assign_dirstack: every whole-
+            // variable bind of DIRSTACK — scalar, compound, append —
+            // routes through the dirstack setter, never through array
+            // storage (rubash#2408). A plain local or tempenv shadow
+            // owns the name instead: the bind lands on the shadowing
+            // binding like any ordinary variable (rubash#2424).
+            return self.apply_dirstack_assignment(&value, append, false);
+        }
+        // GNU bind_variable_internal (variables.c:3130/3152): a plain
+        // bind to an att_noassign variable is a silent no-op — the
+        // entry is returned unchanged and no diagnostic prints (only
+        // readonly prints err_readonly). The carriers (FUNCNAME,
+        // GROUPS, BASH_ARGC, BASH_ARGV, BASH_SOURCE, BASH_LINENO) keep
+        // the swallow: their storage is the frame stack / dynamic
+        // getters. PIPESTATUS is not a carrier (variables.c:6299-6301
+        // make_new_array_variable carries no att_noassign), so it
+        // takes the generic store below and the caller's
         // note_pipestatus_assignment derives the shape from the
-        // stored form (rubash#1364). The stack arrays (BASH_ARGC &
-        // friends) keep the swallow: their storage is the frame stack.
-        if is_noassign_bash_array(base_name) && base_name != "PIPESTATUS" && !append {
+        // stored form (rubash#1364, rubash#2369).
+        if is_noassign_bash_array(base_name) && !append {
             return true;
         }
         let compound_assignment = value.starts_with(COMPOUND_ASSIGNMENT_MARKER);
