@@ -515,12 +515,25 @@ impl FdTable {
         // at-exec capture in the fd layer can (crate::fd::
         // std_fd_closed_at_exec). A fd 1 genuinely redirected from
         // /dev/null was open at exec and keeps the Stdout endpoint.
-        // Scoped to fd 1: fd 0's readers and fd 2's diagnostic
-        // routing have their own inherited-state machinery, and a
-        // born-closed fd 2 is observably identical (diagnostics are
-        // lost either way).
+        // Scoped to fd 1 here: fd 2's diagnostic routing has its
+        // own inherited-state machinery, and a born-closed fd 2 is
+        // observably identical (diagnostics are lost either way).
+        // fd 0 is seeded immediately below (rubash#2503).
         if crate::fd::std_fd_closed_at_exec(1) {
             table.close(1);
+        }
+        // rubash#2503: fd 0 gets the same birth seed. The machinery
+        // the #2476 scoping note set fd 0 aside for already
+        // predicates on the closed bit (function_stdin_is_command_
+        // source requires !is_closed(0)), and with the entry closed
+        // the readers behave as GNU's do on the closed descriptor —
+        // the faces an in-session `exec 0<&-` already produced:
+        // read reports `read: 0: read error: Bad file descriptor`
+        // (read.def:911) instead of a silent EOF, and the stdin
+        // consumers surface the descriptor's EBADF instead of
+        // reading the runtime's /dev/null stand-in.
+        if crate::fd::std_fd_closed_at_exec(0) {
+            table.close(0);
         }
         table
     }

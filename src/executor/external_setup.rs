@@ -895,6 +895,19 @@ impl Executor {
                         // the fd truly absent: GNU's dup2 then fails
                         // EBADF and the open never happens.
                         None => {
+                            // rubash#2503: a SELF-dup of a closed fd
+                            // (`cat <&0` with fd 0 closed) never
+                            // reaches GNU's dup2 — redir.c:1151
+                            // gates the whole dup apply on
+                            // redir_fd != redirector — so it is not
+                            // a redirection failure: the child keeps
+                            // fd 0's closed state and its own reads
+                            // fail (coreutils cat reports the EBADF
+                            // itself, exit 1).
+                            if fd == redirect.fd.unwrap_or(0) && self.fd_table.is_closed(fd) {
+                                process.stdin(closed_stdin());
+                                return Ok(());
+                            }
                             if let Some(file_fd) = self.own_numbered_input_binding(cmd, fd, &target)
                             {
                                 let dup = crate::fd::duplicate_handle(file_fd.handle)?;

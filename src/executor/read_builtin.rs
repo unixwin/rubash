@@ -2291,7 +2291,24 @@ impl Executor {
 
         if read_fd.is_none() {
             if let Some(fd) = redirected_input_fd(self, cmd) {
-                if !self.read_fd_is_available(cmd, fd) {
+                // rubash#2503: a SELF-dup winner (`read x <&0`) never
+                // reaches GNU's dup2 — redir.c:1151 gates the whole
+                // dup apply on redir_fd != redirector — so a closed
+                // fd 0 is not a redirection failure here: the read
+                // runs and reports the descriptor at read time
+                // (read.def:911, `read: 0: read error: Bad file
+                // descriptor`), the same verdict the unredirected
+                // read on the closed fd 0 reaches. A dup from a
+                // DIFFERENT closed fd keeps the redirection failure
+                // above (GNU's dup2 EBADF, redir.c:1193).
+                let self_dup = cmd.redirect_in.as_deref().is_some_and(|redirect| {
+                    let expanded = self.expand_redirect_target(redirect);
+                    redirect.fd.unwrap_or(0) == fd
+                        && expanded.starts_with('&')
+                        && redirect_target_fd_and_move(&expanded)
+                            .is_some_and(|(source, _)| source == fd)
+                });
+                if !self_dup && !self.read_fd_is_available(cmd, fd) {
                     let _ = writeln!(
                         &mut stderr,
                         "{}{fd}: Bad file descriptor",
