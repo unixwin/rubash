@@ -1110,17 +1110,19 @@ impl Executor {
                         output.push_str("$[");
                         output.push_str(&expression);
                     } else {
-                        // rubash#2441: extraction found no closing `]`
-                        // in the string handed to this expansion level —
-                        // GNU reports `bad substitution: no closing `]'`
-                        // and discards the command (subst.c
-                        // extract_delimited_string failure site). A
-                        // heredoc walk names the whole body; any other
-                        // walk names its string through the failing span.
+                        // rubash#2441/#2227: extraction found no closing
+                        // `]` in the string handed to this expansion
+                        // level — GNU reports `bad substitution: no
+                        // closing `]'` and discards the command (subst.c
+                        // extract_delimited_string failure site,
+                        // subst.c:1505). A heredoc walk names the whole
+                        // body; any other walk names its double-quoted
+                        // segment through the failing span.
                         let string = if heredoc {
                             word.to_string()
                         } else {
-                            dollar_bracket_no_closing_string(word, &expression)
+                            let tail: String = chars.clone().collect();
+                            dollar_bracket_no_closing_string(word, &expression, &tail)
                         };
                         self.no_closing_bracket_verdict(&string);
                     }

@@ -92,8 +92,15 @@ echo "rc=$?"
 }
 
 /// Controls that already agreed with GNU and must not regress:
-/// subscript brackets nest, a quoted subscript key works unquoted,
-/// and a nested `$[...]` evaluates inside out.
+/// subscript brackets nest and a nested `$[...]` evaluates inside
+/// out. The s2 line is NOT a control: inside double quotes the bare
+/// `"` after `a[` closes the segment (subst.c:1014 skip_double_quoted
+/// has no `$[...]` case), so GNU rejects the line outright —
+/// `bad substitution: no closing ']' in s2: $[a[` — and the command
+/// is discarded while the script continues. (Expectation corrected
+/// 2026-11-02: the pin as written for #2373 expected `s2: 21`, which
+/// contradicts the GNU oracle; the s2 line's verdict is the #2441
+/// segment semantics, verified byte-for-byte against GNU 5.3.20.)
 #[test]
 fn issue2227_nested_and_subscript_controls() {
     let case = make_case("controls");
@@ -107,7 +114,11 @@ echo "bt: $[`echo 5`+1]"
 "#,
     );
     assert_eq!(code, Some(0), "script failed: {stderr}");
-    assert_eq!(stdout, "s1: 21\ns2: 21\nn: 3\nbt: 6\n");
+    assert_eq!(stdout, "s1: 21\nn: 3\nbt: 6\n");
+    assert!(
+        stderr.contains("bad substitution: no closing `]' in s2: $[a["),
+        "unexpected stderr: {stderr}"
+    );
 }
 
 /// Face 2 of the issue: an unterminated `$[` inside a double-quoted

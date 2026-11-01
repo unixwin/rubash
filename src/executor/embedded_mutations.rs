@@ -1371,7 +1371,8 @@ impl Executor {
                         let string = if heredoc {
                             word.to_string()
                         } else {
-                            dollar_bracket_no_closing_string(word, &expression)
+                            let tail: String = chars.clone().collect();
+                            dollar_bracket_no_closing_string(word, &expression, &tail)
                         };
                         self.no_closing_bracket_verdict(&string);
                     }
@@ -2814,6 +2815,7 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
                 | crate::executor::markers::DATA_DQUOTE
                 | crate::executor::markers::DATA_SQUOTE
                 | crate::executor::markers::DATA_BACKTICK
+                | crate::executor::markers::PROTECTED_ESCAPED_SQUOTE
         )
     }) {
         return (expression, true);
@@ -2825,7 +2827,16 @@ pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
         .replace(crate::executor::markers::ASSIGN_DATA_BACKTICK, "`")
         .replace(crate::executor::markers::DATA_DQUOTE, "\"")
         .replace(crate::executor::markers::DATA_SQUOTE, "'")
-        .replace(crate::executor::markers::DATA_BACKTICK, "`");
+        .replace(crate::executor::markers::DATA_BACKTICK, "`")
+        // rubash#2227: the assignment-RHS channel re-encodes DATA_SQUOTE
+        // (0x17) as PROTECTED_ESCAPED_SQUOTE (0x16) before the walk
+        // (expand_embedded_parameters_preserving_escaped_single_quotes),
+        // so a plain source `'` inside a `$[...]` body reaches the
+        // collector spelled 0x16 — it arms as a single-quote unit and
+        // decodes back to `'` exactly like 0x17 (a source `\'` arrives
+        // as `\`+0x16 and the backslash-pass arm consumes the pair
+        // first, so the escaped spelling never reaches the unit arm).
+        .replace(crate::executor::markers::PROTECTED_ESCAPED_SQUOTE, "'");
     (decoded, true)
 }
 
@@ -2850,8 +2861,7 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
     loop {
         if segment_bounded
             && unit_depth == 0
-            && (pending == Some('"')
-                || (pending.is_none() && chars.peek() == Some(&'"')))
+            && (pending == Some('"') || (pending.is_none() && chars.peek() == Some(&'"')))
         {
             return (expression, false);
         }
@@ -2877,10 +2887,15 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
                     None => return (expression, false),
                 }
             }
-            '\''
-            | crate::executor::markers::DATA_SQUOTE
-            | crate::executor::markers::ASSIGN_DATA_SQUOTE
-            | crate::executor::markers::ASSIGN_HOISTED_SQUOTE => {
+            '\'' | crate::executor::markers::DATA_SQUOTE
+                // rubash#2227: the assignment-RHS channel re-encodes 0x17
+                // as PROTECTED_ESCAPED_SQUOTE before the walk, so a plain
+                // source `'` inside the body arrives spelled 0x16 — same
+                // unit semantics (a source `\'` keeps its backslash and
+                // is passed by the backslash arm above before this).
+                | crate::executor::markers::PROTECTED_ESCAPED_SQUOTE
+                | crate::executor::markers::ASSIGN_DATA_SQUOTE
+                | crate::executor::markers::ASSIGN_HOISTED_SQUOTE => {
                 expression.push(ch);
                 loop {
                     match chars.next() {
@@ -2894,6 +2909,7 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
                             if matches!(
                                 next,
                                 '\'' | crate::executor::markers::DATA_SQUOTE
+                                    | crate::executor::markers::PROTECTED_ESCAPED_SQUOTE
                                     | crate::executor::markers::ASSIGN_DATA_SQUOTE
                                     | crate::executor::markers::ASSIGN_HOISTED_SQUOTE
                             ) {
