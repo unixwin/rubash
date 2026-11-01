@@ -180,6 +180,40 @@ struct ExternalStdioPlan {
     /// Capture generation `capture_reader`'s pipe was materialized for
     /// (meaningful only when `capture_reader` is Some).
     capture_generation: usize,
+    /// Fds among 1/2 whose final slot is closed (a `>&-` binding, an
+    /// ambient `exec >&-`, a moved-from source): GNU redir.c
+    /// r_close_this leaves them CLOSED in the child, so the spawn
+    /// inherits the descriptor and a pre_exec close removes it — a
+    /// null device would let the child's writes succeed invisibly
+    /// (rubash#2378).
+    closed_fds: Vec<u32>,
+}
+
+/// Registers a pre_exec close of the given std fds on a spawn, so the
+/// child execs with those descriptors genuinely closed and its writes
+/// fail EBADF inside the child (redir.c r_close_this; rubash#2378). A
+/// child that reports its own write failures (dash's printf `I/O
+/// error` on the surviving stream) is observable behavior of GNU's
+/// model; a capture pipe or /dev/null in that slot would swallow the
+/// writes silently instead.
+#[cfg(unix)]
+fn attach_child_stdio_closes(process: &mut Command, closed_fds: &[u32]) {
+    if closed_fds.is_empty() {
+        return;
+    }
+    let fds: Vec<std::os::unix::io::RawFd> = closed_fds
+        .iter()
+        .map(|fd| *fd as std::os::unix::io::RawFd)
+        .collect();
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        process.pre_exec(move || {
+            for fd in &fds {
+                libc::close(*fd);
+            }
+            Ok(())
+        });
+    }
 }
 
 impl Executor {
@@ -208,6 +242,7 @@ impl Executor {
                     stderr,
                     capture_reader,
                     capture_generation,
+                    closed_fds,
                 } = plan;
                 if let Some(stdio) = stdout {
                     process.stdout(stdio);
@@ -215,6 +250,10 @@ impl Executor {
                 if let Some(stdio) = stderr {
                     process.stderr(stdio);
                 }
+                #[cfg(unix)]
+                attach_child_stdio_closes(process, &closed_fds);
+                #[cfg(not(unix))]
+                let _ = &closed_fds;
                 self.external_stdio_outcome = Some(match capture_reader {
                     Some(reader) => ExternalStdioOutcome::CapturePipe(reader, capture_generation),
                     None => ExternalStdioOutcome::LiveHandles,
@@ -224,18 +263,43 @@ impl Executor {
             None => self.external_stdio_outcome = None,
         }
         // GNU redir.c r_close_this (do_redirection_internal): a closed fd
-        // 1/2 stays closed in the child, its write() fails EBADF, and the
-        // shell reports `write error: Bad file descriptor` with status 1
-        // (builtins/common.c:320-334 sh_chkwrite folds the failed write
-        // into the status). The child itself writes into these pipes; the
-        // parent routes the bytes through the ordered state
-        // (write_external_captured_streams), which produces the diagnostic
-        // and the status. A null-device Stdio instead would silently
-        // swallow the writes (fd_redirects
-        // c_external_command_reports_write_error_for_closed_stdout).
+        // 1/2 stays closed in the child, its write() fails EBADF inside
+        // the child, and the shell reports NOTHING — the child's own
+        // exit status stands (sh_chkwrite, builtins/common.c:320-334,
+        // folds only a BUILTIN's flush failure into a status; a foreign
+        // child's failed writes are invisible to the parent). The closed
+        // fd therefore stays closed in the child here too (inherit +
+        // pre_exec close): piping it would let the child's writes
+        // succeed into the pipe, and the child would never report the
+        // failure GNU's child reports on its surviving stream (a dash
+        // printf's `I/O error` line). The OPEN sibling keeps the capture
+        // pipe; the parent routes its drained bytes through the ordered
+        // state (write_external_captured_streams) in foreign-drain mode,
+        // which discards anything bound for a closed target and likewise
+        // leaves the child's status alone (rubash#2378).
         if self.external_output_fds_closed(cmd) {
-            process.stdout(Stdio::piped());
-            process.stderr(Stdio::piped());
+            let (closed1, closed2) = self.external_final_closed_stdio(cmd);
+            #[cfg(unix)]
+            {
+                let mut closes = Vec::new();
+                if closed1 {
+                    closes.push(1u32);
+                } else {
+                    process.stdout(Stdio::piped());
+                }
+                if closed2 {
+                    closes.push(2u32);
+                } else {
+                    process.stderr(Stdio::piped());
+                }
+                attach_child_stdio_closes(process, &closes);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (closed1, closed2);
+                process.stdout(Stdio::piped());
+                process.stderr(Stdio::piped());
+            }
             self.external_stdio_piped_fallback = true;
             return Ok(());
         }
@@ -258,6 +322,58 @@ impl Executor {
                 redirect.fd.map_or(true, |fd| fd <= 2)
                     && matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
             })
+    }
+
+    /// Final closed state of fd 1/2 for `cmd`: the ambient fd-table
+    /// state walked through the command's own redirects in order (GNU
+    /// do_redirections applies them left to right and only the final
+    /// binding reaches the child — a `>&-` an earlier `>file` reopens
+    /// is not closed, and vice versa). Only the open/closed bit is
+    /// tracked per fd; handle identity stays with the ordered routes.
+    fn external_final_closed_stdio(&self, cmd: &CommandNode) -> (bool, bool) {
+        use crate::parser::RedirectKind;
+        let mut state: std::collections::HashMap<u32, bool> = std::collections::HashMap::from([
+            (
+                1,
+                self.fd_table.has_entry(1) && !self.fd_table.is_open_for_write(1),
+            ),
+            (
+                2,
+                self.fd_table.has_entry(2) && !self.fd_table.is_open_for_write(2),
+            ),
+        ]);
+        for redirect in &cmd.redirects {
+            let fd = redirect.fd.unwrap_or(1);
+            match redirect.kind {
+                RedirectKind::CloseOutput => {
+                    state.insert(fd, true);
+                }
+                RedirectKind::Output | RedirectKind::Append | RedirectKind::ClobberOutput => {
+                    state.insert(fd, is_closed_redirect_target(&redirect.target));
+                }
+                RedirectKind::DuplicateOutput => {
+                    if is_closed_redirect_target(&redirect.target) {
+                        state.insert(fd, true);
+                    } else if let Some((source, move_source)) =
+                        redirect_target_fd_and_move(&redirect.target)
+                    {
+                        let source_closed = state.get(&source).copied().unwrap_or(false);
+                        state.insert(fd, source_closed);
+                        if move_source && source != fd {
+                            state.insert(source, true);
+                        }
+                    } else {
+                        // `>&word` opens the word: the fd ends open.
+                        state.insert(fd, false);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (
+            state.get(&1).copied().unwrap_or(false),
+            state.get(&2).copied().unwrap_or(false),
+        )
     }
 
     /// GNU redir.c do_redirection_internal for an external child's fd 1/2:
@@ -496,13 +612,12 @@ impl Executor {
                     slots.insert(2, stderr);
                 }
                 RedirectKind::CloseOutput => {
-                    // Closing fd 1/2 must keep the legacy ordered-capture
-                    // route: the child's write to the closed fd FAILS
-                    // (EBADF) and the replay surfaces "write error: Bad
-                    // descriptor" with status 1 in the parent — a null-device
-                    // Stdio would silently swallow the writes instead
-                    // (fd_redirects c_external_command_reports_write_error_
-                    // for_closed_stdout).
+                    // Closing fd 1/2 declines the plan: the legacy route
+                    // owns it, keeping the fd closed in the child (its
+                    // writes fail EBADF there; the shell reports nothing
+                    // and the child's status stands — rubash#2378). A
+                    // null-device Stdio here would silently swallow the
+                    // writes instead.
                     if fd <= 2 {
                         return Ok(None);
                     }
@@ -752,11 +867,35 @@ impl Executor {
         };
         let stdout = realize(&stdout_slot, true)?;
         let stderr = realize(&stderr_slot, false)?;
+        // rubash#2378: a Null fd 1/2 slot is a CLOSED descriptor in GNU
+        // (an ambient `exec >&-` binding, a moved-from dup source) —
+        // realize it as inherit + pre_exec close, not as a null device
+        // whose writes would silently succeed in the child.
+        #[cfg(unix)]
+        let (stdout, stderr, closed_fds) = {
+            let mut closed_fds = Vec::new();
+            let stdout = if matches!(stdout_slot, ExternalStdioSlot::Null) {
+                closed_fds.push(1u32);
+                None
+            } else {
+                stdout
+            };
+            let stderr = if matches!(stderr_slot, ExternalStdioSlot::Null) {
+                closed_fds.push(2u32);
+                None
+            } else {
+                stderr
+            };
+            (stdout, stderr, closed_fds)
+        };
+        #[cfg(not(unix))]
+        let closed_fds: Vec<u32> = Vec::new();
         Ok(Some(ExternalStdioPlan {
             stdout,
             stderr,
             capture_reader,
             capture_generation,
+            closed_fds,
         }))
     }
 
@@ -1157,10 +1296,12 @@ impl Executor {
     /// state (route_builtin_buffered_output / apply_ordered_output_
     /// redirects) so the bytes land where the command's `>&N` dups point —
     /// the fd table's live bindings — with the plain fd-1/fd-2 defaults
-    /// only when the walk declines. The closed-output shapes report the
-    /// sh_chkwrite `write error: Bad file descriptor` through the same
-    /// ordered state instead (the child's writes cannot reach a closed fd,
-    /// so the routing outcome IS the observable behavior, status 1).
+    /// only when the walk declines. The routing runs in foreign-drain
+    /// mode: bytes bound for a closed target are discarded silently,
+    /// because in GNU the child's write to that closed fd failed inside
+    /// the child and the shell reports nothing (rubash#2378) — the
+    /// sh_chkwrite `write error` verdict belongs to builtins, whose own
+    /// buffered route keeps it.
     pub(in crate::executor) fn write_external_captured_streams(
         &mut self,
         cmd: &CommandNode,

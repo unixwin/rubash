@@ -981,12 +981,61 @@ fn dollar_paren_end(chars: &[char], open: usize) -> usize {
     chars.len()
 }
 
-/// End index of a `$[...]` body opened at `open` (the `[`).
+/// End index of a `$[...]` body opened at `open` (the `[`). The span rule
+/// is GNU's extraction machine (subst.c:1361 extract_delimited_string via
+/// subst.c:1301 extract_arithmetic_subst), not plain bracket counting: a
+/// backslash or CTLESC passes the next character, quote/backquote units
+/// are skipped whole, and nested `[` / `$[` openers nest (rubash#2374).
+/// An unterminated span runs to the end of input.
 fn dollar_bracket_end(chars: &[char], open: usize) -> usize {
     let mut depth = 1usize;
     let mut index = open + 1;
     while index < chars.len() {
         match chars[index] {
+            // subst.c:1420-1425: backslash/CTLESC pass the next char.
+            // DATA_BACKSLASH does not pass: it is one already-quoted
+            // backslash unit, so the char after it delimits freely —
+            // the same reading the shared collector makes, so the two
+            // scans agree on where the span ends (rubash#2374).
+            '\\' | '\u{11}' => index += 2,
+            '\'' | crate::executor::markers::DATA_SQUOTE => {
+                index += 1;
+                while index < chars.len()
+                    && chars[index] != '\''
+                    && chars[index] != crate::executor::markers::DATA_SQUOTE
+                {
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            '"'
+            | '`'
+            | crate::executor::markers::DATA_DQUOTE
+            | crate::executor::markers::DATA_BACKTICK => {
+                let closers: &[char] =
+                    if matches!(chars[index], '`' | crate::executor::markers::DATA_BACKTICK) {
+                        &['`', crate::executor::markers::DATA_BACKTICK]
+                    } else {
+                        &['"', crate::executor::markers::DATA_DQUOTE]
+                    };
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' | '\u{11}' => index += 2,
+                        ch if closers.contains(&ch) => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'[') => {
+                depth += 1;
+                index += 2;
+            }
             '[' => {
                 depth += 1;
                 index += 1;

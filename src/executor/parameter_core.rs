@@ -112,9 +112,19 @@ impl Executor {
                 // below); a live unbraced `$name` mixes fine — the walker
                 // expands it while the converted backslashes ride as data.
                 let rhs_owned;
+                // `$[...]` bodies are nested-parse syntax of the same
+                // class as the `$(`/`${`/backtick bodies excluded
+                // below: the extraction (subst.c:1301) reads the
+                // body's backslashes as pass structure, so re-spelling
+                // them as data carriers makes a passed `]`/`[` read
+                // as a plain character — `$[1\]]` in an
+                // assignment-shaped argument word closed at the first
+                // `]` and `$[1\[2]` nested instead of erroring the way
+                // GNU's extraction does (rubash#2374).
                 let rhs = if rhs.contains('\\')
                     && !rhs.contains("${")
                     && !rhs.contains("$(")
+                    && !rhs.contains("$[")
                     && !rhs.contains('`')
                 {
                     rhs_owned = rhs.replace('\\', crate::executor::markers::DATA_BACKSLASH_STR);
