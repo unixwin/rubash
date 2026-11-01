@@ -123,38 +123,36 @@ impl Executor {
         // the prior state read on), the FLAG_ON re-arm load runs.
         let history_prior =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
-        // GNU builtins/set.def:424-447 set_edit_mode: turning the
-        // `vi` or `emacs` option ON runs rl_variable_bind
-        // ("editing-mode", ...) — readline's current keymap (and the
-        // bind registry's variable-table mirror of it) follows the
-        // option. Only a FLAG_ON transition fires it; turning a mode
-        // OFF never touches the variable, so capture the priors.
-        let vi_prior = crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi");
-        let emacs_prior =
-            crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs");
-        let status = crate::builtins::set::set_with_io(
+        let mut o_writes: Vec<(String, bool)> = Vec::new();
+        let status = crate::builtins::set::set_with_io_and_o_writes(
             cmd.words[1..].iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
             &underlay,
+            &mut o_writes,
         )?;
         if !history_prior
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history")
         {
             self.reload_history_file_on_rearm();
         }
-        if !vi_prior && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "vi")
-        {
-            self.bind_registry()
-                .borrow_mut()
-                .set_readline_variable("editing-mode", "vi");
-        } else if !emacs_prior
-            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "emacs")
-        {
-            self.bind_registry()
-                .borrow_mut()
-                .set_readline_variable("editing-mode", "emacs");
+        // GNU builtins/set.def:476-491 set_minus_o_option invokes the
+        // vi/emacs setter (set.def:424-447 set_edit_mode) on EVERY
+        // `-o` write via SET_BINARY_O_OPTION_VALUE (set.def:247-249):
+        // a FLAG_ON write runs rl_variable_bind("editing-mode", name)
+        // whether or not the option cell transitioned, and a FLAG_OFF
+        // write never touches the variable. Replay the writes
+        // set_with_io reported, in operand order — the same funnel
+        // the shopt door replays (rubash#2435). A before/after state
+        // diff cannot see a redundant write whose cell was already on
+        // (rubash#2448).
+        for (name, enabled) in &o_writes {
+            if *enabled && (name == "vi" || name == "emacs") {
+                self.bind_registry()
+                    .borrow_mut()
+                    .set_readline_variable("editing-mode", name);
+            }
         }
         if cmd.words.len() == 1 && !self.posix_mode_enabled() {
             // GNU set.def set_builtin with no arguments calls
