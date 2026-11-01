@@ -32,12 +32,14 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut o_writes: Vec<(String, bool)> = Vec::new();
+        let mut login_shell_write = false;
         let status = crate::builtins::shopt::execute_with_io_and_o_writes(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
             &mut o_writes,
+            &mut login_shell_write,
         )?;
         // GNU builtins/shopt.def:594-606 set_shopt_o_options funnels
         // every `-o` write through builtins/set.def:476-491
@@ -55,6 +57,29 @@ impl Executor {
                     .borrow_mut()
                     .set_readline_variable("editing-mode", name);
             }
+        }
+        // rubash#2457: GNU's login_shell shopt entry carries a custom
+        // setter (builtins/shopt.def:244; set_login_shell at
+        // shopt.def:762-766) that IGNORES the requested value and
+        // re-copies the CURRENT login_shell global into the shadow
+        // the queries read. So `shopt -u login_shell` at the top of
+        // a login shell leaves the report on, `shopt -s login_shell`
+        // in a non-login shell leaves it off, and inside a `( )`
+        // region either spelling snaps it off (execute_in_subshell
+        // cleared the global, execute_cmd.c:1636-1637). The pure
+        // builtin applied the requested value like any other option;
+        // re-derive the bit from this executor's effective login
+        // state — the same expression the logout gate reads
+        // (printf_path_builtins.rs). Plain queries never raise the
+        // attempt flag, so the query face keeps reading the stored
+        // shadow verbatim — which is also GNU's behavior, since a
+        // fork copies the shadow without re-syncing it
+        // (reset_shopt_options, shopt.def:440, runs at shell init,
+        // not at subshell entry).
+        if login_shell_write {
+            let effective =
+                self.invocation_login() && !self.shell_state.subshell_login_cleared.get();
+            self.set_shopt_option("login_shell", effective);
         }
         self.sync_shopt_rebound_var();
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
