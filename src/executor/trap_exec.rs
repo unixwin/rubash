@@ -373,10 +373,14 @@ impl Executor {
         // native target, as the input arms bind it — the pair split
         // serves `<>`; a directory target fails the pair open, like
         // GNU's O_RDWR open of a directory fails.
-        if let Some(link) = crate::special_paths::synthetic_link_target(
-            target,
-            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-        ) {
+        if let Some(link) = {
+            let (cwd_forms, root_forms) = self.proc_link_forms();
+            crate::special_paths::synthetic_link_target(
+                target,
+                Some(&cwd_forms),
+                Some(&root_forms),
+            )
+        } {
             let (read_file, write_file) =
                 FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
             self.set_fd_input_file(fd, read_file, dynamic);
@@ -4631,10 +4635,14 @@ impl Executor {
                         // shape the process-substitution fallback above
                         // binds.
                         self.set_fd_input_bytes(fd, bytes, fd != 0);
-                    } else if let Some(link) = crate::special_paths::synthetic_link_target(
-                        &target,
-                        Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-                    ) {
+                    } else if let Some(link) = {
+                        let (cwd_forms, root_forms) = self.proc_link_forms();
+                        crate::special_paths::synthetic_link_target(
+                            &target,
+                            Some(&cwd_forms),
+                            Some(&root_forms),
+                        )
+                    } {
                         // SyntheticLink (rubash#1900): the open goes
                         // to the resolved native target (the session
                         // cwd answers for self/cwd), exactly as the

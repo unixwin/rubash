@@ -703,10 +703,14 @@ impl Executor {
     ) -> std::io::Result<Vec<u8>> {
         if let Some(bytes) = crate::special_paths::synthetic_proc_content(path) {
             Ok(bytes)
-        } else if let Some(link) = crate::special_paths::synthetic_link_target(
-            path,
-            Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-        ) {
+        } else if let Some(link) = {
+            let (cwd_forms, root_forms) = self.proc_link_forms();
+            crate::special_paths::synthetic_link_target(
+                path,
+                Some(&cwd_forms),
+                Some(&root_forms),
+            )
+        } {
             fs::read(&link.native)
         } else {
             // niubash#177: same operand resolution as the argv funnel —

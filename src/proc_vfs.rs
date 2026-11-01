@@ -24,7 +24,10 @@
 //! top-level `mounts` (one line per logical volume) and `net/dev`
 //! (GetIfTable2 counters) faces. Fields with no Windows source read 0,
 //! the module's standing rule: the SHAPE never changes, only a field's
-//! fidelity.
+//! fidelity. The wave's remainder, the per-pid `root` link, landed
+//! separately: it resolves through the caller-fed payload-root forms
+//! ([`self_root_forms`]), the one link whose target is session state
+//! rather than OS-queried process state.
 
 /// Top-level synthetic file names (the /proc root's file face). The name
 /// table, the content generator below, and the directory enumeration
@@ -53,13 +56,13 @@ const PID_CONTENT_FILES: [&str; 5] = ["cmdline", "environ", "stat", "statm", "st
 /// Per-pid LINK entries (readlink-type: the entry resolves to a target
 /// path elsewhere in the filesystem; see [`proc_link_target`]).
 #[allow(dead_code)] // table face consumed by the Windows generators and the cross-platform tests
-const PID_LINK_FILES: [&str; 2] = ["cwd", "exe"];
+const PID_LINK_FILES: [&str; 3] = ["cwd", "exe", "root"];
 
 /// Every per-pid directory entry name, content and link faces together
 /// (the `/proc/<pid>` and `/proc/self` enumeration face).
 #[allow(dead_code)] // table face consumed by the Windows generators and the cross-platform tests
-const PID_ENTRIES: [&str; 7] = [
-    "cmdline", "cwd", "environ", "exe", "stat", "statm", "status",
+const PID_ENTRIES: [&str; 8] = [
+    "cmdline", "cwd", "environ", "exe", "root", "stat", "statm", "status",
 ];
 
 /// The canonical entry name when `path` is exactly a top-level synthetic
@@ -607,6 +610,27 @@ pub fn self_cwd_forms(session_cwd: &std::path::Path) -> ProcSelfCwd {
     ProcSelfCwd { native, display }
 }
 
+/// The simulation's root directory in both spellings (niubash#758):
+/// `native` is the payload root — the directory the path mapper
+/// serves for the shell namespace's bare `/` — and `display` is that
+/// namespace's own name for it, `/` (the answer Linux's readlink
+/// gives for /proc/<pid>/root). Caller-fed like [`ProcSelfCwd`]
+/// because the payload root is session state the generator does not
+/// hold: it comes from the caller's environment (the configured
+/// shell root the mapper resolves `/` through), never from a
+/// process-global guess.
+pub struct ProcSelfRoot {
+    pub native: String,
+    pub display: String,
+}
+
+pub fn self_root_forms(payload_root: &std::path::Path) -> ProcSelfRoot {
+    ProcSelfRoot {
+        native: payload_root.to_string_lossy().into_owned(),
+        display: "/".to_string(),
+    }
+}
+
 /// A resolved synthetic-link target in both spellings.
 pub struct ProcLinkTarget {
     pub native: String,
@@ -618,10 +642,19 @@ pub struct ProcLinkTarget {
 /// of the OS per process (QueryFullProcessImageNameW — the image a
 /// process was actually started from, not the snapshot's file NAME);
 /// cwd comes from the session (self) or the target's PEB
-/// CurrentDirectory.DosPath (other pids). A dead or unopenable pid
-/// resolves to None — the link dangles exactly when its process does.
+/// CurrentDirectory.DosPath (other pids). `root` (niubash#758)
+/// resolves through the caller-fed payload-root forms for every
+/// pid: the simulation has exactly one namespace, so the root is a
+/// property of the namespace, not of the process — chroot, the one
+/// mechanism that makes Linux roots per-process, has no counterpart
+/// in this layer. A dead or unopenable pid resolves to None — the
+/// link dangles exactly when its process does.
 #[cfg(windows)]
-pub fn proc_link_target(path: &str, self_cwd: Option<&ProcSelfCwd>) -> Option<ProcLinkTarget> {
+pub fn proc_link_target(
+    path: &str,
+    self_cwd: Option<&ProcSelfCwd>,
+    self_root: Option<&ProcSelfRoot>,
+) -> Option<ProcLinkTarget> {
     let (pid_ref, tail) = parse_pid_spelling(path)?;
     if !PID_LINK_FILES.contains(&tail) {
         return None;
@@ -637,12 +670,18 @@ pub fn proc_link_target(path: &str, self_cwd: Option<&ProcSelfCwd>) -> Option<Pr
                 native: cwd.native.clone(),
                 display: cwd.display.clone(),
             }),
+            "root" => self_root.map(|root| ProcLinkTarget {
+                native: root.native.clone(),
+                display: root.display.clone(),
+            }),
             _ => None,
         },
         PidRef::Pid(pid) => {
-            // No liveness pre-walk: the OS queries below are the
-            // liveness check — a dead or protected pid fails them and
-            // the link dangles, which is the answer either way.
+            // No liveness pre-walk for exe/cwd: the OS queries below
+            // are the liveness check — a dead or protected pid fails
+            // them and the link dangles, which is the answer either
+            // way. The root arm has no OS query to lean on, so it
+            // checks liveness itself.
             match tail {
                 "exe" => {
                     let native = process_image_path(pid)?;
@@ -654,6 +693,15 @@ pub fn proc_link_target(path: &str, self_cwd: Option<&ProcSelfCwd>) -> Option<Pr
                     let display = crate::executor::path::shell_pwd_display_path(&native);
                     Some(ProcLinkTarget { native, display })
                 }
+                "root" => {
+                    if !pid_ref_alive(pid_ref) {
+                        return None;
+                    }
+                    self_root.map(|root| ProcLinkTarget {
+                        native: root.native.clone(),
+                        display: root.display.clone(),
+                    })
+                }
                 _ => None,
             }
         }
@@ -661,7 +709,11 @@ pub fn proc_link_target(path: &str, self_cwd: Option<&ProcSelfCwd>) -> Option<Pr
 }
 
 #[cfg(not(windows))]
-pub fn proc_link_target(_path: &str, _self_cwd: Option<&ProcSelfCwd>) -> Option<ProcLinkTarget> {
+pub fn proc_link_target(
+    _path: &str,
+    _self_cwd: Option<&ProcSelfCwd>,
+    _self_root: Option<&ProcSelfRoot>,
+) -> Option<ProcLinkTarget> {
     None
 }
 
@@ -782,7 +834,7 @@ pub fn proc_unary_facts(path: &str) -> Option<ProcUnaryFacts> {
                 is_dir: false,
                 is_file: false,
                 is_link: true,
-                link_target_is_dir: tail == "cwd",
+                link_target_is_dir: tail == "cwd" || tail == "root",
                 writable: true,
                 executable: true,
             });
@@ -1603,8 +1655,9 @@ fn version() -> String {
 /// the volume's real filesystem name (GetVolumeInformationW), and
 /// rw/ro from the volume's read-only flag. The payload root's own
 /// line is deliberately absent: the root's native path is session
-/// state the generator does not hold (the same caller-fed channel
-/// the /proc/<pid>/root link waits on), and a mounts line with a
+/// state this generator does not hold (the /proc/<pid>/root link
+/// resolves it through the caller-fed forms channel instead — the
+/// content face takes no caller input), and a mounts line with a
 /// fabricated source would be worse than its absence — volume
 /// consumers key on the drive mountpoints, which are exact.
 #[cfg(windows)]
@@ -2258,16 +2311,18 @@ mod tests {
     fn link_targets_and_facts() {
         {
             let cwd = self_cwd_forms(std::path::Path::new("D:\\some\\session dir"));
-            let target = proc_link_target("/proc/self/cwd", Some(&cwd)).expect("self cwd link");
+            let root = self_root_forms(std::path::Path::new("D:\\payload"));
+            let target =
+                proc_link_target("/proc/self/cwd", Some(&cwd), None).expect("self cwd link");
             assert_eq!(target.native, "D:\\some\\session dir");
             assert_eq!(target.display, cwd.display);
-            assert!(proc_link_target("/proc/self/cwd", None).is_none());
-            let exe = proc_link_target("/proc/self/exe", None).expect("self exe link");
+            assert!(proc_link_target("/proc/self/cwd", None, None).is_none());
+            let exe = proc_link_target("/proc/self/exe", None, None).expect("self exe link");
             let image = self_image_name().expect("own image name");
             assert!(exe.native.ends_with(&image), "exe target {}", exe.native);
             assert!(exe.display.starts_with('/'));
-            assert!(proc_link_target("/proc/self/status", Some(&cwd)).is_none());
-            assert!(proc_link_target("/proc/4294967294/exe", None).is_none());
+            assert!(proc_link_target("/proc/self/status", Some(&cwd), Some(&root)).is_none());
+            assert!(proc_link_target("/proc/4294967294/exe", None, None).is_none());
             let facts = proc_unary_facts("/proc/self/exe").expect("exe facts");
             assert!(facts.is_link && !facts.link_target_is_dir);
             let facts = proc_unary_facts("/proc/self/cwd").expect("cwd facts");
@@ -2280,6 +2335,45 @@ mod tests {
             );
             assert!(proc_unary_facts("/proc").expect("root facts").is_dir);
             assert!(proc_unary_facts("/proc/4294967294/status").is_none());
+        }
+    }
+
+    /// niubash#758: the /proc/<pid>/root link — the wave's remainder.
+    /// The target is the caller-fed payload root (both forms pass
+    /// through untouched, the display form is the namespace's own
+    /// `/`); every live pid shares it, because the simulation has
+    /// one namespace; without the caller's forms the link dangles,
+    /// and a dead pid's root does not exist at all.
+    #[test]
+    #[cfg(windows)]
+    fn issue758_root_link_resolution() {
+        {
+            let root = self_root_forms(std::path::Path::new("D:\\payload-root"));
+            assert_eq!(root.display, "/");
+            let target =
+                proc_link_target("/proc/self/root", None, Some(&root)).expect("self root link");
+            assert_eq!(target.native, "D:\\payload-root");
+            assert_eq!(target.display, "/");
+            // No caller-fed forms: the link cannot resolve.
+            assert!(proc_link_target("/proc/self/root", None, None).is_none());
+            // The live self pid under its numeric spelling shares the
+            // one namespace root.
+            let own = std::process::id();
+            let target = proc_link_target(&format!("/proc/{own}/root"), None, Some(&root))
+                .expect("numeric self root link");
+            assert_eq!(target.native, "D:\\payload-root");
+            assert_eq!(target.display, "/");
+            // A dead pid's root dangles even with forms in hand, and
+            // does not classify as a link at all.
+            assert!(proc_link_target("/proc/4294967294/root", None, Some(&root)).is_none());
+            assert!(!proc_is_link_path("/proc/4294967294/root"));
+            // The facts face: a link whose target is a directory.
+            let facts = proc_unary_facts("/proc/self/root").expect("root facts");
+            assert!(facts.is_link && facts.link_target_is_dir);
+            assert!(proc_unary_facts("/proc/4294967294/root").is_none());
+            // The enumeration face lists it among the per-pid entries.
+            let entries = proc_dir_entries("/proc/self").expect("self dir enumerates");
+            assert!(entries.iter().any(|e| e == "root"), "{entries:?}");
         }
     }
 }
