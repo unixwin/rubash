@@ -188,19 +188,29 @@ def check_completeness(entries, niu_root):
     Returns (uncovered, unconsumed_warnings, consumed_count). A
     consumed path is covered when an entry names it exactly, or
     when it is a module prefix of a recorded entry (a module is
-    covered by the symbols recorded under it). Recorded-but-
-    unconsumed item/variant entries only warn — the ledger
-    legitimately carries staged exits — and method entries never
-    warn: receiver-form calls are invisible to a path scan.
+    covered by the symbols recorded under it). A trailing
+    `::default` segment names the type's `Default` trait impl, not
+    a freestanding item: the ledger records it under the type's
+    `item` entry (a trait constructor has no `pub fn` the `method`
+    kind could name), so a consumed `T::default` is covered when
+    `T` is covered. Recorded-but-unconsumed item/variant entries
+    only warn — the ledger legitimately carries staged exits —
+    and method entries never warn: receiver-form calls are
+    invisible to a path scan.
     """
     recorded = {path for _kind, path in entries}
     consumed = consumed_paths(niu_root)
-    uncovered = sorted(
-        path
-        for path in consumed
-        if path not in recorded
-        and not any(entry.startswith(path + "::") for entry in recorded)
-    )
+
+    def is_covered(path):
+        if path in recorded:
+            return True
+        if any(entry.startswith(path + "::") for entry in recorded):
+            return True
+        if path.endswith("::default"):
+            return is_covered(path[: -len("::default")])
+        return False
+
+    uncovered = sorted(path for path in consumed if not is_covered(path))
 
     def is_used(entry_path):
         return any(
