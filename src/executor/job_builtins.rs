@@ -729,14 +729,22 @@ impl Executor {
                         job_id,
                         stop_signal,
                     } => {
-                        // GNU jobs.c wait_for_job (rubash#1246).
+                        // GNU's stopped report rides only the jobspec
+                        // path: builtins/wait.def:316 sends `%...`
+                        // operands to wait_for_job (jobs.c:3409-3410
+                        // warns when the job is stopped), while a
+                        // numeric pid goes to wait_for_single_pid
+                        // (wait.def:277; jobs.c:2729), which returns
+                        // the stop status silently (rubash#2488).
                         let mut stderr = Vec::new();
-                        writeln!(
-                            stderr,
-                            "{}warning: wait_for_job: job {} is stopped",
-                            self.diagnostic_prefix(),
-                            job_id
-                        )?;
+                        if cmd.words[1].starts_with('%') {
+                            writeln!(
+                                stderr,
+                                "{}warning: wait_for_job: job {} is stopped",
+                                self.diagnostic_prefix(),
+                                job_id
+                            )?;
+                        }
                         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                         return Ok(128 + stop_signal);
                     }
@@ -764,19 +772,13 @@ impl Executor {
                                 self.write_buffered_builtin_output(cmd, &[], &[])?;
                                 return Ok(status);
                             }
-                            WaitPidOutcome::Stopped {
-                                job_id,
-                                stop_signal,
-                            } => {
-                                // GNU jobs.c wait_for_job (rubash#1246).
-                                let mut stderr = Vec::new();
-                                writeln!(
-                                    stderr,
-                                    "{}warning: wait_for_job: job {} is stopped",
-                                    self.diagnostic_prefix(),
-                                    job_id
-                                )?;
-                                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            WaitPidOutcome::Stopped { stop_signal, .. } => {
+                                // A numeric pid reaches this arm only via
+                                // the wait_for_single_pid path
+                                // (builtins/wait.def:277): GNU returns the
+                                // stop status with no wait_for_job warning
+                                // (rubash#2488).
+                                self.write_buffered_builtin_output(cmd, &[], &[])?;
                                 return Ok(128 + stop_signal);
                             }
                             WaitPidOutcome::NotFound => {}
@@ -979,16 +981,21 @@ impl Executor {
                     job_id,
                     stop_signal,
                 } => {
-                    // GNU jobs.c wait_for_job: a stopped job is reported
-                    // (`warning: wait_for_job: job %d is stopped`) and
-                    // the wait returns the stop status 128+sig without
-                    // blocking (rubash#1246).
-                    writeln!(
-                        stderr,
-                        "{}warning: wait_for_job: job {} is stopped",
-                        self.diagnostic_prefix(),
-                        job_id
-                    )?;
+                    // GNU reports a stopped job only for `%...`
+                    // operands: wait.def:316 routes them to
+                    // wait_for_job (jobs.c:3409-3410 warns), while a
+                    // numeric pid takes wait_for_single_pid
+                    // (wait.def:277), which returns the stop status
+                    // 128+sig silently and without blocking
+                    // (rubash#1246, rubash#2488).
+                    if operand.starts_with('%') {
+                        writeln!(
+                            stderr,
+                            "{}warning: wait_for_job: job {} is stopped",
+                            self.diagnostic_prefix(),
+                            job_id
+                        )?;
+                    }
                     status = 128 + stop_signal;
                     last_pid = Some(pid);
                 }
