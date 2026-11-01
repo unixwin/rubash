@@ -11,9 +11,16 @@
 > the actual-output ledger, not another edit to historical expected-output files.
 > Audience: future agents and maintainers fixing rubash compatibility.
 > Goal: make rubash reach GNU Bash observable compatibility while staying usable
-> as the Bash syntax/execution library embedded by Winuxsh.
+> as the Bash syntax/execution library embedded by niubash (the host named
+> Winuxsh in this 2026-08 plan; winuxsh stock was demolished in the 1.5.0 line).
 
-## Release Platform Scope
+## Release Platform Scope (2026-08 position, superseded)
+
+> **Superseded (2026-11-01):** the host is niubash, and rubash has shipped
+> 1.4.x with Linux as a CI-gated platform — the engine's test lanes and the
+> GNU upstream corpus replay run on Ubuntu on every push, and macOS runs the
+> library suite in CI. Windows remains the primary target. The paragraph
+> below is the historical pre-1.0 position, kept for the record.
 
 Rubash/Winuxsh is Windows-first. Complete Linux support is deferred until after
 1.0 and is not a pre-1.0 acceptance gate. Keep Linux-only suite differences
