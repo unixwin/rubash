@@ -3,9 +3,11 @@
 //! GNU Bash source ownership:
 //! - builtins/enable.def (`enable_builtin`)
 
+use crate::builtins::dynamic;
 use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
 use std::io::{self, Write};
+use std::path::Path;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -15,9 +17,10 @@ const EX_USAGE: i32 = 2;
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 
 pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
+    let cwd = std::env::current_dir().unwrap_or_default();
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
+    execute_with_io_in_dir(args, env_vars, &cwd, &mut stdout, &mut stderr)
 }
 
 pub(crate) fn execute_with_io<W, E>(
@@ -30,8 +33,26 @@ where
     W: Write,
     E: Write,
 {
-    // TODO(builtins/enable.def/builtins.c): Bash can dynamically load/unload
-    // builtins. This implementation tracks the builtins that rubash dispatches.
+    let cwd = std::env::current_dir().unwrap_or_default();
+    execute_with_io_in_dir(args, env_vars, &cwd, stdout, stderr)
+}
+
+/// `enable` entry point with the shell's physical cwd.  Loadable objects
+/// are resolved against the SHELL cwd, not the host process cwd — rubash
+/// `cd` moves `ShellState::cwd` without calling `chdir` (see
+/// `src/shell/state.rs`), while GNU resolves `make_absolute(filename,
+/// ".")` against the process cwd because its `cd` really chdirs.
+pub(crate) fn execute_with_io_in_dir<W, E>(
+    args: &[String],
+    env_vars: &mut VarTable,
+    cwd: &Path,
+    stdout: &mut W,
+    stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
     let mut list_all = false;
     let mut disable = false;
     let mut reusable = false;
@@ -114,48 +135,9 @@ where
         index += 1;
     }
 
-    if let Some(file) = load_file {
-        if operands.is_empty() {
-            writeln!(
-                stderr,
-                "{}enable: {file}: dynamic loading not supported",
-                diagnostic_prefix(env_vars)
-            )?;
-            return Ok(EXECUTION_FAILURE);
-        }
-        for name in operands {
-            writeln!(
-                stderr,
-                "{}enable: {name}: dynamic loading from {file} not supported",
-                diagnostic_prefix(env_vars)
-            )?;
-        }
-        return Ok(EXECUTION_FAILURE);
-    }
-
-    if delete {
-        let mut status = EXECUTION_SUCCESS;
-        for name in operands {
-            if !is_builtin(name) {
-                writeln!(
-                    stderr,
-                    "{}enable: {name}: not a shell builtin",
-                    diagnostic_prefix(env_vars)
-                )?;
-                status = EXECUTION_FAILURE;
-            } else {
-                writeln!(
-                    stderr,
-                    "{}enable: {name}: not dynamically loaded",
-                    diagnostic_prefix(env_vars)
-                )?;
-                status = EXECUTION_FAILURE;
-            }
-        }
-        return Ok(status);
-    }
-
-    // GNU builtins/enable.def (`if (list == 0 || (flags & PFLAG))`): `-p`
+    // GNU builtins/enable.def (`if (list == 0 || (flags & PFLAG))`): this
+    // branch is checked BEFORE -f/-d, so `enable -f file` with no NAME
+    // and `enable -p -f file NAME` both list instead of loading. `-p`
     // lists even when operands are present — the operands are ignored
     // (rubash#1397). Plain `enable` with no operands lists in every mode.
     if operands.is_empty() || reusable {
@@ -164,6 +146,20 @@ where
             for name in crate::executor::command_registry::SPECIAL_BUILTINS {
                 if disable {
                     if disabled.iter().any(|disabled| disabled == name) {
+                        writeln!(stdout, "enable -n {name}")?;
+                    }
+                } else {
+                    writeln!(stdout, "enable {name}")?;
+                }
+            }
+            // GNU list_some_builtins walks the whole shell_builtins table,
+            // so a loadable builtin loaded with `-s` appears here too.
+            for name in dynamic::loaded_names() {
+                if !dynamic::is_special(&name) || is_static_special_builtin(&name) {
+                    continue;
+                }
+                if disable {
+                    if !dynamic::is_enabled(&name) {
                         writeln!(stdout, "enable -n {name}")?;
                     }
                 } else {
@@ -185,8 +181,89 @@ where
                     writeln!(stdout, "enable {name}")?;
                 }
             }
+            // GNU appends dynamically loaded builtins after the compiled
+            // table (enable.def:449-466).  Skip a loaded name that already
+            // has a static row: a shadowing load replaces that one slot.
+            for name in dynamic::loaded_names() {
+                if crate::executor::command_registry::is_static_introspection_builtin(&name) {
+                    continue;
+                }
+                if disabled.iter().any(|disabled| disabled == &name) {
+                    if list_all {
+                        writeln!(stdout, "enable -n {name}")?;
+                    }
+                } else {
+                    writeln!(stdout, "enable {name}")?;
+                }
+            }
         }
         return Ok(EXECUTION_SUCCESS);
+    }
+
+    if let Some(file) = load_file {
+        let names: Vec<String> = operands.iter().map(|name| name.to_string()).collect();
+        let loadables_path = env_vars.get("BASH_LOADABLES_PATH").map(String::as_str);
+        match dynamic::load_builtin(&file, &names, loadables_path, cwd, special_only, disable) {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    writeln!(
+                        stderr,
+                        "{}enable: warning: {warning}",
+                        diagnostic_prefix(env_vars)
+                    )?;
+                }
+                for error in &outcome.errors {
+                    writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                }
+                for name in &outcome.loaded {
+                    set_builtin_enabled(env_vars, name, !disable);
+                }
+                // GNU enable.def:420-446: diagnostics for individual
+                // names do not turn the whole load into a failure when
+                // at least one builtin was installed.
+                if outcome.loaded.is_empty() {
+                    return Ok(EXECUTION_FAILURE);
+                }
+                return Ok(EXECUTION_SUCCESS);
+            }
+            Err(error) => {
+                writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                return Ok(EXECUTION_FAILURE);
+            }
+        }
+    }
+
+    if delete {
+        // GNU enable.def:536-586 (`dyn_unload_builtin`): NAME must be a
+        // builtin and must have been loaded with -f; a static builtin is
+        // reported "not dynamically loaded".
+        let mut status = EXECUTION_SUCCESS;
+        for name in operands {
+            if !is_builtin(name) {
+                writeln!(
+                    stderr,
+                    "{}enable: {name}: not a shell builtin",
+                    diagnostic_prefix(env_vars)
+                )?;
+                status = EXECUTION_FAILURE;
+            } else if !dynamic::is_loaded(name) {
+                writeln!(
+                    stderr,
+                    "{}enable: {name}: not dynamically loaded",
+                    diagnostic_prefix(env_vars)
+                )?;
+                status = EXECUTION_FAILURE;
+            } else {
+                match dynamic::unload_builtin(name) {
+                    Ok(()) => set_builtin_enabled(env_vars, name, true),
+                    Err(error) => {
+                        writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                        status = EXECUTION_FAILURE;
+                    }
+                }
+            }
+        }
+        return Ok(status);
     }
 
     let mut disabled = disabled_builtins(env_vars);
@@ -209,6 +286,8 @@ where
         } else {
             disabled.retain(|disabled| disabled != name);
         }
+        // Keep a loaded struct's BUILTIN_ENABLED bit in sync.
+        dynamic::set_enabled(name, !disable);
     }
     set_disabled_builtins(env_vars, &disabled);
     Ok(status)
@@ -226,6 +305,7 @@ pub fn set_disabled(env_vars: &mut VarTable, name: &str, disabled: bool) {
         builtins.retain(|builtin| builtin != name);
     }
     set_disabled_builtins(env_vars, &builtins);
+    dynamic::set_enabled(name, !disabled);
 }
 
 pub fn is_disabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
@@ -258,8 +338,27 @@ fn set_disabled_builtins(env_vars: &mut VarTable, disabled: &[String]) {
 fn is_builtin(name: &str) -> bool {
     // The registry projection (rubash#2036 S2): `env` is a builtin
     // here too — KD-1's third face. The hand ALL_BUILTINS copy that
-    // lacked env is gone.
-    crate::executor::command_registry::is_introspection_builtin(name)
+    // lacked env is gone. Loadable builtins join the same table from
+    // the process-global dynamic registry.
+    crate::executor::command_registry::is_introspection_builtin(name) || dynamic::is_loaded(name)
+}
+
+fn is_static_special_builtin(name: &str) -> bool {
+    crate::executor::command_registry::SPECIAL_BUILTINS.contains(&name)
+}
+
+/// Set NAME's enabled state in the existing `enable -n` carrier used by
+/// every dispatch path.  Loading with `-n` records the same disabled
+/// state as `enable -n NAME` (GNU clears BUILTIN_ENABLED, enable.def:430).
+fn set_builtin_enabled(env_vars: &mut VarTable, name: &str, enabled: bool) {
+    let mut disabled = disabled_builtins(env_vars);
+    if enabled {
+        disabled.retain(|disabled| disabled != name);
+    } else if !disabled.iter().any(|disabled| disabled == name) {
+        disabled.push(name.to_string());
+    }
+    set_disabled_builtins(env_vars, &disabled);
+    dynamic::set_enabled(name, enabled);
 }
 
 fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {

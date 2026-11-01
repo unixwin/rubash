@@ -1103,8 +1103,18 @@ pub(crate) fn introspection_builtin_names() -> Vec<&'static str> {
         .collect()
 }
 
-/// Whether `name` belongs to the introspection builtin set.
+/// Whether `name` belongs to the introspection builtin set — the
+/// compiled registry rows plus any builtin loaded at runtime with
+/// `enable -f` (GNU's `shell_builtins` table contains both,
+/// `builtins/enable.def:449-466`).
 pub(crate) fn is_introspection_builtin(name: &str) -> bool {
+    is_static_introspection_builtin(name) || crate::builtins::dynamic::is_loaded(name)
+}
+
+/// The compiled-registry half of `is_introspection_builtin`, used by
+/// the `enable` listing so a loadable builtin that shadows a static
+/// name does not print the same row twice.
+pub(crate) fn is_static_introspection_builtin(name: &str) -> bool {
     registry_row(name).is_some_and(|row| row.introspection == Introspection::Builtin)
 }
 

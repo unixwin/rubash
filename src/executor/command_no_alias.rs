@@ -29,6 +29,13 @@ impl Executor {
             return self.execute_external(cmd);
         }
 
+        // `command` suppresses functions and aliases, not builtins; a
+        // loadable builtin is in GNU's shell_builtins table, so it runs
+        // here too.
+        if self.execute_dynamic_builtin_command(cmd, word)? {
+            return Ok(());
+        }
+
         // GNU Bash has no `sudo` builtin (issue #759 item 4): `command
         // sudo` resolves on PATH unless an embedding host registered an
         // elevation handler. Not a registry claim (rubash#2036 S3): the
