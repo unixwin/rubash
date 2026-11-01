@@ -803,6 +803,22 @@ impl Executor {
                 return Some(file_fd.path.clone());
             }
         }
+        // rubash#2502: a stage-0 materialized copy (see
+        // FdReadEndpoint::bytes_with_origin) stands in for the
+        // regular-file descriptor it was drained from; the alias
+        // open re-opens that file fresh, as GNU's open of the magic
+        // link does against the live descriptor (redir.c:725). The
+        // origin answers only while it still names a regular file —
+        // an unlinked origin keeps the copy's own serve.
+        if let Some(path) = self
+            .fd_table
+            .read_endpoint(fd)
+            .and_then(|endpoint| endpoint.text_origin_path())
+        {
+            if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
+                return Some(path);
+            }
+        }
         if let Some(FdWriteEndpoint::File(file_fd)) = self.fd_table.write_endpoint(fd) {
             if file_fd.reopens_fresh() {
                 return Some(file_fd.path.clone());

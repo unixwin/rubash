@@ -18,6 +18,19 @@ pub(crate) struct TextInput {
     /// (process-substitution bodies), judged against the armed read
     /// deadline in `read_bytes` — see timed_input.rs.
     timing: Option<super::timed_input::SharedTimedInput>,
+    /// rubash#2502: the on-disk file this buffered copy was
+    /// materialized FROM, when the replaced endpoint was a regular
+    /// file that an alias-spelling open re-opens fresh
+    /// (`FileFd::reopens_fresh`). The stage-0 materialization
+    /// (pipeline_exec::materialize_stage0_alias_source) replaces a
+    /// drained handle-backed endpoint with this copy; without the
+    /// origin, the descriptor's identity is lost and a later
+    /// `< /dev/fd/N` open of the same slot falls to the copy's
+    /// remainder instead of GNU's fresh open of the file
+    /// (redir.c:725 — the alias spelling is a plain open of the
+    /// magic link). Only the stage-0 materialization sets it; every
+    /// other TextInput (heredocs, mirrors, channels) leaves it None.
+    origin_path: Option<PathBuf>,
 }
 
 impl TextInput {
@@ -1623,7 +1636,32 @@ impl FdReadEndpoint {
             data: input,
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
+    }
+
+    /// rubash#2502: a buffered copy that stands in for a drained
+    /// regular-file endpoint (the stage-0 alias materialization) —
+    /// the copy remembers the file it was drained from so an
+    /// alias-spelling open of the slot can still re-open that file
+    /// fresh, exactly as GNU's open of /dev/fd/N does against the
+    /// live descriptor (redir.c:725).
+    pub(crate) fn bytes_with_origin(input: Vec<u8>, origin_path: Option<PathBuf>) -> Self {
+        Self::Text(Rc::new(RefCell::new(TextInput {
+            data: input,
+            offset: 0,
+            timing: None,
+            origin_path,
+        })))
+    }
+
+    /// rubash#2502: the file a buffered copy was materialized from
+    /// (see `bytes_with_origin`); None for every other endpoint.
+    pub(crate) fn text_origin_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Text(text) => text.borrow().origin_path.clone(),
+            _ => None,
+        }
     }
 
     pub(crate) fn text(input: impl Into<String>) -> Self {
@@ -1635,6 +1673,7 @@ impl FdReadEndpoint {
             data: input.into().into_bytes(),
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
     }
 
@@ -1645,6 +1684,7 @@ impl FdReadEndpoint {
             data: input,
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
     }
 }
