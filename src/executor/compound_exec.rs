@@ -1361,9 +1361,24 @@ impl Executor {
                     !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
                 })
                 .collect();
-        for (key, value) in &self.shell_state.env_vars {
-            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                env_map.insert(key.clone(), value.clone());
+        // rubash#2486: iterate the SNAPSHOT, not the live table. The
+        // VarTable is write-behind for the attribute keys (#916): the
+        // serialized `__RUBASH_*_VARS` strings inside it are stale/absent
+        // and only env_vars_snapshot materializes them from the structured
+        // flags. Iterating the raw table shipped a bg child that had lost
+        // every variable attribute — `declare -A building=()` imported as a
+        // plain string, so `building[app]=1` took the INDEXED path, whose
+        // subscript is arithmetic (arrayfunc.c:425 array_expand_index ->
+        // evalexp), where a bare `app` under `set -u` raised `app: unbound
+        // variable`. GNU's async child is a FORK (execute_cmd.c:1761-1763
+        // execute_in_subshell), inheriting the attribute table whole; for
+        // assoc arrays the subscript is word-expanded
+        // (arrayfunc.c:396 expand_subscript_string, subst.c:11063) and used
+        // literally as the key (arrayfunc.c:408 bind_assoc_variable) — no
+        // unbound check of the expanded key ever runs.
+        for (key, value) in self.env_vars_snapshot() {
+            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(&key) {
+                env_map.insert(key, value);
             }
         }
         // POSIX 2.11 (Signals and Error Handling): caught traps reset to
@@ -4911,9 +4926,13 @@ impl Executor {
         // redirect-error / pipe-failure paths in between.
         let mut env_entries: Vec<(String, String)> = Vec::new();
         if direct_plan.is_none() {
-            for (key, value) in &self.shell_state.env_vars {
-                if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                    env_entries.push((key.clone(), value.clone()));
+            // rubash#2486: the snapshot materializes the attribute
+            // markers (`__RUBASH_*_VARS`) the write-behind live table no
+            // longer carries; the coproc fork (execute_cmd.c coproc_getfd
+            // -> make_child) inherits the parent's attributes whole.
+            for (key, value) in self.env_vars_snapshot() {
+                if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(&key) {
+                    env_entries.push((key, value));
                 }
             }
             // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
