@@ -69,7 +69,11 @@ fn bind_v_dumps_the_full_gnu_table() {
     let lines: Vec<&str> = stdout.lines().collect();
     // GNU probe: `bind -v | wc -l` = 48, exact order.
     assert_eq!(lines.len(), 48);
-    assert_eq!(lines[0], "set bind-tty-special-chars off");
+    // lib/readline/bind.c:1874 + readline.c: _rl_bind_stty_chars
+    // defaults to 1; the GNU bash 5.3.20 oracle prints `on`
+    // (rubash#2418 — this pin previously recorded the WT probe's
+    // `off`, which the C default contradicts).
+    assert_eq!(lines[0], "set bind-tty-special-chars on");
     assert_eq!(lines[35], "set visible-stats off");
     assert_eq!(lines[36], "set bell-style audible");
     assert_eq!(lines[41], "set editing-mode emacs");
