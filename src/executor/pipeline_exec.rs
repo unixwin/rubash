@@ -4553,6 +4553,18 @@ impl Executor {
         // current shell and keeps the parent sequence.)
         let saved_random = self.shell_state.random_state.clone_state();
         self.shell_state.random_state.reseed_fresh();
+        // rubash#2438: the forked element also loses login_shell —
+        // a builtin/function element runs through
+        // execute_subshell_builtin_or_function (execute_cmd.c:5474-5475)
+        // and a compound element through execute_in_subshell
+        // (execute_cmd.c:1636-1637); both reset it. The stage runs in
+        // place here, so bracket the reset like the generator above:
+        // `logout | cat` in a login shell reports not-login with stage
+        // status 1 instead of silently exiting the element as a login
+        // shell. (lastpipe's last element runs through
+        // execute_lastpipe_stage instead — it IS the current shell and
+        // keeps login_shell.)
+        let saved_login_cleared = self.shell_state.subshell_login_cleared.replace(true);
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -4844,6 +4856,10 @@ impl Executor {
         // restored its own mirror entries in the stage's table).
         self.restore_spec_variables(saved_stage_variables);
         self.shell_state.random_state.restore_state(&saved_random);
+        // rubash#2438: the element's login reset dies with the element.
+        self.shell_state
+            .subshell_login_cleared
+            .set(saved_login_cleared);
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;

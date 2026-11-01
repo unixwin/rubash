@@ -670,8 +670,17 @@ impl Executor {
                             // execute_cmd.c:1821-1825). Only the too-many
                             // class pre-sets 2; every other DISCARD class
                             // here already carries 1.
+                            // rubash#2439: the `-c` process framing folds
+                            // the same way (run_one_command's
+                            // parse_and_execute catch, shell.c:1477):
+                            // `bash -c '(suspend foo); echo rc=$?'` gives
+                            // the region status 1, a script file gives 2.
                             if self.evalerror_exit_toomany_pending.get()
-                                && self.discard_fold_frame()
+                                && (self.discard_fold_frame()
+                                    || self
+                                        .shell_state
+                                        .env_vars
+                                        .contains_key("__RUBASH_IS_C"))
                             {
                                 self.exit_code = 1;
                             }
@@ -978,6 +987,13 @@ impl Executor {
                 crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
                 let old_depth = self.shell_state.subshell_depth.get();
                 self.shell_state.subshell_depth.set(old_depth + 1);
+                // execute_in_subshell (execute_cmd.c:1636-1637): the
+                // region is "neither login nor interactive" — record the
+                // login reset alongside the depth bump so builtins that
+                // consult the effective login state (logout,
+                // builtins/exit.def:83) see it; the region's saved state
+                // clone above reverts it at the boundary (rubash#2438).
+                self.shell_state.subshell_login_cleared.set(true);
                 // rubash#1493: record the region's whole `( ... )` text
                 // for the exec signal-death notice (jobs.c:4625 names
                 // the whole job command) — a node-form region renders

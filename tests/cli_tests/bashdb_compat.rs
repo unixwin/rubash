@@ -972,11 +972,19 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
     )
     .unwrap();
 
-    // The behavior under test is the option plumbing: --init-file runs
-    // before the script, and --debugger sources the starter found via
-    // the documented search (src/main.rs start_debugger, mirroring GNU
-    // shell.c:1547 start_debugger: $BASHDB_START_FILE, then
-    // /usr/local/share and /usr/share) before the script. Which starter
+    // The behavior under test is the option plumbing: --debugger
+    // sources the starter found via the documented search (src/main.rs
+    // start_debugger, mirroring GNU shell.c:1547 start_debugger:
+    // $BASHDB_START_FILE, then /usr/local/share and /usr/share) before
+    // the script, while --init-file does NOT run for this
+    // non-interactive shape: GNU run_startup_files executes bashrc_file
+    // only in the interactive, non-login bash arm (shell.c:1235-1237),
+    // and start_debugger executes only DEBUGGER_START_FILE — oracle
+    // GNU 5.3.20 probes of both arms below print `value=` (init
+    // variable unset). Earlier revisions of this pin asserted
+    // `value=ready` from rubash's pre-#2436 direct-run extension;
+    // rubash#2436 closed that door behind GNU's arms, so the init
+    // assertions now encode the unset value. Which starter
     // a machine happens to carry is an environment property, and the
     // old pin's expectations were unsatisfiable in every environment
     // (rubash#2190): with no starter anywhere, GNU's outcome carries
@@ -986,11 +994,11 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
     // line, consumes the command stream from stdin, and the script
     // never runs at all. Both arms are therefore made deterministic:
     // arm A hands the search a minimal starter written by this test
-    // through the $BASHDB_START_FILE seam and asserts the init file and
-    // the starter both ran before the script, with a clean stderr;
-    // arm B removes the seam and, on machines with no system starter,
-    // asserts the exact diagnostic pair while the init file and the
-    // script still run.
+    // through the $BASHDB_START_FILE seam and asserts the starter ran
+    // before the script (and the init file did not), with a clean
+    // stderr; arm B removes the seam and, on machines with no system
+    // starter, asserts the exact diagnostic pair while the script
+    // still runs with the init variable unset.
     let mut arm_a = crate::rubash_command();
     arm_a
         .arg("--init-file")
@@ -1004,7 +1012,7 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
     assert!(output_a.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output_a.stdout),
-        "value=ready starter=from-starter\n"
+        "value= starter=from-starter\n"
     );
     assert_eq!(String::from_utf8_lossy(&output_a.stderr), "");
 
@@ -1024,7 +1032,7 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
         assert!(output_b.status.success());
         assert_eq!(
             String::from_utf8_lossy(&output_b.stdout),
-            "value=ready starter=\n"
+            "value= starter=\n"
         );
         assert_eq!(
             String::from_utf8_lossy(&output_b.stderr),

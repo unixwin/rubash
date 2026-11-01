@@ -295,6 +295,28 @@ pub struct ShellState {
     pub(crate) random_state: RandomGen,
     /// execute_cmd.c subshell_level.
     pub(crate) subshell_depth: Cell<usize>,
+    /// The login_shell reset GNU performs at a REAL subshell boundary:
+    /// execute_cmd.c:1636-1637 (execute_in_subshell) and
+    /// execute_cmd.c:5474-5475 (execute_subshell_builtin_or_function)
+    /// both run `login_shell = interactive = 0` ("Subshells are neither
+    /// login nor interactive"), so the effective login state a builtin
+    /// sees is `invocation_login && !subshell_login_cleared`. The
+    /// command-substitution fork is NOT such a boundary: subst.c:7143
+    /// command_substitute's child setup (subst.c:7258 make_child
+    /// FORK_COMSUB; subst.c:7303-7350) sets `interactive = 0` and ORs
+    /// SUBSHELL_COMSUB into subshell_environment but never touches
+    /// login_shell, so `$(logout)` in a login shell still logs out —
+    /// it silently exits the substitution child (rubash#2438).
+    /// subshell_depth cannot carry this distinction: it is GNU's
+    /// subshell_level (BASH_SUBSHELL), which the comsub child ALSO
+    /// increments. Set at the `( )` region entries (ast_exec flat
+    /// region, compound_exec scoped subshell, and the comsub body's
+    /// textually stripped `( )` group); like subshell_source_text it is
+    /// written only after the entry clone_for_child_save, so the
+    /// wholesale boundary restore reverts it, and fork copies inherit
+    /// it through Clone exactly as a forked child inherits
+    /// login_shell == 0.
+    pub(crate) subshell_login_cleared: Cell<bool>,
     /// print_cmd.c make_command_string of the innermost enclosing
     /// `( )` subshell, rendered at subshell entry (executor
     /// execute_subshell_command_with_redirects / the ast_exec region
@@ -575,6 +597,7 @@ pub(crate) struct ProcSubStream {
 #[derive(Debug)]
 pub(crate) struct InteriorSnapshot {
     subshell_depth: usize,
+    subshell_login_cleared: bool,
     in_command_substitution: bool,
     stdin_redir: bool,
     xtrace_suspended: usize,
@@ -638,6 +661,7 @@ impl ShellState {
     pub(crate) fn snapshot_interior(&self) -> InteriorSnapshot {
         InteriorSnapshot {
             subshell_depth: self.subshell_depth.get(),
+            subshell_login_cleared: self.subshell_login_cleared.get(),
             in_command_substitution: self.in_command_substitution.get(),
             stdin_redir: self.stdin_redir.get(),
             xtrace_suspended: self.xtrace_suspended.get(),
@@ -681,6 +705,8 @@ impl ShellState {
     /// Restore a snapshot taken by `snapshot_interior`.
     pub(crate) fn restore_interior(&self, snapshot: &InteriorSnapshot) {
         self.subshell_depth.set(snapshot.subshell_depth);
+        self.subshell_login_cleared
+            .set(snapshot.subshell_login_cleared);
         self.in_command_substitution
             .set(snapshot.in_command_substitution);
         self.stdin_redir.set(snapshot.stdin_redir);
@@ -762,6 +788,7 @@ impl Clone for ShellState {
             last_builtin_class: self.last_builtin_class,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
+            subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             subshell_source_text: self.subshell_source_text.clone(),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),

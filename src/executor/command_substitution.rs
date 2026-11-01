@@ -787,8 +787,19 @@ impl Executor {
                 .shell_state
                 .subshell_depth
                 .replace(self.shell_state.subshell_depth.get() + 1);
+            // The stripped parens are a real execute_in_subshell
+            // boundary, so they also carry its login reset
+            // (execute_cmd.c:1636-1637): the comsub fork kept
+            // login_shell (subst.c:7143 command_substitute never
+            // clears it), but a `( )` inside the body clears it —
+            // `$( (logout) )` in a login shell reports not-login
+            // (rubash#2438). Save/restore with the depth above.
+            let saved_login_cleared = self.shell_state.subshell_login_cleared.replace(true);
             let result = self.expand_command_substitution_inner(inner, context);
             self.shell_state.subshell_depth.set(saved_depth);
+            self.shell_state
+                .subshell_login_cleared
+                .set(saved_login_cleared);
             return result;
         }
         if let Some(rest) = source.strip_prefix('<') {

@@ -1001,6 +1001,10 @@ impl Executor {
                 // (rubash#1074) covers coproc/other respawns where BG_DEPTH
                 // is absent.
                 subshell_depth: Cell::new(bg_depth.unwrap_or(respawned_subshell_depth)),
+                // A fresh process starts with GNU's login_shell as invoked
+                // (invocation_login above carries it); no subshell boundary
+                // has been crossed yet (rubash#2438).
+                subshell_login_cleared: Cell::new(false),
                 subshell_source_text: None,
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
