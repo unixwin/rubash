@@ -614,7 +614,11 @@ impl Executor {
         if !existed {
             return false;
         }
-        if self.dynamic_parameter_is_set(name) {
+        if self.dynamic_parameter_is_set(name)
+            // Same DIRSTACK unbind recording as the unset builtin's
+            // leaf sequence (unset_arrays.rs, rubash#2434).
+            || (name == "DIRSTACK" && !self.dirstack_shadowed())
+        {
             mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name);
         }
         // Nameref: unbinding removes the referenced variable and

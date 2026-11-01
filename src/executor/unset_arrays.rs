@@ -318,7 +318,16 @@ impl Executor {
                 continue;
             }
             if !is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &name)
-                && self.dynamic_parameter_is_set(&name)
+                && (self.dynamic_parameter_is_set(&name)
+                    // DIRSTACK's dynamic value is not served by
+                    // dynamic_parameter_is_set (its faces are the
+                    // carrier-derived array views), but its unbind is
+                    // the same variables.c:3839 act and must be recorded
+                    // the same way, or the braced faces keep reading the
+                    // carrier after the unset (rubash#2434). A live
+                    // local/tempenv shadow owns the name: unsetting it
+                    // removes the shadow, not the global dynamic var.
+                    || (name == "DIRSTACK" && !self.dirstack_shadowed()))
             {
                 mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
             }
