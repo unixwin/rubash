@@ -1228,6 +1228,16 @@ impl Executor {
         input: &str,
         stdin_inherit: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#2502: a fresh command recomputes its own numbered
+        // input bindings (the rubash#2235 discipline the plain path
+        // applies in apply_external_redirects). The stage path never
+        // cleared the stash, so a binding materialized for one
+        // command's list (a temp carrier for `3<&6`, drained by that
+        // command's child) answered the NEXT command's `<&3` walk —
+        // `cat 3< /dev/fd/6 <&3 | wc -c` after any `3<&…` command
+        // read the previous command's drained carrier instead of
+        // this list's own fresh open.
+        self.own_input_bindings.clear();
         let Some(name) = command.words.first() else {
             return Ok(Some((String::new(), String::new(), 0)));
         };

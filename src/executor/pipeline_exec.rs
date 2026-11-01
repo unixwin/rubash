@@ -6330,8 +6330,16 @@ impl Executor {
         // after the restore, on the restored table.)
         let saved_input_env = self.snapshot_spec_env(command);
         // rubash#2003: snapshot an fd-alias source before the resolution
-        // below drains it (see stage_fd_alias_source).
-        let alias_source = self.stage_fd_alias_source(command);
+        // below drains it (see stage_fd_alias_source). rubash#2502: the
+        // snapshot/materialize/fold target is the plan's DELIVERY fd —
+        // for a true-dup winner that is the chain's terminal descriptor
+        // (the one the resolution actually drains), not the spelling's
+        // fd, and for a fresh-open spelling winner there is no delivery
+        // at all (see stage0_alias_plan).
+        let alias_source = match self.stage0_alias_plan(command) {
+            Some(Stage0AliasPlan::Deliver(fd)) => Some(fd),
+            _ => None,
+        };
         let alias_buffered_offset = alias_source
             .and_then(|fd| self.fd_table.input_snapshot_bytes(fd))
             .map(|(_, offset)| offset);
@@ -6379,6 +6387,130 @@ impl Executor {
             (input, Some(base), alias_fold)
         } else {
             (input, None, alias_fold)
+        }
+    }
+
+    /// rubash#2502: the element's fd-0 winner redirect, in the two
+    /// presentations stage_fd_alias_source searches: an entry of the
+    /// command's own redirect list (with its list index), or the
+    /// synthesized `redirect_in`. Mirrors stage_fd_alias_source's
+    /// search exactly — a heredoc/here-string/close winner, or a
+    /// {var} winner, is NOT an alias winner and yields None, as does
+    /// the absence of any fd-0 entry.
+    fn stage0_fd0_winner<'a>(
+        &self,
+        command: &'a CommandNode,
+    ) -> Option<(usize, &'a crate::parser::Redirect)> {
+        let winner = command
+            .redirects
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, redirect)| {
+                redirect.fd.unwrap_or(0) == 0
+                    && matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::Input
+                            | crate::parser::RedirectKind::DuplicateInput
+                            | crate::parser::RedirectKind::ReadWrite
+                            | crate::parser::RedirectKind::CloseInput
+                            | crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                    )
+            });
+        match winner {
+            Some((position, redirect))
+                if matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                ) && redirect.fd_var.is_none() =>
+            {
+                Some((position, redirect))
+            }
+            Some(_) => None,
+            None => {
+                let redirect = command.redirect_in.as_ref().filter(|redirect| {
+                    redirect.fd.unwrap_or(0) == 0 && redirect.fd_var.is_none()
+                })?;
+                // The position the payload resolution adjudicates the
+                // synthesized redirect at: the matching list entry when
+                // redirect_in is also listed, else past the list end
+                // (mirrors stdin_string_for_command's winner_position).
+                let target = self.expand_redirect_target(redirect);
+                let position = command
+                    .redirects
+                    .iter()
+                    .rposition(|entry| {
+                        entry.fd.unwrap_or(0) == 0
+                            && entry.kind == redirect.kind
+                            && self.expand_redirect_target(entry) == target
+                    })
+                    .unwrap_or(command.redirects.len());
+                Some((position, redirect))
+            }
+        }
+    }
+
+    /// rubash#2502: where stage 0's resolved payload must be DELIVERED
+    /// so the stage's descriptor-channel consumers read it exactly
+    /// once — GNU's model has no delivery at all: the forked element
+    /// applies its own redirections against the shell's descriptors
+    /// (execute_cmd.c:2620, :4617), a dup shares the description it
+    /// names (redir.c:1193 dup2), and an alias-spelling open opens the
+    /// descriptor's target fresh (redir.c:725). Rubash's resolution
+    /// drains a descriptor to build the payload, so the materialized
+    /// copy must land on the descriptor the stage's re-resolution
+    /// actually reads through:
+    ///
+    /// - A true-dup winner (`<&N` whose in-list chain ends at an
+    ///   ambient fd) drains the chain's TERMINAL descriptor — the
+    ///   resolution's own effective fd — so the copy and the fold
+    ///   belong on the terminal, not on the spelling's fd
+    ///   (`cat 3<&6 <&3 | wc -c` drained fd 6 but materialized onto
+    ///   fd 3, which no consumer reads: the stage read EOF).
+    /// - A dup OF an alias open (rubash#2479) shares the open, not
+    ///   the ambient stream: the copy stays on the spelling's fd.
+    /// - An alias-spelling winner (`< /dev/fd/N`) whose target
+    ///   re-opens fresh never drains the descriptor at all — the
+    ///   resolution served a fresh open and the stage re-resolves
+    ///   the same way — so there is nothing to deliver and nothing
+    ///   to fold (FreshOpen). Materializing anyway replaced the
+    ///   descriptor's file endpoint with the payload copy, and the
+    ///   next identical command in the same process fell to the
+    ///   copy's EOF remainder (`cat < /dev/fd/6 | wc -c` twice
+    ///   printed 12, then 0).
+    fn stage0_alias_plan(&self, command: &CommandNode) -> Option<Stage0AliasPlan> {
+        use crate::executor::external_setup::InListBinding;
+        let source = self.stage_fd_alias_source(command)?;
+        let (position, winner) = self.stage0_fd0_winner(command)?;
+        match winner.kind {
+            crate::parser::RedirectKind::DuplicateInput => {
+                // The resolution's own adjudication of the dup winner
+                // (stdin_string_for_command): the in-list verdict for
+                // the winner's target, with the alias-open carve-out.
+                let verdict = self.in_list_binding(command, position, source);
+                if matches!(verdict, InListBinding::AmbientOf(_))
+                    && self.in_list_entry_is_alias_open(command, position, source)
+                {
+                    return Some(Stage0AliasPlan::Deliver(source));
+                }
+                match verdict {
+                    InListBinding::AmbientOf(terminal) if terminal != source => {
+                        Some(Stage0AliasPlan::Deliver(terminal))
+                    }
+                    _ => Some(Stage0AliasPlan::Deliver(source)),
+                }
+            }
+            crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                if self.fd_alias_reopen_path(source).is_some() {
+                    Some(Stage0AliasPlan::FreshOpen)
+                } else {
+                    Some(Stage0AliasPlan::Deliver(source))
+                }
+            }
+            _ => Some(Stage0AliasPlan::Deliver(source)),
         }
     }
 
@@ -6472,7 +6604,59 @@ impl Executor {
                     self.fd_table.set_input_offset(fd, offset);
                 }
             }
-            Some(FdReadEndpoint::File(_)) | Some(FdReadEndpoint::CoprocStdout { .. }) => {
+            Some(FdReadEndpoint::File(file)) => {
+                let dynamic = self
+                    .fd_table
+                    .entries
+                    .get(&fd)
+                    .map(|entry| entry.dynamic)
+                    .unwrap_or(false);
+                let bytes =
+                    crate::executor::substitution_metadata::shell_text_to_raw_bytes(payload);
+                // rubash#2502: the copy remembers the file it was
+                // drained from when that file re-opens fresh, so a
+                // later alias-spelling open of this slot still opens
+                // the file instead of serving the copy's remainder
+                // (see FdReadEndpoint::bytes_with_origin).
+                let origin = if file.reopens_fresh() {
+                    Some(file.path.clone())
+                } else {
+                    None
+                };
+                let copy = FdReadEndpoint::bytes_with_origin(bytes, origin);
+                // rubash#2502: every other slot holding the SAME open
+                // file description (an earlier dup — `exec 7<&6` —
+                // shares the Rc) must see the same copy: GNU's dup
+                // shares one description (redir.c:1193), so the
+                // stage's consumption is the siblings' consumption
+                // too. Slots are only replaced, never created — an
+                // fd with no ambient entry is an in-list-only binding
+                // and dies with its element.
+                let siblings: Vec<u32> = self
+                    .fd_table
+                    .entries
+                    .keys()
+                    .copied()
+                    .filter(|other| *other != fd)
+                    .filter(|other| {
+                        matches!(self.fd_table.read_endpoint(*other),
+                            Some(FdReadEndpoint::File(other_file))
+                            if std::rc::Rc::ptr_eq(&other_file, &file))
+                    })
+                    .collect();
+                self.fd_table.open_input(fd, copy.clone(), dynamic);
+                for sibling in siblings {
+                    let sibling_dynamic = self
+                        .fd_table
+                        .entries
+                        .get(&sibling)
+                        .map(|entry| entry.dynamic)
+                        .unwrap_or(false);
+                    self.fd_table
+                        .open_input(sibling, copy.clone(), sibling_dynamic);
+                }
+            }
+            Some(FdReadEndpoint::CoprocStdout { .. }) => {
                 let dynamic = self
                     .fd_table
                     .entries
@@ -6543,6 +6727,19 @@ impl Executor {
             self.fd_table.set_input_offset(fd, target);
         }
     }
+}
+
+/// rubash#2502: stage 0's payload delivery plan — see
+/// `Executor::stage0_alias_plan` for the adjudication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Stage0AliasPlan {
+    /// Materialize the resolved payload onto this fd and fold the
+    /// stage's measured consumption back onto it.
+    Deliver(u32),
+    /// The fd-0 winner is an alias-spelling open whose target
+    /// re-opens fresh: the descriptor is never drained, so there is
+    /// nothing to materialize and nothing to fold.
+    FreshOpen,
 }
 
 pub(crate) fn command_is_compound_pipeline_stage(command: &CommandNode) -> bool {

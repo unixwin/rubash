@@ -85,9 +85,11 @@ impl Executor {
                 return Ok(true);
             }
 
-            // #2036 S2 disclosure: a live in-process claim (emulation
-            // layer / fast path) is reported as what it is, not as the
-            // PATH file it replaces.
+            // #2036 S2 disclosure, as adjudicated by #2514: the claim
+            // call below reports a live in-process claim on the Windows
+            // product face only; off Windows the describe answer is the
+            // GNU one (the PATH file below, or not found) — see
+            // describe_emulated_claim_with_io.
             if self.describe_emulated_claim_with_io(name, mode, stdout)? {
                 return Ok(true);
             }
@@ -205,9 +207,13 @@ impl Executor {
                 found = true;
             }
 
-            // #2036 S2 disclosure (see describe_emulated_claim_with_io):
-            // the claim line takes the builtin line's position; the PATH
-            // enumeration below still runs, as it does for builtins.
+            // #2036 S2 disclosure as adjudicated by #2514 (see
+            // describe_emulated_claim_with_io): on the Windows face the
+            // claim line takes the builtin line's position and the PATH
+            // enumeration below still runs, as it does for builtins;
+            // off Windows there is no claim line and the enumeration is
+            // the whole file answer, exactly as GNU's describe_command
+            // prints it.
             if self.describe_emulated_claim_with_io(name, mode, stdout)? {
                 found = true;
             }
@@ -234,16 +240,17 @@ impl Executor {
         Ok(found)
     }
 
-    /// #2036 S2 disclosure ruling: when `name` carries a live
-    /// simple-command claim whose registry projection is
-    /// `Introspection::Emulated`, print the emulation answer for
-    /// `mode` and return true; otherwise print nothing and return
-    /// false. The answer forms mirror the builtin forms one class up:
-    /// Verbose names the replaced body ("X is a shell emulation of
-    /// <path>"), TypeOnly is the single token `emulation`, Reusable
-    /// (`command -v`) is the bare name — invoking the name reproduces
-    /// the in-process behavior, invoking the path would not — and
-    /// PathOnly is silent-but-found, like a builtin under `type -p`.
+    /// #2036 S2 disclosure ruling, as adjudicated for the describe
+    /// faces by #2514: when `name` carries a live simple-command
+    /// claim whose registry projection is `Introspection::Emulated`,
+    /// print the emulation answer for `mode` and return true;
+    /// otherwise print nothing and return false. The answer forms
+    /// mirror the builtin forms one class up: Verbose names the
+    /// replaced body ("X is a shell emulation of <path>"), TypeOnly
+    /// is the single token `emulation`, Reusable (`command -v`) is
+    /// the bare name — invoking the name reproduces the in-process
+    /// behavior, invoking the path would not — and PathOnly is
+    /// silent-but-found, like a builtin under `type -p`.
     ///
     /// The liveness test is the dispatch test itself, face by face,
     /// so the report cannot claim a body dispatch would not run: the
@@ -252,6 +259,22 @@ impl Executor {
     /// alone, and a Windows-only row claims nothing off Windows.
     /// Liveness implies the stand-down lookup resolved, so the path
     /// the sentence names always exists.
+    ///
+    /// #2514 platform adjudication (2026-11-02): the disclosure is a
+    /// Windows product-face behavior and is gated to it below. Off
+    /// Windows a bridge-free resolution is a genuine OS PATH file —
+    /// GNU `describe_command` (builtins/type.def:211) knows no
+    /// emulation kind and reports that file (`command -v` prints the
+    /// full path, `type -t` prints `file`), so the describe faces
+    /// must do the same: reporting scripts (modernish's `command -v`
+    /// absolute-path probe is the field case) read the answer as a
+    /// PATH answer. On Windows the resolved body may be the product's
+    /// own applet file (the WinuxCmd bundle face the S2 windows
+    /// battery pins), so the disclosure stands there unchanged; the
+    /// not-found face (no bridge-free resolution) is likewise
+    /// unchanged on every platform — the claim already stood down.
+    /// Dispatch routing is untouched: this gates only what the
+    /// describe faces print.
     fn describe_emulated_claim_with_io<W>(
         &self,
         name: &str,
@@ -262,6 +285,9 @@ impl Executor {
         W: Write,
     {
         use super::command_registry::{CfgGate, ClaimClass, Introspection};
+        if !cfg!(windows) {
+            return Ok(false);
+        }
         let Some(row) = super::command_registry::registry_row(name) else {
             return Ok(false);
         };

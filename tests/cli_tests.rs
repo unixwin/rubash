@@ -4080,12 +4080,18 @@ fn c_command_substitution_captures_type_t_output_without_leak() {
         .expect("run rubash");
 
     assert!(output.status.success());
-    // #2036 S2 disclosure: `cat` carries a live in-process claim in
-    // the bare binary (emulation layer on, cat resolvable), so
-    // `type -t cat` reports `emulation`, not `file`. (This pin's
-    // subject is the capture mechanics; the value follows the
-    // introspection contract.)
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "A=[emulation]\n");
+    // The introspection value follows the #2514 ruling: on Windows the
+    // #2036 S2 disclosure holds (`cat` may resolve to the product's own
+    // applet file, so `type -t cat` reports `emulation`); off Windows a
+    // bridge-free resolution is a genuine PATH file and GNU parity
+    // applies, so `type -t cat` reports `file`. (This pin's subject is
+    // the capture mechanics; the value follows the platform contract.)
+    let expected = if cfg!(windows) {
+        "A=[emulation]\n"
+    } else {
+        "A=[file]\n"
+    };
+    assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 

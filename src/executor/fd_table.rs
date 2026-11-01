@@ -18,6 +18,19 @@ pub(crate) struct TextInput {
     /// (process-substitution bodies), judged against the armed read
     /// deadline in `read_bytes` — see timed_input.rs.
     timing: Option<super::timed_input::SharedTimedInput>,
+    /// rubash#2502: the on-disk file this buffered copy was
+    /// materialized FROM, when the replaced endpoint was a regular
+    /// file that an alias-spelling open re-opens fresh
+    /// (`FileFd::reopens_fresh`). The stage-0 materialization
+    /// (pipeline_exec::materialize_stage0_alias_source) replaces a
+    /// drained handle-backed endpoint with this copy; without the
+    /// origin, the descriptor's identity is lost and a later
+    /// `< /dev/fd/N` open of the same slot falls to the copy's
+    /// remainder instead of GNU's fresh open of the file
+    /// (redir.c:725 — the alias spelling is a plain open of the
+    /// magic link). Only the stage-0 materialization sets it; every
+    /// other TextInput (heredocs, mirrors, channels) leaves it None.
+    origin_path: Option<PathBuf>,
 }
 
 impl TextInput {
@@ -502,12 +515,25 @@ impl FdTable {
         // at-exec capture in the fd layer can (crate::fd::
         // std_fd_closed_at_exec). A fd 1 genuinely redirected from
         // /dev/null was open at exec and keeps the Stdout endpoint.
-        // Scoped to fd 1: fd 0's readers and fd 2's diagnostic
-        // routing have their own inherited-state machinery, and a
-        // born-closed fd 2 is observably identical (diagnostics are
-        // lost either way).
+        // Scoped to fd 1 here: fd 2's diagnostic routing has its
+        // own inherited-state machinery, and a born-closed fd 2 is
+        // observably identical (diagnostics are lost either way).
+        // fd 0 is seeded immediately below (rubash#2503).
         if crate::fd::std_fd_closed_at_exec(1) {
             table.close(1);
+        }
+        // rubash#2503: fd 0 gets the same birth seed. The machinery
+        // the #2476 scoping note set fd 0 aside for already
+        // predicates on the closed bit (function_stdin_is_command_
+        // source requires !is_closed(0)), and with the entry closed
+        // the readers behave as GNU's do on the closed descriptor —
+        // the faces an in-session `exec 0<&-` already produced:
+        // read reports `read: 0: read error: Bad file descriptor`
+        // (read.def:911) instead of a silent EOF, and the stdin
+        // consumers surface the descriptor's EBADF instead of
+        // reading the runtime's /dev/null stand-in.
+        if crate::fd::std_fd_closed_at_exec(0) {
+            table.close(0);
         }
         table
     }
@@ -1623,7 +1649,32 @@ impl FdReadEndpoint {
             data: input,
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
+    }
+
+    /// rubash#2502: a buffered copy that stands in for a drained
+    /// regular-file endpoint (the stage-0 alias materialization) —
+    /// the copy remembers the file it was drained from so an
+    /// alias-spelling open of the slot can still re-open that file
+    /// fresh, exactly as GNU's open of /dev/fd/N does against the
+    /// live descriptor (redir.c:725).
+    pub(crate) fn bytes_with_origin(input: Vec<u8>, origin_path: Option<PathBuf>) -> Self {
+        Self::Text(Rc::new(RefCell::new(TextInput {
+            data: input,
+            offset: 0,
+            timing: None,
+            origin_path,
+        })))
+    }
+
+    /// rubash#2502: the file a buffered copy was materialized from
+    /// (see `bytes_with_origin`); None for every other endpoint.
+    pub(crate) fn text_origin_path(&self) -> Option<PathBuf> {
+        match self {
+            Self::Text(text) => text.borrow().origin_path.clone(),
+            _ => None,
+        }
     }
 
     pub(crate) fn text(input: impl Into<String>) -> Self {
@@ -1635,6 +1686,7 @@ impl FdReadEndpoint {
             data: input.into().into_bytes(),
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
     }
 
@@ -1645,6 +1697,7 @@ impl FdReadEndpoint {
             data: input,
             offset: 0,
             timing: None,
+            origin_path: None,
         })))
     }
 }

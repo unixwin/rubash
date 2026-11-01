@@ -2501,7 +2501,22 @@ impl Executor {
                 return false;
             }
             let target = self.expand_redirect_target(redirect);
-            return is_closed_redirect_target(&target);
+            if is_closed_redirect_target(&target) {
+                return true;
+            }
+            // rubash#2503: a dup winner whose SOURCE descriptor is
+            // closed in the table reads a closed stdin too. The
+            // redirect layer only lets the SELF-dup through (GNU
+            // redir.c:1151 gates the dup2 on redir_fd != redirector;
+            // a non-self dup of a closed fd fails the redirection
+            // upstream and the emulation never runs), so a closed
+            // source here is exactly that surviving self-dup.
+            if let Some((source, _)) =
+                crate::executor::execution_misc::redirect_target_fd_and_move(&target)
+            {
+                return self.fd_table.is_closed(source);
+            }
+            return false;
         }
         if matches!(
             super::shell_options::fd0_stdin_redirect_winner(cmd),
