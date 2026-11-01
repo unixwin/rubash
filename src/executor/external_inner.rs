@@ -278,6 +278,20 @@ impl Executor {
         }
     }
 
+    /// rubash#2475: env's own diagnostics obey the command's
+    /// redirections like every other builtin's stderr — they flush
+    /// through the buffered builtin router, not the fd-table default
+    /// write (see the print branch in execute_env_command for the
+    /// disease: a plain command's `2>` target never lands in the fd
+    /// table, so the diagnostic escaped to the terminal).
+    fn write_env_command_stderr(
+        &mut self,
+        cmd: &CommandNode,
+        output: &[u8],
+    ) -> Result<(), ExecuteError> {
+        self.write_buffered_builtin_output(cmd, &[], output)
+    }
+
     pub(in crate::executor) fn execute_env_command(
         &mut self,
         cmd: &CommandNode,
@@ -288,7 +302,7 @@ impl Executor {
         // executed the substitution and reported the redirect failure on the
         // caller's stderr (exportfunc.tests line 68).
         let args = cmd.words[1..].to_vec();
-        let Some(config) = self.parse_env_command_args(args)? else {
+        let Some(config) = self.parse_env_command_args(cmd, args)? else {
             return Ok(());
         };
         let Some(env_vars) = self.materialize_env_command_environment(cmd, &config)? else {
@@ -324,13 +338,29 @@ impl Executor {
                 );
                 output.push(if config.null_terminated { b'\0' } else { b'\n' });
             }
-            self.write_default_stdout(&output)?;
-            self.exit_code = 0;
+            // rubash#2475: env executes in-process, so the environment
+            // it prints obeys the command's redirections like every
+            // other builtin's output — flush through the buffered
+            // builtin router (the do_redirections model,
+            // execute_cmd.c:5606). The fd-table default write only
+            // ever sees pipeline/capture/exec bindings; a plain
+            // command's `>` target never lands there, so the dump
+            // escaped to the process stdout and the redirect file was
+            // never even created (`env >/dev/null` printed in full).
+            self.write_buffered_builtin_output(cmd, &output, &[])?;
+            // sh_chkwrite folding (the rubash#1496 pattern): a failed
+            // flush fails the command instead of being erased by the
+            // nominal success status.
+            self.exit_code = if self.take_builtin_write_failed() {
+                1
+            } else {
+                0
+            };
             return Ok(());
         }
 
         if config.null_terminated {
-            self.write_default_stderr(b"env: cannot specify --null (-0) with command\n")?;
+            self.write_env_command_stderr(cmd, b"env: cannot specify --null (-0) with command\n")?;
             self.exit_code = 125;
             return Ok(());
         }
@@ -361,7 +391,7 @@ impl Executor {
                 "env: failed to run command '{}': No such file or directory",
                 config.command[0]
             )?;
-            self.write_default_stderr(&stderr)?;
+            self.write_env_command_stderr(cmd, &stderr)?;
             self.exit_code = 127;
             return Ok(());
         };
@@ -391,11 +421,7 @@ impl Executor {
         // wrong directory there; the anchored program stands for
         // that shape.
         let exec_name = if config.chdir.is_none() {
-            crate::executor::path::spawn_exec_name(
-                &config.command[0],
-                &program,
-                resolution_env,
-            )
+            crate::executor::path::spawn_exec_name(&config.command[0], &program, resolution_env)
         } else {
             None
         };
@@ -427,7 +453,7 @@ impl Executor {
         if let Some(chdir) = &config.chdir {
             let directory = shell_path_to_windows(chdir, &env_map);
             if !directory.is_dir() {
-                self.write_default_stderr(b"env: cannot change directory\n")?;
+                self.write_env_command_stderr(cmd, b"env: cannot change directory\n")?;
                 self.exit_code = 125;
                 return Ok(());
             }
@@ -442,6 +468,7 @@ impl Executor {
 
     fn parse_env_command_args(
         &mut self,
+        cmd: &CommandNode,
         args: Vec<String>,
     ) -> Result<Option<EnvCommandConfig>, ExecuteError> {
         let mut config = EnvCommandConfig::default();
@@ -475,7 +502,7 @@ impl Executor {
             }
 
             if let Some(parsed) =
-                self.parse_env_short_option_cluster(&arg, &args, &mut index, &mut config)?
+                self.parse_env_short_option_cluster(cmd, &arg, &args, &mut index, &mut config)?
             {
                 let Some(split) = parsed else {
                     return Ok(None);
@@ -490,7 +517,10 @@ impl Executor {
             }
             if arg == "-u" || arg == "--unset" {
                 let Some(value) = args.get(index).cloned() else {
-                    self.write_default_stderr(b"env: option --unset requires an argument\n")?;
+                    self.write_env_command_stderr(
+                        cmd,
+                        b"env: option --unset requires an argument\n",
+                    )?;
                     self.exit_code = 125;
                     return Ok(None);
                 };
@@ -505,7 +535,10 @@ impl Executor {
             }
             if arg == "-C" || arg == "--chdir" {
                 let Some(value) = args.get(index).cloned() else {
-                    self.write_default_stderr(b"env: option --chdir requires an argument\n")?;
+                    self.write_env_command_stderr(
+                        cmd,
+                        b"env: option --chdir requires an argument\n",
+                    )?;
                     self.exit_code = 125;
                     return Ok(None);
                 };
@@ -520,7 +553,10 @@ impl Executor {
             }
             if arg == "-f" || arg == "--file" {
                 let Some(value) = args.get(index).cloned() else {
-                    self.write_default_stderr(b"env: option --file requires an argument\n")?;
+                    self.write_env_command_stderr(
+                        cmd,
+                        b"env: option --file requires an argument\n",
+                    )?;
                     self.exit_code = 125;
                     return Ok(None);
                 };
@@ -535,7 +571,10 @@ impl Executor {
             }
             if arg == "-a" || arg == "--argv0" {
                 let Some(value) = args.get(index).cloned() else {
-                    self.write_default_stderr(b"env: option --argv0 requires an argument\n")?;
+                    self.write_env_command_stderr(
+                        cmd,
+                        b"env: option --argv0 requires an argument\n",
+                    )?;
                     self.exit_code = 125;
                     return Ok(None);
                 };
@@ -551,7 +590,8 @@ impl Executor {
             }
             if arg == "-S" || arg == "--split-string" {
                 let Some(value) = args.get(index).cloned() else {
-                    self.write_default_stderr(
+                    self.write_env_command_stderr(
+                        cmd,
                         b"env: option --split-string requires an argument\n",
                     )?;
                     self.exit_code = 125;
@@ -586,7 +626,7 @@ impl Executor {
         }
 
         if config.command.is_empty() && config.chdir.is_some() {
-            self.write_default_stderr(b"env: must specify command with --chdir\n")?;
+            self.write_env_command_stderr(cmd, b"env: must specify command with --chdir\n")?;
             self.exit_code = 125;
             return Ok(None);
         }
@@ -802,7 +842,7 @@ impl Executor {
                 Err(error) => {
                     let mut stderr = Vec::new();
                     writeln!(&mut stderr, "env: {file}: {error}")?;
-                    self.write_default_stderr(&stderr)?;
+                    self.write_env_command_stderr(cmd, &stderr)?;
                     self.exit_code = 1;
                     return Ok(None);
                 }
@@ -824,6 +864,7 @@ impl Executor {
 
     fn parse_env_short_option_cluster(
         &mut self,
+        cmd: &CommandNode,
         arg: &str,
         args: &[String],
         index: &mut usize,
@@ -861,7 +902,7 @@ impl Executor {
                                 'S' => "env: option --split-string requires an argument\n",
                                 _ => unreachable!(),
                             };
-                            self.write_default_stderr(message.as_bytes())?;
+                            self.write_env_command_stderr(cmd, message.as_bytes())?;
                             self.exit_code = 125;
                             return Ok(Some(None));
                         };
@@ -884,7 +925,7 @@ impl Executor {
                 _ => {
                     let mut stderr = Vec::new();
                     writeln!(&mut stderr, "env: invalid option -- '{option}'")?;
-                    self.write_default_stderr(&stderr)?;
+                    self.write_env_command_stderr(cmd, &stderr)?;
                     self.exit_code = 125;
                     return Ok(Some(None));
                 }
