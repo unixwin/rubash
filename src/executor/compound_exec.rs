@@ -2568,8 +2568,42 @@ impl Executor {
     /// gives a forked async subshell.
     fn materialize_virtual_stdin_fd0(&mut self, bytes: &[u8]) -> Option<std::fs::File> {
         let path = self.process_substitution_temp_path().ok()?;
-        fs::write(&path, bytes).ok()?;
+        // rubash#2409: GNU's here_document_to_fd (redir.c:423) makes the
+        // document "really temporary" (redir.c:548-551): the scratch
+        // file is written through one handle, re-opened by name for
+        // reading, and the name is unlinked before the descriptor is
+        // ever used — the temp file has no directory entry for its
+        // whole working life. The previous body wrote the file and
+        // opened it but never unlinked, so every async subshell that
+        // inherited a virtual fd 0 (FUNCTION_STDIN text channel or a
+        // Text/ProcessSubstitution fd-0 endpoint) leaked a named
+        // rubash-process-subst*.tmp into the temp dir — the #2395 leak
+        // class on this face (the exec face's fix in
+        // materialize_exec_stdin_bytes is the sibling). Mirror GNU:
+        // scratch write handle, read re-open while it is alive,
+        // immediate unlink on Unix; FILE_FLAG_DELETE_ON_CLOSE carries
+        // the same lifetime on Windows (the re-opened handle keeps the
+        // delete pending until fd 0 itself closes).
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let mut scratch = options.open(&path).ok()?;
+        {
+            use std::io::Write as _;
+            scratch.write_all(bytes).ok()?;
+        }
         let file_fd = FileFd::open_read(path).ok()?;
+        #[cfg(unix)]
+        {
+            // The descriptor stays valid after the name is unlinked.
+            let _ = std::fs::remove_file(&file_fd.path);
+        }
+        drop(scratch);
         let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle).ok()?;
         self.set_fd_input_file(0, file_fd, false);
         Some(crate::fd::handle_to_file(dup))
@@ -2609,12 +2643,21 @@ impl Executor {
                     return None;
                 }
                 if want_string {
-                    if command.here_string_carrier.is_some() {
-                        Some(self.expand_here_string_mut_from_carrier(&command.here_string_carrier))
+                    // rubash#2409 (same-wave residual): a here-string's
+                    // bytes are the expanded word PLUS a trailing
+                    // newline (GNU heredoc_expand for r_reading_string,
+                    // redir.c:396-397; the correlated path above appends
+                    // it in expand_heredoc_redirect_text). The legacy
+                    // fallback returned the bare word, so every async
+                    // here-string (`cat <<<word &`) lost its newline.
+                    let mut expanded = if command.here_string_carrier.is_some() {
+                        self.expand_here_string_mut_from_carrier(&command.here_string_carrier)
                     } else {
                         let body = command.here_string.clone()?;
-                        Some(self.expand_here_string_mut(&body))
-                    }
+                        self.expand_here_string_mut(&body)
+                    };
+                    expanded.push('\n');
+                    Some(expanded)
                 } else if command.heredoc_body.is_some() {
                     Some(self.expand_heredoc_body_mut_from_carrier(&command.heredoc_body))
                 } else {
@@ -2623,8 +2666,37 @@ impl Executor {
                 }
             })?;
         let path = self.process_substitution_temp_path().ok()?;
-        fs::write(&path, expanded.as_bytes()).ok()?;
-        std::fs::File::open(&path).ok().map(|file| (file, path))
+        // rubash#2409: same leak class as materialize_virtual_stdin_fd0
+        // above — the carrier was created by name and never unlinked,
+        // so every background command carrying its own heredoc /
+        // here-string redirect left a rubash-process-subst*.tmp in the
+        // temp dir. GNU's here_document_to_fd (redir.c:423) unlinks
+        // the name before the descriptor is used (redir.c:548-551);
+        // mirror it here so both callers (the background-stdio face,
+        // which discarded the path, and the redirect-replay face,
+        // which keeps it only as the FileFd name record) inherit the
+        // anonymous lifetime. The returned path is a name record only
+        // from here on.
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt as _;
+            // FILE_FLAG_DELETE_ON_CLOSE.
+            options.custom_flags(0x0400_0000);
+        }
+        let mut scratch = options.open(&path).ok()?;
+        {
+            use std::io::Write as _;
+            scratch.write_all(expanded.as_bytes()).ok()?;
+        }
+        let file = std::fs::File::open(&path).ok()?;
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+        drop(scratch);
+        Some((file, path))
     }
 
     fn background_command_source(&self, command: &CommandNode) -> String {
