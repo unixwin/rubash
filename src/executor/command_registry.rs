@@ -324,6 +324,16 @@ pub(crate) enum Introspection {
     /// plain file answer (or not-found) returns, exactly as dispatch
     /// behaves. Whether an emulated execution also writes a hash-table
     /// resolution record is the separate `hash_record` field.
+    ///
+    /// #2514 adjudication (2026-11-02): the describe-face disclosure
+    /// above is the Windows product face only. Off Windows the
+    /// describe faces follow GNU `describe_command`
+    /// (builtins/type.def:211) exactly — a resolved name is reported
+    /// as its PATH file, an unresolvable one as not found — because
+    /// off Windows a resolution is a genuine OS file, not the
+    /// product's own applet bundle. The projection value itself (and
+    /// this row set) is unchanged; only the describe consumer gates
+    /// the disclosure by platform (type_describe.rs).
     Emulated,
     /// Reported as the PATH file (or not found): the row's claims are
     /// shape-scoped (pipeline stage / command substitution only) or
