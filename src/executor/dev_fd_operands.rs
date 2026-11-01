@@ -60,6 +60,10 @@ enum DevOperandFlush {
     /// so the downstream stage sees EOF.
     OwnedHandle(crate::fd::HANDLE),
     Capture,
+    /// rubash#2385: a complementary channel end — the operand temp's
+    /// bytes append to the shared queue at finish, the same deferred
+    /// delivery the Stdout/Stderr arms give their streams.
+    Channel(crate::executor::fd_table::PipeChannelEnd),
 }
 
 /// Deferred work from operand materialization: GNU's dup shares the fd's
@@ -754,6 +758,19 @@ impl Executor {
             // procfs entry cannot cross the boundary (the in-shell
             // faces carry that shape).
             FdWriteEndpoint::ProcContentWrite => dev_operand_temp(&[], m),
+            // rubash#2385: an operand naming a complementary channel
+            // end — the child writes a temp, and finish appends its
+            // bytes to the shared queue (the deferred-delivery shape
+            // the Stdout/Stderr arms above use for their streams;
+            // GNU's child writes the pipe itself).
+            FdWriteEndpoint::PipeChannel(channel) => {
+                let temp = dev_operand_temp(&[], m)?;
+                m.flushes.push((
+                    PathBuf::from(&temp),
+                    DevOperandFlush::Channel(channel.clone()),
+                ));
+                Some(temp)
+            }
         }
     }
 
@@ -785,6 +802,9 @@ impl Executor {
                     let _ = crate::fd::write_all(*handle, &bytes);
                 }
                 DevOperandFlush::Capture => captured.extend_from_slice(&bytes),
+                // rubash#2385: the operand child's bytes join the
+                // channel's stream at the tail.
+                DevOperandFlush::Channel(channel) => channel.append(&bytes),
             }
         }
         for fd in &m.consume_fds {
@@ -1096,7 +1116,12 @@ impl Executor {
             | FdWriteEndpoint::FullDevice
             // rubash#2042: neither does a 0644-class synthetic /proc
             // write binding (the entry's bytes ride the read side).
-            | FdWriteEndpoint::ProcContentWrite => None,
+            | FdWriteEndpoint::ProcContentWrite
+            // rubash#2385: neither does a complementary channel end
+            // by itself — the queue's bytes ride the READ endpoint
+            // the open paired it with (served by the read-side arms
+            // above whenever the entry carries one).
+            | FdWriteEndpoint::PipeChannel(_) => None,
         }
     }
 
