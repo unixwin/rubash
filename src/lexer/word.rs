@@ -398,7 +398,6 @@ impl<'a> Lexer<'a> {
     fn skip_word_inner(&mut self, token_start: usize) {
         let mut extglob_operator = false;
         let array_assignment = self.looks_like_array_element_assignment();
-        let array_compound_assignment = self.looks_like_array_element_compound_assignment();
         let mut array_subscript_depth = 0usize;
         let mut array_value_paren_depth = 0usize;
         // GNU parse.y read_token_word tracks the whole token: a `name=(...)`
@@ -454,11 +453,23 @@ impl<'a> Lexer<'a> {
                 // position (a resumed or sub-lexed stream), the parser
                 // reassembles the one-word form at first-word position
                 // (collect_split_array_element_assignment_word). The
-                // compound-value form stays glued at any position: its
-                // `(` cannot be recovered from split word tokens.
+                // element-compound form (`name[sub]=(...)`) is NOT an
+                // exception to this gate: parse.y:5653 admits the `=(`
+                // compound VALUE where assignment_acceptable OR
+                // PST_ASSIGNOK holds (a declaration builtin's operand
+                // position), but the parse.y:5636 span gate itself
+                // knows only assignment_acceptable and PST_COMPASSIGN —
+                // so in a declare/local/export operand a SPACED
+                // subscript still splits the word, and the compound
+                // list's `(` then reaches the parser as a stray token:
+                // GNU reports a parse-time syntax error and aborts the
+                // script (rubash#2474). The UNSPACED element-compound
+                // form stays one word at any position through the
+                // compound_assignment_start arm below, which is where
+                // the PST_ASSIGNOK admission lives in this lexer.
                 && !(array_subscript_depth > 0
                     && c.is_ascii_whitespace()
-                    && (array_compound_assignment || self.assignment_word_position()))
+                    && self.assignment_word_position())
                 && !(in_array_value && c.is_ascii_whitespace())
                 && !(in_array_value && matches!(c, '(' | ')'))
                 // GNU skip_to_delim/skipsubscript (subst.c:2186): the
@@ -892,21 +903,6 @@ impl<'a> Lexer<'a> {
         // the word an assignment.
         self.array_element_assignment_tail()
             .is_some_and(|tail| tail.starts_with('=') || tail.starts_with("+="))
-    }
-
-    // True for `name[subscript]=(...)` / `name[subscript]+=(...)`: the
-    // only array-element shape whose subscript interior must stay atomic
-    // at lex time even outside assignment position, because the compound
-    // list's `(` is a separate token class — once the word splits at the
-    // subscript's whitespace, the parser cannot reassemble the list.
-    // GNU parse.y:5653-5670 enters parse_compound_assignment at that `=`
-    // (assignment_acceptable or PST_ASSIGNOK); rubash's lexer keeps the
-    // whole word atomic for compound values at every position (the
-    // compound_assignment_start invariant), and this predicate extends
-    // the same atomicity to the element form's subscript span.
-    fn looks_like_array_element_compound_assignment(&self) -> bool {
-        self.array_element_assignment_tail()
-            .is_some_and(|tail| tail.starts_with("=(") || tail.starts_with("+("))
     }
 
     fn word_so_far_ends_extglob_operator(&self, start: usize) -> bool {

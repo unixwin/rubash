@@ -42,6 +42,71 @@ pub enum ReadWait {
     Timeout,
 }
 
+/// rubash#2476: whether a standard descriptor was CLOSED at exec —
+/// the state GNU starts from, before any runtime initialization.
+///
+/// A Rust process cannot observe this from `main`: std::rt::init
+/// sanitizes the standard descriptors, opening /dev/null over any
+/// that were closed at exec, so by the time user code runs a
+/// born-closed fd 1 is indistinguishable from a genuine
+/// `>/dev/null` redirect — the descriptor is open and writes to it
+/// succeed. GNU (C) keeps the descriptor closed: a builtin's
+/// buffered output fails at sh_chkwrite's fflush (builtins/common.c:
+/// 319) with EBADF, producing `echo: write error: Bad file
+/// descriptor` and status 1.
+///
+/// The capture therefore runs in a loader constructor (ELF
+/// `.init_array`; Mach-O `__mod_init_func`), which the dynamic
+/// loader invokes before the Rust runtime's sanitization. It uses
+/// only fcntl and atomic stores — no std, no allocation. Values:
+/// 0 = never captured (unsupported platform / constructor not
+/// linked), 1 = open at exec, 2 = closed at exec. Only the fd
+/// table's fd-1 seed consults it (see FdTable::new): a descriptor
+/// genuinely redirected from /dev/null was OPEN at exec (value 1)
+/// and keeps the normal Stdout endpoint.
+static STD_FD_AT_EXEC: [std::sync::atomic::AtomicU8; 3] = [
+    std::sync::atomic::AtomicU8::new(0),
+    std::sync::atomic::AtomicU8::new(0),
+    std::sync::atomic::AtomicU8::new(0),
+];
+
+extern "C" fn capture_std_fds_at_exec() {
+    for fd in 0..3i32 {
+        let open = unsafe { libc::fcntl(fd, libc::F_GETFD, 0) } >= 0;
+        STD_FD_AT_EXEC[fd as usize].store(
+            if open { 1 } else { 2 },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "netbsd",
+    target_os = "openbsd",
+    target_os = "dragonfly"
+))]
+#[used]
+#[link_section = ".init_array"]
+static STD_FD_AT_EXEC_CTOR: extern "C" fn() = capture_std_fds_at_exec;
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+#[used]
+#[link_section = "__DATA,__mod_init_func"]
+static STD_FD_AT_EXEC_CTOR: extern "C" fn() = capture_std_fds_at_exec;
+
+/// True when descriptor `fd` (0..=2) was closed at exec, per the
+/// loader-constructor capture above. False when the descriptor was
+/// open, and false when no capture ran (the pre-#2476 behavior is
+/// the safe fallback on platforms without a constructor section).
+pub fn std_fd_closed_at_exec(fd: u32) -> bool {
+    STD_FD_AT_EXEC
+        .get(fd as usize)
+        .is_some_and(|state| state.load(std::sync::atomic::Ordering::Relaxed) == 2)
+}
+
 /// GNU builtins/read.def fstat gate (`tmsec = tmusec = 0` on S_ISREG):
 /// a regular-file input disables `read -t` entirely.
 pub fn is_disk_file(h: HANDLE) -> bool {

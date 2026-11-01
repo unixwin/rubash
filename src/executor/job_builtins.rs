@@ -729,14 +729,22 @@ impl Executor {
                         job_id,
                         stop_signal,
                     } => {
-                        // GNU jobs.c wait_for_job (rubash#1246).
+                        // GNU's stopped report rides only the jobspec
+                        // path: builtins/wait.def:316 sends `%...`
+                        // operands to wait_for_job (jobs.c:3409-3410
+                        // warns when the job is stopped), while a
+                        // numeric pid goes to wait_for_single_pid
+                        // (wait.def:277; jobs.c:2729), which returns
+                        // the stop status silently (rubash#2488).
                         let mut stderr = Vec::new();
-                        writeln!(
-                            stderr,
-                            "{}warning: wait_for_job: job {} is stopped",
-                            self.diagnostic_prefix(),
-                            job_id
-                        )?;
+                        if cmd.words[1].starts_with('%') {
+                            writeln!(
+                                stderr,
+                                "{}warning: wait_for_job: job {} is stopped",
+                                self.diagnostic_prefix(),
+                                job_id
+                            )?;
+                        }
                         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                         return Ok(128 + stop_signal);
                     }
@@ -764,19 +772,13 @@ impl Executor {
                                 self.write_buffered_builtin_output(cmd, &[], &[])?;
                                 return Ok(status);
                             }
-                            WaitPidOutcome::Stopped {
-                                job_id,
-                                stop_signal,
-                            } => {
-                                // GNU jobs.c wait_for_job (rubash#1246).
-                                let mut stderr = Vec::new();
-                                writeln!(
-                                    stderr,
-                                    "{}warning: wait_for_job: job {} is stopped",
-                                    self.diagnostic_prefix(),
-                                    job_id
-                                )?;
-                                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            WaitPidOutcome::Stopped { stop_signal, .. } => {
+                                // A numeric pid reaches this arm only via
+                                // the wait_for_single_pid path
+                                // (builtins/wait.def:277): GNU returns the
+                                // stop status with no wait_for_job warning
+                                // (rubash#2488).
+                                self.write_buffered_builtin_output(cmd, &[], &[])?;
                                 return Ok(128 + stop_signal);
                             }
                             WaitPidOutcome::NotFound => {}
@@ -979,16 +981,21 @@ impl Executor {
                     job_id,
                     stop_signal,
                 } => {
-                    // GNU jobs.c wait_for_job: a stopped job is reported
-                    // (`warning: wait_for_job: job %d is stopped`) and
-                    // the wait returns the stop status 128+sig without
-                    // blocking (rubash#1246).
-                    writeln!(
-                        stderr,
-                        "{}warning: wait_for_job: job {} is stopped",
-                        self.diagnostic_prefix(),
-                        job_id
-                    )?;
+                    // GNU reports a stopped job only for `%...`
+                    // operands: wait.def:316 routes them to
+                    // wait_for_job (jobs.c:3409-3410 warns), while a
+                    // numeric pid takes wait_for_single_pid
+                    // (wait.def:277), which returns the stop status
+                    // 128+sig silently and without blocking
+                    // (rubash#1246, rubash#2488).
+                    if operand.starts_with('%') {
+                        writeln!(
+                            stderr,
+                            "{}warning: wait_for_job: job {} is stopped",
+                            self.diagnostic_prefix(),
+                            job_id
+                        )?;
+                    }
                     status = 128 + stop_signal;
                     last_pid = Some(pid);
                 }
@@ -2425,14 +2432,75 @@ impl Executor {
         )?;
         let status = match action {
             crate::builtins::disown::DisownAction::Complete(status) => status,
-            crate::builtins::disown::DisownAction::All { nohup_only } => {
+            crate::builtins::disown::DisownAction::All {
+                nohup_only,
+                running_only,
+            } => {
                 if nohup_only {
-                    // GNU jobs.c:5111 nohup_all_jobs: mark, never delete.
+                    // GNU jobs.c:5111 nohup_all_jobs: mark, never
+                    // delete. Its argument is the `-r` flag
+                    // (builtins/jobs.def disown_builtin), and with it
+                    // only running jobs take the mark (rubash#2496).
                     for job in self.shell_state.job_table.jobs.values_mut() {
-                        job.nohup = true;
+                        if !running_only || job.state == crate::jobs::ProcessState::Running {
+                            job.nohup = true;
+                        }
                     }
                     0
+                } else if running_only {
+                    // GNU jobs.c:5066 delete_all_jobs (1): delete
+                    // only JRUNNING jobs — stopped and completed jobs
+                    // stay in the table (rubash#2496). A stopped job
+                    // is never deleted here, so the DEL_WARNSTOPPED
+                    // report cannot fire (rubash#2489). The teardown
+                    // mirrors the full clear below, scoped to the
+                    // deleted jobs: their pids keep nothing waitable
+                    // (delete_job's DEL_NOBGPID — the same rule the
+                    // All form follows per rubash#1304).
+                    let doomed: Vec<u32> = self
+                        .shell_state
+                        .job_table
+                        .jobs
+                        .iter()
+                        .filter(|(_, job)| job.state == crate::jobs::ProcessState::Running)
+                        .map(|(job_id, _)| *job_id)
+                        .collect();
+                    for job_id in doomed {
+                        let pids: Vec<u32> = self
+                            .shell_state
+                            .job_table
+                            .jobs
+                            .get(&job_id)
+                            .map(|job| job.pids.clone())
+                            .unwrap_or_default();
+                        for pid in &pids {
+                            self.background_children.remove(pid);
+                            self.close_coproc_endpoints(*pid);
+                            self.fd_table.close(*pid);
+                        }
+                        self.shell_state.job_table.remove_job(job_id);
+                    }
+                    // jobs.c:5078-5079: delete_all_jobs sets
+                    // j_current/j_previous to NO_JOB on entry, and
+                    // its own XXX comment notes they are never set
+                    // appropriately for the running_only form — the
+                    // +/- markers stay cleared even when this arm
+                    // deleted nothing (rubash#2496).
+                    self.shell_state.job_table.clear_current_markers();
+                    0
                 } else {
+                    // GNU delete_all_jobs (jobs.c:5091) deletes with
+                    // DEL_WARNSTOPPED: one report per stopped job, in
+                    // slot order. The -r form deletes running jobs
+                    // only, so a stopped job is never reported there
+                    // (rubash#2489).
+                    if !running_only {
+                        let job_ids: Vec<u32> =
+                            self.shell_state.job_table.jobs.keys().copied().collect();
+                        for job_id in job_ids {
+                            self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                        }
+                    }
                     let pids: Vec<u32> = self
                         .shell_state
                         .job_table
@@ -2456,11 +2524,22 @@ impl Executor {
                 }
             }
             crate::builtins::disown::DisownAction::Current { nohup_only } => {
-                let acted = if nohup_only {
-                    self.nohup_current_job()
-                } else {
-                    self.disown_current_job()
-                };
+                let acted =
+                    if nohup_only {
+                        self.nohup_current_job()
+                    } else {
+                        // GNU disown with no spec deletes the current job
+                        // through the same delete_job (job, DEL_WARNSTOPPED)
+                        // as an explicit spec (builtins/jobs.def
+                        // disown_builtin), so a stopped current job is
+                        // reported before it leaves the table (rubash#2489).
+                        if let Some(job_id) = self.shell_state.last_background_pid.and_then(|pid| {
+                            self.shell_state.job_table.pid_to_job.get(&pid).copied()
+                        }) {
+                            self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                        }
+                        self.disown_current_job()
+                    };
                 if acted {
                     0
                 } else {
@@ -2528,6 +2607,15 @@ impl Executor {
                                     }
                                 }
                             } else {
+                                // GNU builtins/jobs.def disown_builtin:
+                                // delete_job (job, DEL_WARNSTOPPED) —
+                                // a stopped job is reported as it is
+                                // deleted (jobs.c:1495, rubash#2489).
+                                if let Some(job_id) =
+                                    self.shell_state.job_table.pid_to_job.get(&pid).copied()
+                                {
+                                    self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                                }
                                 self.background_children.remove(&pid);
                                 self.close_coproc_endpoints(pid);
                                 self.fd_table.close(pid);
@@ -2585,6 +2673,36 @@ impl Executor {
     /// 127 "not a child of this shell" (rubash#1304). (DisownAction::All
     /// is the exception: GNU `disown -a` leaves nothing waitable, which
     /// clear_jobs' purge of completed_statuses already models.)
+    /// GNU jobs.c:1495-1496: delete_job's DEL_WARNSTOPPED report,
+    /// `warning: deleting stopped job %d with process group %ld`,
+    /// emitted when a job is deleted while stopped. Every disown
+    /// deletion path carries the flag (builtins/jobs.def: delete_job
+    /// (job, 1) per spec; jobs.c:5091 delete_all_jobs), and the report
+    /// is gated on subshell_environment == 0 — a deletion inside a
+    /// subshell or command substitution never warns. Plain shell exit
+    /// is not a delete_job path and never warns (rubash#2489).
+    fn warn_deleting_stopped_job(
+        &self,
+        job_id: u32,
+        stderr: &mut Vec<u8>,
+    ) -> Result<(), ExecuteError> {
+        if self.shell_state.subshell_depth.get() != 0 {
+            return Ok(());
+        }
+        if let Some(entry) = self.shell_state.job_table.jobs.get(&job_id) {
+            if entry.state == crate::jobs::ProcessState::Stopped {
+                writeln!(
+                    stderr,
+                    "{}warning: deleting stopped job {} with process group {}",
+                    self.diagnostic_prefix(),
+                    entry.id,
+                    entry.pgrp
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn disown_job_by_pid(&mut self, pid: u32) {
         let job_pids: Vec<u32> = self
             .shell_state

@@ -1378,6 +1378,14 @@ pub fn inherited_open_fds() -> Vec<(u32, bool, bool)> {
     Vec::new()
 }
 
+/// rubash#2476: Windows has no at-exec std-fd capture — standard
+/// handles are inherited opt-in per handle and a missing handle
+/// surfaces through the handle layer, not through a loader
+/// constructor. Always "not closed at exec" (see fd/unix.rs).
+pub fn std_fd_closed_at_exec(_fd: u32) -> bool {
+    false
+}
+
 /// rubash#1838: Windows never snapshots inherited descriptors (handle
 /// inheritance is opt-in per handle, so `inherited_open_fds` is always
 /// empty), hence there is nothing to adopt. Returning None also keeps

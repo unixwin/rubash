@@ -423,6 +423,61 @@ impl Executor {
         self.in_list_binding_depth(cmd, before, fd, 0)
     }
 
+    /// rubash#2479: whether the winning entry binding `fd` in cmd's own
+    /// list before `before` is an fd-alias PATH spelling open (Input or
+    /// ReadWrite kind over `/dev/fd/N`, `/dev/std*`, `/proc/self/fd/N`).
+    /// Such a binding's description is the OPEN of the aliased
+    /// descriptor — fresh for a regular-file target (rubash#2256) — not
+    /// the aliased fd's own description, so a later `<&fd` dup in the
+    /// same list shares the open, never the ambient fd the spelling
+    /// names. Only the winning entry's kind and target class are
+    /// judged; the scan mirrors in_list_binding_depth's binding walk.
+    pub(in crate::executor) fn in_list_entry_is_alias_open(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        fd: u32,
+    ) -> bool {
+        for position in (0..before).rev() {
+            let entry = &cmd.redirects[position];
+            // {var} bindings land in the fd table before dispatch;
+            // the ambient table is their service face.
+            if entry.fd_var.is_some() {
+                continue;
+            }
+            let binds_fd = match entry.kind {
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => matches!(fd, 1 | 2),
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString
+                | crate::parser::RedirectKind::ReadWrite => entry.fd.unwrap_or(0) == fd,
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput
+                | crate::parser::RedirectKind::DuplicateOutput
+                | crate::parser::RedirectKind::CloseOutput => entry.fd.unwrap_or(1) == fd,
+                _ => false,
+            };
+            if !binds_fd {
+                continue;
+            }
+            if !matches!(
+                entry.kind,
+                crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+            ) {
+                return false;
+            }
+            let target = self.expand_redirect_target(entry);
+            return !is_closed_redirect_target(&target)
+                && !super::execution_misc::redirect_target_is_dup_spelling(&target)
+                && redirect_target_fd(&target).is_some();
+        }
+        false
+    }
+
     fn in_list_binding_depth(
         &self,
         cmd: &CommandNode,

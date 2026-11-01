@@ -493,6 +493,22 @@ impl FdTable {
                 dynamic: false,
             },
         );
+        // rubash#2476: a process BORN with fd 1 closed keeps it
+        // closed in the table. GNU never reopens it: builtin output
+        // fails at sh_chkwrite (builtins/common.c:319) and reports
+        // `write error: Bad file descriptor` with status 1. The Rust
+        // runtime reopens a closed standard fd as /dev/null before
+        // main, so the live descriptor cannot answer this — the
+        // at-exec capture in the fd layer can (crate::fd::
+        // std_fd_closed_at_exec). A fd 1 genuinely redirected from
+        // /dev/null was open at exec and keeps the Stdout endpoint.
+        // Scoped to fd 1: fd 0's readers and fd 2's diagnostic
+        // routing have their own inherited-state machinery, and a
+        // born-closed fd 2 is observably identical (diagnostics are
+        // lost either way).
+        if crate::fd::std_fd_closed_at_exec(1) {
+            table.close(1);
+        }
         table
     }
 

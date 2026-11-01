@@ -820,6 +820,17 @@ impl JobTable {
         self.previous_job = None;
     }
 
+    /// GNU jobs.c:5078-5079 delete_all_jobs: js.j_current and
+    /// js.j_previous are set to NO_JOB on entry and never recomputed
+    /// (the XXX comment in the source notes they should be set
+    /// appropriately when running_only, but they aren't), so the
+    /// +/- markers stay cleared after a `disown -r` even when no
+    /// job was deleted (rubash#2496).
+    pub fn clear_current_markers(&mut self) {
+        self.current_job = None;
+        self.previous_job = None;
+    }
+
     pub fn attach_coproc_endpoint(&mut self, job_id: JobId, fd: u32) {
         if let Some(job) = self.jobs.get_mut(&job_id) {
             job.coproc_endpoints.push(fd);
