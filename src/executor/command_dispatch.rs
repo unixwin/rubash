@@ -624,7 +624,23 @@ impl Executor {
             // adjudicated once, by the ast_exec time branch, when the
             // timed command completes (rubash#1277) — firing here too
             // would double it.
-            if self.timed_dispatch_depth.get() == 0 {
+            // rubash#2482 (t133 residual): fire only for a COMPLETED
+            // command. GNU's run_error_trap call sites (execute_cmd.c:
+            // 773/1000/1166/2909) only ever adjudicate a command that
+            // returned a status; the `exit` builtin never returns —
+            // builtins/exit.def ends in jump_to_top_level (EXITBLTIN),
+            // so no frame the unwind crosses performs failure
+            // adjudication for the exit-terminated chain (probes:
+            // `set -eET; trap 'echo E' ERR; exit 1` and an EXIT action
+            // whose function chain ends in `exit` print no E in GNU).
+            // An in-flight Err here is exactly such an unwind — the
+            // exit builtin's own result, or an inner frame's
+            // already-adjudicated conversion arriving through an
+            // eval/source wrapper (`eval 'false'` fired twice: once
+            // at the inner completion, once again at this frame) —
+            // and it propagates below unchanged, the same rule the
+            // conversion mark two statements down already applies.
+            if self.timed_dispatch_depth.get() == 0 && result.is_ok() {
                 self.maybe_run_error_trap(cmd)?;
             }
             // rubash#1611: mark ONLY the conversion of an Ok completion —
