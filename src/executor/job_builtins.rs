@@ -2437,10 +2437,56 @@ impl Executor {
                 running_only,
             } => {
                 if nohup_only {
-                    // GNU jobs.c:5111 nohup_all_jobs: mark, never delete.
+                    // GNU jobs.c:5111 nohup_all_jobs: mark, never
+                    // delete. Its argument is the `-r` flag
+                    // (builtins/jobs.def disown_builtin), and with it
+                    // only running jobs take the mark (rubash#2496).
                     for job in self.shell_state.job_table.jobs.values_mut() {
-                        job.nohup = true;
+                        if !running_only || job.state == crate::jobs::ProcessState::Running {
+                            job.nohup = true;
+                        }
                     }
+                    0
+                } else if running_only {
+                    // GNU jobs.c:5066 delete_all_jobs (1): delete
+                    // only JRUNNING jobs — stopped and completed jobs
+                    // stay in the table (rubash#2496). A stopped job
+                    // is never deleted here, so the DEL_WARNSTOPPED
+                    // report cannot fire (rubash#2489). The teardown
+                    // mirrors the full clear below, scoped to the
+                    // deleted jobs: their pids keep nothing waitable
+                    // (delete_job's DEL_NOBGPID — the same rule the
+                    // All form follows per rubash#1304).
+                    let doomed: Vec<u32> = self
+                        .shell_state
+                        .job_table
+                        .jobs
+                        .iter()
+                        .filter(|(_, job)| job.state == crate::jobs::ProcessState::Running)
+                        .map(|(job_id, _)| *job_id)
+                        .collect();
+                    for job_id in doomed {
+                        let pids: Vec<u32> = self
+                            .shell_state
+                            .job_table
+                            .jobs
+                            .get(&job_id)
+                            .map(|job| job.pids.clone())
+                            .unwrap_or_default();
+                        for pid in &pids {
+                            self.background_children.remove(pid);
+                            self.close_coproc_endpoints(*pid);
+                            self.fd_table.close(*pid);
+                        }
+                        self.shell_state.job_table.remove_job(job_id);
+                    }
+                    // jobs.c:5078-5079: delete_all_jobs sets
+                    // j_current/j_previous to NO_JOB on entry, and
+                    // its own XXX comment notes they are never set
+                    // appropriately for the running_only form — the
+                    // +/- markers stay cleared even when this arm
+                    // deleted nothing (rubash#2496).
+                    self.shell_state.job_table.clear_current_markers();
                     0
                 } else {
                     // GNU delete_all_jobs (jobs.c:5091) deletes with
