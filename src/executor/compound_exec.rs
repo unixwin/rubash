@@ -1731,17 +1731,43 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            let read_file = match &entry.read {
-                Some(FdReadEndpoint::File(f)) => Some(f),
-                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some(fd),
+            // Each delivery is (source handle, path label, shared-dup
+            // key): File/Coproc endpoints key by their Rc identity so
+            // two slots sharing one description share one dup;
+            // standard-stream endpoints (rubash#2212 — an `N<&0` /
+            // `N>&1` / `N>&2` dup carries no FileFd) key by the
+            // standard handle itself and deliver the process standard
+            // descriptor GNU's fork would inherit.
+            let read_delivery = match &entry.read {
+                Some(FdReadEndpoint::File(f)) => Some((
+                    f.handle,
+                    f.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(f) as usize,
+                )),
+                Some(FdReadEndpoint::CoprocStdout { fd, .. }) => Some((
+                    fd.handle,
+                    fd.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(fd) as usize,
+                )),
+                Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                    // A Windows GUI parent has no standard handle
+                    // (process_std_handle == 0); leave the endpoint
+                    // unforwarded rather than fail the spawn on a
+                    // bad dup. On Unix the handle IS the fd (0 is a
+                    // valid descriptor).
+                    #[cfg(windows)]
+                    if handle == 0 {
+                        return None;
+                    }
+                    Some((handle, label.to_string(), handle as usize))
+                }),
                 _ => None,
             };
-            if let Some(f) = read_file {
-                let key = Rc::as_ptr(f) as usize;
+            if let Some((src_handle, src_path, key)) = read_delivery {
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
                     None => {
-                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        let dup = crate::fd::duplicate_handle_inheritable(src_handle)?;
                         fd_shared_dups.insert(key, dup);
                         extra_handles.push(dup);
                         owned_handles.push(dup);
@@ -1749,22 +1775,33 @@ impl Executor {
                     }
                 };
                 env_map.insert(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{:#x}", dup));
-                env_map.insert(
-                    format!("__RUBASH_FD_PATH_{fd}"),
-                    f.path.to_string_lossy().into_owned(),
-                );
+                env_map.insert(format!("__RUBASH_FD_PATH_{fd}"), src_path);
             }
-            let write_file = match &entry.write {
-                Some(FdWriteEndpoint::File(f)) => Some(f),
-                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some(fd),
+            let write_delivery = match &entry.write {
+                Some(FdWriteEndpoint::File(f)) => Some((
+                    f.handle,
+                    f.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(f) as usize,
+                )),
+                Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => Some((
+                    fd.handle,
+                    fd.path.to_string_lossy().into_owned(),
+                    Rc::as_ptr(fd) as usize,
+                )),
+                Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                    #[cfg(windows)]
+                    if handle == 0 {
+                        return None;
+                    }
+                    Some((handle, label.to_string(), handle as usize))
+                }),
                 _ => None,
             };
-            if let Some(f) = write_file {
-                let key = Rc::as_ptr(f) as usize;
+            if let Some((src_handle, src_path, key)) = write_delivery {
                 let dup = match fd_shared_dups.get(&key) {
                     Some(&h) => h,
                     None => {
-                        let dup = crate::fd::duplicate_handle_inheritable(f.handle)?;
+                        let dup = crate::fd::duplicate_handle_inheritable(src_handle)?;
                         fd_shared_dups.insert(key, dup);
                         extra_handles.push(dup);
                         owned_handles.push(dup);
@@ -1772,10 +1809,7 @@ impl Executor {
                     }
                 };
                 env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{:#x}", dup));
-                env_map.insert(
-                    format!("__RUBASH_FD_WPATH_{fd}"),
-                    f.path.to_string_lossy().into_owned(),
-                );
+                env_map.insert(format!("__RUBASH_FD_WPATH_{fd}"), src_path);
             }
         }
 

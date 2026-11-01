@@ -189,6 +189,42 @@ pub(crate) enum FdWriteEndpoint {
     ProcContentWrite,
 }
 
+impl FdReadEndpoint {
+    /// rubash#2212: the (handle, path label) backing this endpoint for
+    /// cross-process fd delivery when the endpoint names one of the
+    /// process's own standard descriptors. GNU's forked children
+    /// inherit the descriptor itself (execute_cmd.c fork inheritance;
+    /// subst.c:6362 for the process_substitute fork), but the symbolic
+    /// endpoint carries no FileFd, so the delivery transports resolve
+    /// it to the process standard handle at spawn time. `None` for
+    /// endpoints that carry their own FileFd and for endpoints with
+    /// no descriptor behind them (Text snapshots, carriers — those
+    /// ride their own delivery passes).
+    pub(crate) fn standard_backing(&self) -> Option<(crate::fd::HANDLE, &'static str)> {
+        match self {
+            FdReadEndpoint::InheritedProcessStdin => {
+                Some((crate::fd::process_std_handle(0), "ambient:stdin"))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl FdWriteEndpoint {
+    /// rubash#2212: the write-side twin of
+    /// `FdReadEndpoint::standard_backing` — a `N>&1` / `N>&2` dup binds
+    /// the shell's own stdout/stderr description into the table as
+    /// the symbolic Stdout/Stderr endpoint (bats' `exec 3<&1` in
+    /// bats_tee is the driving shape).
+    pub(crate) fn standard_backing(&self) -> Option<(crate::fd::HANDLE, &'static str)> {
+        match self {
+            FdWriteEndpoint::Stdout => Some((crate::fd::process_std_handle(1), "ambient:stdout")),
+            FdWriteEndpoint::Stderr => Some((crate::fd::process_std_handle(2), "ambient:stderr")),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct FdEntry {
     pub(crate) read: Option<FdReadEndpoint>,
