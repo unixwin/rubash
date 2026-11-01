@@ -26,7 +26,12 @@ rubash 对一个命令词按优先级做三层处理：
    一致）；但 describe 面（`type`、`command -v`）必须如实披露进程内
    接管——接管生效时 `type X` 报告 `X is a shell emulation of <path>`、
    `type -t X` 报告 `emulation`；接管因名字不可解析而 stand-down 时，
-   如实回落文件 / 未找到答案。
+   如实回落文件 / 未找到答案。**#2514 裁定（2026-11-02）**：上述披露
+   仅限 Windows 产品面（解析落点可能是产品自家 applet 文件）；非
+   Windows 上 describe 严格按 GNU `describe_command`
+   （builtins/type.def:211）作答——可解析即报告 PATH 文件本身
+   （`command -v` 给全路径、`type -t` 给 `file`），不可解析即未找到，
+   与执行面是否接管无关。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
 ## 二、真 builtin 清单（62 项）
@@ -196,10 +201,13 @@ tr
 
 关键事实：
 
-- **introspection 披露（#2036 S2）**：该层启用且名字可解析时，`type X`
-  报告 `X is a shell emulation of <path>`、`type -t X` 报告 `emulation`、
-  `command -v X` 报告裸名；该层被宿主关闭或名字不可解析（stand-down）
-  时回落文件 / 未找到答案。第三节 fast-path 同口径。
+- **introspection 披露（#2036 S2，#2514 裁定后限 Windows 面）**：该层
+  启用且名字可解析时，Windows 上 `type X` 报告
+  `X is a shell emulation of <path>`、`type -t X` 报告 `emulation`、
+  `command -v X` 报告裸名；非 Windows 上 describe 按 GNU
+  `describe_command` 报告 PATH 文件本身（#2514）；该层被宿主关闭或
+  名字不可解析（stand-down）时回落文件 / 未找到答案。第三节
+  fast-path 同口径。
 
 - **宿主契约（#2045 收口，2026-10-29 按代码复核）**：裸跑 rubash.exe
   （83 套件 harness 即如此）与产品 niubash **都保持该层开启**——旧版此节
