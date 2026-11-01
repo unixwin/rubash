@@ -89,7 +89,6 @@ mod external_file_builtins;
 mod external_finish;
 mod external_inner;
 mod external_redirects;
-mod external_route;
 mod external_setup;
 pub(crate) mod fd_table;
 mod function_calls;
@@ -285,11 +284,6 @@ pub struct HostExternalCommandOutput {
     pub stderr: Vec<u8>,
     pub status: i32,
 }
-
-pub use external_route::{
-    ExternalRouteHandle, ExternalRouteOutcome, ExternalRouteProvider, ExternalRouteRequest,
-    ExternalRouteStdio,
-};
 
 struct HostExternalCommandHandler(
     Box<dyn FnMut(&[String], &HashMap<String, String>) -> Option<HostExternalCommandOutput>>,
@@ -1851,32 +1845,6 @@ pub struct Executor {
     /// endpoint. Reset at the start of every `apply_external_redirects`.
     external_stdio_piped_fallback: bool,
     host_external_command_handler: Option<HostExternalCommandHandler>,
-    /// The external-command route seam's registered provider
-    /// (niubash#567 P3, external_route.rs): consulted by
-    /// `execute_external_inner` after name resolution when a simple
-    /// command is about to be spawned. `None` (the default) leaves
-    /// dispatch byte-identical to the pre-seam engine. Shared
-    /// (`Rc`) with command-substitution fork copies: the provider
-    /// is a process-level host service (the motivating host's is a
-    /// process singleton), and a forked comsub child routes through
-    /// the same registration as its parent. `RefCell` because a
-    /// fork shares the registration while the parent executor may
-    /// be mid-dispatch; the dispatch consults it through
-    /// `try_borrow_mut`, so a re-entrant routed call (a provider
-    /// that itself runs shell commands) declines to spawn instead
-    /// of panicking.
-    external_route_provider:
-        Option<std::rc::Rc<std::cell::RefCell<external_route::ExternalRouteProviderSlot>>>,
-    /// The fd 1/2 slots the last successful stdio plan walked
-    /// (external_redirects::PlannedStdioSlots), stashed by
-    /// `plan_external_stdio` so the route seam can realize the same
-    /// bindings as OS handles without walking the redirects a
-    /// second time (a second walk would re-open — re-truncate —
-    /// the command's targets). Consumed by the route attempt that
-    /// immediately follows the `apply_external_redirects` which
-    /// produced it; reset at the start of every
-    /// `apply_external_redirects`.
-    external_stdio_slots: Option<external_redirects::PlannedStdioSlots>,
     /// rubash#2235: bindings of the command's OWN numbered input
     /// redirects (`3<file`, `3< <(...)`) that
     /// `apply_external_stdin_redirect` opened while resolving an

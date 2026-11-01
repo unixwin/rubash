@@ -70,96 +70,6 @@ pub(in crate::executor) enum ExternalStdioOutcome {
     CapturePipe(os_pipe::PipeReader, usize),
 }
 
-/// The fd 1/2 slots one successful stdio plan walked, stashed on
-/// the executor by [`Executor::plan_external_stdio`] so the route
-/// seam (external_route) can realize the SAME bindings as OS
-/// handles without walking the redirects a second time — a second
-/// walk would re-open (and re-truncate) the command's targets.
-/// The slots are clones: the plan's own realization keeps its
-/// originals for the spawn it was built for.
-pub(in crate::executor) struct PlannedStdioSlots {
-    pub stdout: ExternalStdioSlot,
-    pub stderr: ExternalStdioSlot,
-    /// A command-substitution capture owns fd 1 in this plan: the
-    /// `LiveStdout` slot realizes as the shared capture pipe, not
-    /// as the process stdout (same test the plan's realize uses).
-    pub capture_active: bool,
-}
-
-impl std::fmt::Debug for PlannedStdioSlots {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // The slots wrap OS files/handles; name the plan's shape,
-        // not the objects (same discipline as ExternalStdioOutcome).
-        f.debug_struct("PlannedStdioSlots")
-            .field("capture_active", &self.capture_active)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Owner of one OS object whose handle a routed call borrows: the
-/// engine keeps these alive until the provider returns, then drops
-/// them (the parent's copies close, exactly as the spawn path
-/// drops its prepared `Command` after the fork).
-pub(in crate::executor) enum RouteKeepAlive {
-    File(File),
-    PipeWriter(os_pipe::PipeWriter),
-}
-
-/// The route seam's realized stdio for one call: the handle set
-/// the provider receives, the owners to keep alive across the
-/// call, and — when the call's stdout (or merged stderr) is the
-/// active capture — the capture pipe's reader + generation. The
-/// drain discipline mirrors the spawn path (rubash#2094): the
-/// caller starts the drain BEFORE the provider runs and joins it
-/// after, so a provider writing more than a pipe buffer cannot
-/// deadlock against an undrained capture.
-pub(in crate::executor) struct RouteStdioRealization {
-    pub stdio: super::external_route::ExternalRouteStdio,
-    pub keep_alive: Vec<RouteKeepAlive>,
-    pub capture: Option<(os_pipe::PipeReader, usize)>,
-}
-
-/// The route seam's realized stdin for one call (built by
-/// `Executor::route_stdin_handle` in external_setup.rs): the
-/// handle the provider reads, the owner to keep alive across the
-/// call, and — when the source was a text buffer — the text the
-/// pull materialized, so a decline can hand it to the prepared
-/// spawn's feed instead of pulling (and re-running the body's
-/// substitutions) a second time.
-pub(in crate::executor) struct RouteStdinRealization {
-    pub handle: super::external_route::ExternalRouteHandle,
-    pub keep_alive: Option<RouteKeepAlive>,
-    pub pulled_text: Option<String>,
-}
-
-/// The raw OS value of a realized route handle (a Windows `HANDLE`
-/// or a unix fd number), for [`super::external_route::ExternalRouteHandle::Handle`].
-pub(in crate::executor) fn route_handle_value(file: &File) -> usize {
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        file.as_raw_handle() as usize
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        file.as_raw_fd() as usize
-    }
-}
-
-fn route_pipe_writer_value(writer: &os_pipe::PipeWriter) -> usize {
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        writer.as_raw_handle() as usize
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        writer.as_raw_fd() as usize
-    }
-}
-
 impl std::fmt::Debug for ExternalStdioOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -231,7 +141,6 @@ impl Executor {
         // which mark any stream they pipe so the parent drains it
         // (external_stdio_piped_fallback).
         self.external_stdio_piped_fallback = false;
-        self.external_stdio_slots = None;
         // rubash#2235: a fresh command recomputes its own numbered
         // input bindings (see Executor::own_input_bindings).
         self.own_input_bindings.clear();
@@ -393,11 +302,6 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Option<ExternalStdioPlan>, ExecuteError> {
         use crate::parser::RedirectKind;
-
-        // The route seam's slot stash belongs to THIS plan: a
-        // declined plan leaves nothing for a route attempt to
-        // realize against.
-        self.external_stdio_slots = None;
 
         let capture_active = self.stdout_capture.is_some()
             || crate::executor::shell_options::stdout_capture_active();
@@ -862,18 +766,6 @@ impl Executor {
             .map(|slot| slot.try_clone())
             .unwrap_or(Some(ExternalStdioSlot::LiveStderr))
             .unwrap_or(ExternalStdioSlot::LiveStderr);
-        // Stash clones of the final slots for the route seam
-        // (see PlannedStdioSlots): if a registered provider claims
-        // this call, it receives these bindings as handles; the
-        // plan's own realization below is untouched either way.
-        self.external_stdio_slots = match (stdout_slot.try_clone(), stderr_slot.try_clone()) {
-            (Some(stdout), Some(stderr)) => Some(PlannedStdioSlots {
-                stdout,
-                stderr,
-                capture_active,
-            }),
-            _ => None,
-        };
         let stdout = realize(&stdout_slot, true)?;
         let stderr = realize(&stderr_slot, false)?;
         // rubash#2378: a Null fd 1/2 slot is a CLOSED descriptor in GNU
@@ -1433,112 +1325,4 @@ fn dup_process_handle(fd: u32) -> std::io::Result<File> {
     Ok(crate::fd::handle_to_file(dup))
 }
 
-impl Executor {
-    /// Realize the stashed stdio plan slots as the route seam's
-    /// handle set. Returns `None` — the route declines and the
-    /// prepared spawn proceeds untouched — for the slot shapes a
-    /// routed call cannot faithfully hold: a closed fd (the
-    /// write-error surface belongs to the legacy route), the
-    /// env-channel marker (never a realized fd 1/2 slot), or a
-    /// handle that cannot be duplicated. The bindings mirror the
-    /// plan's own realization one for one: inherit where the child
-    /// would inherit, a `DuplicateHandle` of the same process stdio
-    /// object for dup snapshots, a clone of the redirect-opened
-    /// file for file slots, and ONE shared capture pipe (created
-    /// here, as the plan's realize creates it) when a capture owns
-    /// fd 1 — both merged fds then hold clones of the one writer,
-    /// so merged writes interleave in true write order.
-    pub(in crate::executor) fn realize_route_stdio(&mut self) -> Option<RouteStdioRealization> {
-        use super::external_route::{ExternalRouteHandle, ExternalRouteStdio};
-        let slots = self.external_stdio_slots.take()?;
-        let mut keep_alive: Vec<RouteKeepAlive> = Vec::new();
-        let mut capture_reader: Option<os_pipe::PipeReader> = None;
-        let mut capture_generation = 0usize;
-        let mut capture_writer: Option<os_pipe::PipeWriter> = None;
-
-        fn dup_std(fd: u32, keep_alive: &mut Vec<RouteKeepAlive>) -> Option<ExternalRouteHandle> {
-            let file = dup_process_handle(fd).ok()?;
-            let value = route_handle_value(&file);
-            keep_alive.push(RouteKeepAlive::File(file));
-            Some(ExternalRouteHandle::Handle(value))
-        }
-
-        // Realize one slot; `is_fd1` distinguishes the live-stdout
-        // inherit case (fd 1 itself inherits; any OTHER fd bound to
-        // the live stdout object gets a duplicate of it).
-        let mut realize = |slot: &ExternalStdioSlot,
-                           is_fd1: bool,
-                           keep_alive: &mut Vec<RouteKeepAlive>,
-                           capture_reader: &mut Option<os_pipe::PipeReader>,
-                           capture_generation: &mut usize,
-                           capture_writer: &mut Option<os_pipe::PipeWriter>|
-         -> Option<ExternalRouteHandle> {
-            Some(match slot {
-                ExternalStdioSlot::Null | ExternalStdioSlot::EnvChannelFile => return None,
-                ExternalStdioSlot::LiveStderr => {
-                    if is_fd1 {
-                        dup_std(2, keep_alive)?
-                    } else {
-                        ExternalRouteHandle::Inherit
-                    }
-                }
-                ExternalStdioSlot::RealStdoutSnapshot => dup_std(1, keep_alive)?,
-                ExternalStdioSlot::LiveStdout => {
-                    if slots.capture_active {
-                        if capture_writer.is_none() {
-                            let (reader, writer) = os_pipe::pipe().ok()?;
-                            *capture_reader = Some(reader);
-                            *capture_generation =
-                                crate::executor::shell_options::stdout_capture_generation();
-                            *capture_writer = Some(writer);
-                        }
-                        let clone = capture_writer.as_ref()?.try_clone().ok()?;
-                        let value = route_pipe_writer_value(&clone);
-                        keep_alive.push(RouteKeepAlive::PipeWriter(clone));
-                        ExternalRouteHandle::Handle(value)
-                    } else if is_fd1 {
-                        ExternalRouteHandle::Inherit
-                    } else {
-                        dup_std(1, keep_alive)?
-                    }
-                }
-                ExternalStdioSlot::Handle(file) => {
-                    let clone = file.try_clone().ok()?;
-                    let value = route_handle_value(&clone);
-                    keep_alive.push(RouteKeepAlive::File(clone));
-                    ExternalRouteHandle::Handle(value)
-                }
-            })
-        };
-
-        let stdout = realize(
-            &slots.stdout,
-            true,
-            &mut keep_alive,
-            &mut capture_reader,
-            &mut capture_generation,
-            &mut capture_writer,
-        )?;
-        let stderr = realize(
-            &slots.stderr,
-            false,
-            &mut keep_alive,
-            &mut capture_reader,
-            &mut capture_generation,
-            &mut capture_writer,
-        )?;
-        // The parent's own copy of the capture writer closes now:
-        // EOF on the reader must follow the provider's clones, not
-        // wait for this realization to drop.
-        drop(capture_writer);
-        Some(RouteStdioRealization {
-            stdio: ExternalRouteStdio {
-                stdin: ExternalRouteHandle::Inherit,
-                stdout,
-                stderr,
-            },
-            keep_alive,
-            capture: capture_reader.map(|reader| (reader, capture_generation)),
-        })
-    }
-}
+impl Executor {}

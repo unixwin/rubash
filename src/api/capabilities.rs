@@ -11,13 +11,6 @@
 //!   host-external-command closure setter: decide/run-or-delegate
 //!   for non-builtin commands, with the session's argv and
 //!   environment as data.
-//! - [`ExternalRouteProvider`] — the route seam (niubash#567):
-//!   run a RESOLVED foreground external in-process over live OS
-//!   stdio handles with the complete child environment, the
-//!   session cwd, and a cancellation poll, or decline to the
-//!   prepared spawn. Unlike the buffered handler above, it is
-//!   consulted after resolution and redirection, with the spawn
-//!   already prepared — the seam an FFI provider binds to.
 //! - [`ElevationHandler`] (Windows) — formalizes the elevation
 //!   closure setter: sudo/elevation requests as data.
 //! - [`CompletionProvider`] — backing for
@@ -42,11 +35,6 @@ use super::Diagnostic;
 use crate::executor::HostExternalCommandOutput;
 #[cfg(windows)]
 use crate::executor::{ElevationOutput, ElevationRequest};
-pub use crate::executor::{
-    ExternalRouteHandle, ExternalRouteOutcome, ExternalRouteProvider, ExternalRouteRequest,
-    ExternalRouteStdio,
-};
-
 /// Decide/run-or-delegate for a non-builtin command (§5.5).
 /// Returning `None` delegates to the engine's normal spawn path;
 /// returning `Some` supplies the command's whole result.
