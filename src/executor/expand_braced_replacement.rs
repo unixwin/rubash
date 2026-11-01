@@ -981,12 +981,45 @@ fn dollar_paren_end(chars: &[char], open: usize) -> usize {
     chars.len()
 }
 
-/// End index of a `$[...]` body opened at `open` (the `[`).
+/// End index of a `$[...]` body opened at `open` (the `[`). The span rule
+/// is GNU's extraction machine (subst.c:1361 extract_delimited_string via
+/// subst.c:1301 extract_arithmetic_subst), not plain bracket counting: a
+/// backslash or CTLESC passes the next character, quote/backquote units
+/// are skipped whole, and nested `[` / `$[` openers nest (rubash#2374).
+/// An unterminated span runs to the end of input.
 fn dollar_bracket_end(chars: &[char], open: usize) -> usize {
     let mut depth = 1usize;
     let mut index = open + 1;
     while index < chars.len() {
         match chars[index] {
+            '\\' | '\u{11}' => index += 2,
+            '\'' => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\'' {
+                    index += 1;
+                }
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            '"' | '`' => {
+                let closer = chars[index];
+                index += 1;
+                while index < chars.len() {
+                    match chars[index] {
+                        '\\' => index += 2,
+                        ch if ch == closer => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            '$' if chars.get(index + 1) == Some(&'[') => {
+                depth += 1;
+                index += 2;
+            }
             '[' => {
                 depth += 1;
                 index += 1;

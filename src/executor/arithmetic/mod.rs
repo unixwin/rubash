@@ -1180,6 +1180,7 @@ impl Executor {
             crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
         );
         let expanded = self.expand_arithmetic_expression_mut(&with_assoc_keys);
+        let expanded = arith_string_quote_removal(&expanded);
         let expression = normalize_arithmetic_quotes(&expanded);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
@@ -2501,6 +2502,51 @@ fn has_bare_single_quote(expression: &str, _env_vars: &crate::shell::var_table::
         index += 1;
     }
     false
+}
+
+/// GNU subst.c:3981 expand_arith_string's quote-removal branch, applied to
+/// an arithmetic string (`$(( ))` body via expand_string_dollar_arith,
+/// `$[...]` body via param_expand case '[' at subst.c:10912-10926): when
+/// the string carries no expansion character (`$`, backquote, CTLESC —
+/// ARITH_EXP_CHAR, subst.c:3802) the word-expansion branch is skipped, and
+/// a body containing `'`, `\` or `"` instead goes through
+/// string_quote_removal (subst.c:12199) with Q_DOUBLE_QUOTES|Q_ARITH.
+/// Under those flags a backslash is dropped exactly before the
+/// Q_ARITH-special brackets and tilde (`[`, `]`, `~`) and before the
+/// CBSDQUOTE set (`$`, backquote, `"`, `\`, newline); before any other
+/// character it is kept, an unescaped `"` is dropped, and `'` is literal.
+/// This is what makes `$[1\]]` evaluate the string `1]` (error token `]`,
+/// not `\`) while `$[1\+1]` keeps `\+` (rubash#2374). Borrowed when the
+/// branch does not apply.
+pub(in crate::executor) fn arith_string_quote_removal(input: &str) -> std::borrow::Cow<'_, str> {
+    if input.contains('$')
+        || input.contains('`')
+        || input.contains('\u{11}')
+        || !input
+            .bytes()
+            .any(|byte| matches!(byte, b'\'' | b'"' | b'\\'))
+    {
+        return std::borrow::Cow::Borrowed(input);
+    }
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some(next) if matches!(next, '[' | ']' | '~' | '$' | '`' | '"' | '\\' | '\n') => {
+                    output.push(next);
+                }
+                Some(next) => {
+                    output.push('\\');
+                    output.push(next);
+                }
+                None => output.push('\\'),
+            },
+            '"' => {}
+            _ => output.push(ch),
+        }
+    }
+    std::borrow::Cow::Owned(output)
 }
 
 /// Reduce `\"` to `"` (the arith-text quote normalization). Borrowed when no

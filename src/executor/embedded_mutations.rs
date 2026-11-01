@@ -2756,28 +2756,102 @@ fn arith_sub_parens_balanced(s: &str) -> bool {
     count == 0
 }
 
-fn collect_dollar_bracket_arithmetic_expansion(
+/// Collects a `$[...]` body (chars just past the `[`) through its matching
+/// `]`, returning the body text and whether the close was found. This is
+/// GNU's extraction machine — subst.c:1361 extract_delimited_string as
+/// invoked by subst.c:1301 extract_arithmetic_subst — not plain bracket
+/// counting: a backslash or CTLESC passes the next character verbatim (it
+/// can neither delimit nor nest, so `$[1\]]` closes at the SECOND `]`),
+/// single-quoted, double-quoted and backquote units are skipped whole (a
+/// `]` inside one never closes, so `$["]"]` is a complete expansion), and
+/// nested `[` / `$[` openers recurse the depth. Plain counting diverged
+/// on every one of those shapes (rubash#2374). An unterminated quote unit
+/// or exhausted input reports not-closed, like extraction running off the
+/// end of the string.
+pub(in crate::executor) fn collect_dollar_bracket_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {
     let mut expression = String::new();
-    let mut bracket_depth: usize = 0;
+    let mut depth: usize = 1;
+    let mut pending: Option<char> = None;
 
-    for ch in chars.by_ref() {
+    loop {
+        let ch = match pending.take() {
+            Some(ch) => ch,
+            None => match chars.next() {
+                Some(ch) => ch,
+                None => return (expression, false),
+            },
+        };
         match ch {
+            '\\' | '\u{11}' => {
+                expression.push(ch);
+                match chars.next() {
+                    Some(next) => expression.push(next),
+                    None => return (expression, false),
+                }
+            }
+            '\'' => {
+                expression.push(ch);
+                loop {
+                    match chars.next() {
+                        Some(next) => {
+                            expression.push(next);
+                            if next == '\'' {
+                                break;
+                            }
+                        }
+                        None => return (expression, false),
+                    }
+                }
+            }
+            '"' | '`' => {
+                let closer = ch;
+                expression.push(ch);
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            expression.push('\\');
+                            match chars.next() {
+                                Some(next) => expression.push(next),
+                                None => return (expression, false),
+                            }
+                        }
+                        Some(next) => {
+                            expression.push(next);
+                            if next == closer {
+                                break;
+                            }
+                        }
+                        None => return (expression, false),
+                    }
+                }
+            }
+            '$' => {
+                expression.push(ch);
+                match chars.next() {
+                    Some('[') => {
+                        expression.push('[');
+                        depth += 1;
+                    }
+                    Some(other) => pending = Some(other),
+                    None => return (expression, false),
+                }
+            }
             '[' => {
-                bracket_depth += 1;
+                depth += 1;
                 expression.push(ch);
             }
-            ']' if bracket_depth == 0 => return (expression, true),
             ']' => {
-                bracket_depth = bracket_depth.saturating_sub(1);
+                depth -= 1;
+                if depth == 0 {
+                    return (expression, true);
+                }
                 expression.push(ch);
             }
             _ => expression.push(ch),
         }
     }
-
-    (expression, false)
 }
 
 pub(in crate::executor) fn collect_command_substitution_source(

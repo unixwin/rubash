@@ -1043,26 +1043,13 @@ impl Executor {
                 }
                 Some('[') => {
                     chars.next();
-                    let mut expression = String::new();
-                    let mut bracket_depth: usize = 0;
-                    let mut closed = false;
-                    for expression_ch in chars.by_ref() {
-                        match expression_ch {
-                            '[' => {
-                                bracket_depth += 1;
-                                expression.push(expression_ch);
-                            }
-                            ']' if bracket_depth == 0 => {
-                                closed = true;
-                                break;
-                            }
-                            ']' => {
-                                bracket_depth = bracket_depth.saturating_sub(1);
-                                expression.push(expression_ch);
-                            }
-                            _ => expression.push(expression_ch),
-                        }
-                    }
+                    // GNU subst.c:1301 extract_arithmetic_subst extraction
+                    // (quote-unit aware, backslash-passed) — the shared
+                    // collector in embedded_mutations (rubash#2374).
+                    let (expression, closed) =
+                        crate::executor::embedded_mutations::collect_dollar_bracket_arithmetic_expansion(
+                            &mut chars,
+                        );
                     if closed {
                         let expression = self.expand_arithmetic_special_parameters(&expression);
                         // Same unterminated-`${` verdict as the `$((` arm
@@ -1081,6 +1068,11 @@ impl Executor {
                             }
                             continue;
                         }
+                        // GNU expand_arith_string's quote-removal branch
+                        // (subst.c:3981/12199) runs on the expanded string
+                        // before evalexp (rubash#2374).
+                        let expression =
+                            crate::executor::arithmetic::arith_string_quote_removal(&expression);
                         if let Some(value) =
                             eval_conditional_arith_value(&expression, &self.shell_state.env_vars)
                         {
