@@ -528,6 +528,16 @@ impl Session {
         self.executor.expand_word(word)
     }
 
+    /// The expansion tail of GNU `shell-expand-line` (bashline.c:2982)
+    /// after the host's history/alias legs: expand the line's words,
+    /// field-split unquoted results on IFS, and rejoin with single
+    /// spaces (`expand_word` + `string_list`). No filename globbing —
+    /// GNU does not glob word/string expansion. The quoted form of a
+    /// variable keeps its spacing; the unquoted form splits.
+    pub fn expand_shell_words(&self, line: &str) -> String {
+        self.executor.expand_shell_words(line)
+    }
+
     /// Expand a prompt template and deliver the result through
     /// the event observer's prompt channel (§5.4: prompts are
     /// produced here and rendered by the host, never
