@@ -4142,6 +4142,21 @@ impl Executor {
         for (key, value) in self.fork_context_transport_entries() {
             env_entries.push((key, value));
         }
+        // rubash#2456: process_substitute's fork (subst.c:6412-6445)
+        // never resets login_shell — the reset sites are
+        // execute_cmd.c:1636-1637 and 5474-5475, neither on this
+        // path — so the child inherits the parent's CURRENT login
+        // global: the effective state the logout gate reads
+        // (invocation_login && !subshell_login_cleared), which is why
+        // a procsub constructed inside a `( )` region is born
+        // non-login while one at the top of a login shell (or inside
+        // a command substitution, subst.c:7143) keeps login-ness.
+        if self.invocation_login() && !self.shell_state.subshell_login_cleared.get() {
+            env_entries.push((
+                super::compound_exec::FORK_LOGIN_SHELL_TRANSPORT.to_string(),
+                "1".to_string(),
+            ));
+        }
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone()));
         }

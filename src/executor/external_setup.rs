@@ -3306,6 +3306,17 @@ impl Executor {
         for (key, value) in self.fork_context_transport_entries() {
             env_map.insert(key, value);
         }
+        // rubash#2456: the output form is the same process_substitute
+        // fork as the input form (subst.c:6412-6445) — login_shell
+        // crosses untouched, so stamp the parent's effective login
+        // state exactly as spawn_input_process_substitution_child
+        // does (see trap_exec.rs).
+        if self.invocation_login() && !self.shell_state.subshell_login_cleared.get() {
+            env_map.insert(
+                super::compound_exec::FORK_LOGIN_SHELL_TRANSPORT.to_string(),
+                "1".to_string(),
+            );
+        }
         // subst.c:6609 subshell_level++ — the procsub child runs one level
         // deeper than the parent for $BASH_SUBSHELL/$BASHPID.
         env_map.insert(
