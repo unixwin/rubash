@@ -1271,6 +1271,102 @@ impl Executor {
         )
     }
 
+    /// The whole-variable assignment door for DIRSTACK (rubash#2408).
+    ///
+    /// GNU variables.c:1612 assign_dirstack is DIRSTACK's only write
+    /// path: bind_variable routes scalar binds, element binds and
+    /// compound lists alike to it, and each element lands through
+    /// set_dirstack_element (builtins/pushd.def), which ignores
+    /// element 0 and any index outside the current stack — the list
+    /// is never cleared and never grown. Without this door the
+    /// generic machinery below wrote a parallel typed array cell for
+    /// `DIRSTACK=(...)` / `DIRSTACK=value`: dirs kept showing the
+    /// carrier while ${DIRSTACK[1]} read the phantom cell, and
+    /// `declare -p DIRSTACK` panicked on the mirror disagreement.
+    ///
+    /// The compound scan is the generic one (same token walk,
+    /// subscript arithmetic and bad-subscript reporting as any
+    /// indexed array); only the store differs. For `=` the scan's
+    /// working array starts empty — running indices from 0, negative
+    /// subscripts resolving against the elements written so far, so
+    /// `DIRSTACK=([-1]=x)` is a bad subscript exactly like a fresh
+    /// array. For `+=` the working array is the live stack, so
+    /// subscripts resolve against it and positional elements land
+    /// past its end, where the setter drops them.
+    pub(in crate::executor) fn apply_dirstack_assignment(
+        &mut self,
+        value: &str,
+        append: bool,
+    ) -> bool {
+        let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) else {
+            // A scalar bind (or scalar +=) is an element-0 bind,
+            // which set_dirstack_element ignores: the stack is
+            // untouched and the assignment succeeds.
+            return true;
+        };
+        if !(compound.starts_with('(') && compound.ends_with(')')) {
+            return true;
+        }
+        let current = if append {
+            self.dirstack_storage()
+        } else {
+            "()".to_string()
+        };
+        let outcome = match super::arrays::append_array_value(
+            &current,
+            None,
+            compound,
+            "DIRSTACK",
+            false,
+            self.shell_state.env_vars.get("IFS").map(String::as_str),
+            &self.shell_state.env_vars,
+            &self.shell_state.cwd,
+        ) {
+            Ok(outcome) => outcome,
+            Err(pattern) => {
+                // Failglob: the generic path's discard class, minus
+                // its fresh-target storage materialization — DIRSTACK
+                // is never a fresh target.
+                self.report_failglob(&pattern);
+                self.raise_evalerror_abort();
+                self.evalerror_failglob_pending.set(true);
+                return false;
+            }
+        };
+        let writes: std::collections::BTreeMap<usize, String> = match &outcome.entries {
+            Some(entries) => entries.clone(),
+            None => {
+                let mut entries = super::arrays::indexed_array_entries(&current);
+                entries.extend(outcome.appended.iter().cloned());
+                entries
+            }
+        };
+        for (index, element) in writes {
+            if index == 0 {
+                continue;
+            }
+            crate::builtins::pushd::set_stack_value(
+                &mut self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                index,
+                element,
+            );
+        }
+        if let Some(word) = &outcome.bad_subscript {
+            // arrayfunc.c:804-809 err_badarraysub, mirrored from the
+            // generic compound tail: the elements written before the
+            // bad one stay stored, the diagnostic names the element
+            // word, and the assignment fails with status 1.
+            let line = format!("{}{}: bad array subscript\n", self.error_prefix(), word);
+            self.emit_assignment_diag(line);
+            self.exit_code = 1;
+            self.evalerror_subscript_pending.set(true);
+            self.raise_evalerror_abort();
+            return false;
+        }
+        true
+    }
+
     pub(in crate::executor) fn bashpid_value(&self) -> u32 {
         let pid = std::process::id();
         let depth = self.shell_state.subshell_depth.get();

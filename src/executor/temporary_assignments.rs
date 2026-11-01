@@ -1543,6 +1543,13 @@ impl Executor {
         if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
             return true;
         }
+        if base_name == "DIRSTACK" && !dynamic_unbound {
+            // GNU variables.c:1612 assign_dirstack: every whole-
+            // variable bind of DIRSTACK — scalar, compound, append —
+            // routes through the dirstack setter, never through array
+            // storage (rubash#2408).
+            return self.apply_dirstack_assignment(&value, append);
+        }
         // GNU bind_variable_internal (variables.c:3130/3152): a plain
         // bind to an att_noassign variable is a silent no-op — the
         // entry is returned unchanged and no diagnostic prints (only
