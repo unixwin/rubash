@@ -2281,10 +2281,14 @@ impl Executor {
                 // through the resolved target (session cwd for
                 // self/cwd, per the G-02 anchoring); errors keep the
                 // bare GNU cat diagnostic shape used below.
-                if let Some(link) = crate::special_paths::synthetic_link_target(
-                    &target,
-                    Some(&crate::proc_vfs::self_cwd_forms(self.session_cwd())),
-                ) {
+                if let Some(link) = {
+                    let (cwd_forms, root_forms) = self.proc_link_forms();
+                    crate::special_paths::synthetic_link_target(
+                        &target,
+                        Some(&cwd_forms),
+                        Some(&root_forms),
+                    )
+                } {
                     match fs::read(&link.native) {
                         Ok(bytes) => output.extend(bytes),
                         Err(error) => {
