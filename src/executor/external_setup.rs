@@ -1400,7 +1400,31 @@ impl Executor {
                 substitutions
             };
             if substitutions.is_empty() {
-                if metadata.is_none() {
+                // rubash#2410: the standalone arm re-scans the EXPANDED
+                // word text, but GNU recognizes a process substitution
+                // only while scanning the word's own characters at
+                // expansion time (subst.c:11365-11385
+                // expand_word_internal '<'/'>' cases, via
+                // extract_process_subst, subst.c:1311); a value that
+                // arrives through parameter expansion is appended as
+                // data and never re-scanned. Expansion drops
+                // word_metadata for most commands, so a data word whose
+                // VALUE spells `<(...)` (e.g. `x='<(echo hi)'; echo
+                // "$x"`) reached this arm with no metadata and was
+                // materialized as if it were source syntax. Gate the
+                // arm on parse provenance: the node's substitution
+                // aggregate is cloned through expansion, and a genuine
+                // word-position substitution is recorded there with no
+                // redirect fd and either this word index or this exact
+                // source word as its target. A data word has no record
+                // and stays literal.
+                if metadata.is_none()
+                    && rewritten.process_substitutions.iter().any(|substitution| {
+                        substitution.redirect_fd.is_none()
+                            && (substitution.word_index == Some(word_index)
+                                || substitution.target == rewritten.words[word_index])
+                    })
+                {
                     self.materialize_standalone_process_substitution_word(
                         &mut rewritten.words[word_index],
                         &mut files,

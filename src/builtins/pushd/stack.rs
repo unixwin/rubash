@@ -74,6 +74,18 @@ pub(crate) fn stack_words(env_vars: &HashMap<String, String>, cwd: &Path) -> Str
 }
 
 pub(crate) fn set_stack_value(env_vars: &mut VarTable, cwd: &Path, index: usize, value: String) {
+    // GNU builtins/pushd.def:657-665 set_dirstack_element: `if (ind
+    // == 0 || ...) return;` — slot 0 is not stored state, it is the
+    // working directory itself, produced at every read face
+    // (pushd.def:669-682 get_directory_stack appends
+    // get_working_directory). rubash serializes slot 0 inside the
+    // carrier, so the element-assignment door must refuse to rewrite
+    // it: `DIRSTACK[0]=x` is a no-op, or every read face (dirs,
+    // ${DIRSTACK[@]}, ~+0) desyncs from $PWD until the next cd/pushd
+    // refresh re-binds slot 0 (rubash#2407).
+    if index == 0 {
+        return;
+    }
     let mut stack = load_stack(env_vars, cwd);
     if index < stack.len() {
         stack[index] = value;

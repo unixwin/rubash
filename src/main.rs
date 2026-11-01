@@ -1921,7 +1921,22 @@ fn run_stdin_script_with_init(
 /// --rcfile twice (issue312 gate test). True for the leftover shapes
 /// startup skips (empty HOME, non-interactive extension, login).
 fn init_file_needs_direct_run(executor: &Executor, init_file: &str) -> bool {
-    executor.get_env("__RUBASH_SOURCED_RC").as_deref() != Some(init_file)
+    if executor.get_env("__RUBASH_SOURCED_RC").as_deref() == Some(init_file) {
+        return false;
+    }
+    // GNU shell.c:1238-1239 / 1244-1245: an interactive shell in the
+    // $ENV arm — invoked as `sh`, or any posix-mode shell — has no
+    // rcfile slot at all; --rcfile belongs to the bash arm's
+    // execute_bashrc_file. The direct run is rubash's extension for
+    // the non-interactive/login/empty-HOME shapes above and must not
+    // leak an rcfile into an interactive $ENV-arm shell, whose whole
+    // startup contract is the $ENV file (rubash#2412).
+    if own_interactive_shell()
+        && (own_act_like_sh() || executor.shell_option_enabled("posix"))
+    {
+        return false;
+    }
+    true
 }
 
 /// GNU shell.c:1547 start_debugger: run the bashdb starter file once before
@@ -2120,7 +2135,14 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
         Vec::new()
     } else {
         let exists = |path: &str| std::fs::metadata(executor.resolve_shell_path(path)).is_ok();
-        if login {
+        // GNU shell.c gates BOTH login profile blocks on
+        // posixly_correct == 0: the argv[0]-dash/--login block at
+        // shell.c:1196 and the interactive non-posix arm at
+        // shell.c:1223 (the posix arm, shell.c:1242-1245, sources
+        // $ENV only). A posix-mode login shell therefore never runs
+        // the profile chain — interactive it reads $ENV (the env-file
+        // step below), non-interactive it reads nothing (rubash#2411).
+        if login && !posix {
             login_profile_branch(&home, no_profile, exists)
         } else if interactive && !no_rc && !act_like_sh && !posix {
             // GNU shell.c:1235-1239 / 1242-1245: the bashrc chain is
