@@ -20,8 +20,8 @@ use std::time::Instant;
 #[cfg(windows)]
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
-    Candidate, CompletionProvider, DiagnosticSink, ExternalCommandHandler, ExternalRouteProvider,
-    RcPolicy, StartupClass, StartupContext,
+    Candidate, CompletionProvider, DiagnosticSink, ExternalCommandHandler, RcPolicy, StartupClass,
+    StartupContext,
 };
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
@@ -1115,7 +1115,6 @@ pub struct SessionBuilder {
     argv0: Option<String>,
     history_provider: Option<SharedHistoryProvider>,
     external_command_handler: Option<Box<dyn ExternalCommandHandler>>,
-    external_route_provider: Option<Box<dyn ExternalRouteProvider>>,
     #[cfg(windows)]
     elevation_handler: Option<Box<dyn ElevationHandler>>,
     events: Option<Box<dyn SessionEvents>>,
@@ -1189,21 +1188,6 @@ impl SessionBuilder {
         handler: Box<dyn ExternalCommandHandler>,
     ) -> SessionBuilder {
         self.external_command_handler = Some(handler);
-        self
-    }
-
-    /// The external-command ROUTE capability (niubash#567): a
-    /// provider the dispatcher consults for a resolved foreground
-    /// external whose spawn is fully prepared — it may run the
-    /// call in-process over live stdio handles or decline to the
-    /// spawn. Registration is inert until the provider itself
-    /// claims a call; hosts keep their own enable switches on
-    /// their side of the trait.
-    pub fn external_route_provider(
-        mut self,
-        provider: Box<dyn ExternalRouteProvider>,
-    ) -> SessionBuilder {
-        self.external_route_provider = Some(provider);
         self
     }
 
@@ -1375,9 +1359,6 @@ impl SessionBuilder {
             executor.set_host_external_command_handler(move |argv, env| {
                 handler.borrow_mut().handle_command(argv, env)
             });
-        }
-        if let Some(provider) = self.external_route_provider {
-            executor.set_external_route_provider(provider);
         }
         #[cfg(windows)]
         if let Some(handler) = self.elevation_handler {
