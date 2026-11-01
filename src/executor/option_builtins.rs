@@ -31,12 +31,31 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::shopt::execute_with_io(
+        let mut o_writes: Vec<(String, bool)> = Vec::new();
+        let status = crate::builtins::shopt::execute_with_io_and_o_writes(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
+            &mut o_writes,
         )?;
+        // GNU builtins/shopt.def:594-606 set_shopt_o_options funnels
+        // every `-o` write through builtins/set.def:476-491
+        // set_minus_o_option, so a `shopt -s -o vi` lands in the same
+        // set_edit_mode setter (set.def:424-447) as `set -o vi`: each
+        // FLAG_ON write of vi/emacs runs rl_variable_bind
+        // ("editing-mode", name) — a redundant re-set rebinds too, and
+        // a FLAG_OFF write never touches the variable (oracle-verified
+        // round trips). Replay the reported writes in operand order,
+        // exactly as the `set -o` fast path applies its own writes
+        // (rubash#2435; the #2386 bridge covered only the set paths).
+        for (name, enabled) in &o_writes {
+            if *enabled && (name == "vi" || name == "emacs") {
+                self.bind_registry()
+                    .borrow_mut()
+                    .set_readline_variable("editing-mode", name);
+            }
+        }
         self.sync_shopt_rebound_var();
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
