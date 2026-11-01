@@ -1,7 +1,10 @@
 # Windows 路径边界契约（Windows Path Contract）
 
 > 状态：**权威现状**（boundary contract audit，2026-10-12，对 master
-> `eb062957` 逐边界实测后成文）。本文把"每层边界谁负责转换、POSIX 形态
+> `eb062957` 逐边界实测后成文；2026-11-01 增补 #748/#779 代：裸 `/` 与
+> 盘根形态对 native 子进程 verbatim、附着值不翻，L4 行与 §2 已同步——
+> argv 方言的契约正本为 niubash `docs/src/windows-path-contract.md`，
+> 本文与之冲突时以正本为准）。本文把"每层边界谁负责转换、POSIX 形态
 > 通到哪、什么必须 verbatim"从部落知识固化为契约，并配契约测试套件
 > `tests/path_contract_boundary_*.rs`（三不变量 × 正/反用例，当前全绿；
 > 红即契约被合并推翻）。配套阅读：
@@ -32,7 +35,7 @@ argv 字节**；路径形态的取舍按"子进程自己有没有 POSIX 层"分�
 | L1 | **shell 内语义层**（重定向目标 / cd / pwd / $PWD / $(pwd) / OLDPWD） | ✅ 操作数双形态全收（`/c/Users/...` 与 `C:/Users/...` 等价），**渲染恒 POSIX** `/<drive>/…`（#537/#556：`NIU_SHELL_PATH_STYLE` 等宿主变量对引擎已失效，仅宿主 prompt 渲染提示） | ✅（内建 wrapper 的操作数单次展开后 as-is，#511/#555 家族） | 引擎内部单一漏斗 `shell_path_to_windows`（含虚拟根 /tmp、/dev、/mnt/X、NTFS 冒号 U+F03A 编码）；渲染反向漏斗 `shell_pwd_display_path` | `posix_forms.rs` 前 3 测试 |
 | L2 | **winuxcmd 工具参数层**（touch/ls/env/timeout/xargs/rm… 的操作数） | ✅ 显式 POSIX 操作数可用——盘符形态（`/d/...`、`/mnt/d/...`、虚拟根）由 **rubash 引擎预翻译为 Win32 形态**（#592：不依赖每个工具自查——sed/du 无自解析、git.exe 按存在性自解析，工具侧补齐是渐进的）；`/cygdrive/d/...` 与 `/dev/*` 仍 verbatim（工具自身折叠/描述符表解析，#568 四路复测实证） | 数据操作数 verbatim（invariant C）：grep/sed/awk 首位置模式/脚本文本、find `-name` 族值——与 niubash 宿主 `winuxcmd_path_translation_mask` 同表（#62：形状无法分辨路径与模式） | 引擎（`executor/path.rs` argv 漏斗）+ 各工具自身 | `posix_forms.rs` 后 2 测试 + `issue592_argv_translation_completeness.rs` |
 | L3 | **winuxcmd 子进程查找层**（env/timeout/xargs/find -exec 的子命令查找） | ✅ 通过 PATH 解析子命令名；`-exec cat {} ;` 同 | ✅ 子命令与 `{}`/参数原样 | 各工具自身（PATH 查找） | `posix_forms.rs::winuxcmd_tools_accept_posix_operands` |
-| L4 | **原生子进程 argv 层**（cmd.exe / 任意非 winuxcmd 树 .exe） | ❌ **不可用**——子进程收到的是统一翻译后的 Win32 形态（`D:\...`）；自 #592 起该统一翻译覆盖**所有**非 shell 包裹子类（POSIX-aware 含内） | ✅ 字节保真（引号遵循 CommandLineToArgvW；通配符/MSYS 宿主检测才加引号）；**path 形操作数统一翻译，绝不半个 argv 翻译半个不翻**（数据操作数按四工具语法表豁免） | rubash（`executor/path.rs`：`external_argument_path` + `translated_virtual_system_root_argument`；`__RUBASH_ARGV_DIALECT=legacy` 为回滚阀） | `native_core.rs::native_children_receive_win32_cwd_not_posix_persona` + `issue592_argv_translation_completeness.rs` |
+| L4 | **原生子进程 argv 层**（cmd.exe / 任意非 winuxcmd 树 .exe） | ⚠️ **分类可用**——经分类的 path 形操作数收到翻译后的 Win32 形态（`D:\...`）：虚拟根、`/mnt/X`、带分量的盘符形态（`/d/repo`），自 #592 起覆盖**所有**非 shell 包裹子类（POSIX-aware 含内）；但裸 `/` 与盘根形态（`/d`、`/d/`）按 #748/#779 **verbatim 过界**，由子进程按 Win32 当前盘相对语义自解（到达盘根的可用拼写：`/d/.`、`/mnt/d/`、`D:/`） | ✅ 字节保真（引号遵循 CommandLineToArgvW；通配符/MSYS 宿主检测才加引号）；翻译按 token 类别判定、从不靠猜：verbatim 类（裸 `/`、盘根形态、附着值 `--opt=/d/x`、数据操作数按四工具语法表豁免）原样过界 | rubash（`executor/path.rs`：`external_argument_path` + `translated_virtual_system_root_argument`；`__RUBASH_ARGV_DIALECT=legacy` 为回滚阀） | `native_core.rs::native_children_receive_win32_cwd_not_posix_persona` + `issue592_argv_translation_completeness.rs` |
 
 环境通道（env）横跨 L2/L4：**任何子进程类都 verbatim**——`PWD=/d/...`
 原样可达 winuxcmd env 与 cmd.exe，引擎不在 spawn 时重渲染 env 值
@@ -50,7 +53,7 @@ argv 字节**；路径形态的取舍按"子进程自己有没有 POSIX 层"分�
 ### L2 工具参数层
 
 - ~~touch/ls/env/timeout/xargs/rm/cat：显式 `/c/...` 操作数可用（verbatim 直通后由工具解析）。~~~~`/mnt/c/...` 工具侧同样可解析（WinuxCmd 1.1.5 实测）~~ **更正（rubash#568 裁决，2026-10-12）：该结论是测量污染**——Git Bash 直打 `ls /mnt/c/...` rc=0 来自 MSYS 运行时 spawn 前转换（bash 传给原生子进程的 argv 已是 `C:\Windows`），测的是 Git Bash 不是工具链；PowerShell 同进程并排（无 POSIX 层）`/d/repo` ✅、`/cygdrive/d/repo` ✅、`/mnt/c/Windows` ❌ ENOENT，`touch /mnt/c/...` rc=1 未落盘；源码 `normalize_api_operand_w`（native_path.cppm:101）只有 /cygdrive 折叠 + 单字母 `/X/` 分支，v1.1.2..v1.1.6 零 /mnt 提交。因此引擎按 #444 对 `/mnt/X` 做**全类预翻译**是必要行为；未来若撤翻译，前置条件是 WinuxCmd 先落地 /mnt arm（先 probe 后迁移）。
-- **盘符形态全类预翻译（rubash#592，2026-10-13）**：Option B 的"POSIX-aware 子进程自解析 `/d/x`"前提对在售工具链三处不成立——sed/du 完全无操作数自解析（WinuxCmd#1178 补齐中）、`usr/bin/git.exe` 按存在性自解析（`git -C /d/已存在` ✅ 而 `worktree add /d/待建` 落到 `D:\d\...`）、宿主（niu）只在顶层 AST 点做名单翻译（for/子壳/函数/script 内不生效）→ 同一命令的形态**随执行上下文漂移**（即 #592 标题症状）。引擎侧修正：盘符形态操作数对**所有子类**一律走原生漏斗翻译（上下文/参数位/存在性无关）；数据操作数 verbatim 豁免两族——grep/sed/awk 首位置模式/脚本、find `-name` 族值（宿主 `winuxcmd_path_translation_mask` 同表，invariant C / niubash#62）+ 不触 FS 的 dirname/basename 字符串变换（GNU dirname.c/basename.c 零 stat，操作数是回显文本，issue71）；`__RUBASH_ARGV_DIALECT=legacy` 整体回滚（原生漏斗的存在性门语义）。锁定：`tests/issue592_argv_translation_completeness.rs` + `executor::path` 漏斗测试族。
+- **盘符形态全类预翻译（rubash#592，2026-10-13）**：Option B 的"POSIX-aware 子进程自解析 `/d/x`"前提对在售工具链三处不成立——sed/du 完全无操作数自解析（WinuxCmd#1178 补齐中）、`usr/bin/git.exe` 按存在性自解析（`git -C /d/已存在` ✅ 而 `worktree add /d/待建` 落到 `D:\d\...`）、宿主（niu）只在顶层 AST 点做名单翻译（for/子壳/函数/script 内不生效）→ 同一命令的形态**随执行上下文漂移**（即 #592 标题症状）。引擎侧修正：盘符形态操作数对**所有子类**一律走原生漏斗翻译（上下文/参数位/存在性无关）；数据操作数 verbatim 豁免两族——grep/sed/awk 首位置模式/脚本、find `-name` 族值（宿主 `winuxcmd_path_translation_mask` 同表，invariant C / niubash#62）+ 不触 FS 的 dirname/basename 字符串变换（GNU dirname.c/basename.c 零 stat，操作数是回显文本，issue71）；`__RUBASH_ARGV_DIALECT=legacy` 整体回滚（原生漏斗的存在性门语义）。锁定：`tests/issue592_argv_translation_completeness.rs` + `executor::path` 漏斗测试族。**2026-11-01 更正（#748/#779 代）**：全类翻译此后两处收窄——裸 `/` 对 foreign 子进程永远 verbatim（#748 终裁 B 案，rubash#153）；盘根形态 `/X`、`/X/` 对所有盘一律 verbatim（#779 R0 定案；R2 清理删去 drive-C 根形式例外，PR #2458）。带分量形态（`/d/repo`）仍无条件翻译（Option B 不变），附着值（`--opt=/d/x`、`FOO=/d/x`）从来不翻。argv 方言正本见 niubash `docs/src/windows-path-contract.md`「Shell Namespace Ownership」。
 - **已知边缘（violation，[WinuxCmd#1170](https://github.com/unixwin/WinuxCmd/issues/1170)）**：~~`find` 的**起点操作数**不认 `/c/...`、`/d/...`~~ **rubash 侧已由 #592 覆盖**（起点经漏斗翻译为 Win32，工具收到即认）；`-exec` 子命令查找不受影响。工具侧自身认 `/c/` 起点仍是工具账。
 - **已知边缘（violation，[niu-git#7](https://github.com/unixwin/niu-git/issues/7)）**：`opt/niugit/git.exe` 启动器重建命令行时**丢弃 argv 中的 `"`**、破坏尾部 `\`（`commit -m` 消息字节损坏）。真 git（`mingw64/bin/git.exe`）与 rubash 侧均保真，损坏在 stub。git 的 `-C /d/...`、rev spec（`origin/feat/x`、`HEAD~1..HEAD`、`-- rev`）均零转换可用（rev spec 不呈盘符形态，漏斗不碰；`--git-dir=/x` 附着值是开关 token 亦不碰——附着 `--opt=/x` 属值语义豁免，分隔拼写 `--git-dir /x` 的路径词照常翻译）。
 
@@ -60,7 +63,7 @@ env/timeout/xargs 的子命令、find 的 `-exec` 子命令：按 PATH 解析，
 
 ### L4 原生子进程 argv 层
 
-- native 子进程（cmd.exe、System32 工具、任意第三方 exe）：path 形操作数统一翻译为 Win32；`cmd /c cd` 看到的是 `D:\...`。这是设计而非缺陷——native 工具没有 POSIX 层，翻译是 rubash 替它做的唯一一次。
+- native 子进程（cmd.exe、System32 工具、任意第三方 exe）：经分类的 path 形操作数翻译为 Win32；`cmd /c cd` 看到的是 `D:\...`。verbatim 类（裸 `/`、盘根形态、附着值、语法数据）按 #748/#779 原样过界——根形式与开关位同串（`cmd /c`、`xcopy /D`），无规则可分，由子进程按自身文法解释。翻译仍是设计而非缺陷——native 工具没有 POSIX 层，能分类的路径形态由 rubash 替它翻这唯一一次。
 - shell-wrapped 子进程（`#!` 脚本经 bash 重入）：与调用方同域，argv verbatim（rubash#259 的教训：混域翻译破坏子脚本路径算术）。
 - MSYS 宿主检测（程序目录带 `msys-2.0.dll`/`cygwin1.dll`）只影响**加引号**（防其二次展开），不影响形态。
 
@@ -76,7 +79,7 @@ env/timeout/xargs 的子命令、find 的 `-exec` 子命令：按 PATH 解析，
 
 1. **rubash 会话内（脚本、-c、交互）**：一律用 POSIX 形态。`cd /d/repo`、`> /tmp/out`、`$PWD`、`find /d/repo ...`（find 起点除外，见 L2 边缘——用 `cd` + 相对起点或 `D:/`）。渲染回来的一定是 POSIX 形态，直接消费。
 2. **从 rubash 里调 winuxcmd 工具**：POSIX 操作数放心给（L2 verbatim 直通）；子命令靠 PATH，别假设 `env` 会替你补 PATH。
-3. **从 rubash 里调原生子进程（cmd、第三方 exe）**：给它 Win32 形态或让它自己处理——rubash 会把 path 形操作数统一翻译，但你拼接的**字符串内部**（引号里的路径、`/c` 开关）它不会碰。`cmd` 的 `/c`、`/D` 开关被识别为 native 开关不翻译（preserve_native_args）。
+3. **从 rubash 里调原生子进程（cmd、第三方 exe）**：给它 Win32 形态或让它自己处理——rubash 会把经分类的 path 形操作数翻译（裸 `/`、盘根形态与附着值 verbatim——想让 native 程序到达盘根，写 `/d/.`、`/mnt/d/` 或 `D:/`），但你拼接的**字符串内部**（引号里的路径、`/c` 开关）它不会碰。`cmd` 的 `/c`、`/D` 开关被识别为 native 开关不翻译（preserve_native_args）。
 4. **必须用 `D:/` 形态的场景**：
    - 驱动 **winuxcmd find 的起点**（[WinuxCmd#1170](https://github.com/unixwin/WinuxCmd/issues/1170) 修复前）；
    - 在 **rubash 之外**（PowerShell/cmd/宿主直接 spawn）传给"POSIX 支持不可证"的工具——工具层各自的 POSIX 支持是**各自运行层的私事**（git 收 `/d/...` 是 git-for-windows 自己的账，不是契约）；唯一跨工具可靠的形态是 `D:/`；
@@ -102,4 +105,5 @@ env/timeout/xargs 的子命令、find 的 `-exec` 子命令：按 PATH 解析，
 - 契约测试：`tests/path_contract_boundary_{native_core,posix_forms,verbatim}.rs`，15 用例全绿。
 - 违规台账：rubash#566（cd /c 裸盘根）、WinuxCmd#1170（find POSIX 起点）、niu-git#7（stub 双引号）、rubash#568（/mnt/c 契约矛盾：master --lib Windows 恒红，#444 漏改 verbatim 测试；裁决（2026-10-12）：#444 前提成立，"工具链已自解析 /mnt" 系 Git Bash argv 转换污染——已修 verbatim 测试、保留全类翻译）。
 - **rubash#592（2026-10-13，已修）**：盘符形态操作数的 Option B verbatim 前提对在售工具链不成立（sed/du 无自解析、niugit 存在性门、宿主名单翻译仅顶层）→ 同一命令形态随执行上下文漂移，`git worktree add /d/新路径` 实落 `D:\d\...`。修正：盘符形态对全部子类走原生漏斗翻译（上下文×参数位×存在性无关），grep/sed/awk/find 四类数据主操作数按宿主同表豁免；`__RUBASH_ARGV_DIALECT=legacy` 回滚阀保留。L2/L4 行已同步。
+- **niubash#748 / #779（2026-10-31 / 2026-11-01，已裁定落地）**：foreign 裸 `/` 永远 verbatim（#748 B 案；A 案「对所有非 applet 子进程翻译裸 `/`」经原型实测被否）；盘根形态 `/X`、`/X/` 对所有盘 verbatim（#779 R0 定案：与 `cmd /c`、`xcopy /D`、`robocopy /E` 等开关位同串、无规则可分，存在性门与全翻在杀招行上等价同死）；R2 清理删 funnel 的 drive-C 根形式例外（PR #2458），`/c`、`/c/` 与其他盘一致原样。L4 行、§2 #592 条与 L4 细则已同步；argv 方言正本移至 niubash `docs/src/windows-path-contract.md`。
 - 非边界类旁证（记录在案，未开票）：`rmdir` wrapper 对失败操作恒返回 0（`external_rmdir` `let _ =` + 硬编码 `exit_code = 0`，GNU 应报错 rc=1）；`mkdir` wrapper 缺父目录时自动补齐父链（GNU 裸 mkdir 应 ENOENT）。两者都是语义差异而非路径形态违规，留给语义车道。
