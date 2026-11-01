@@ -195,6 +195,19 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        // GNU builtins/exit.def:81 (logout_builtin): CHECK_HELPOPT runs
+        // before everything else — `logout --help` prints the help,
+        // returns EX_USAGE, and never exits, in login and non-login
+        // shells alike (the same class execute_exit_command_word pins
+        // for `exit --help`).
+        if cmd.words.get(1).map(String::as_str) == Some("--help") {
+            let mut stdout = Vec::new();
+            crate::builtins::logout::write_help(&mut stdout)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &[])?;
+            self.special_builtin_failed.set(true);
+            return Ok(crate::builtins::exit::EX_USAGE);
+        }
+
         // GNU builtins/exit.def:79-90 (logout_builtin): only a login shell
         // may logout; anything else reports and continues. The login
         // state the builtin sees is the EFFECTIVE one: GNU clears
@@ -231,17 +244,74 @@ impl Executor {
             return Ok(1);
         }
 
-        // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a login
-        // shell sources ~/.bash_logout once before exiting.
+        // GNU builtins/common.c:519-554 get_exitstat — the argument
+        // parser exit and logout share (exit_or_logout,
+        // builtins/exit.def:93-154). A leading `--` is skipped
+        // (ISOPTION); the FIRST status word's numeric validity is
+        // checked before the too-many arm; a bad number is
+        // sh_neednumarg (common.c:182-185) and get_exitstat returns
+        // EX_USAGE (258), which exit_or_logout returns untouched
+        // because it exceeds EX_SHERRBASE (256) — the shell does NOT
+        // exit, $? is 2, and bash_logout is never reached. The old
+        // code parsed with unwrap_or(0) and exited silently
+        // (rubash#2437).
+        let args: Vec<&str> = cmd.words[1..].iter().map(String::as_str).collect();
+        let rest: &[&str] = if args.first() == Some(&"--") {
+            &args[1..]
+        } else {
+            &args[..]
+        };
+        let status = match rest.first() {
+            None => self.exit_code,
+            Some(word) => match crate::builtins::exit::gnu_valid_number(word) {
+                Some(value) => crate::builtins::exit::normalize_status(value),
+                None => {
+                    let mut stderr = Vec::new();
+                    writeln!(
+                        stderr,
+                        "{}logout: {}: numeric argument required",
+                        self.diagnostic_prefix(),
+                        word
+                    )?;
+                    self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                    self.exit_code = 2;
+                    // The same special-builtin failure class the exit
+                    // intercept marks for this error
+                    // (execute_cmd.c:4886-4888).
+                    self.special_builtin_failed.set(true);
+                    return Ok(2);
+                }
+            },
+        };
+        // no_args (builtins/common.c, fatal == 0): extra words after a
+        // valid status word are the DISCARD class — the diagnostic,
+        // set_exit_status (EX_BADUSAGE) leaves $? = 2, and the rest of
+        // the current list is abandoned, exactly the vehicle
+        // execute_exit_command_word arms for `exit 1 2`.
+        if rest.len() > 1 {
+            let mut stderr = Vec::new();
+            writeln!(
+                stderr,
+                "{}logout: too many arguments",
+                self.diagnostic_prefix()
+            )?;
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            self.exit_code = 2;
+            self.raise_evalerror_abort();
+            self.evalerror_exit_toomany_pending.set(true);
+            return Ok(2);
+        }
+
+        // GNU exit.def:147,156-166 (exit_or_logout -> bash_logout): a
+        // login shell sources ~/.bash_logout once before exiting —
+        // only a validated exit reaches it (see the get_exitstat arms
+        // above).
         self.source_bash_logout_once()?;
 
-        // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level(EXITBLTIN)
-        // - the shell exits with the logout status (an optional numeric
-        // argument overrides it), after the regular exit trap.
-        let status = match cmd.words.get(1) {
-            Some(word) => self.expand_word(word).trim().parse::<i32>().unwrap_or(0),
-            None => self.exit_code,
-        };
+        // GNU exit.def:93-154 (exit_or_logout): jump_to_top_level
+        // (EXITBLTIN) — the shell exits with the logout status (an
+        // optional numeric argument overrides it), after the regular
+        // exit trap.
         let status = self.run_exit_trap_for_status(status)?;
         Err(ExecuteError::ExitCode(status))
     }
