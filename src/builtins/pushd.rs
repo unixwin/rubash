@@ -6,7 +6,9 @@
 mod parse;
 mod stack;
 
-pub(crate) use stack::{load_stack, save_stack, set_stack_value, stack_value, stack_words};
+pub(crate) use stack::{
+    load_stack, load_stack_carrier, save_stack, set_stack_value, stack_value, stack_words,
+};
 
 use crate::executor::types::READONLY_VARS;
 use crate::shell::var_table::VarTable;
@@ -103,7 +105,7 @@ where
     E: Write,
 {
     let args: Vec<&str> = args.into_iter().collect();
-    let mut stack = load_stack(env_vars);
+    let mut stack = load_stack(env_vars, cwd);
 
     match builtin {
         StackBuiltin::Dirs => {
@@ -485,8 +487,7 @@ where
                 // its EXECUTION_FAILURE are the only effects (rubash#830;
                 // GNU bash 5.3.0 probes: rc 1, `dirs` still shows the entry).
                 let target = stack[1].clone();
-                let Some(chdir) =
-                    popd_chdir(&target, env_vars, cwd, stderr, diagnostic_prefix)?
+                let Some(chdir) = popd_chdir(&target, env_vars, cwd, stderr, diagnostic_prefix)?
                 else {
                     return Ok(EXECUTION_FAILURE);
                 };

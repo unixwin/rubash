@@ -292,6 +292,7 @@ impl Executor {
             };
             crate::builtins::pushd::set_stack_value(
                 &mut self.shell_state.env_vars,
+                &self.shell_state.cwd,
                 index,
                 value.to_string(),
             );
