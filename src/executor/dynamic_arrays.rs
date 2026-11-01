@@ -1232,7 +1232,7 @@ impl Executor {
                 self.groups_words().into_iter().enumerate().collect(),
             ));
         }
-        if name == "DIRSTACK" {
+        if name == "DIRSTACK" && !self.dirstack_shadowed() {
             return Some(self.dirstack_storage());
         }
         if name == "BASH_ALIASES" {
@@ -1297,6 +1297,7 @@ impl Executor {
         &mut self,
         value: &str,
         append: bool,
+        integer: bool,
     ) -> bool {
         let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) else {
             // A scalar bind (or scalar +=) is an element-0 bind,
@@ -1312,12 +1313,20 @@ impl Executor {
         } else {
             "()".to_string()
         };
+        // GNU make_variable_value: the integer attribute evaluates
+        // each element as it is bound. The attribute reaches the door
+        // either from the caller's own verdict (declare's -i in this
+        // call) or from the variable's standing mark (a plain bind to
+        // a DIRSTACK declared -i earlier); the compound scanner also
+        // applies the standing case marks itself.
+        let integer =
+            integer || is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, "DIRSTACK");
         let outcome = match super::arrays::append_array_value(
             &current,
             None,
             compound,
             "DIRSTACK",
-            false,
+            integer,
             self.shell_state.env_vars.get("IFS").map(String::as_str),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
@@ -1419,18 +1428,67 @@ impl Executor {
         mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
     }
 
+    /// True while a plain binding shadows the dynamic DIRSTACK variable:
+    /// a frame local created by `local`/`declare` (GNU make_local_variable
+    /// builds a brand-new SHELL_VAR with no get/assign funcs, so the local
+    /// is an ordinary variable) or a temporary-environment tempvar (GNU
+    /// assign_in_env likewise creates a fresh scalar in temporary_env and
+    /// never reaches assign_dirstack). While a shadow is live, every
+    /// dynamic face of DIRSTACK -- the stack setter routing, the
+    /// get_dirstack materialization, the carrier-derived read views --
+    /// must defer to the plain binding, exactly as find_variable finding
+    /// the shadowing variable first defers in GNU (rubash#2424).
+    pub(in crate::executor) fn dirstack_shadowed(&self) -> bool {
+        self.tempenv_names.iter().any(|name| name == "DIRSTACK")
+            || self
+                .shell_state
+                .local_var_scopes
+                .iter()
+                .any(|scope| scope.contains_key("DIRSTACK"))
+    }
+
     /// Materializes the DIRSTACK array cell from the live directory stack.
     /// GNU runs this getter only when DIRSTACK itself is named by a command
     /// (named `declare -p DIRSTACK`, `declare -a DIRSTACK`, subscript
     /// access, assignment) -- pushd/popd/dirs and unrelated declares leave
     /// the stored cell untouched (variables.c:1618 get_dirstack,
-    /// builtins/pushd.def:669 get_directory_stack).
+    /// builtins/pushd.def:669 get_directory_stack). The one caller
+    /// (execute_declare) gates the call on the shadow state: a plain
+    /// local or tempenv shadow suppresses the materialization, because
+    /// the shadowing binding is what named accesses see (rubash#2424).
     pub(in crate::executor) fn sync_dirstack_cell(&mut self) {
         let storage = self.dirstack_storage();
         self.shell_state
             .env_vars
-            .insert("DIRSTACK".to_string(), storage);
+            .insert("DIRSTACK".to_string(), storage.clone());
         mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, "DIRSTACK");
+        // The materialization is ONE object in GNU (get_dirstack
+        // rebuilds the array cell); rubash splits it into the mirror
+        // above and a typed cell. Rewriting the mirror under a live
+        // typed cell without refreshing the cell leaves the pair
+        // incoherent and the boundary verifier panics on the next
+        // command (rubash#2424: `declare -p DIRSTACK; pushd /x;
+        // declare -p DIRSTACK` — the first print materialized the
+        // cell, pushd moved the carrier, the second print re-synced
+        // only the mirror). Refresh an existing cell from the new
+        // storage; an absent cell stays absent (the bare-listing
+        // rule: the cell materializes only on named access).
+        if self.shell_state.variables.get("DIRSTACK").is_some() {
+            let entries = super::arrays::indexed_array_entries(&storage)
+                .into_iter()
+                .map(|(index, value)| (i64::try_from(index).unwrap_or(i64::MAX), value));
+            if self
+                .shell_state
+                .variables
+                .replace_indexed_array_entries("DIRSTACK", entries)
+                .is_err()
+            {
+                crate::executor::drop_typed_indexed_array(
+                    &mut self.shell_state.variables,
+                    "DIRSTACK",
+                );
+            }
+        }
     }
 
     pub(in crate::executor) fn funcname_stack(&self) -> Vec<String> {
@@ -1509,7 +1567,10 @@ impl Executor {
     /// its successors removed, so the builtin still binds the earlier words
     /// — `declare -i a=1 b=8+2x c=3` binds a, skips c, rc=1) plus the
     /// rendered evalerror diagnostic for the caller to emit.
-    fn integer_assignment_eval_failure(&self, value: &str) -> Option<String> {
+    pub(in crate::executor) fn integer_assignment_eval_failure(
+        &self,
+        value: &str,
+    ) -> Option<String> {
         if eval_conditional_arith_value(value, &self.shell_state.env_vars).is_some() {
             return None;
         }
