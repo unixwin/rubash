@@ -85,7 +85,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_tracked(args, env_vars, stdout, stderr, None)
+    execute_with_io_tracked(args, env_vars, stdout, stderr, None, None)
 }
 
 /// [`execute_with_io`] plus a sink for the `-o` binary-option WRITES
@@ -98,18 +98,37 @@ where
 /// funnel's side effects needs the writes themselves, not a before/
 /// after state diff (rubash#2435). Print/list modes never write and
 /// record nothing.
+///
+/// The second sink reports a `login_shell` set/unset ATTEMPT (either
+/// spelling, any resulting value): GNU's login_shell entry carries a
+/// custom setter (builtins/shopt.def:244, set_login_shell at
+/// shopt.def:762-766) that ignores the requested value and re-copies
+/// the CURRENT login_shell global, which this pure layer cannot see —
+/// the executor re-derives the stored bit when the flag is set
+/// (rubash#2457). An attempt that lands on the already-reported value
+/// still counts: `shopt -s login_shell` inside a `( )` region writes
+/// "on" here but must end off, so a before/after diff cannot detect
+/// it.
 pub(crate) fn execute_with_io_and_o_writes<W, E>(
     args: &[String],
     env_vars: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     stderr: &mut E,
     o_writes: &mut Vec<(String, bool)>,
+    login_shell_write: &mut bool,
 ) -> io::Result<i32>
 where
     W: Write,
     E: Write,
 {
-    execute_with_io_tracked(args, env_vars, stdout, stderr, Some(o_writes))
+    execute_with_io_tracked(
+        args,
+        env_vars,
+        stdout,
+        stderr,
+        Some(o_writes),
+        Some(login_shell_write),
+    )
 }
 
 fn execute_with_io_tracked<W, E>(
@@ -118,6 +137,7 @@ fn execute_with_io_tracked<W, E>(
     stdout: &mut W,
     stderr: &mut E,
     o_writes: Option<&mut Vec<(String, bool)>>,
+    mut login_shell_write: Option<&mut bool>,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -231,6 +251,16 @@ where
             )?;
             status = EXECUTION_FAILURE;
             continue;
+        }
+
+        // rubash#2457: a login_shell write attempt is reported for
+        // the executor's re-derivation (see execute_with_io_and_o_writes);
+        // the write itself proceeds with the requested value here and
+        // the executor's correction, when it runs, overwrites it.
+        if name == "login_shell" && matches!(mode, ShoptMode::Set | ShoptMode::Unset) {
+            if let Some(flag) = login_shell_write.as_deref_mut() {
+                *flag = true;
+            }
         }
 
         match mode {
