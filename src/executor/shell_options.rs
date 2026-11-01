@@ -544,11 +544,7 @@ impl Executor {
         // the caller reports like any unreadable redirect source.
         if let Some(link) = {
             let (cwd_forms, root_forms) = self.proc_link_forms();
-            crate::special_paths::synthetic_link_target(
-                target,
-                Some(&cwd_forms),
-                Some(&root_forms),
-            )
+            crate::special_paths::synthetic_link_target(target, Some(&cwd_forms), Some(&root_forms))
         } {
             return Some(open_redirect_input_file(std::path::Path::new(&link.native)));
         }
@@ -3691,7 +3687,23 @@ impl Executor {
                     InListBinding::AmbientOf(ambient_fd) => *ambient_fd,
                     _ => source_fd,
                 };
-                if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput) {
+                // rubash#2479: a `<&N` dup winner shares the description
+                // N is bound to AT THIS POSITION — when that binding is
+                // itself an alias-spelling open (`3< /dev/fd/6`), the
+                // description is the open (fresh for a regular-file
+                // target), not the ambient fd the spelling names. The
+                // AmbientOf verdict alone cannot tell the two apart (a
+                // dup-bound source, `3<&6`, chains to the same verdict
+                // and DOES share the ambient stream), so the dup winner
+                // takes the fresh serve below exactly when the winning
+                // in-list entry for its source is an alias open.
+                let dup_of_alias_open =
+                    matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput)
+                        && matches!(in_list_verdict, InListBinding::AmbientOf(_))
+                        && self.in_list_entry_is_alias_open(cmd, winner_position, source_fd);
+                if !matches!(redirect.kind, crate::parser::RedirectKind::DuplicateInput)
+                    || dup_of_alias_open
+                {
                     if let InListBinding::File(path) = &in_list_verdict {
                         if let Ok(bytes) = std::fs::read(path) {
                             return Some(

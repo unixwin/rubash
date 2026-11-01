@@ -387,11 +387,7 @@ impl Executor {
         // GNU's O_RDWR open of a directory fails.
         if let Some(link) = {
             let (cwd_forms, root_forms) = self.proc_link_forms();
-            crate::special_paths::synthetic_link_target(
-                target,
-                Some(&cwd_forms),
-                Some(&root_forms),
-            )
+            crate::special_paths::synthetic_link_target(target, Some(&cwd_forms), Some(&root_forms))
         } {
             let (read_file, write_file) =
                 FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
@@ -4740,6 +4736,43 @@ impl Executor {
                                     self.record_output_fd_ledger(fd);
                                     continue;
                                 }
+                            }
+                        }
+                    }
+                    // rubash#2479: an fd-alias PATH spelling (/dev/fd/N,
+                    // /dev/std*, /proc/self/fd/N) is an OPEN, not a dup —
+                    // the dup applies below answer for it only because
+                    // redirect_target_fd_and_move falls back to the alias
+                    // table for words without `&`. GNU's open of the alias
+                    // (redir.c redir_open over the magic link) binds a
+                    // FRESH description of a regular-file target (offset
+                    // 0; the source fd does not move) and a dup of every
+                    // other endpoint kind — the compound binder's dispatch
+                    // (command_input_scope.rs, rubash#2256). An alias whose
+                    // endpoint is absent falls through to the ladder below,
+                    // keeping the dangling-alias outcome it has today.
+                    if !super::execution_misc::redirect_target_is_dup_spelling(&target) {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if self.fd_table.read_endpoint(source_fd).is_some() {
+                                if let Some(error) = self.fd_alias_spelling_open_error(source_fd) {
+                                    return Err(ExecuteError::from(
+                                        crate::posix_errors::path_error(&target, error),
+                                    ));
+                                }
+                                if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+                                    self.set_fd_readwrite_file(fd, &target, fd != 0)
+                                        .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                                } else if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                                    match FileFd::open_read(path) {
+                                        Ok(fresh) => self.set_fd_input_file(fd, fresh, fd != 0),
+                                        Err(_) => self.copy_persistent_input_fd(fd, source_fd),
+                                    }
+                                } else {
+                                    self.copy_persistent_input_fd(fd, source_fd);
+                                }
+                                continue;
                             }
                         }
                     }
