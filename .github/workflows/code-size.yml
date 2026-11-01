@@ -1,0 +1,73 @@
+# Refresh the net code-size table (docs/code-size.md) and the README badge
+# data (docs/code-size-badge.json) by re-running scripts/code-size.py.
+#
+# Trigger choice: release-published + manual dispatch. The badge is a
+# per-version figure ("code size at this release"); running on every push
+# would churn docs/ on master and collide with unrelated PRs, while a
+# schedule would publish numbers for versions nobody shipped.
+#
+# The GNU baseline is rebuilt exactly: the bash-5.3 release tarball is
+# the pristine tree, and a second copy is brought to 5.3.20 by applying
+# the official bash53-001..020 patches. The patch step fails loudly if a
+# hunk does not apply, so a wrong strip level can never silently skew
+# the count. Strip level is -p0, as the official patch headers themselves
+# prescribe ("Patch (apply with `patch -p0')"); verified locally against
+# the 5.3 tarball + bash53-001 (dry-run): -p0 applies, -p1 cannot find
+# the files to patch.
+name: code-size
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Fetch GNU bash 5.3.20 sources (tarball + official patches)
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/gnu && cd /tmp/gnu
+          curl -fsSLO https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz
+          tar xzf bash-5.3.tar.gz
+          mv bash-5.3 pristine
+          cp -r pristine bash-5.3.20
+          cd bash-5.3.20
+          for i in $(seq -w 1 20); do
+            curl -fsSL "https://ftp.gnu.org/gnu/bash/bash-5.3-patches/bash53-0${i}" \
+              -o "/tmp/gnu/bash53-0${i}"
+            patch -p0 < "/tmp/gnu/bash53-0${i}"
+          done
+
+      - name: Recount and update doc + badge
+        run: |
+          python3 scripts/code-size.py \
+            --pristine /tmp/gnu/pristine \
+            --write-md docs/code-size.md \
+            --badge-out docs/code-size-badge.json \
+            --badge-vs gnu-5.3.20 \
+            "rubash=." "gnu-5.3.20=/tmp/gnu/bash-5.3.20"
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- docs/code-size.md docs/code-size-badge.json; then
+            echo "code-size figures unchanged; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/code-size.md docs/code-size-badge.json
+          git commit -m "docs: refresh code-size table + badge for release"
+          git push origin master

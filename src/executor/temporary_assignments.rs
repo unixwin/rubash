@@ -620,6 +620,54 @@ impl Executor {
                     continue;
                 }
             }
+            // rubash#2424: a scalar tempenv bind of DIRSTACK takes the
+            // same tempvar shadow as any other name. GNU assign_in_env
+            // (variables.c:3536) creates the binding in temporary_env and
+            // never calls bind_variable, so assign_dirstack never runs:
+            // the directory stack is untouched for the window, every
+            // read sees the scalar shadow, and the snapshot restore
+            // reinstalls the dynamic face whole. The permanent-bind
+            // funnel below instead routes through the #2408 setter
+            // intercept, which makes the bind a silent no-op and leaves
+            // the dynamic face visible in the window. (Compound words
+            // took the literal-scalar splice branch above; this block
+            // is the scalar/append remainder.)
+            {
+                let (_, append) = assignment_name_and_append(name);
+                let target = resolved_target
+                    .clone()
+                    .unwrap_or_else(|| base_name.to_string());
+                if target == "DIRSTACK" && !name.contains('[') {
+                    if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "DIRSTACK") {
+                        let line = format!("{}{target}: readonly variable\n", self.error_prefix());
+                        self.emit_assignment_diag(line);
+                        assignments_failed = true;
+                        continue;
+                    }
+                    let window_value = if append {
+                        format!("{}{}", self.tempenv_scalar_view("DIRSTACK"), expanded_value)
+                    } else {
+                        expanded_value.clone()
+                    };
+                    self.shell_state
+                        .env_vars
+                        .insert(target.clone(), window_value.clone());
+                    let _ = self
+                        .shell_state
+                        .variables
+                        .set(target.clone(), crate::shell::Variable::scalar(window_value));
+                    set_var_attrs(
+                        &mut self.shell_state.env_vars,
+                        &target,
+                        VarAttrs {
+                            exported: true,
+                            ..VarAttrs::default()
+                        },
+                    );
+                    self.tempenv_names.push(target);
+                    continue;
+                }
+            }
             // GNU variables.c bind_variable (ASS_MKLOCAL tempenv path): a
             // failed bind (readonly violation via ASSIGN_DISALLOWED, expansion
             // error) reports and keeps going through the REST of the operand
@@ -663,6 +711,21 @@ impl Executor {
     /// element 0 of an indexed array, empty for an assoc array,
     /// the value itself for a scalar.
     pub(in crate::executor) fn tempenv_scalar_view(&self, target: &str) -> String {
+        // DIRSTACK's cell is a materialization artifact; its scalar
+        // view for an append is the live stack's element 0 (GNU
+        // make_variable_value with ASS_APPEND reads the array's
+        // element 0, and get_dirstack's element 0 is the working
+        // directory) — never the encoded storage text (rubash#2424).
+        // A live shadow owns the name instead and falls through to
+        // the generic arms, which read the shadowing cell.
+        if target == "DIRSTACK" && !self.dirstack_shadowed() {
+            return crate::builtins::pushd::stack_value(
+                &self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                0,
+            )
+            .unwrap_or_default();
+        }
         match self.shell_state.variables.get(target).map(|v| &v.value) {
             Some(crate::shell::ShellValue::IndexedArray(entries)) => {
                 entries.get(&0).cloned().unwrap_or_default()
@@ -1542,6 +1605,15 @@ impl Executor {
         }
         if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
             return true;
+        }
+        if base_name == "DIRSTACK" && !dynamic_unbound && !self.dirstack_shadowed() {
+            // GNU variables.c:1612 assign_dirstack: every whole-
+            // variable bind of DIRSTACK — scalar, compound, append —
+            // routes through the dirstack setter, never through array
+            // storage (rubash#2408). A plain local or tempenv shadow
+            // owns the name instead: the bind lands on the shadowing
+            // binding like any ordinary variable (rubash#2424).
+            return self.apply_dirstack_assignment(&value, append, false);
         }
         // GNU bind_variable_internal (variables.c:3130/3152): a plain
         // bind to an att_noassign variable is a silent no-op — the
