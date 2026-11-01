@@ -1216,6 +1216,12 @@ impl Executor {
         if self.exec_replaced {
             return Ok(exit_status);
         }
+        // rubash#2212: the EXIT trap runs once per exit (see the
+        // exit_trap_ran field) — a later funnel entry for the same
+        // exit must not fire an action the first handler re-registered.
+        if self.exit_trap_ran.get() {
+            return Ok(exit_status);
+        }
         let Some(action) = crate::builtins::trap::take_exit_trap(&mut self.shell_state.env_vars)
         else {
             return Ok(exit_status);
@@ -1223,6 +1229,7 @@ impl Executor {
         if action.is_empty() {
             return Ok(exit_status);
         }
+        self.exit_trap_ran.set(true);
 
         self.exit_code = exit_status;
         // GNU trap.c:1128 run_exit_trap saves the exiting status in
