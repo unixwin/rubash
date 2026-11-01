@@ -851,9 +851,12 @@ impl Executor {
                 .collect();
             selected
         });
-        // A body flagged UNSTREAMED_FUNCTION_BODIES still holds
-        // unexpanded alias words; lift the ambient streamed marker so the
-        // executor-level expand_aliases sees them for the body's duration.
+        // The body's own read-time alias state governs its execution,
+        // not the caller's ambient stream state: a body flagged
+        // UNSTREAMED_FUNCTION_BODIES still holds unexpanded alias words,
+        // so lift the ambient streamed marker for its duration; any
+        // other body was already expanded by its reader, so pin the
+        // marker for its duration instead (see the else arm below).
         let body_unstreamed =
             marked_env_names(&self.shell_state.env_vars, UNSTREAMED_FUNCTION_BODIES)
                 .iter()
@@ -861,7 +864,21 @@ impl Executor {
         let saved_alias_streamed = if body_unstreamed {
             self.suspend_alias_streamed()
         } else {
-            None
+            // rubash#2511: a streamed body was already alias-expanded by
+            // the reader that produced it. GNU expands aliases only while
+            // reading (parse.y read_token_word -> alias_expand_token);
+            // execute_cmd.c execute_function runs the stored body tree
+            // verbatim, so a definition-time expansion must never be
+            // re-applied at the call. The streamed marker is an ambient
+            // property of the caller's input stream, not of this body:
+            // left to the ambient state, a streamed body called from an
+            // unmarked context is expanded a second time (modernish's
+            // `alias let='let --'` is baked into stored bodies at
+            // definition and doubled to `let -- --` at the call). Pin
+            // the marker for the body's duration so the protection
+            // travels with the body that earned it; both arms hand
+            // resume_alias_streamed the caller's previous marker value.
+            self.mark_alias_streamed()
         };
         // execute_cmd.c:5391: the skipped body keeps the call's success
         // status — no body execution, no RETURN trap (both live inside the
@@ -910,9 +927,7 @@ impl Executor {
                 })
             })
         };
-        if body_unstreamed {
-            self.resume_alias_streamed(saved_alias_streamed);
-        }
+        self.resume_alias_streamed(saved_alias_streamed);
         self.shell_state.loop_depth = saved_loop_depth;
         self.shell_state.inherited_loop_depth = saved_inherited_loop_depth;
         // GNU execute_cmd.c:5269+ — the call's input redirections are
