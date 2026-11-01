@@ -8,6 +8,12 @@
 //! (`stty.exe`, `cat.exe`, ...) sitting on PATH — can be pinned with
 //! empty placeholder files: `type` only resolves them.
 //!
+//! rubash#2514 (2026-11-02) adjudicated the S2 describe disclosure
+//! to this Windows product face only: off Windows the describe faces
+//! answer the GNU file form (see the #2514 update in
+//! `issue2036_precedence_introspection_regressions`). Everything
+//! pinned here is the preserved behavior, unchanged.
+//!
 //! What is pinned here, against a PATH containing only the fake
 //! applet directory:
 //! - the simple-command claims disclose: `type -t stty` -> `emulation`,
