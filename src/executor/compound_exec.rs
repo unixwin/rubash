@@ -6407,7 +6407,10 @@ impl Executor {
                 output.push_str(&self.expand_case_pattern_run(&run));
             }
             let restored = output.replace(PROTECTED_CASE_PATTERN_BACKSLASH, "\\");
-            return std::borrow::Cow::Owned(strip_surrounding_quotes(&restored));
+            // No surrounding-quote strip: quotes at the edges of the
+            // expanded text can only have arrived from an expansion
+            // result, where they are data (rubash#2428).
+            return std::borrow::Cow::Owned(restored);
         }
 
         let array_at = self.case_pattern_array_at_map(&pattern.raw_text);
@@ -6421,10 +6424,12 @@ impl Executor {
     /// One unquoted run of a quote-free case pattern (the text between
     /// two escape pairs): full mutable expansion plus the pattern quote
     /// decode, exactly the pipeline the former whole-string guard scheme
-    /// applied to the protected text (rubash#2421).
+    /// applied to the protected text (rubash#2421). The decode runs in
+    /// expansion-result mode: quote characters the expansion produced
+    /// are data, not pattern quoting (rubash#2428).
     fn expand_case_pattern_run(&mut self, run: &str) -> String {
         let expanded = self.expand_word_mut(run);
-        decode_parameter_pattern_quotes(&expanded)
+        decode_case_pattern_expansion(&expanded)
     }
 
     /// First element + element count for every `${name[@]}` unit in a
@@ -7389,9 +7394,11 @@ fn quote_aware_case_pattern(
         }
         let segment = chars[start..index].iter().collect::<String>();
         let expanded = expand_word(&segment);
-        output.push_str(&strip_surrounding_quotes(&decode_parameter_pattern_quotes(
-            &expanded,
-        )));
+        // The segment text between the source quotes is expanded, and
+        // the decode runs in expansion-result mode: quote characters
+        // the expansion produced are data, not pattern quoting, and
+        // are not stripped from the edges either (rubash#2428).
+        output.push_str(&decode_case_pattern_expansion(&expanded));
     }
 
     output

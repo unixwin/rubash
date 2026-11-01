@@ -401,21 +401,34 @@ fn removal_pair_gates_clean(pattern: &str, value: &str) -> bool {
         && !super::conditional::pattern::sides_need_byte_locale_units(pattern, value)
 }
 
-pub(in crate::executor) fn strip_surrounding_quotes(s: &str) -> String {
-    if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-            return s[1..s.len() - 1].to_string();
-        }
-    }
-    s.to_string()
+pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> String {
+    decode_parameter_pattern_quotes_impl(pattern, true)
 }
 
-pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> String {
+/// Case-pattern variant (rubash#2428): the input is text an expansion
+/// already PRODUCED. Quoting is a read-time property only (parse.y
+/// CTLESC marking); an expansion result carries no quoting, and GNU
+/// performs no quote removal on case patterns (execute_cmd.c:3733-3736),
+/// so quote characters arriving from a value are ordinary data — the
+/// glob characters next to them stay live (`p='"*"'; case '"xb"' in
+/// $p)` matches). Decoding the expanded text with the source-quote
+/// rules literal-marked those globs away. Source-level quote syntax
+/// never reaches this decoder from the case paths (any raw quote routes
+/// the pattern to the quote-aware segment walk, whose segments split at
+/// the quotes), so the `'`, `"` and `$'`/`$"` forms are copied as data;
+/// the backslash arm and the DATA_SQUOTE carrier arm keep their shared
+/// meaning (a `\` in a value still quotes the next character for the
+/// matcher, exactly as quote_aware_glob_rhs treats `[[ == ]]` RHS data).
+pub(in crate::executor) fn decode_case_pattern_expansion(pattern: &str) -> String {
+    decode_parameter_pattern_quotes_impl(pattern, false)
+}
+
+fn decode_parameter_pattern_quotes_impl(pattern: &str, source_quotes: bool) -> String {
     let mut output = String::new();
     let chars = pattern.chars().collect::<Vec<_>>();
     let mut index = 0;
     while index < chars.len() {
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
+        if source_quotes && chars[index] == '$' && chars.get(index + 1) == Some(&'\'') {
             index += 2;
             let mut quoted = String::new();
             let mut escaped = false;
@@ -444,7 +457,7 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
             continue;
         }
 
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
+        if source_quotes && chars[index] == '$' && chars.get(index + 1) == Some(&'"') {
             index += 2;
             while index < chars.len() {
                 let ch = chars[index];
@@ -474,7 +487,11 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                 index += 1;
             }
             '\'' => {
-                if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
+                if !source_quotes {
+                    // Data from an expansion result (rubash#2428).
+                    output.push('\'');
+                    index += 1;
+                } else if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
                     let close = index + 1 + close_offset;
                     for ch in &chars[index + 1..close] {
                         push_literal_pattern_char(&mut output, *ch);
@@ -486,6 +503,12 @@ pub(in crate::executor) fn decode_parameter_pattern_quotes(pattern: &str) -> Str
                 }
             }
             '"' => {
+                if !source_quotes {
+                    // Data from an expansion result (rubash#2428).
+                    output.push('"');
+                    index += 1;
+                    continue;
+                }
                 if !chars[index + 1..].iter().any(|ch| *ch == '"') {
                     output.push('"');
                     index += 1;
