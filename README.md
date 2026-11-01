@@ -12,6 +12,7 @@
 [![Release](https://img.shields.io/github/v/release/unixwin/rubash)](https://github.com/unixwin/rubash/releases)
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Net code size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/unixwin/rubash/master/docs/code-size-badge.json)](docs/code-size.md)
 
 Rubash is a from-scratch reimplementation of GNU Bash semantics in Rust — lexer, parser, expansion engine, executor, builtins — packaged as an **embeddable, headless engine**. It targets byte-level compatibility with GNU Bash 5.3.x (the vendored upstream tree is at the Bash-5.3 patch 20 level, #957) and runs natively on Windows, Linux, and macOS.
 
