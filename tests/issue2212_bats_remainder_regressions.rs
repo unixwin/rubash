@@ -13,7 +13,8 @@
 //!   10 — an async group's ambient fd reaches its respawn
 //!   11 — a `<(...)` child sees an ambient `exec 9>file` fd
 //!   12 — the EXIT trap runs once per exit (handler re-registration)
-//!   13 — the DEBUG trap does not fire inside the EXIT trap action
+//!   13 — the DEBUG trap re-fires inside the EXIT trap action
+//!        wearing the frozen pre-trap command (corrected by #2482)
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -509,13 +510,18 @@ fn issue2212_12_exit_trap_runs_once_per_exit() {
     let _ = fs::remove_dir_all(&dir);
 }
 
-// 13 — GNU gates every run_debug_trap call site on
-// `running_trap == 0` (execute_cmd.c:704/3047/3519/...): commands
-// inside a trap action take no DEBUG firing. Before the fix the
-// EXIT handler's own commands were DEBUG-traced, which shifted
-// bats' captured stack ring (bats.bats tests 55/57/59/64).
+// 13 — CORRECTED by rubash#2482 (this pin originally encoded the
+// #2212 F4 misreading): GNU does NOT silence the DEBUG trap inside
+// the EXIT action. execute_cmd.c:4506 calls run_debug_trap
+// unconditionally for every simple command; the running_trap gate
+// at execute_cmd.c:4498 covers only the refresh of
+// the_printed_command_except_trap, so the EXIT action's command
+// takes a DEBUG firing wearing the FROZEN last command. GNU
+// 5.3.20 on this exact body logs three lines (trap-set, echo body,
+// and the in-handler firing reported as `echo body`). Verified
+// against the oracle 2026-11-02.
 #[test]
-fn issue2212_13_debug_trap_silent_inside_exit_trap() {
+fn issue2212_13_debug_trap_refires_in_exit_action_frozen() {
     let dir = test_dir("13");
     let body = "trap 'echo \"DEBUG $BASH_COMMAND\" >> dbg.log' DEBUG\ntrap 'echo in-handler' EXIT\necho body\n";
     let output = run_script(&dir, "main.sh", body);
@@ -530,7 +536,7 @@ fn issue2212_13_debug_trap_silent_inside_exit_trap() {
     );
     let dbg = fs::read_to_string(dir.join("dbg.log")).unwrap_or_default();
     assert_eq!(
-        dbg, "DEBUG trap 'echo in-handler' EXIT\nDEBUG echo body\n",
+        dbg, "DEBUG trap 'echo in-handler' EXIT\nDEBUG echo body\nDEBUG echo body\n",
         "dbg.log: {dbg:?}"
     );
     let _ = fs::remove_dir_all(&dir);

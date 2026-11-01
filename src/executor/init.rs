@@ -987,6 +987,7 @@ impl Executor {
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                exit_unwind_leaked_frames: std::cell::Cell::new(0),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
                 respawn_root_line_spans: respawn_root_line_spans
@@ -1112,6 +1113,8 @@ impl Executor {
             return_trap_running: false,
             signal_trap_running: false,
             error_trap_running: false,
+            exit_trap_running: false,
+            subshell_element_root_depth: std::cell::Cell::new(None),
             subshell_fork_collapse: std::cell::Cell::new(false),
             trap_saved_exit_value: None,
             trap_saved_exit_context: 0,

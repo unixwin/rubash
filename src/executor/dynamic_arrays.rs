@@ -316,7 +316,10 @@ impl Executor {
             // and cleared at 5167 on unwind). The "source" frame pushed by
             // evalfile.c:257 does NOT flip visibility, so at the top level
             // (even mid-source) $FUNCNAME reads as unset.
-            "FUNCNAME" if self.shell_state.function_depth > 0 => {
+            "FUNCNAME"
+                if self.shell_state.function_depth > 0
+                    || self.shell_state.exit_unwind_leaked_frames.get() > 0 =>
+            {
                 Some(self.funcname_stack().first().cloned().unwrap_or_default())
             }
             // GNU variables.c:1892: BASH_SOURCE is an INIT_DYNAMIC_VAR
@@ -1028,7 +1031,15 @@ impl Executor {
                 let inherited_names: &[String] = inherited
                     .map(|frames| frames.function_names.as_slice())
                     .unwrap_or(&[]);
-                if (self.shell_state.function_depth == 0 && inherited_names.is_empty())
+                // rubash#2482: a fatal ExitCode unwind leaks its frames
+                // onto the stack (see shell/state.rs) — GNU's
+                // make_funcname_visible clear (execute_cmd.c:5167)
+                // sits on the epilogue path the longjmp skips, so the
+                // array stays visible at depth 0 while leaked frames
+                // remain (the EXIT trap reads them).
+                if (self.shell_state.function_depth == 0
+                    && inherited_names.is_empty()
+                    && self.shell_state.exit_unwind_leaked_frames.get() == 0)
                     || is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
                 {
                     Vec::new()

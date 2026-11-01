@@ -146,7 +146,18 @@ impl Executor {
                 // rubash#1611: the timed-dispatch depth gate is the
                 // same single-adjudication rule as in
                 // execute_materialized_command's tail.
-                if !self.subshell_fork_collapse.get() && self.timed_dispatch_depth.get() == 0 {
+                // rubash#2482 face b: a pipeline element's root `( )`
+                // gets no wait-side adjudication either — the depth
+                // marker the stage installed names this frame (a
+                // nested `( )` inside the body sits deeper, its
+                // subshell_depth restored above the marker, and keeps
+                // its fire).
+                let element_root = self.subshell_element_root_depth.get()
+                    == Some(self.shell_state.subshell_depth.get());
+                if !self.subshell_fork_collapse.get()
+                    && self.timed_dispatch_depth.get() == 0
+                    && !element_root
+                {
                     self.maybe_run_error_trap(cmd)?;
                 }
                 // rubash#1611: conversion of a completed subshell's
@@ -160,7 +171,10 @@ impl Executor {
                 // death is adjudicated at the region close (whose
                 // promotion parks, after the wait-side ERR fire),
                 // and a timed death is decided by the time branch.
-                if !self.subshell_fork_collapse.get() && self.timed_dispatch_depth.get() == 0 {
+                if !self.subshell_fork_collapse.get()
+                    && self.timed_dispatch_depth.get() == 0
+                    && !element_root
+                {
                     self.debugger_note_exception_site(
                         crate::debugger::ExceptionKind::Errexit,
                         self.exit_code,

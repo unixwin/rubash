@@ -387,11 +387,7 @@ impl Executor {
         // GNU's O_RDWR open of a directory fails.
         if let Some(link) = {
             let (cwd_forms, root_forms) = self.proc_link_forms();
-            crate::special_paths::synthetic_link_target(
-                target,
-                Some(&cwd_forms),
-                Some(&root_forms),
-            )
+            crate::special_paths::synthetic_link_target(target, Some(&cwd_forms), Some(&root_forms))
         } {
             let (read_file, write_file) =
                 FileFd::open_readwrite_pair(std::path::PathBuf::from(&link.native))?;
@@ -1219,6 +1215,44 @@ impl Executor {
         exit_status: i32,
         redirect_cmd: Option<&CommandNode>,
     ) -> Result<i32, ExecuteError> {
+        let result = self.run_exit_trap_action(exit_status, redirect_cmd);
+        // rubash#2482: the EXIT action (or, for an already-consumed
+        // trap, this funnel's early return) is the last reader of the
+        // call stack a fatal ExitCode unwind leaked onto the stacks —
+        // drop the leaked frames so a continuing session never sees
+        // the dead stack again. Fork-boundary restores supersede this:
+        // they restore the stacks and the counter wholesale.
+        self.drop_exit_unwind_leaked_frames();
+        result
+    }
+
+    /// rubash#2482: remove the frames an ExitCode/LastpipeExit unwind
+    /// left on the call stacks (see the function epilogue in
+    /// function_calls.rs and the counter field in shell/state.rs).
+    pub(in crate::executor) fn drop_exit_unwind_leaked_frames(&mut self) {
+        let leaked = self.shell_state.exit_unwind_leaked_frames.get();
+        if leaked == 0 {
+            return;
+        }
+        self.shell_state.exit_unwind_leaked_frames.set(0);
+        for _ in 0..leaked {
+            if !self.shell_state.function_name_stack.is_empty() {
+                self.shell_state.function_name_stack.remove(0);
+            }
+            if !self.shell_state.bash_lineno_stack.is_empty() {
+                self.shell_state.bash_lineno_stack.remove(0);
+            }
+            if !self.shell_state.bash_source_stack.is_empty() {
+                self.shell_state.bash_source_stack.remove(0);
+            }
+        }
+    }
+
+    fn run_exit_trap_action(
+        &mut self,
+        exit_status: i32,
+        redirect_cmd: Option<&CommandNode>,
+    ) -> Result<i32, ExecuteError> {
         // rubash#1012 (GNU builtins/exec.def exec_builtin ->
         // execute_cmd.c:6126 shell_execve): a successful `exec command`
         // replaces the shell image with no exit path, and trap.c:1440
@@ -1288,14 +1322,25 @@ impl Executor {
         // output rides the same open file description as the body — no
         // re-binding here, which would re-open `>file` and truncate what
         // the body already wrote.
-        // rubash#2212: the action runs under the running-trap umbrella
-        // (GNU's `running_trap != 0` at every run_debug_trap call
-        // site), so commands inside the EXIT action take no DEBUG
-        // firing; debug_trap_running is the umbrella bit the funnel
-        // consults.
-        let saved_debug_trap_running = std::mem::replace(&mut self.debug_trap_running, true);
+        // rubash#2482 (face a, correcting the #2212 F4 reading): the
+        // action does NOT run under a DEBUG-silencing umbrella. GNU
+        // execute_cmd.c:4506 calls run_debug_trap unconditionally for
+        // every simple command — the `running_trap == 0` gate at
+        // execute_cmd.c:4498 covers only the refresh of
+        // the_printed_command_except_trap (BASH_COMMAND's backing), and
+        // run_debug_trap itself (trap.c:1263) gates only on the DEBUG
+        // trap's own SIG_INPROGRESS. Commands inside the EXIT action
+        // therefore DO take DEBUG firings, each wearing the frozen
+        // pre-trap command — that first in-action firing is the
+        // re-presentation bats' tracing ring (LAST/LASTLAST) depends on
+        // after a DISCARD-class failure (GNU 5.3.20 probes: string,
+        // function, and redirect-bearing EXIT actions all re-fire once
+        // per action command with $BASH_COMMAND unchanged). The window
+        // bit's only job is the BASH_COMMAND freeze, which
+        // run_debug_trap consults (exit_trap_running below).
+        let saved_exit_trap_running = std::mem::replace(&mut self.exit_trap_running, true);
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
-        self.debug_trap_running = saved_debug_trap_running;
+        self.exit_trap_running = saved_exit_trap_running;
         self.resume_alias_streamed(saved_alias_streamed);
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.trap_saved_exit_value = prev_saved_exit;
@@ -1334,21 +1379,21 @@ impl Executor {
         seam: crate::debugger::SeamKind,
         command_text: &str,
     ) -> Result<Option<i32>, ExecuteError> {
-        // GNU gates every run_debug_trap call site on
-        // `signal_in_progress (DEBUG_TRAP) == 0 && running_trap == 0`
-        // (execute_cmd.c:704/3047/3519/...): the DEBUG trap never
-        // fires for commands executed inside a trap action. The
-        // EXIT window holds debug_trap_running itself (see
-        // run_exit_trap_for_status), which is the half rubash#2212
-        // proved missing: the EXIT handler's own first command took
-        // a DEBUG firing GNU never makes. The ERR/RETURN/signal
-        // windows are deliberately NOT consulted here — the
-        // post-ERR re-presentation seams (the DEBUG firing GNU
-        // makes for the failing command as its failure propagates
-        // to the caller) run inside this executor's ERR bookkeeping
-        // window, and gating on error_trap_running silences them
-        // (probe rDbg: GNU fires DEBUG between the inner and outer
-        // ERR firings; a gated funnel drops it).
+        // The only re-entrancy gate is the DEBUG trap's own
+        // SIG_INPROGRESS (trap.c:1263 run_debug_trap): the trap never
+        // fires for commands executed inside the DEBUG action itself.
+        // Other trap windows (ERR/RETURN/signal/EXIT) are deliberately
+        // NOT firing gates — GNU execute_cmd.c:4506 calls
+        // run_debug_trap unconditionally for simple commands, so
+        // commands inside any trap action take firings wearing the
+        // frozen BASH_COMMAND (the update gate below): the post-ERR
+        // re-presentation seams (probe rDbg: GNU fires DEBUG between
+        // the inner and outer ERR firings) and the EXIT action's
+        // first-command re-presentation (rubash#2482 face a) both
+        // live behind this rule. (The #2212-era claim that GNU gates
+        // every call site on running_trap == 0 misread
+        // execute_cmd.c:4498 — that gate covers only the
+        // the_printed_command_except_trap refresh, not the call.)
         if self.debug_trap_running || self.host_internal_depth.get() > 0 {
             return Ok(None);
         }
@@ -1417,14 +1462,16 @@ impl Executor {
         // rubash#546 (cell 2): GNU get_bash_command (variables.c:1558) reads
         // the_printed_command_except_trap, which the printer only refreshes
         // while NO trap action is executing. Inside an ERR/DEBUG/signal/
-        // RETURN action the value stays frozen at whatever the trap fired
+        // RETURN/EXIT action the value stays frozen at whatever the trap fired
         // with — the ERR action's entry DEBUG reports the FAILED command
         // (`false`), never the action's own first command (probe
         // 2026-10-12: `trap 'echo DEBUG: $BASH_COMMAND' DEBUG;
         // trap 'echo ACT; false' ERR; false` GNU prints `DEBUG: false` for
         // every in-action firing, not `DEBUG: echo ACT`).
-        let update_bash_command =
-            !(self.error_trap_running || self.signal_trap_running || self.return_trap_running);
+        let update_bash_command = !(self.error_trap_running
+            || self.signal_trap_running
+            || self.return_trap_running
+            || self.exit_trap_running);
         if update_bash_command {
             *self.shell_state.debug_trap_command.borrow_mut() = Some(command_text.to_string());
         }

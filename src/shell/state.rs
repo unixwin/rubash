@@ -190,6 +190,21 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#2482: frames an ExitCode/LastpipeExit unwind deliberately
+    /// left on the three call stacks above. GNU's fatal unwinds
+    /// (errexit via execute_cmd.c's exit_immediately_on_error, the
+    /// word-expansion DISCARD jump — subst.c:4296/13104
+    /// exp_jump_to_top_level, sig.c:490 jump_to_top_level) longjmp
+    /// straight past execute_function's frame pop, so the EXIT trap
+    /// action executes with the dying call stack still installed
+    /// (FUNCNAME/BASH_LINENO/BASH_SOURCE name the failed function;
+    /// bats' tracing ring and its $BASH_SOURCE exclusion both read
+    /// that stack). The function epilogue therefore skips its pops
+    /// for exactly those unwinds and counts the leaked frames here;
+    /// the EXIT trap funnel drops them once the action has run, and
+    /// fork-boundary restores roll the count back with the stacks
+    /// (it rides Clone like the stacks themselves).
+    pub(crate) exit_unwind_leaked_frames: Cell<usize>,
     /// rubash#2058: the fork-inherited call-stack frames a respawned
     /// child was born with (see InheritedForkFrames). None for ordinary
     /// shells; the dynamic views read the child's own frames above
@@ -788,6 +803,7 @@ impl Clone for ShellState {
             last_builtin_class: self.last_builtin_class,
             random_state: self.random_state.clone_state(),
             subshell_depth: Cell::new(self.subshell_depth.get()),
+            exit_unwind_leaked_frames: Cell::new(self.exit_unwind_leaked_frames.get()),
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             subshell_source_text: self.subshell_source_text.clone(),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),

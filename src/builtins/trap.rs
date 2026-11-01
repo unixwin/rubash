@@ -1166,10 +1166,10 @@ pub(crate) fn reset_for_subshell(env_vars: &mut VarTable) {
 /// trap when `-E` is on, so `set -E; trap 'echo ERR' ERR; ( false )` fires
 /// ERR for the inner `false` and again for the failing subshell command
 /// (rubash#702). Command substitutions use this variant too: bash's `-E`
-/// contract names them explicitly (rubash#1133). The pipeline-element
-/// and `read` builtin copy paths keep the unconditional
-/// [`reset_for_subshell`]; their ERR inheritance is modeled at their own
-/// call sites.
+/// contract names them explicitly (rubash#1133). Pipeline elements are
+/// subshells in GNU as well and use this variant since rubash#2482
+/// (face b); the `read` builtin copy path keeps the unconditional
+/// [`reset_for_subshell`] (no user commands run inside `read`).
 pub(crate) fn reset_for_subshell_child(env_vars: &mut VarTable) {
     reset_for_subshell_inner(env_vars, true);
 }

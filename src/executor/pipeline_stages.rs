@@ -183,8 +183,13 @@ impl Executor {
         subshell.shell_state.inherited_loop_depth = 0;
         // A pipeline member runs in a subshell: caught signal traps reset to
         // the inherited disposition (execute_cmd.c subshell trap reset), so
-        // only traps set inside the member run at its exit.
-        crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
+        // only traps set inside the member run at its exit. The ERR trap
+        // follows errtrace inheritance exactly like a `( )` child
+        // (reset_for_subshell_child): GNU fires it for a failing command
+        // inside a pipeline element when `set -E` is on — `( false ) |
+        // cat` and `f | cat` with a failing `f` body both fire once,
+        // inside the element (rubash#2482 face b).
+        crate::builtins::trap::reset_for_subshell_child(&mut subshell.shell_state.env_vars);
         // GNU execute_cmd.c execute_pipeline (2702-2708 left elements,
         // 2722-2723 rightmost) propagates the pipeline command's
         // CMD_IGNORE_RETURN into EVERY element, and a group command pushes
@@ -308,11 +313,24 @@ impl Executor {
             Some(saved)
         };
 
+        // rubash#2482 face b: a `( )` element's own completion takes
+        // no wait-side ERR adjudication — GNU's execute_pipeline has
+        // no wait frame for the element itself (the :769 fire belongs
+        // to a frame that forked a subshell COMMAND). Mark the stage
+        // root depth so execute_command's subshell tail can tell the
+        // element's own completion from a nested `( )` command's
+        // (which sits deeper and keeps its fire).
+        if command.subshell_command.is_some() {
+            subshell
+                .subshell_element_root_depth
+                .set(Some(subshell.shell_state.subshell_depth.get()));
+        }
         let result = if command.brace_group.is_some() {
             subshell.execute_brace_group_pipeline(command).map(|_| ())
         } else {
             subshell.execute_command(command)
         };
+        subshell.subshell_element_root_depth.set(None);
         // A failglob-aborted redirect expansion must escape the stage
         // boundary (GNU subst.c:12663-12668 DISCARD): the forked child owns
         // the element's do_redirections, so the parent never re-applies
@@ -528,8 +546,11 @@ impl Executor {
         }
         // A pipeline member runs in a subshell: caught signal traps reset to
         // the inherited disposition (execute_cmd.c subshell trap reset), so
-        // only traps the function body itself installs run at its exit.
-        crate::builtins::trap::reset_for_subshell(&mut subshell.shell_state.env_vars);
+        // only traps the function body itself installs run at its exit. The
+        // ERR trap follows errtrace inheritance like a `( )` child
+        // (reset_for_subshell_child, rubash#2482 face b): with `set -E`
+        // the parent's ERR trap fires for the body's failing commands.
+        crate::builtins::trap::reset_for_subshell_child(&mut subshell.shell_state.env_vars);
         // Function pipeline stages are compound command bodies for errexit
         // (execute_cmd.c execute_function: the body inherits the element's
         // CMD_IGNORE_RETURN), so the subshell keeps the parent's
@@ -788,13 +809,14 @@ impl Executor {
         // rubash#846: the preflight can return Err (unopenable `>file`).
         // Restore the active thread-local capture before propagating or
         // every later stdout write is swallowed into the orphaned buffer.
-        let builtin_stage_output_redirect_failed = match self.pipeline_stage_output_redirect_fails(&call) {
-            Ok(failed) => failed,
-            Err(error) => {
-                crate::executor::shell_options::restore_stdout_capture(saved_capture);
-                return Err(error);
-            }
-        };
+        let builtin_stage_output_redirect_failed =
+            match self.pipeline_stage_output_redirect_fails(&call) {
+                Ok(failed) => failed,
+                Err(error) => {
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
+            };
         if builtin_stage_output_redirect_failed {
             // rubash#1844: same pre-wired contract as the stage
             // preflight in pipeline_exec.rs — the element died at
