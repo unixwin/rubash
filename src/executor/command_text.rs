@@ -347,7 +347,7 @@ impl Drop for HeredocRenderHold {
     }
 }
 
-fn render_ended_with_heredoc() -> bool {
+pub(in crate::executor) fn render_ended_with_heredoc() -> bool {
     RENDER_ENDED_WITH_HEREDOC.with(|flag| flag.get())
 }
 

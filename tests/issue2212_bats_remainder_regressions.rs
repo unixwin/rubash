@@ -7,6 +7,13 @@
 //!   04 — nounset diagnostics name the file the failing command is in
 //!   05 — lowercase environment imports keep the export attribute
 //!   06 — a `>(...)` consumer inherits the shell's ambient fds
+//!   07 — a heredoc-bearing function survives the async respawn prelude
+//!   08 — a `<(...)` producer inherits an ambient std-stream fd
+//!   09 — a pipeline stage's `>(...)` consumer inherits ambient fds
+//!   10 — an async group's ambient fd reaches its respawn
+//!   11 — a `<(...)` child sees an ambient `exec 9>file` fd
+//!   12 — the EXIT trap runs once per exit (handler re-registration)
+//!   13 — the DEBUG trap does not fire inside the EXIT trap action
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -311,5 +318,220 @@ fn issue2212_06_procsub_consumer_inherits_ambient_fd() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(delivered.contains("hello"), "out.txt: {delivered:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 07 — bats.bats test 118's prelude face: bats' libexec respawns
+// carry every defined function through the background prelude
+// serializer. A function whose body ends with a heredoc delimiter
+// line must not have the prelude's closer appended ON that line —
+// GNU print_cmd.c:1053 prints deferred heredocs so the delimiter
+// never shares its line (the same rule as the #2388 closer in
+// function source text). Before the fix, any `&` respawn from a
+// table containing a heredoc-bearing function died at parse with
+// "here-document delimited by end-of-file" + a syntax error.
+#[test]
+fn issue2212_07_heredoc_function_survives_async_prelude() {
+    let dir = test_dir("07");
+    let body = "usage() {\n  cat <<'HELP'\nhelp body\nHELP\n}\necho hi &\nwait\necho ok\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\nok\n");
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("here-document"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 08 — an input process substitution's producer inherits an
+// ambient fd bound to a standard stream (`exec 3<&1`, the shape
+// bats' own `run` uses for its fd-3 output channel). GNU's
+// process_substitute fork (subst.c:6362) inherits the descriptor
+// itself; the std-stream endpoints carry no FileFd handle, so the
+// delivery transports used to drop them and the producer died
+// with EBADF.
+#[test]
+fn issue2212_08_input_procsub_inherits_ambient_std_fd() {
+    let dir = test_dir("08");
+    let body = "exec 3>&1\nx=$(cat <(echo via-input >&3))\necho \"got=[$x]\"\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "via-input\ngot=[]\n"
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Bad file descriptor"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 09 — the failing half of pin 06's shape: the ambient fd must
+// also reach a `>(...)` consumer spawned from inside a PIPELINE
+// STAGE (bats.bats test 118 runs `tee >(cat >&3)` as a stage).
+// The stage's own spawn adjudication carried the fd; the nested
+// consumer spawn dropped it.
+#[test]
+fn issue2212_09_pipeline_stage_procsub_inherits_ambient_fd() {
+    let dir = test_dir("09");
+    let cap = dir.join("cap.txt");
+    let body = format!(
+        "exec 3>{cap}\necho hello | tee >(cat >&3) >/dev/null\n",
+        cap = shell_test_path(&cap)
+    );
+    let output = run_script(&dir, "main.sh", &body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Bad file descriptor"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut delivered = String::new();
+    while Instant::now() < deadline {
+        delivered = fs::read_to_string(&cap).unwrap_or_default();
+        if delivered.contains("hello") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(delivered.contains("hello"), "cap.txt: {delivered:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 10 — an async brace group's respawn inherits an ambient fd
+// bound to a standard stream (`{ echo >&3; } &` after
+// `exec 3>file`). The async ambient pass keyed deliveries by
+// FileFd identity only, so std-stream endpoints never crossed.
+#[test]
+fn issue2212_10_async_group_inherits_ambient_fd() {
+    let dir = test_dir("10");
+    let cap = dir.join("cap.txt");
+    let body = format!(
+        "exec 3>{cap}\n{{ echo via-async >&3; }} &\nwait\n",
+        cap = shell_test_path(&cap)
+    );
+    let output = run_script(&dir, "main.sh", &body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("Bad file descriptor"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut delivered = String::new();
+    while Instant::now() < deadline {
+        delivered = fs::read_to_string(&cap).unwrap_or_default();
+        if delivered.contains("via-async") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(delivered.contains("via-async"), "cap.txt: {delivered:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 11 — a `<(...)` child sees an ambient `exec 9>file` fd
+// (rubash#2466's shape, surfaced by the #2163 mapping and fixed
+// by the same delivery pass as 08: the input-procsub spawn had
+// no ambient pass at all). The foreign-child half needs the raw
+// descriptor pinned at its slot; the rubash-child half rides
+// the env channel.
+#[test]
+fn issue2212_11_input_procsub_child_sees_ambient_file_fd() {
+    let dir = test_dir("11");
+    let body =
+        "exec 9>ps.txt\ngot=$(cat <(echo in-child >&9; echo to-pipe))\necho \"pipe=[$got]\"\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "pipe=[to-pipe]\n");
+    let ps = fs::read_to_string(dir.join("ps.txt")).unwrap_or_default();
+    assert!(ps.contains("in-child"), "ps.txt: {ps:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn issue2212_11_input_procsub_foreign_child_sees_ambient_file_fd() {
+    let dir = test_dir("11f");
+    let body = "exec 9>ps.txt\ngot=$(cat <(/usr/bin/bash -c 'echo in-child >&9; echo to-pipe'))\necho \"pipe=[$got]\"\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "pipe=[to-pipe]\n");
+    let ps = fs::read_to_string(dir.join("ps.txt")).unwrap_or_default();
+    assert!(ps.contains("in-child"), "ps.txt: {ps:?}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 12 — the EXIT trap runs ONCE per shell exit (GNU shell.c
+// exit_shell -> trap.c run_exit_trap). bats' exec-suite teardown
+// re-registers the EXIT action from inside the running handler
+// ("avoid being called twice"); a second funnel entry for the
+// same exit must not fire the new registration. Before the fix
+// the `exit` builtin's dispatch ran the trap and the script
+// finish ran it again, so the re-registered action fired too
+// (bats.bats test 133's doubled failure block).
+#[test]
+fn issue2212_12_exit_trap_runs_once_per_exit() {
+    let dir = test_dir("12");
+    let body = "inner() { echo INNER; trap 'echo SECOND' EXIT; }\nwrapper() { echo WRAPPER; inner; }\ntrap wrapper EXIT\nexit 3\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "WRAPPER\nINNER\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// 13 — GNU gates every run_debug_trap call site on
+// `running_trap == 0` (execute_cmd.c:704/3047/3519/...): commands
+// inside a trap action take no DEBUG firing. Before the fix the
+// EXIT handler's own commands were DEBUG-traced, which shifted
+// bats' captured stack ring (bats.bats tests 55/57/59/64).
+#[test]
+fn issue2212_13_debug_trap_silent_inside_exit_trap() {
+    let dir = test_dir("13");
+    let body = "trap 'echo \"DEBUG $BASH_COMMAND\" >> dbg.log' DEBUG\ntrap 'echo in-handler' EXIT\necho body\n";
+    let output = run_script(&dir, "main.sh", body);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "body\nin-handler\n"
+    );
+    let dbg = fs::read_to_string(dir.join("dbg.log")).unwrap_or_default();
+    assert_eq!(
+        dbg, "DEBUG trap 'echo in-handler' EXIT\nDEBUG echo body\n",
+        "dbg.log: {dbg:?}"
+    );
     let _ = fs::remove_dir_all(&dir);
 }

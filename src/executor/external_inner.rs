@@ -2192,6 +2192,27 @@ impl Executor {
                 }),
                 &mut pins,
             );
+            // rubash#2212: standard-stream endpoints (an `N>&1` /
+            // `N<&0` dup) carry no FileFd — the process standard
+            // descriptor backs the pin, and dup2'ing it onto the
+            // slot in the child is exactly GNU's fork inheritance
+            // for that descriptor.
+            if let Some(read) = &entry.read {
+                if let Some((handle, _label)) = read.standard_backing() {
+                    let pin = (handle, *fd);
+                    if !pins.contains(&pin) {
+                        pins.push(pin);
+                    }
+                }
+            }
+            if let Some(write) = &entry.write {
+                if let Some((handle, _label)) = write.standard_backing() {
+                    let pin = (handle, *fd);
+                    if !pins.contains(&pin) {
+                        pins.push(pin);
+                    }
+                }
+            }
         }
         pins
     }

@@ -128,7 +128,7 @@ struct OutputProcessSubstitution {
 /// a temp carrier) captures that prefix state at materialization
 /// time, before the command's redirects are applied and undone.
 #[derive(Debug, Clone)]
-enum ProcsubSpawnFd {
+pub(in crate::executor) enum ProcsubSpawnFd {
     /// Untouched by the prefix: inherit the shell's ambient state
     /// (stdio inherit for fds 1-2; nothing crosses for fds >= 3,
     /// matching the consumer spawn's existing transport).
@@ -2374,9 +2374,26 @@ impl Executor {
     /// way GNU's fork would inherit it. Non-file endpoints (pipes,
     /// coproc streams, text inputs) cannot cross the consumer
     /// spawn's transport and stay Inherit.
-    fn ambient_procsub_spawn_fd(&self, fd: u32) -> ProcsubSpawnFd {
+    pub(in crate::executor) fn ambient_procsub_spawn_fd(&self, fd: u32) -> ProcsubSpawnFd {
         let read = match self.fd_table.read_endpoint(fd) {
             Some(FdReadEndpoint::File(file)) => Some(file),
+            // rubash#2212: a standard-stream endpoint (an `N<&0` dup)
+            // has no FileFd of its own; the process standard handle
+            // backs it for delivery (see FdReadEndpoint::standard_backing).
+            Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                // The synthesized FileFd owns its handle (FileFd's
+                // Drop closes it) — wrap a DUPLICATE, never the raw
+                // standard handle itself: dropping the verdict must
+                // not close the shell's own stdin.
+                crate::fd::duplicate_handle_inheritable(handle)
+                    .ok()
+                    .map(|dup| {
+                        Rc::new(crate::executor::fd_table::FileFd {
+                            handle: dup,
+                            path: PathBuf::from(label),
+                        })
+                    })
+            }),
             _ => None,
         };
         let write = match self.fd_table.write_endpoint(fd) {
@@ -2384,6 +2401,23 @@ impl Executor {
             Some(FdWriteEndpoint::ProcessSubstitution { path, .. }) => {
                 return ProcsubSpawnFd::CarrierWrite(path);
             }
+            // rubash#2212: same standard backing on the write side —
+            // bats_tee's `exec 3<&1` binds fd 3 to the Stdout endpoint,
+            // and the `>(cat >&3)` consumer fork (subst.c:6362)
+            // inherits the descriptor under GNU.
+            Some(endpoint) => endpoint.standard_backing().and_then(|(handle, label)| {
+                // Duplicate before wrapping (see the read arm):
+                // FileFd's Drop closes its handle, and the raw
+                // standard handle is the shell's own stdout/stderr.
+                crate::fd::duplicate_handle_inheritable(handle)
+                    .ok()
+                    .map(|dup| {
+                        Rc::new(crate::executor::fd_table::FileFd {
+                            handle: dup,
+                            path: PathBuf::from(label),
+                        })
+                    })
+            }),
             _ => None,
         };
         if read.is_none() && write.is_none() {
