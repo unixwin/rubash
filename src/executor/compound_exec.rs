@@ -1216,9 +1216,28 @@ impl Executor {
             None
         };
         if let Some((program, argv)) = direct_plan {
-            let mut process = std::process::Command::new(&program);
-            // argv[0] is the child's image name; the words after the
-            // command name are the real arguments.
+            // rubash#2442: the async child is an execute_disk_command
+            // spawn like any other (execute_cmd.c:5810 resolution,
+            // 6133 execve) — its execve filename comes from the shared
+            // funnel (typed word / as-written search join), so a
+            // background script's $0 matches GNU, and argv[0] is the
+            // typed word exactly as the named-program constructor
+            // sets it. The child is born in the session cwd below,
+            // which is what a relative join resolves against.
+            let exec_name = crate::executor::path::spawn_exec_name(
+                &argv[0],
+                &program,
+                &self.shell_state.env_vars,
+            );
+            let mut process = match &exec_name {
+                Some(name) => std::process::Command::new(name),
+                None => std::process::Command::new(&program),
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                process.arg0(&argv[0]);
+            }
             process.args(&argv[1..]);
             let [stdin_stdio, stdout_stdio, stderr_stdio] = stdio.map(|resolved| match resolved {
                 BackgroundStdio::Inherit => std::process::Stdio::inherit(),
@@ -4713,7 +4732,29 @@ impl Executor {
         // direct_plan.is_none() block below).
         let mut respawn_argv_bytes = exe.as_os_str().len() + 16;
         let mut child = if let Some((program, argv)) = &direct_plan {
-            let mut command = Command::new(program);
+            // rubash#2442: a direct coproc child is spawned from the
+            // same execute_disk_command resolution as any external
+            // (execute_cmd.c:5810 -> 6133) — its execve filename comes
+            // from the shared funnel and argv[0] is the typed word,
+            // mirroring the named-program constructor. The shared
+            // tail below births the child in the session cwd, which
+            // is what a relative join resolves against; a plan whose
+            // program the funnel cannot reproduce (the bridge-aware
+            // lookup above) declines to the anchored program.
+            let exec_name = crate::executor::path::spawn_exec_name(
+                &argv[0],
+                program,
+                &self.shell_state.env_vars,
+            );
+            let mut command = match &exec_name {
+                Some(name) => Command::new(name),
+                None => Command::new(program),
+            };
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.arg0(&argv[0]);
+            }
             command.args(&argv[1..]);
             self.apply_external_environment(&CommandNode::new(), &mut command, program);
             command

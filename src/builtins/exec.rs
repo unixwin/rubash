@@ -682,6 +682,13 @@ fn external_exec_process(
         // (shell_execve via external_command_for_named_program), NOT the
         // resolved program's file stem: `exec /usr/bin/bash -c 'echo $0'`
         // reports /usr/bin/bash in GNU (rubash#1227).
+        // rubash#2442 audit: this route deliberately stays OFF the
+        // spawn_exec_name funnel — GNU's exec builtin absolutizes the
+        // resolved target before shell_execve (exec.def:172
+        // full_pathname, exec.def:231), so the execve filename here
+        // is the anchored program, and a script run through `exec`
+        // reports the absolute path as its $0 where every other
+        // spawn shape reports the as-written join.
         let (command, _) = crate::executor::path::external_command_for_named_program(
             program,
             Some(command_name),
