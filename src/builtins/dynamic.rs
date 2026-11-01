@@ -38,7 +38,9 @@
 //! are process resources in both implementations.
 
 use std::collections::HashSet;
-use std::ffi::{CStr, CString};
+#[cfg(unix)]
+use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
