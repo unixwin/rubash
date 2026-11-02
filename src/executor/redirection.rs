@@ -2120,6 +2120,51 @@ impl Executor {
             // async-stdio walk in compound_exec.rs skips fd_var entries
             // for the same reason.
             if redirect.fd_var.is_some() {
+                // rubash#2552: a `{var}` CLOSE
+                // is the one fd_var effect the seeded state cannot
+                // reflect — the applier only RECORDS it
+                // (fd_var_pending_closes) for the spawn delivery
+                // instead of closing the descriptor in this shell's
+                // table, and that delivery consumes the records
+                // before the post-wait routing caller runs this
+                // walk. Fold the close into the walk state at its
+                // list position, resolving the variable exactly as
+                // the applier did (dynamic_fd_variable_value — the
+                // same resolution varfd_close_hits_stdio falls back
+                // to for the routing caller): a `{v}>&-` with v=1
+                // closes fd 1 for this command (GNU redir.c:1219-1248
+                // r_close_this under REDIR_VARASSIGN), so the drained
+                // fd-2 bytes must route past a Closed fd 1 instead of
+                // the walk reporting "no output redirect" and the
+                // caller discarding the whole drained pair. A
+                // `{var}` dup's move form (`{v}>&N-`) likewise closes
+                // its source at this position (the other recorded
+                // output close, redir.c:1137-1166). Binds and plain
+                // dups stay skipped: the applier installed those in
+                // the fd table, so the seeded state already carries
+                // them at the variable's descriptor.
+                match redirect.kind {
+                    crate::parser::RedirectKind::CloseOutput => {
+                        if let Some(fd) = redirect
+                            .fd_var
+                            .as_deref()
+                            .and_then(|name| self.dynamic_fd_variable_value(name))
+                        {
+                            state.fds.insert(fd, OutputTarget::Closed);
+                            state.shared_with.remove(&fd);
+                            state.saw_output_redirect = true;
+                        }
+                    }
+                    crate::parser::RedirectKind::DuplicateOutput => {
+                        let target = self.expand_redirect_target(redirect);
+                        if let Some((source_fd, true)) = redirect_target_fd_and_move(&target) {
+                            state.fds.insert(source_fd, OutputTarget::Closed);
+                            state.shared_with.remove(&source_fd);
+                            state.saw_output_redirect = true;
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
             }
             match redirect.kind {
