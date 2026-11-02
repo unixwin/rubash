@@ -591,7 +591,11 @@ impl PipestatusShape {
 /// dispose_temporary_env reinstall the saved object whole), so the
 /// pair encoded by `encode_pipestatus_state` travels with the cell
 /// snapshot and is reinstalled with it.
-pub(crate) const PIPESTATUS_STATE_SNAPSHOT_KEY: &str = "__RUBASH_PIPESSTATUS_STATE";
+/// rubash#2588: the key value was misspelled `__RUBASH_PIPESSTATUS_STATE`
+/// (PIPESSTATUS for PIPESTATUS). Internally consistent through this
+/// const, but the `__RUBASH_*` prefix mirrors the key into child
+/// environments and `set`/`env` dumps, making the typo user-visible.
+pub(crate) const PIPESTATUS_STATE_SNAPSHOT_KEY: &str = "__RUBASH_PIPESTATUS_STATE";
 
 /// Encode a (shape, status vector) pair for a scope snapshot:
 /// `Shape|i0:v0,i1:v1,...` over the sparse (index, status) vector
@@ -894,5 +898,18 @@ impl Clone for ShellState {
             procsub_adhoc_carriers: RefCell::new(Vec::new()),
             fork_saved_process_umask: self.fork_saved_process_umask,
         }
+    }
+}
+
+#[cfg(test)]
+mod issue2588_key_spelling_tests {
+    //! rubash#2588 leg (a): the snapshot key is user-visible through
+    //! child environments and dumps, so its spelling is contractual.
+    #[test]
+    fn issue2588_pipestatus_snapshot_key_spelling() {
+        assert_eq!(
+            super::PIPESTATUS_STATE_SNAPSHOT_KEY,
+            "__RUBASH_PIPESTATUS_STATE"
+        );
     }
 }

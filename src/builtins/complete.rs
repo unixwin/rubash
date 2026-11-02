@@ -421,6 +421,36 @@ impl Compspec {
     }
 }
 
+/// One job-table entry as the completion actions see it: the candidate
+/// name (the job command's first word) plus the job's process state.
+/// GNU's `job` / `running` / `stopped` actions filter ONE job list by
+/// status (pcomplete.c:570-585 it_init_jobs / it_init_running /
+/// it_init_stopped, all over it_init_joblist with filter -1 = all,
+/// 0 = running only, 1 = stopped only), so the state has to travel
+/// with the name — a bare name list cannot answer the running/stopped
+/// arms (rubash#2584).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobCandidate {
+    pub name: String,
+    pub state: crate::jobs::ProcessState,
+}
+
+/// pcomplete.c:1458-1477 pcomp_set_readline_variables over a set of
+/// COPT_* option bits: the five insert/display faces the host editor
+/// consumes (rubash#2573). Callers pass the EFFECTIVE bits — the
+/// governing spec's options with any compopt mutations folded in
+/// (rubash#2572) — exactly as bashline.c passes the used compspec's
+/// options including the pcomp_curcs mutations.
+pub(crate) fn completion_policy(options: u64) -> crate::api::capabilities::CompletionPolicy {
+    crate::api::capabilities::CompletionPolicy {
+        filename_completion_desired: options & COPT_FILENAMES != 0,
+        full_quoting_desired: options & COPT_FULLQUOTE != 0,
+        suppress_append: options & COPT_NOSPACE != 0,
+        filename_quoting_desired: options & COPT_NOQUOTE == 0,
+        sort_matches: options & COPT_NOSORT == 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Completion registry (pcomplib.c prog_completes over hashlib.c).
 // ---------------------------------------------------------------------------
@@ -572,7 +602,7 @@ pub fn execute_with_io<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     stdout: &mut E,
     stderr: &mut E,
@@ -610,7 +640,7 @@ pub(crate) fn execute_compgen_with_dynamic<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     dynamic: Option<CompgenDynamic>,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -656,6 +686,16 @@ pub(crate) struct CompgenDynamic {
     /// lives. The executor reads the cell shape from its shell state;
     /// the builtin-side listings cannot see it.
     pub(crate) pipestatus: PipestatusListing,
+    /// The governing spec's option bits AFTER any `compopt` mutations
+    /// the -F/-C generator performed during this resolution
+    /// (rubash#2572). GNU's gen_progcomp_completions copies the spec,
+    /// runs the generator against the copy (compopt mutates the copy),
+    /// and folds the copy's options back into the caller
+    /// (`*foundp |= cs->options`), which is what the caller's fallback
+    /// block and pcomp_set_readline_variables then consume. `None`
+    /// means no live resolution ran, so consumers use the registered
+    /// spec's options.
+    pub(crate) options_override: Option<u64>,
 }
 
 /// PIPESTATUS cell shapes as the -A variable / -A arrayvar listings
@@ -722,7 +762,7 @@ pub(crate) fn apply_completion_actions(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
 ) -> Vec<String> {
@@ -750,7 +790,7 @@ pub(crate) fn apply_completion_actions_with_settings(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
     settings: &ReadlineCompletionSettings,
@@ -803,13 +843,23 @@ pub(crate) fn apply_completion_actions_with_settings(
             "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
             "function" => candidates.extend(function_completion_candidates(function_names)),
             "group" => candidates.extend(group_completion_candidates(env_vars)),
-            "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
+            // pcomplete.c it_init_joblist filters: `job` takes every
+            // entry, `running` only JRUNNING jobs, `stopped` only
+            // JSTOPPED ones (rubash#2584).
+            "job" => candidates.extend(job_completion_candidates(job_names, None)),
+            "running" => candidates.extend(job_completion_candidates(
+                job_names,
+                Some(crate::jobs::ProcessState::Running),
+            )),
+            "stopped" => candidates.extend(job_completion_candidates(
+                job_names,
+                Some(crate::jobs::ProcessState::Stopped),
+            )),
             "keyword" => candidates.extend(shell_keyword_names().iter().map(|s| s.to_string())),
             "service" => candidates.extend(service_completion_candidates(word)),
             "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "signal" => candidates.extend(signal_completion_candidates()),
-            "stopped" => {}
             "user" => candidates.extend(user_completion_candidates(env_vars)),
             "variable" => candidates.extend(variable_completion_candidates(
                 env_vars,
@@ -936,7 +986,13 @@ pub(crate) fn split_for_completion(
     cursor: usize,
     wordbreaks: &str,
 ) -> (Vec<String>, usize, String) {
-    let cursor = cursor.min(line.len());
+    // The cursor is a host-supplied byte offset (the rl_point equivalent);
+    // a host may legitimately hand over an offset that falls inside a
+    // multi-byte character (boundary-transient editor states), and GNU
+    // readline only ever slices the line at character boundaries. Clamp
+    // down to the nearest boundary instead of panicking on the slice
+    // (rubash#2583).
+    let cursor = line.floor_char_boundary(cursor.min(line.len()));
     let prefix = &line[..cursor];
     let is_break = |c: char| wordbreaks.contains(c);
     let mut words: Vec<String> = Vec::new();
@@ -996,14 +1052,92 @@ pub(crate) fn resolve_compspec<'a>(
     specs: &'a CompletionRegistry,
     words: &[String],
     cur_idx: usize,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
 ) -> Option<&'a Compspec> {
     if words.is_empty() {
         return specs.get("-E").or_else(|| specs.get("-D"));
     }
     if cur_idx == 0 {
+        // The -I (initial word) compspec GOVERNS command-word
+        // completion: bashline.c:1682 loads iw_compspec =
+        // progcomp_search(INITIALWORD) unconditionally at the start of
+        // attempt_completion, and bashline.c:1785-1792 runs it for the
+        // command word when no command-specific spec matched (there
+        // is no command name to match yet). Returning None here made
+        // -I dead configuration (rubash#2571); without an -I spec the
+        // host's built-in command completion still applies.
+        return specs.get("-I");
+    }
+    resolve_command_compspec(specs, &words[0], aliases, progcomp_alias)
+}
+
+/// Verbatim-then-basename lookup (pcomplete.c programmable_completions
+/// steps 1-2): the command as typed, then — when it contains a `/` —
+/// its basename.
+fn lookup_command_compspec<'a>(specs: &'a CompletionRegistry, cmd: &str) -> Option<&'a Compspec> {
+    if let Some(cs) = specs.get(cmd) {
+        return Some(cs);
+    }
+    let base = cmd.rsplit('/').next().unwrap_or(cmd);
+    if base != cmd && !base.is_empty() {
+        return specs.get(base);
+    }
+    None
+}
+
+/// GNU's retry chain for the command word (pcomplete.c:1567+
+/// programmable_completions), when the verbatim lookup misses:
+/// basename retry, then the -D default, then — only with
+/// `shopt -s progcomp_alias` — the alias retry: the line is rebuilt
+/// with the alias value and the whole lookup restarts from the alias
+/// value's first word (delimiters per bashline.c's skip_to_delim set
+/// `"()<>&;| \t\n"`), with the lastcs guard becoming a visited set so
+/// an alias cycle cannot spin. This chain was missing entirely, so a
+/// spec registered for `git` never governed `/usr/bin/git …` or an
+/// alias of git (rubash#2574).
+fn resolve_command_compspec<'a>(
+    specs: &'a CompletionRegistry,
+    ocmd: &str,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
+) -> Option<&'a Compspec> {
+    if let Some(cs) = lookup_command_compspec(specs, ocmd) {
+        return Some(cs);
+    }
+    if let Some(cs) = specs.get("-D") {
+        return Some(cs);
+    }
+    if !progcomp_alias {
         return None;
     }
-    specs.get(&words[0]).or_else(|| specs.get("-D"))
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(ocmd.to_string());
+    let mut current = ocmd;
+    loop {
+        let alias = aliases.get(current)?;
+        let hop = alias_value_first_word(&alias.value);
+        if hop.is_empty() || !visited.insert(hop.to_string()) {
+            return None;
+        }
+        if let Some(cs) = lookup_command_compspec(specs, hop) {
+            return Some(cs);
+        }
+        current = hop;
+    }
+}
+
+/// The first word of an alias value, the way GNU's
+/// programmable_completions rebuilds the command word after an alias
+/// expansion (bashline.c: skip leading blanks with skip_to_delim over
+/// `" \t"`, then take characters until the first shell delimiter in
+/// `"()<>&;| \t\n"`).
+fn alias_value_first_word(value: &str) -> &str {
+    let trimmed = value.trim_start_matches([' ', '\t']);
+    let end = trimmed
+        .find(['(', ')', '<', '>', '&', ';', '|', ' ', '\t', '\n'])
+        .unwrap_or(trimmed.len());
+    &trimmed[..end]
 }
 
 /// Host completion hook. Given the in-progress command `line` and the `cursor`
@@ -1028,7 +1162,7 @@ pub(crate) fn complete_line_candidates(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
 ) -> Vec<String> {
     complete_line_candidates_with_dynamic(
         line,
@@ -1057,15 +1191,47 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     dynamic: Option<CompgenDynamic>,
     settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
+    complete_line_candidates_with_dynamic_detailed(
+        line,
+        cursor,
+        specs,
+        env_vars,
+        aliases,
+        function_names,
+        job_names,
+        dynamic,
+        settings,
+    )
+    .0
+}
+
+/// `complete_line_candidates_with_dynamic` plus the attempt's
+/// insertion/display policy (rubash#2573): the policy derives from
+/// the EFFECTIVE option bits — the governing spec's options, or the
+/// compopt-mutated copy's when a live resolution ran (rubash#2572) —
+/// mirroring bashline.c calling pcomp_set_readline_variables with
+/// the used compspec after generation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_line_candidates_with_dynamic_detailed(
+    line: &str,
+    cursor: usize,
+    specs: &CompletionRegistry,
+    env_vars: &crate::shell::var_table::VarTable,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[JobCandidate],
+    dynamic: Option<CompgenDynamic>,
+    settings: &ReadlineCompletionSettings,
+) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
     // rubash#2575: disable-completion on — readline refuses the
     // completion attempt outright (rl_complete_internal with completion
     // disabled produces no matches).
     if settings.disable_completion {
-        return Vec::new();
+        return (Vec::new(), completion_policy(0));
     }
     let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
     // rubash#2576: GNU bashline.c:1681 — programmable completion is
@@ -1073,7 +1239,13 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     // shopt); `shopt -u progcomp` leaves plain command/file completion.
     let progcomp_on = crate::builtins::shopt::option_enabled(env_vars, "progcomp");
     let resolved = if progcomp_on {
-        resolve_compspec(specs, &words, cur_idx)
+        resolve_compspec(
+            specs,
+            &words,
+            cur_idx,
+            aliases,
+            crate::builtins::shopt::option_enabled(env_vars, "progcomp_alias"),
+        )
     } else {
         None
     };
@@ -1085,8 +1257,15 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         && cur_word.is_empty()
         && crate::builtins::shopt::option_enabled(env_vars, "no_empty_cmd_completion")
     {
-        return Vec::new();
+        return (Vec::new(), completion_policy(0));
     }
+    // The effective option bits for this attempt: the live
+    // resolution's read-back when one ran, else the governing spec's
+    // registered options, else none (policy defaults).
+    let effective_options = dynamic
+        .as_ref()
+        .and_then(|d| d.options_override)
+        .or_else(|| resolved.map(|cs| cs.options));
 
     let mut candidates: Vec<String> = if let Some(cs) = resolved {
         let mut c = Vec::new();
@@ -1192,6 +1371,10 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             .collect();
     }
     if let Some(cs) = resolved {
+        // The fallback decisions consume the attempt's effective
+        // option bits (computed at the head of this function —
+        // rubash#2572's override when a live resolution ran).
+        let effective_options = effective_options.unwrap_or(cs.options);
         // The compspec -o fallback options (rubash#2570), in GNU's own
         // layering order. pcomplete.c:1435-1457 gen_compspec_completions:
         // dirnames REPLACES an empty result (the check runs on the
@@ -1201,9 +1384,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // path below mirrors the same block; the fallback candidates
         // are never -X filtered and never -P/-S wrapped, so this block
         // sits after both.
-        if candidates.is_empty() && cs.options & COPT_DIRNAMES != 0 {
+        if candidates.is_empty() && effective_options & COPT_DIRNAMES != 0 {
             candidates = directory_candidates_matching(&cur_word, env_vars, settings);
-        } else if cs.options & COPT_PLUSDIRS != 0 {
+        } else if effective_options & COPT_PLUSDIRS != 0 {
             candidates.extend(directory_candidates_matching(&cur_word, env_vars, settings));
         }
         // bashline.c:1801-1822 attempt_shell_completion: with the
@@ -1217,8 +1400,8 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // word yields NOTHING (only its $-variable, ~-username and
         // @-hostname shapes fire); both together (the fzf registration)
         // yield filenames for plain words through the -o default half.
-        if candidates.is_empty() && cs.options & (COPT_DEFAULT | COPT_BASHDEFAULT) != 0 {
-            if cs.options & COPT_BASHDEFAULT != 0 {
+        if candidates.is_empty() && effective_options & (COPT_DEFAULT | COPT_BASHDEFAULT) != 0 {
+            if effective_options & COPT_BASHDEFAULT != 0 {
                 candidates.extend(bash_default_candidates(
                     &cur_word,
                     cur_idx,
@@ -1228,14 +1411,23 @@ pub(crate) fn complete_line_candidates_with_dynamic(
                     dynamic.as_ref().map(|d| d.pipestatus).unwrap_or_default(),
                 ));
             }
-            if cs.options & COPT_DEFAULT != 0 {
+            if effective_options & COPT_DEFAULT != 0 {
                 candidates.extend(filename_candidates_matching(&cur_word, env_vars, settings));
             }
         }
     }
-    candidates.sort();
-    candidates.dedup();
-    candidates
+    let policy = completion_policy(effective_options.unwrap_or(0));
+    if policy.sort_matches {
+        candidates.sort();
+        candidates.dedup();
+    } else {
+        // -o nosort: rl_sort_completion_matches = 0 — generation order
+        // IS the result; only exact duplicates collapse (readline
+        // never shows the same match twice from one attempt).
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.clone()));
+    }
+    (candidates, policy)
 }
 
 /// The `-o bashdefault` fallback set (bashline.c:1830-1967
@@ -1345,7 +1537,7 @@ fn execute_compgen<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     dynamic: Option<CompgenDynamic>,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -2013,8 +2205,18 @@ fn function_completion_candidates(function_names: &[String]) -> Vec<String> {
     candidates
 }
 
-fn job_completion_candidates(job_names: &[String]) -> Vec<String> {
-    let mut candidates = job_names.to_vec();
+/// Job candidates for one state filter (pcomplete.c it_init_joblist):
+/// `None` yields every job (`-A job`), `Some(state)` only the jobs in
+/// that state (`-A running` / `-A stopped`).
+fn job_completion_candidates(
+    job_names: &[JobCandidate],
+    state: Option<crate::jobs::ProcessState>,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = job_names
+        .iter()
+        .filter(|job| state.is_none_or(|wanted| job.state == wanted))
+        .map(|job| job.name.clone())
+        .collect();
     candidates.sort();
     candidates.dedup();
     candidates
@@ -2657,7 +2859,7 @@ mod completion_hook_tests {
         crate::shell::var_table::VarTable,
         HashMap<String, crate::builtins::alias::Alias>,
         Vec<String>,
-        Vec<String>,
+        Vec<JobCandidate>,
     ) {
         (
             crate::shell::var_table::VarTable::default(),
@@ -2844,6 +3046,7 @@ mod completion_hook_tests {
         let mut specs = CompletionRegistry::new();
         specs.insert("dyncmd", wordlist_compspec("alpha alpine"));
         let dynamic = CompgenDynamic {
+            options_override: None,
             function_candidates: vec!["zzz".to_string(), "alps".to_string()],
             command_candidates: Vec::new(),
             expanded_wordlist: None,

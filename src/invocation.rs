@@ -864,7 +864,16 @@ pub fn materialize_command_file(args: &mut Vec<String>) {
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return;
     };
-    let _ = std::fs::remove_file(&path);
+    // rubash#2588: a failed delete used to be silently ignored,
+    // leaking the temp file (which carries the full command string).
+    // Retry once, then report — the file content is already consumed,
+    // so a loud leftover beats a silent one.
+    if std::fs::remove_file(&path).is_err() && std::fs::remove_file(&path).is_err() {
+        eprintln!(
+            "rubash: warning: could not remove command temp file {}",
+            path.to_string_lossy()
+        );
+    }
     if let Some(index) = args.iter().position(|arg| arg == "-c") {
         if index + 1 < args.len() {
             args[index + 1] = contents;

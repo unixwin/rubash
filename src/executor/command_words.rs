@@ -321,6 +321,33 @@ impl Executor {
         raw: Option<&str>,
         metadata: Option<&WordMetadata>,
     ) -> Result<Vec<String>, String> {
+        self.expand_for_word_values_impl(word, raw, metadata, false)
+    }
+
+    /// The `compgen -W` / compspec `-W` wordlist expansion: GNU
+    /// gen_wordlist_matches (pcomplete.c:884) runs expand_words_shellexp,
+    /// which is expand_word_list_internal with WEXP_SHELLEXP =
+    /// BRACEEXP|TILDEEXP|PARAMEXP — crucially WITHOUT WEXP_PATHEXP
+    /// (subst.c:12575, pathname stage gated at subst.c:13219+44), so a
+    /// wordlist element is never pathname-expanded: glob characters in
+    /// an element (literal or produced by an expansion) stay literal
+    /// candidates, and failglob cannot fail the expansion. The for-list
+    /// expander below is the same walker with the pathname stage
+    /// forced off (rubash#2587).
+    pub(in crate::executor) fn expand_shellexp_word_values_result(
+        &mut self,
+        word: &str,
+    ) -> Result<Vec<String>, String> {
+        self.expand_for_word_values_impl(word, None, None, true)
+    }
+
+    fn expand_for_word_values_impl(
+        &mut self,
+        word: &str,
+        raw: Option<&str>,
+        metadata: Option<&WordMetadata>,
+        force_no_glob: bool,
+    ) -> Result<Vec<String>, String> {
         // A fully single-quoted for-list item carries literal data only
         // (the lexer already removed the outer quotes); any double quotes
         // left in the value are characters, not operators. Without this
@@ -357,7 +384,8 @@ impl Executor {
                 crate::executor::markers::decode_word_position_carriers(word),
             ]);
         }
-        let suppress_glob = word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+        let suppress_glob = force_no_glob
+            || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
         // GNU subst.c param_expand expands a for-list word exactly like a
@@ -513,12 +541,9 @@ impl Executor {
         // quoted span stays literal, a body keeps its backslashes,
         // and `<(...)` text that only appears in an expansion result
         // (a variable's value) is data, never a substitution.
-        let substitutions = crate::parser::WordMetadata::new(
-            0,
-            word.to_string(),
-            raw.unwrap_or(word).to_string(),
-        )
-        .process_substitutions;
+        let substitutions =
+            crate::parser::WordMetadata::new(0, word.to_string(), raw.unwrap_or(word).to_string())
+                .process_substitutions;
         let materialized;
         let expand_input = if substitutions.is_empty() {
             word
