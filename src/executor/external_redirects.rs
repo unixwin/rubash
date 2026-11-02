@@ -824,6 +824,33 @@ impl Executor {
         if redirect_target_fd(target).is_some() || dev_stdio_redirect_fd(target).is_some() {
             return Ok(None);
         }
+        // rubash#2533: a /dev/full target gets the REAL device handle
+        // wherever the platform has one. GNU hands the child the
+        // opened device itself (redir.c do_redirections, dup2 onto
+        // the child's fd), so the write fails ENOSPC inside the
+        // child, which diagnoses itself (`/bin/echo: write error:
+        // No space left on device`) and exits nonzero — the failure
+        // stays the child's, in status and in wording. The stand-in
+        // sink create_redirect_output returns for this class
+        // (rubash#1898) absorbs the writes instead: right for the
+        // faces that only need the open to succeed where /dev/full
+        // is a simulated spelling with no kernel device behind it,
+        // wrong for a spawn. On unix the device is a kernel object —
+        // open it directly; where that open fails, the sink contract
+        // below stands.
+        if crate::special_paths::is_full_device(target) {
+            #[cfg(unix)]
+            {
+                let opened = if redirect.append {
+                    OpenOptions::new().write(true).append(true).open(target)
+                } else {
+                    OpenOptions::new().write(true).open(target)
+                };
+                if let Ok(file) = opened {
+                    return Ok(Some(file));
+                }
+            }
+        }
         let file = if redirect.append {
             // The append open error must carry the target word like every
             // other redirect diagnostic (redir.c:149-176 redirection_error,
