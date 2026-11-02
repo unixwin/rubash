@@ -228,9 +228,87 @@ impl Executor {
     fn external_output_fds_closed(&self, cmd: &CommandNode) -> bool {
         (1..=2).any(|fd| self.fd_table.has_entry(fd) && !self.fd_table.is_open_for_write(fd))
             || cmd.redirects.iter().any(|redirect| {
-                redirect.fd.map_or(true, |fd| fd <= 2)
+                // rubash#2522: a `{var}` entry has no static redirector
+                // (`fd` is None; the name lives in `fd_var`), so it must
+                // never fall into the defaulted-fd arm below, which
+                // reads None as fd 1. varfd_close_hits_stdio judges
+                // those entries by the descriptor the variable names.
+                redirect.fd_var.is_none()
+                    && redirect.fd.map_or(true, |fd| fd <= 2)
                     && matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
             })
+            || self.varfd_close_hits_stdio(cmd)
+    }
+
+    /// rubash#2522: whether the recorded `{var}` close at `position`
+    /// in `cmd`'s list is an output-side close — its owning entry is
+    /// a `{var}>&-` close or the move source of a `{var}>&N-` dup.
+    fn varfd_close_record_is_output_close(&self, cmd: &CommandNode, position: usize) -> bool {
+        cmd.redirects.get(position).is_some_and(|entry| {
+            matches!(
+                entry.kind,
+                crate::parser::RedirectKind::CloseOutput
+                    | crate::parser::RedirectKind::DuplicateOutput
+            )
+        })
+    }
+
+    /// rubash#2522: whether any `{var}` output close in this
+    /// command's list closes fd 1 or 2. GNU's walk closes the
+    /// descriptor the variable's value names (do_redirection_internal,
+    /// case r_close_this, redir.c:1239; the REDIR_VARASSIGN arm
+    /// resolves `redirector = redir_varvalue(redirect)`,
+    /// redir.c:1244), never a defaulted fd 1. The dynamic-fd applier
+    /// records exactly those descriptors in fd_var_pending_closes
+    /// (generation-guarded, the same records the redirect gate
+    /// folds); where the spawn delivery has already consumed the
+    /// records — the post-wait routing caller — the variable's
+    /// current value is the same resolution the applier performed
+    /// (dynamic_fd_variable_value).
+    fn varfd_close_hits_stdio(&self, cmd: &CommandNode) -> bool {
+        if self.fd_var_pending_close_generation == self.fd_var_close_generation
+            && self.fd_var_pending_closes.iter().any(|&(position, fd)| {
+                fd <= 2 && self.varfd_close_record_is_output_close(cmd, position)
+            })
+        {
+            return true;
+        }
+        cmd.redirects.iter().any(|redirect| {
+            let Some(name) = redirect.fd_var.as_deref() else {
+                return false;
+            };
+            matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
+                && self
+                    .dynamic_fd_variable_value(name)
+                    .is_some_and(|fd| fd <= 2)
+        })
+    }
+
+    /// rubash#2522: fold this command's recorded `{var}` output
+    /// closes with list position < `before` into `state`, in walk
+    /// order (the positional fold the redirect gate performs,
+    /// redirection.rs). `folded` counts the records consumed so far;
+    /// the generation stamp confines the fold to this command's
+    /// applier run.
+    fn fold_varfd_output_closes(
+        &self,
+        cmd: &CommandNode,
+        state: &mut std::collections::HashMap<u32, bool>,
+        folded: &mut usize,
+        before: usize,
+    ) {
+        if self.fd_var_pending_close_generation != self.fd_var_close_generation {
+            return;
+        }
+        while *folded < self.fd_var_pending_closes.len()
+            && self.fd_var_pending_closes[*folded].0 < before
+        {
+            let (position, closed_fd) = self.fd_var_pending_closes[*folded];
+            if self.varfd_close_record_is_output_close(cmd, position) {
+                state.insert(closed_fd, true);
+            }
+            *folded += 1;
+        }
     }
 
     /// Final closed state of fd 1/2 for `cmd`: the ambient fd-table
@@ -251,7 +329,19 @@ impl Executor {
                 self.fd_table.has_entry(2) && !self.fd_table.is_open_for_write(2),
             ),
         ]);
-        for redirect in &cmd.redirects {
+        // rubash#2522: `{var}` entries are skipped by the static
+        // walk: a `{var}` bind allocates a fresh descriptor (never
+        // fd 1/2), and a `{var}` close's effect is its recorded
+        // (position, descriptor) pair, folded in at its list
+        // position. Reading the entry's missing static fd as the
+        // defaulted fd 1 (the pre-fix walk) marked fd 1 closed for
+        // EVERY `{var}>&-` and let a `{var}>file` bind reopen it.
+        let mut folded_closes = 0usize;
+        for (index, redirect) in cmd.redirects.iter().enumerate() {
+            self.fold_varfd_output_closes(cmd, &mut state, &mut folded_closes, index);
+            if redirect.fd_var.is_some() {
+                continue;
+            }
             let fd = redirect.fd.unwrap_or(1);
             match redirect.kind {
                 RedirectKind::CloseOutput => {
@@ -279,6 +369,7 @@ impl Executor {
                 _ => {}
             }
         }
+        self.fold_varfd_output_closes(cmd, &mut state, &mut folded_closes, usize::MAX);
         (
             state.get(&1).copied().unwrap_or(false),
             state.get(&2).copied().unwrap_or(false),
