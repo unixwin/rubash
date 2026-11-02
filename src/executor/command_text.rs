@@ -756,12 +756,23 @@ fn bash_command_source_text_render(cmd: &CommandNode) -> String {
         function_command_source_text(function_command)
     } else if let Some(brace_group) = &cmd.brace_group {
         let body = bash_command_sequence_text(&brace_group.body);
-        if render_ended_with_heredoc() {
-            // A delimiter line admits only a newline before `}'.
-            format!("{{ {body}\n}}")
-        } else {
-            format!("{{ {body}; }}")
-        }
+        // print_cmd.c:693-728 print_group_command: the closer is
+        // `semicolon(); " "' before `}' — and semicolon()
+        // (print_cmd.c:1520-1530) prints NOTHING when the accumulated
+        // output ends with `" &"' or `\n' (only a newline_list may
+        // follow `&': parse.y:1275/1290), so GNU spells a trailing
+        // background command `{ ...cmd & }'. The unconditional `; }'
+        // here rendered `{ ...cmd &; }' — unparseable — corrupting
+        // every serialized function body that contains a
+        // redirect-carrying brace group ending in `&' (the modernish
+        // die trap's `{ { ...; } &; } 8<&0', rubash#2493) inside
+        // respawned background children. push_command_separator is the
+        // repo's #294/#2388 spelling of the same suppression: newline
+        // after `&' or a heredoc delimiter line, `; ' otherwise.
+        let mut text = format!("{{ {body}");
+        push_command_separator(&mut text);
+        text.push('}');
+        text
     } else {
         // bash_command_text already appends the command's redirections;
         // routing it through append_source_redirects below would render
@@ -1139,7 +1150,14 @@ fn coproc_command_source_text(coproc_command: &crate::parser::CoprocCommand) -> 
     if let Some(body) = &coproc_command.body {
         text.push_str("{ ");
         text.push_str(&bash_command_sequence_text(body));
-        text.push_str("; }");
+        // print_cmd.c:357-363 (cm_coproc) delegates the body to
+        // make_command_string_internal — a group body closes through
+        // print_group_command's `semicolon()' (print_cmd.c:1520-1530
+        // suppression after `... &' / a trailing newline), so the
+        // closer never glues `; }' onto a trailing background command
+        // (`coproc C { cmd &; }' is unparseable — rubash#2493 family).
+        push_command_separator(&mut text);
+        text.push('}');
     } else {
         text.push_str(&command_words_source_text(
             &coproc_command.words,
@@ -1164,25 +1182,30 @@ fn function_command_source_text(function_command: &crate::parser::FunctionComman
         FunctionBodyKind::BraceGroup => {
             // rubash#2388: after a trailing heredoc body the closer
             // takes a newline, never `; }' (delimiter line rule).
-            let separator = if render_ended_with_heredoc() {
-                "\n"
-            } else {
-                "; "
-            };
-            format!(
-                "{} {} {}{}{}",
+            // print_cmd.c:1323+ print_function_def closes with
+            // `newline("}")' — and the semicolon() suppression
+            // (print_cmd.c:1520-1530) applies before it in every
+            // printer, so a body ending `... &' takes the newline
+            // form too: `f() { cmd &; }' is unparseable and corrupted
+            // respawned children whose prelude carried such a nested
+            // definition (rubash#2493 family).
+            let mut body_text = format!(
+                "{} {} {}",
                 text,
                 function_command
                     .body_open_delimiter
                     .as_deref()
                     .unwrap_or("{"),
-                body,
-                separator,
+                body
+            );
+            push_command_separator(&mut body_text);
+            body_text.push_str(
                 function_command
                     .body_close_delimiter
                     .as_deref()
-                    .unwrap_or("}")
-            )
+                    .unwrap_or("}"),
+            );
+            body_text
         }
         FunctionBodyKind::Subshell => {
             let separator = if render_ended_with_heredoc() {
@@ -1292,6 +1315,53 @@ mod literal_render_tests {
         let ast = crate::parser::parse(&tokens);
         assert_eq!(ast.commands.len(), 1, "{src:?} should parse to one command");
         ast.commands.into_iter().next().unwrap()
+    }
+
+    /// rubash#2493: GNU closes a brace group through
+    /// print_cmd.c:693-728 print_group_command's `semicolon()'
+    /// (print_cmd.c:1520-1530), which prints NOTHING after a body
+    /// ending `... &' — only a newline_list may follow `&'
+    /// (parse.y:1275/1290). The brace, coproc-body and nested
+    /// function-definition renderers emitted `... &; }' —
+    /// unparseable — so every respawned async child whose prelude
+    /// carried a function with the modernish die trap's
+    /// `{ { ...; } & } 8<&0' died at parse. Pin the newline spellings
+    /// (the #294 convention) for all three closers.
+    #[test]
+    fn closers_after_trailing_background_take_newline_not_semicolon() {
+        // Brace group whose last body command is backgrounded.
+        let cmd = parse_one("{ { echo hi; } & } 8<&0");
+        let text = bash_command_source_text(&cmd);
+        assert!(
+            text.contains("&\n}"),
+            "brace closer must be a newline after `&': {text:?}"
+        );
+        assert!(!text.contains("&;"), "brace closer corrupted: {text:?}");
+
+        // coproc body ending in a background command.
+        let cmd = parse_one("coproc C { echo hi & }");
+        let text = bash_command_source_text(&cmd);
+        assert!(
+            text.contains("&\n}"),
+            "coproc closer must be a newline after `&': {text:?}"
+        );
+        assert!(!text.contains("&;"), "coproc closer corrupted: {text:?}");
+
+        // A nested function definition whose body ends in `&'.
+        let cmd = parse_one("g() { echo hi & }");
+        let text = bash_command_source_text(&cmd);
+        assert!(
+            text.contains("&\n}"),
+            "function-def closer must be a newline after `&': {text:?}"
+        );
+        assert!(
+            !text.contains("&;"),
+            "function-def closer corrupted: {text:?}"
+        );
+
+        // The non-`&' spelling is unchanged: `; }' after a plain body.
+        let cmd = parse_one("{ echo hi; }");
+        assert_eq!(bash_command_source_text(&cmd), "{ echo hi; }");
     }
 
     /// The fast render must agree byte-for-byte with the full renderer on
