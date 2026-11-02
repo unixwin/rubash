@@ -977,10 +977,13 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // path below mirrors the same block; the fallback candidates
         // are never -X filtered and never -P/-S wrapped, so this block
         // sits after both.
+        let mut filename_sourced = false;
         if candidates.is_empty() && cs.options & COPT_DIRNAMES != 0 {
             candidates = directory_candidates_matching(&cur_word, env_vars);
+            filename_sourced = true;
         } else if cs.options & COPT_PLUSDIRS != 0 {
             candidates.extend(directory_candidates_matching(&cur_word, env_vars));
+            filename_sourced = true;
         }
         // bashline.c:1801-1822 attempt_shell_completion: with the
         // compspec's generators (and the dirnames/plusdirs step) still
@@ -1006,6 +1009,24 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             }
             if cs.options & COPT_DEFAULT != 0 {
                 candidates.extend(filename_candidates_matching(&cur_word, env_vars));
+                filename_sourced = true;
+            }
+        }
+        // GNU rl_filename_completion_desired (pcomplete.c:1461-1462 for
+        // -o filenames; bashline.c:1801+ for the filename fallback):
+        // filename-semantics candidates mark directories with a trailing
+        // `/` so the host's insert layer keeps the path open instead of
+        // appending a space. The compgen write path stays bare — the mark
+        // is an insert-layer semantic, not part of the name.
+        if cs.options & COPT_FILENAMES != 0 || filename_sourced {
+            let cwd = crate::executor::glob::env_cwd_path(env_vars);
+            for candidate in &mut candidates {
+                if !candidate.ends_with('/')
+                    && !candidate.starts_with('-')
+                    && cwd.join(candidate.as_str()).is_dir()
+                {
+                    candidate.push('/');
+                }
             }
         }
     }
