@@ -250,9 +250,46 @@ pub(in crate::executor) enum OutputTarget {
     Closed,
 }
 
+/// rubash#2562: what one entry of the command's OWN redirect list
+/// bound an fd to, recorded by the ordered walk at the entry's list
+/// position for the binding classes the output graph does not model
+/// (input-side entries). GNU resolves a dup against the descriptor
+/// as bound AT THE DUP'S POSITION in its single ordered walk
+/// (redir.c:237 do_redirections; the dup arms of
+/// do_redirection_internal, redir.c:1139-1275, require only an open
+/// descriptor — direction is irrelevant to dup2, redir.c:1193).
+/// OutputFdState is seeded from the AMBIENT fd table, so without
+/// this record a dup whose source an earlier entry of the same
+/// list bound input-side was invisible and the walk rejected it
+/// with EBADF (`echo hi 9<f 10>&9`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ListBound {
+    /// An open read description (a `<` file, a heredoc body, an
+    /// exotic `<>` target the walk does not open): a dup of it
+    /// succeeds and clones the write-less model —
+    /// OutputTarget::Closed, the same model the ambient seeding
+    /// gives an entry with no write endpoint.
+    ReadOnly,
+    /// An open description with a walk-level write model (a `<>`
+    /// plain file's shared read/write description, the null
+    /// device): a dup clones this target.
+    Target(OutputTarget),
+    /// Closed at this walk position (a `<&-`/`>&-` entry, a dup's
+    /// move source): a dup of it fails EBADF, however the ambient
+    /// table describes the fd.
+    Closed,
+}
+
 #[derive(Debug, Clone)]
 struct OutputFdState {
     fds: HashMap<u32, OutputTarget>,
+    /// rubash#2562: positional record of this walk's own list
+    /// bindings for the classes `fds` does not model (see
+    /// ListBound). An output-binding arm clears the fd's record
+    /// (the output graph then owns the newest model); a close arm
+    /// sets it to Closed so a list close dominates a still-open
+    /// ambient entry.
+    list_binds: HashMap<u32, ListBound>,
     saw_output_redirect: bool,
     redirect_failed: bool,
     /// Pipeline-routing mode: `OutputTarget::Stdout` stands for the pipe
@@ -2018,6 +2055,7 @@ impl Executor {
     fn command_output_fd_state(&self) -> OutputFdState {
         let mut state = OutputFdState {
             fds: HashMap::new(),
+            list_binds: HashMap::new(),
             saw_output_redirect: false,
             redirect_failed: false,
             defer_stdout_writes: false,
@@ -2120,7 +2158,121 @@ impl Executor {
             // async-stdio walk in compound_exec.rs skips fd_var entries
             // for the same reason.
             if redirect.fd_var.is_some() {
+                // rubash#2552: a `{var}` CLOSE
+                // is the one fd_var effect the seeded state cannot
+                // reflect — the applier only RECORDS it
+                // (fd_var_pending_closes) for the spawn delivery
+                // instead of closing the descriptor in this shell's
+                // table, and that delivery consumes the records
+                // before the post-wait routing caller runs this
+                // walk. Fold the close into the walk state at its
+                // list position, resolving the variable exactly as
+                // the applier did (dynamic_fd_variable_value — the
+                // same resolution varfd_close_hits_stdio falls back
+                // to for the routing caller): a `{v}>&-` with v=1
+                // closes fd 1 for this command (GNU redir.c:1219-1248
+                // r_close_this under REDIR_VARASSIGN), so the drained
+                // fd-2 bytes must route past a Closed fd 1 instead of
+                // the walk reporting "no output redirect" and the
+                // caller discarding the whole drained pair. A
+                // `{var}` dup's move form (`{v}>&N-`) likewise closes
+                // its source at this position (the other recorded
+                // output close, redir.c:1137-1166). Binds and plain
+                // dups stay skipped: the applier installed those in
+                // the fd table, so the seeded state already carries
+                // them at the variable's descriptor.
+                match redirect.kind {
+                    crate::parser::RedirectKind::CloseOutput => {
+                        if let Some(fd) = redirect
+                            .fd_var
+                            .as_deref()
+                            .and_then(|name| self.dynamic_fd_variable_value(name))
+                        {
+                            state.fds.insert(fd, OutputTarget::Closed);
+                            state.list_binds.insert(fd, ListBound::Closed);
+                            state.shared_with.remove(&fd);
+                            state.saw_output_redirect = true;
+                        }
+                    }
+                    crate::parser::RedirectKind::DuplicateOutput => {
+                        let target = self.expand_redirect_target(redirect);
+                        if let Some((source_fd, true)) = redirect_target_fd_and_move(&target) {
+                            state.fds.insert(source_fd, OutputTarget::Closed);
+                            state.list_binds.insert(source_fd, ListBound::Closed);
+                            state.shared_with.remove(&source_fd);
+                            state.saw_output_redirect = true;
+                        }
+                    }
+                    _ => {}
+                }
                 continue;
+            }
+            // rubash#2562: record this list's input-side bindings at
+            // their positions (see ListBound) — the output graph
+            // seeded from the ambient table cannot see them, and the
+            // dup arms below resolve their source against this
+            // record. A numbered binding also shadows any ambient
+            // model in `fds`: the newest binding of the fd is the
+            // input-side one, so a later dup must not clone the
+            // ambient description the list replaced.
+            match redirect.kind {
+                crate::parser::RedirectKind::Input
+                | crate::parser::RedirectKind::HereDoc
+                | crate::parser::RedirectKind::HereString => {
+                    let fd = redirect_fd_or_default(redirect, 0);
+                    state.list_binds.insert(fd, ListBound::ReadOnly);
+                    if fd >= 3 {
+                        state.fds.remove(&fd);
+                        state.shared_with.remove(&fd);
+                    }
+                }
+                crate::parser::RedirectKind::ReadWrite => {
+                    let fd = redirect_fd_or_default(redirect, 0);
+                    let bound = self.readwrite_list_bound(redirect);
+                    state.list_binds.insert(fd, bound);
+                    if fd >= 3 {
+                        state.fds.remove(&fd);
+                        state.shared_with.remove(&fd);
+                    }
+                }
+                crate::parser::RedirectKind::DuplicateInput => {
+                    let target = self.expand_redirect_target(redirect);
+                    let fd = redirect_fd_or_default(redirect, 0);
+                    if is_closed_redirect_target(&target) {
+                        state.list_binds.insert(fd, ListBound::Closed);
+                        if fd >= 3 {
+                            state.fds.remove(&fd);
+                            state.shared_with.remove(&fd);
+                        }
+                    } else if let Some((source_fd, move_source)) =
+                        redirect_target_fd_and_move(&target)
+                    {
+                        if source_fd != fd {
+                            let bound = self.list_dup_model(state, source_fd);
+                            state.list_binds.insert(fd, bound);
+                            if fd >= 3 {
+                                state.fds.remove(&fd);
+                                state.shared_with.remove(&fd);
+                            }
+                            if move_source {
+                                state.list_binds.insert(source_fd, ListBound::Closed);
+                                if source_fd >= 3 {
+                                    state.fds.remove(&source_fd);
+                                    state.shared_with.remove(&source_fd);
+                                }
+                            }
+                        }
+                    }
+                }
+                crate::parser::RedirectKind::CloseInput => {
+                    let fd = redirect_fd_or_default(redirect, 0);
+                    state.list_binds.insert(fd, ListBound::Closed);
+                    if fd >= 3 {
+                        state.fds.remove(&fd);
+                        state.shared_with.remove(&fd);
+                    }
+                }
+                _ => {}
             }
             match redirect.kind {
                 crate::parser::RedirectKind::Output
@@ -2252,7 +2404,11 @@ impl Executor {
                             && !dead_path_spelled_fd
                             && !complementary_path_spelled_fd
                     }) {
-                        let Some(source_target) = state.fd_target(source_fd).cloned() else {
+                        // rubash#2562: resolve the source AT THIS
+                        // POSITION — this list's own bindings count,
+                        // not just the ambient-seeded output graph.
+                        let Some(source_target) = self.walk_dup_source_target(state, source_fd)
+                        else {
                             self.write_bad_fd_redirect_diagnostic(
                                 state,
                                 &redirect.target_metadata.raw,
@@ -2261,17 +2417,6 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         };
-                        if source_target == OutputTarget::Closed
-                            && !self.dup_source_fd_still_open(source_fd)
-                        {
-                            self.write_bad_fd_redirect_diagnostic(
-                                state,
-                                &redirect.target_metadata.raw,
-                            )?;
-                            self.exit_code = 1;
-                            state.redirect_failed = true;
-                            return Ok(true);
-                        }
                         // A dup of the LIVE stderr alias must freeze the
                         // original stderr object (rubash#279): `3>&2
                         // 2>/dev/null` keeps fd 3 on the original stderr.
@@ -2282,7 +2427,19 @@ impl Executor {
                         } else {
                             source_target
                         };
+                        // rubash#2562: same chain rule as the
+                        // DuplicateOutput arm — a Closed model from
+                        // an open read description records ReadOnly
+                        // for the target; any other model leaves
+                        // the fd to the output graph.
+                        let source_is_read_description =
+                            source_target == OutputTarget::Closed;
                         state.fds.insert(fd, source_target);
+                        if source_is_read_description {
+                            state.list_binds.insert(fd, ListBound::ReadOnly);
+                        } else {
+                            state.list_binds.remove(&fd);
+                        }
                         // rubash#2121: record the clone so the flush
                         // shares one open across the alias pair.
                         state.shared_with.insert(fd, source_fd);
@@ -2312,6 +2469,7 @@ impl Executor {
                     }
                     let stdout_target = state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                     state.fds.insert(2, stdout_target);
+                    state.list_binds.remove(&2);
                     // rubash#2121: fd 2 clones fd 1's binding (&> / &>>
                     // is ONE open file description in GNU).
                     state.shared_with.insert(2, 1);
@@ -2321,6 +2479,7 @@ impl Executor {
                     let target = self.expand_redirect_target(redirect);
                     if is_closed_redirect_target(&target) {
                         state.fds.insert(target_fd, OutputTarget::Closed);
+                        state.list_binds.insert(target_fd, ListBound::Closed);
                         state.shared_with.remove(&target_fd);
                         state.saw_output_redirect = true;
                         continue;
@@ -2339,7 +2498,11 @@ impl Executor {
                             state.saw_output_redirect = true;
                             continue;
                         }
-                        let Some(source_target) = state.fd_target(source_fd).cloned() else {
+                        // rubash#2562: resolve the source AT THIS
+                        // POSITION — this list's own bindings count,
+                        // not just the ambient-seeded output graph.
+                        let Some(source_target) = self.walk_dup_source_target(state, source_fd)
+                        else {
                             self.write_bad_fd_redirect_diagnostic(
                                 state,
                                 &redirect.target_metadata.raw,
@@ -2348,17 +2511,6 @@ impl Executor {
                             state.redirect_failed = true;
                             return Ok(true);
                         };
-                        if source_target == OutputTarget::Closed
-                            && !self.dup_source_fd_still_open(source_fd)
-                        {
-                            self.write_bad_fd_redirect_diagnostic(
-                                state,
-                                &redirect.target_metadata.raw,
-                            )?;
-                            self.exit_code = 1;
-                            state.redirect_failed = true;
-                            return Ok(true);
-                        }
                         // Same live-alias freeze as the file arm above
                         // (rubash#279): `>&2 2>/dev/null` in one command
                         // list keeps the first dup on the original stderr.
@@ -2377,13 +2529,30 @@ impl Executor {
                         let target_was_open = state
                             .fd_target(target_fd)
                             .is_some_and(|target| *target != OutputTarget::Closed);
+                        // rubash#2562: a dup whose source is an open
+                        // READ description resolves to the write-less
+                        // Closed model — the target fd now holds that
+                        // same read description, so record it as
+                        // ReadOnly: a further dup in the chain
+                        // (`11>&10` after `10>&9` on a `<` binding)
+                        // must not read the Closed model in `fds` as
+                        // a closed descriptor. Any other model means
+                        // the output graph owns the fd outright.
+                        let source_is_read_description =
+                            source_target == OutputTarget::Closed;
                         state.fds.insert(target_fd, source_target);
+                        if source_is_read_description {
+                            state.list_binds.insert(target_fd, ListBound::ReadOnly);
+                        } else {
+                            state.list_binds.remove(&target_fd);
+                        }
                         // rubash#2121: record the clone (see the file
                         // arm above).
                         state.shared_with.insert(target_fd, source_fd);
                         state.saw_output_redirect = true;
                         if move_source {
                             state.fds.insert(source_fd, OutputTarget::Closed);
+                            state.list_binds.insert(source_fd, ListBound::Closed);
                             state.shared_with.remove(&source_fd);
                             if state.persist_move_closes && !target_was_open {
                                 self.close_persistent_output_fd(source_fd)?;
@@ -2423,6 +2592,7 @@ impl Executor {
                             let stdout_target =
                                 state.fd_target(1).cloned().unwrap_or(OutputTarget::Stdout);
                             state.fds.insert(2, stdout_target);
+                            state.list_binds.remove(&2);
                             // rubash#2121: r_err_and_out — fd 2 clones
                             // fd 1's binding (redir.c:832-838).
                             state.shared_with.insert(2, 1);
@@ -2448,6 +2618,7 @@ impl Executor {
                 crate::parser::RedirectKind::CloseOutput => {
                     let closed_fd = redirect_fd_or_default(redirect, 1);
                     state.fds.insert(closed_fd, OutputTarget::Closed);
+                    state.list_binds.insert(closed_fd, ListBound::Closed);
                     state.shared_with.remove(&closed_fd);
                     state.saw_output_redirect = true;
                 }
@@ -2546,6 +2717,9 @@ impl Executor {
         // rubash#2121: a fresh open supersedes any clone aliasing this
         // fd held — the fd is no longer a dup of its former source.
         state.shared_with.remove(&fd);
+        // rubash#2562: the output graph now owns this fd's newest
+        // model — drop any positional input-side record for it.
+        state.list_binds.remove(&fd);
         if is_closed_redirect_target(target) {
             state.fds.insert(fd, OutputTarget::Closed);
         } else if is_null_device(target) {
@@ -3179,6 +3353,97 @@ impl Executor {
     /// write fails later at sh_chkwrite (`echo: write error: Bad file
     /// descriptor`, #551 C8) — while a closed/unopened fd fails the dup at
     /// setup (`3: Bad file descriptor`).
+    /// rubash#2562: the walk-level model of the description a `<>`
+    /// entry of this walk's own list binds, for the positional
+    /// record (ListBound). Mirrors the reject gate's ReadWrite
+    /// classification: a plain file is opened O_RDWR exactly as
+    /// the gate probes it (make_cmd.c:682 O_RDWR|O_CREAT — the
+    /// open is part of the redirection), so a later dup clones the
+    /// shared description; the null device clones as Null; every
+    /// other class (fd-alias spellings, net targets,
+    /// process-substitution spans, synthetic paths, devices) keeps
+    /// the write-less model — the dup still succeeds, only its
+    /// write arm is unmodeled.
+    fn readwrite_list_bound(&self, redirect: &Redirect) -> ListBound {
+        let target = self.expand_redirect_target(redirect);
+        if is_closed_redirect_target(&target) {
+            return ListBound::Closed;
+        }
+        if is_null_device(&target) {
+            return ListBound::Target(OutputTarget::Null);
+        }
+        if crate::executor::execution_misc::dev_stdio_redirect_fd(&target).is_none()
+            && !crate::special_paths::is_net_redirect_target(&target)
+            && !super::external_setup::redirect_target_span_is_recorded(redirect)
+            && crate::special_paths::synthetic_proc_content(&target).is_none()
+            && !crate::special_paths::is_synthetic_link_path(&target)
+            && !crate::special_paths::is_zero_device(&target)
+            && !crate::special_paths::is_full_device(&target)
+            && !crate::special_paths::is_random_device(&target)
+        {
+            // Anchor like the gate's probe (rubash#2240): the
+            // session cwd, never the process cwd.
+            let path = if target.is_empty() {
+                shell_path_to_windows(&target, &self.shell_state.env_vars)
+            } else {
+                self.session_path(crate::executor::path::windows_operand_file_path(
+                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                    &self.shell_state.env_vars,
+                ))
+            };
+            if let Ok((_, write)) = FileFd::open_readwrite_pair(path) {
+                return ListBound::Target(OutputTarget::SharedFile(write));
+            }
+            return ListBound::Closed;
+        }
+        ListBound::ReadOnly
+    }
+
+    /// rubash#2562: the positional model of a dup's source at the
+    /// current walk position — this list's own record first, then
+    /// the output graph, then the ambient table's still-open fact
+    /// (a read-only ambient binding models as the write-less
+    /// target, exactly as the seeding models it). None = the
+    /// source is not an open descriptor here, and the dup fails
+    /// EBADF (redir.c:1139-1275).
+    fn walk_dup_source_target(
+        &self,
+        state: &OutputFdState,
+        source_fd: u32,
+    ) -> Option<OutputTarget> {
+        match state.list_binds.get(&source_fd) {
+            Some(ListBound::Closed) => None,
+            Some(ListBound::ReadOnly) => Some(OutputTarget::Closed),
+            Some(ListBound::Target(target)) => Some(target.clone()),
+            None => {
+                let target = state.fd_target(source_fd)?;
+                if *target == OutputTarget::Closed && !self.dup_source_fd_still_open(source_fd) {
+                    None
+                } else {
+                    Some(target.clone())
+                }
+            }
+        }
+    }
+
+    /// rubash#2562: the ListBound a DuplicateInput entry clones
+    /// from its source, resolved at the entry's position.
+    fn list_dup_model(&self, state: &OutputFdState, source_fd: u32) -> ListBound {
+        if let Some(bound) = state.list_binds.get(&source_fd) {
+            return bound.clone();
+        }
+        match state.fd_target(source_fd) {
+            Some(OutputTarget::Closed) | None => {
+                if self.dup_source_fd_still_open(source_fd) {
+                    ListBound::ReadOnly
+                } else {
+                    ListBound::Closed
+                }
+            }
+            Some(target) => ListBound::Target(target.clone()),
+        }
+    }
+
     fn dup_source_fd_still_open(&self, fd: u32) -> bool {
         self.fd_table
             .entries

@@ -625,8 +625,17 @@ impl Executor {
                 continue;
             }
             match entry.kind {
-                crate::parser::RedirectKind::CloseInput => return None,
-                crate::parser::RedirectKind::DuplicateInput => {
+                crate::parser::RedirectKind::CloseInput
+                | crate::parser::RedirectKind::CloseOutput => return None,
+                // rubash#2562: a dup binds its target to the source's
+                // description whichever spelling wrote it — GNU's
+                // walk is one ordered pass (redir.c:237) and
+                // in_list_binding_depth already treats the two dup
+                // kinds symmetrically. Without the DuplicateOutput
+                // arm, a source bound by `10>&9` was invisible here
+                // and `cat 9<f 10>&9 <&10` failed EBADF at setup.
+                crate::parser::RedirectKind::DuplicateInput
+                | crate::parser::RedirectKind::DuplicateOutput => {
                     let target = self.expand_redirect_target(entry);
                     if is_closed_redirect_target(&target) {
                         return None;
