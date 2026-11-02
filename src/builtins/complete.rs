@@ -967,9 +967,106 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             .map(|c| format!("{p}{c}{s}"))
             .collect();
     }
+    if let Some(cs) = resolved {
+        // The compspec -o fallback options (rubash#2570), in GNU's own
+        // layering order. pcomplete.c:1435-1457 gen_compspec_completions:
+        // dirnames REPLACES an empty result (the check runs on the
+        // post-filter list above), and plusdirs APPENDS directory
+        // candidates whenever the dirnames branch did not fire — on
+        // non-empty results and on empty ones alike. The compgen write
+        // path below mirrors the same block; the fallback candidates
+        // are never -X filtered and never -P/-S wrapped, so this block
+        // sits after both.
+        if candidates.is_empty() && cs.options & COPT_DIRNAMES != 0 {
+            candidates = directory_candidates_matching(&cur_word, env_vars);
+        } else if cs.options & COPT_PLUSDIRS != 0 {
+            candidates.extend(directory_candidates_matching(&cur_word, env_vars));
+        }
+        // bashline.c:1801-1822 attempt_shell_completion: with the
+        // compspec's generators (and the dirnames/plusdirs step) still
+        // empty, -o default leaves readline's own filename completion
+        // open and -o bashdefault drops into bash_default_completion
+        // (bashline.c:1830). The engine's candidate list is final for
+        // the host, so both sets are materialized here. Probed against
+        // GNU bash 5.3.20: -o default alone on an empty function result
+        // yields filename candidates; -o bashdefault alone on a plain
+        // word yields NOTHING (only its $-variable, ~-username and
+        // @-hostname shapes fire); both together (the fzf registration)
+        // yield filenames for plain words through the -o default half.
+        if candidates.is_empty() && cs.options & (COPT_DEFAULT | COPT_BASHDEFAULT) != 0 {
+            if cs.options & COPT_BASHDEFAULT != 0 {
+                candidates.extend(bash_default_candidates(
+                    &cur_word,
+                    cur_idx,
+                    env_vars,
+                    aliases,
+                    function_names,
+                    dynamic.as_ref().map(|d| d.pipestatus).unwrap_or_default(),
+                ));
+            }
+            if cs.options & COPT_DEFAULT != 0 {
+                candidates.extend(filename_candidates_matching(&cur_word, env_vars));
+            }
+        }
+    }
     candidates.sort();
     candidates.dedup();
     candidates
+}
+
+/// The `-o bashdefault` fallback set (bashline.c:1830-1967
+/// bash_default_completion), restricted to the generators this engine
+/// owns: `$`-prefixed words complete variable names (rendered with the
+/// `$`, as readline lists them), a slash-less `~` word completes
+/// usernames (rendered `~name`), an `@` word completes hostnames, and
+/// a first-word position (reachable when a `-D`/`-E` compspec governs
+/// the empty line) completes command names. A plain argument word
+/// completes NOTHING here — GNU returns no matches for it under
+/// -o bashdefault alone (the filename set comes from -o default).
+/// Command-substitution (`$(`/`${`) and glob-pattern words are not
+/// materialized; see the #2570 report's residuals.
+fn bash_default_candidates(
+    word: &str,
+    cur_idx: usize,
+    env_vars: &crate::shell::var_table::VarTable,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    pipestatus: PipestatusListing,
+) -> Vec<String> {
+    if let Some(rest) = word.strip_prefix('$') {
+        if rest.starts_with('(') || rest.starts_with('{') {
+            return Vec::new();
+        }
+        return variable_completion_candidates(
+            env_vars,
+            &crate::shell::var_table::TempenvListingUnderlay::new(),
+            pipestatus.cell_visible,
+        )
+        .into_iter()
+        .map(|name| format!("${name}"))
+        .filter(|candidate| candidate.starts_with(word))
+        .collect();
+    }
+    if word.starts_with('~') && !word.contains('/') {
+        return user_completion_candidates(env_vars)
+            .into_iter()
+            .map(|name| format!("~{name}"))
+            .filter(|candidate| candidate.starts_with(word))
+            .collect();
+    }
+    if word.starts_with('@') {
+        return hostname_completion_candidates(env_vars)
+            .into_iter()
+            .filter(|candidate| candidate.starts_with(word))
+            .collect();
+    }
+    if cur_idx == 0 {
+        return command_completion_candidates(env_vars, aliases, function_names)
+            .into_iter()
+            .filter(|candidate| candidate.starts_with(word))
+            .collect();
+    }
+    Vec::new()
 }
 
 /// output; otherwise generate candidates from every set action (plus the -G
@@ -1128,6 +1225,17 @@ where
 /// word prefix the way the file/directory actions filter.
 fn directory_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
     path_completion_candidates(word, PathCompletionKind::Directory, env_vars)
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(word))
+        .collect()
+}
+
+/// The `-o default` fallback (bashline.c:1808-1810: COPT_DEFAULT leaves
+/// readline's default filename completion open) — filename candidates
+/// under the word's directory prefix, word-filtered like the
+/// CA_FILE action.
+fn filename_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
+    path_completion_candidates(word, PathCompletionKind::File, env_vars)
         .into_iter()
         .filter(|candidate| candidate.starts_with(word))
         .collect()
