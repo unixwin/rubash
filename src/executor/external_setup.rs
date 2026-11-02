@@ -3431,6 +3431,14 @@ impl Executor {
         // the same markers the `&` respawn forwards.
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_map.insert("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone());
+            // rubash#2586: forward the top-level name with the script
+            // identity, as the async respawn does (compound_exec.rs).
+            if let Some(top_level_name) = self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME") {
+                env_map.insert(
+                    "__RUBASH_TOP_LEVEL_NAME".to_string(),
+                    top_level_name.clone(),
+                );
+            }
             env_map.insert(
                 "__RUBASH_CURRENT_LINE".to_string(),
                 self.shell_state

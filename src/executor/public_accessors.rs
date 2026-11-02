@@ -1728,15 +1728,28 @@ impl Executor {
             // byte-identical inserts are idempotent, so skipping them
             // changes nothing observable.
             self.set_current_line_value(line);
-            // GNU's line_number is a process-internal C int; the Windows
-            // process-environment mirror only needs the OS write when the
-            // stamped value differs from the last one WE wrote — a loop
-            // body re-stamps the same line thousands of times. The gate
-            // compares against the last OS write, not the map value:
+            // GNU's line_number is a single process-global C int
+            // (execute_cmd.c:295 SET_LINE_NUMBER writes the one global;
+            // there is no per-builtin copy), so EVERY reader must see the
+            // same value. The env_vars map is the canonical store, and the
+            // process-environment mirror is its second storage for the
+            // builtins whose execute signatures carry no env map (alias,
+            // help, kill, shift, shopt, setattr read std::env directly).
+            // rubash#2580: the mirror write used to be gated by a
+            // 15-word whitelist matched on the RAW command words, so an
+            // indirectly invoked builtin (`x=shift; $x 5`, host
+            // call_function dispatch) read a stale or missing mirror and
+            // printed diagnostics with the wrong/absent line, while
+            // `echo kill` stamped the mirror for no reason. Write BOTH
+            // storages on every stamp instead (the #2564 COLUMNS
+            // both-storages shape): the OS write still only happens when
+            // the stamped value differs from the last one WE wrote — a
+            // loop body re-stamps the same line thousands of times. The
+            // gate compares against the last OS write, not the map value:
             // ambient-line restores write the map directly, so a
             // map-equality gate left the OS env stale (alias/declare
             // diagnostics reported an earlier line).
-            if command_needs_process_line_env(cmd) {
+            {
                 let rendered = line.to_string();
                 if self.line_env_os_value.borrow().as_deref() != Some(rendered.as_str()) {
                     set_process_env("__RUBASH_CURRENT_LINE", &rendered);

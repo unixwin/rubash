@@ -267,33 +267,6 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     Some(start + first_word_newlines)
 }
 
-pub(in crate::executor) fn command_needs_process_line_env(cmd: &CommandNode) -> bool {
-    cmd.words
-        .iter()
-        .any(|word| command_word_needs_process_line_env(word))
-}
-
-fn command_word_needs_process_line_env(word: &str) -> bool {
-    matches!(
-        word,
-        "alias"
-            | "unalias"
-            | "declare"
-            | "typeset"
-            | "export"
-            | "readonly"
-            | "hash"
-            | "help"
-            | "kill"
-            | "let"
-            | "local"
-            | "shopt"
-            | "shift"
-            | "ulimit"
-            | "unset"
-    )
-}
-
 /// GNU print_cmd.c prints the command node's OWN redirection list. A
 /// redirect cloned into this node by an enclosing compound's splice
 /// (support_names::injected_group_redirect — the mark's own contract is
