@@ -2819,7 +2819,7 @@ impl Executor {
     /// applier's AMBIENT copy of the source, and a single-channel
     /// stamp leaves the other channel's ambient value in place — a
     /// `>&N` dup then wrote through the at-position description
-    /// while reads still served the ambient one.
+    /// while reads still served the ambient one (rubash#2562).
     fn stamp_child_fd_description(
         &mut self,
         process: &mut Command,
@@ -3193,12 +3193,20 @@ impl Executor {
         // (1) A binding this walk already delivered for the source.
         if let Some(file) = walk_opened.get(&source_fd).cloned() {
             let path = file.path.to_string_lossy().into_owned();
-            self.stamp_child_fd_handle(
+            // rubash#2562: the walk opened ONE description for the
+            // source (an input or readwrite binding of this list) —
+            // the dup clones that description, so stamp the WHOLE
+            // description (both channels off one dup) instead of
+            // only the channel this dup's direction names. The
+            // single-channel stamp left the child's other channel
+            // to whatever the ambient delivery held for the slot —
+            // the stale pattern rubash#2531 fixed in
+            // deliver_fd_var_dup.
+            self.stamp_child_fd_description(
                 process,
                 command_fd_pins,
                 parent_side_dups,
                 fd,
-                write,
                 file.handle,
                 path,
             );

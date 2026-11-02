@@ -10,7 +10,12 @@ impl Executor {
     /// fd is a bad descriptor (rubash's virtual fd table is the single
     /// source of truth, replacing the OS handle slot Windows exposes
     /// nondeterministically).
-    fn validate_builtin_dup_source(&self, source_fd: u32) -> Result<(), ExecuteError> {
+    fn validate_builtin_dup_source(
+        &self,
+        cmd: &CommandNode,
+        before: usize,
+        source_fd: u32,
+    ) -> Result<(), ExecuteError> {
         if source_fd <= 2 {
             return Ok(());
         }
@@ -19,12 +24,49 @@ impl Executor {
             Some(entry) if !entry.closed
         );
         if open {
-            Ok(())
-        } else {
-            Err(ExecuteError::IoError(std::io::Error::other(format!(
-                "{source_fd}: Bad file descriptor"
-            ))))
+            return Ok(());
         }
+        // rubash#2562: a binding EARLIER in this command's own list
+        // also opens the source — GNU's one ordered walk
+        // (redir.c:237 do_redirections) has applied it by the time
+        // the dup runs, so `cmd 9<f <&9` and `: 9<f 10>&9` are
+        // legal. in_list_binding resolves the winning entry
+        // positionally, dup chains included; a Closed or unbound
+        // verdict keeps the EBADF.
+        match self.in_list_binding(cmd, before, source_fd) {
+            crate::executor::external_setup::InListBinding::File(_)
+            | crate::executor::external_setup::InListBinding::Other
+            | crate::executor::external_setup::InListBinding::AmbientOf(_) => Ok(()),
+            crate::executor::external_setup::InListBinding::Closed
+            | crate::executor::external_setup::InListBinding::NotBound => {
+                Err(ExecuteError::IoError(std::io::Error::other(format!(
+                    "{source_fd}: Bad file descriptor"
+                ))))
+            }
+        }
+    }
+
+    /// rubash#2562: the position of the list entry a structured
+    /// mirror field (redirect_in / redirect_out) was projected
+    /// from — the parser pushes the entry into cmd.redirects and
+    /// clones it into the field, and the LAST matching entry is
+    /// the projection source (a later assignment to the field
+    /// overwrote it). Falls back to the whole list when no entry
+    /// matches.
+    fn redirect_list_position(
+        &self,
+        cmd: &CommandNode,
+        redirect: &crate::parser::Redirect,
+    ) -> usize {
+        cmd.redirects
+            .iter()
+            .rposition(|entry| {
+                entry.kind == redirect.kind
+                    && entry.fd == redirect.fd
+                    && entry.fd_var == redirect.fd_var
+                    && entry.target_metadata.raw == redirect.target_metadata.raw
+            })
+            .unwrap_or(cmd.redirects.len())
     }
 
     /// GNU redir.c do_redirections (redir.c:260 do_redirection_internal)
@@ -495,7 +537,11 @@ impl Executor {
                 // spelling: GNU opens it (redir_open), so it falls through
                 // to the classified probes below, whose closed-alias answer
                 // is the open's ENOENT (rubash#1963).
-                self.validate_builtin_dup_source(source_fd)?;
+                self.validate_builtin_dup_source(
+                    cmd,
+                    self.redirect_list_position(cmd, redirect),
+                    source_fd,
+                )?;
             } else if redirect.append {
                 // `<> word` on fd 0: the classified probe performs the
                 // one O_RDWR open — registry classes first (net /
@@ -531,7 +577,11 @@ impl Executor {
                 // through to create_redirect_output, whose registry arm
                 // answers a closed alias with the open's ENOENT
                 // (rubash#1963).
-                self.validate_builtin_dup_source(source_fd)?;
+                self.validate_builtin_dup_source(
+                    cmd,
+                    self.redirect_list_position(cmd, redirect),
+                    source_fd,
+                )?;
             } else if redirect.fd.unwrap_or(1) == 1 && target.starts_with('&') {
                 // GNU redir.c:832-838: >&WORD with a non-numeric WORD and
                 // redirector 1 translates to r_err_and_out (>&file ==
@@ -612,7 +662,7 @@ impl Executor {
         // apply_dynamic_fd_var_redirects before this helper (see the
         // note at the top) and are skipped, as are close/heredoc forms
         // with no open to perform.
-        for redirect in &cmd.redirects {
+        for (index, redirect) in cmd.redirects.iter().enumerate() {
             if redirect.fd_var.is_some() {
                 continue;
             }
@@ -633,7 +683,7 @@ impl Executor {
                 | crate::parser::RedirectKind::CombinedAppend => {
                     if is_closed_redirect_target(&target) {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
-                        self.validate_builtin_dup_source(source_fd)?;
+                        self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
                         self.create_redirect_output(&target, redirect.clobber)?;
                     }
@@ -655,7 +705,7 @@ impl Executor {
                 crate::parser::RedirectKind::Input => {
                     if is_closed_redirect_target(&target) {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
-                        self.validate_builtin_dup_source(source_fd)?;
+                        self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
                         // rubash#2329: positional — see
                         // probe_input_redirect_positional.
@@ -683,7 +733,7 @@ impl Executor {
                 crate::parser::RedirectKind::DuplicateInput
                 | crate::parser::RedirectKind::DuplicateOutput => {
                     if let Some((source_fd, _)) = redirect_target_fd_and_move(&target) {
-                        self.validate_builtin_dup_source(source_fd)?;
+                        self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     }
                 }
                 _ => {}
