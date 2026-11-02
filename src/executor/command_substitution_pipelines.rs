@@ -538,7 +538,9 @@ impl Executor {
             if let Some(word) = &command.here_string {
                 let trimmed = word.trim_start();
                 if !trimmed.starts_with('\'') && !trimmed.starts_with("$'") {
-                    blocked |= self.parameter_expansion_error_in_word(word).is_some();
+                    blocked |= self
+                        .parameter_expansion_error_in_word_isolated(word)
+                        .is_some();
                 }
             }
             for redirect in &command.heredoc_redirects {

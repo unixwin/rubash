@@ -401,7 +401,9 @@ impl Executor {
             // recorded procsub body — mask this word's recorded spans
             // (the expansion below still consumes the original word).
             let masked = self.mask_conditional_procsub_spans(word);
-            if let Some((name, message, status)) = self.parameter_expansion_error_in_word(&masked) {
+            if let Some((name, message, status)) =
+                self.parameter_expansion_error_in_word_isolated(&masked)
+            {
                 if status == 1 {
                     // GNU subst.c: a non-fatal word-expansion error
                     // (substring expression < 0, bad substitution) is

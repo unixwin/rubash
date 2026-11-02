@@ -1465,7 +1465,7 @@ impl Executor {
             let trimmed = word.trim_start();
             let no_expansion = trimmed.starts_with('\'') || trimmed.starts_with("$'");
             if !no_expansion {
-                if let Some(error) = self.parameter_expansion_error_in_word(word) {
+                if let Some(error) = self.parameter_expansion_error_in_word_isolated(word) {
                     return Some(error);
                 }
             }
