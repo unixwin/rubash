@@ -678,6 +678,17 @@ impl Executor {
                     _ => {}
                 }
             }
+            // rubash#2560: GNU wait_for_background_pids' procsub
+            // step (jobs.c:2853-2858, no WAIT_WAITS_FOR_ALL_PROCSUBS
+            // in the oracle build): procsub_waitpid on the last
+            // procsub child when it is $! — this BLOCKS for a live
+            // consumer/producer, which the placeholder sweep below
+            // never does (a real `>(...)` consumer lives in
+            // background_children, not in the placeholder set).
+            if let Some(interrupt) = self.wait_last_procsub_if_last_async()? {
+                self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
+                return Ok(interrupt);
+            }
             // rubash#1022: GNU's no-operand wait also reaps finished
             // process substitutions (jobs.c waits the last procsub when it
             // is $!). Completed placeholders are already dead, so the
@@ -824,6 +835,18 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 return Ok(status);
             }
+        }
+
+        // rubash#2560: a bare wait that reached here (no background
+        // jobs to wait for) still runs wait_for_background_pids'
+        // procsub step (jobs.c:2853-2858) — settle the last procsub
+        // child when it is $! — followed by the delete_procsubs
+        // sweep, before the empty wait reports success.
+        if cmd.words.len() == 1 {
+            if let Some(interrupt) = self.wait_last_procsub_if_last_async()? {
+                return Ok(interrupt);
+            }
+            self.sweep_procsub_placeholders();
         }
 
         let mut stderr = Vec::new();
@@ -1183,6 +1206,33 @@ impl Executor {
             .collect();
         for pid in candidates {
             self.reap_procsub_placeholder(pid, false);
+        }
+    }
+
+    /// rubash#2560: the bare wait's procsub step — GNU
+    /// wait_for_background_pids (jobs.c:2853-2858): without
+    /// WAIT_WAITS_FOR_ALL_PROCSUBS (the oracle build does not
+    /// define it), only the LAST procsub child is waited, and only
+    /// when it is also the last asynchronous pid ($!):
+    /// procsub_waitpid (jobs.c:1131) blocks in wait_for for it.
+    /// Returns Some(status) when a trapped signal interrupted the
+    /// block, mirroring the per-job pass's interrupt arm.
+    fn wait_last_procsub_if_last_async(&mut self) -> Result<Option<i32>, ExecuteError> {
+        let Some(procsub_pid) = self.shell_state.last_procsub_pid else {
+            return Ok(None);
+        };
+        if self.shell_state.last_background_pid != Some(procsub_pid) {
+            return Ok(None);
+        }
+        if !self.background_children.contains_key(&procsub_pid) {
+            // Already reaped and recorded, or a fork placeholder
+            // whose recorded status the placeholder sweep settles:
+            // procsub_waitpid returns the recorded status at once.
+            return Ok(None);
+        }
+        match self.wait_for_background_pid(procsub_pid, false)? {
+            WaitPidOutcome::Interrupted(status) => Ok(Some(status)),
+            _ => Ok(None),
         }
     }
 

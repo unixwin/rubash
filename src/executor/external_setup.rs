@@ -3582,6 +3582,10 @@ impl Executor {
         self.background_children
             .insert(pid, crate::fd::SpawnedChild::from(child));
         self.shell_state.last_background_pid = Some(pid);
+        // rubash#2560: GNU subst.c procsub_add records the child as
+        // last_procsub_child — a bare `wait` settles it when it is
+        // still $! (jobs.c wait_for_background_pids tail).
+        self.shell_state.last_procsub_pid = Some(pid);
         Ok(())
     }
 
@@ -4028,6 +4032,11 @@ impl Executor {
             .completed_statuses
             .insert(pid, status);
         self.shell_state.last_background_pid = Some(pid);
+        // rubash#2560: a placeholder is still the most recent
+        // procsub child (GNU last_procsub_child); its status is
+        // already recorded, so the bare-wait tail finds nothing to
+        // block on and the placeholder sweep settles it.
+        self.shell_state.last_procsub_pid = Some(pid);
         pid
     }
 
