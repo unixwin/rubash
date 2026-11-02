@@ -106,8 +106,16 @@ fn apply_pending_close_at(
 /// Two-phase so a pin never clobbers a not-yet-moved source: first move
 /// every source above every target with F_DUPFD_CLOEXEC, then dup2 the
 /// staged copies onto their slots (dup2 clears CLOEXEC on the target,
-/// so the descriptor survives exec). A source already sitting at its
-/// slot only needs its CLOEXEC flag cleared. Failures are ignored per
+/// so the descriptor survives exec). EVERY pin stages, including one
+/// whose source already sits at its slot: list order is the precedence
+/// contract (ambient pins first, the command's own pins appended —
+/// rubash#1686), and a source==target pin "applied" during the staging
+/// phase by merely clearing CLOEXEC is defenseless against an earlier
+/// ambient pin for the same slot whose staged dup2 lands in phase two
+/// (rubash#2599: in a respawned shell's sparse fd space the delivery
+/// walk opens the command's `9>o1.txt` target at OS fd 10 — exactly
+/// the {var} slot the ambient applier copy also claims — and the
+/// ambient seed description, not o1, survived at the slot). Failures are ignored per
 /// pin: the child then simply lacks that descriptor — the pre-fix
 /// behavior — instead of failing the whole spawn. One target is never
 /// clobbered: an anonymous pipe the spawn machinery itself parked at
@@ -144,10 +152,15 @@ pub(in crate::executor) fn pin_ambient_fds_in_child(
     let mut staged: Vec<(RawFd, RawFd)> = Vec::with_capacity(pins.len());
     for &(source, slot) in pins {
         let target = slot as RawFd;
-        if source == target {
-            unsafe { libc::fcntl(source, libc::F_SETFD, 0) };
-            continue;
-        }
+        // rubash#2599: a source already sitting at its slot stages like
+        // every other pin — no CLOEXEC-clear shortcut. The shortcut
+        // applied the pin at staging time, but precedence is list order
+        // at dup2 time: a lower-precedence pin naming the same slot
+        // (an ambient applier copy) still dup2's in phase two and
+        // clobbers the slot the shortcut "delivered". Staged, the
+        // source==target pin dup2's in its own list position and the
+        // later (command) binding wins the slot, as the merged pin
+        // list's order promises.
         let temp = unsafe { libc::fcntl(source, libc::F_DUPFD_CLOEXEC, ceiling + 1) };
         if temp >= 0 {
             staged.push((temp, target));
