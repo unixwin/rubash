@@ -38,9 +38,8 @@ fn run_script(dir: &Path, script: &str) -> (String, String) {
         .env_remove("ENV")
         .output()
         .expect("run rubash");
-    let normalize = |text: &str| {
-        text.replace(&script_path.to_string_lossy().into_owned(), "SCRIPT")
-    };
+    let normalize =
+        |text: &str| text.replace(&script_path.to_string_lossy().into_owned(), "SCRIPT");
     (
         normalize(&String::from_utf8_lossy(&output.stdout)),
         normalize(&String::from_utf8_lossy(&output.stderr)),
@@ -79,10 +78,7 @@ echo "keys=${!s[@]}"
 "#,
     );
     assert_eq!(err, "");
-    assert_eq!(
-        out,
-        "y0=[abc] y2=[q] n=2\nw0=[  pad  ] n=2\nkeys=0 5\n"
-    );
+    assert_eq!(out, "y0=[abc] y2=[q] n=2\nw0=[  pad  ] n=2\nkeys=0 5\n");
     let _ = fs::remove_dir_all(&dir);
 }
 

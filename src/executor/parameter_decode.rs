@@ -491,7 +491,9 @@ fn decode_parameter_pattern_quotes_impl(pattern: &str, source_quotes: bool) -> S
                     // Data from an expansion result (rubash#2428).
                     output.push('\'');
                     index += 1;
-                } else if let Some(close_offset) = chars[index + 1..].iter().position(|ch| *ch == '\'') {
+                } else if let Some(close_offset) =
+                    chars[index + 1..].iter().position(|ch| *ch == '\'')
+                {
                     let close = index + 1 + close_offset;
                     for ch in &chars[index + 1..close] {
                         push_literal_pattern_char(&mut output, *ch);

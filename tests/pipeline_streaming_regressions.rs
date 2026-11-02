@@ -80,12 +80,7 @@ fn streamed(script: &str) -> (Vec<u8>, Duration, Duration, Option<i32>) {
     let ttfb = first
         .expect("streamed pipeline produced no output at all")
         .duration_since(start);
-    (
-        bytes,
-        ttfb,
-        eof_at.duration_since(start),
-        status.code(),
-    )
+    (bytes, ttfb, eof_at.duration_since(start), status.code())
 }
 
 /// Resolve an external tool to an absolute, quoteable script word so the
@@ -142,8 +137,7 @@ fn external_pipeline_first_bytes_arrive_while_members_still_run() {
     let cat = resolve_tool("cat");
     // `ping -n 4` runs ~3s with its first line immediate; the retired
     // withhold-to-exit drain produced nothing before ~3s.
-    let (bytes, ttfb, total, code) =
-        streamed(&format!("\"{ping}\" -n 4 127.0.0.1 | \"{cat}\"\n"));
+    let (bytes, ttfb, total, code) = streamed(&format!("\"{ping}\" -n 4 127.0.0.1 | \"{cat}\"\n"));
     assert_eq!(code, Some(0), "pipeline status");
     assert!(
         ttfb < LIVE_BOUND,
@@ -166,8 +160,9 @@ fn streaming_pipeline_does_not_delay_following_statement() {
     let cat = resolve_tool("cat");
     // Probe shape `A | B; c`: the trailing `echo` must not wait on withheld
     // pipeline bytes, and the pipeline bytes themselves must still be live.
-    let (bytes, ttfb, total, code) =
-        streamed(&format!("\"{ping}\" -n 3 127.0.0.1 | \"{cat}\"; echo DONE\n"));
+    let (bytes, ttfb, total, code) = streamed(&format!(
+        "\"{ping}\" -n 3 127.0.0.1 | \"{cat}\"; echo DONE\n"
+    ));
     assert_eq!(code, Some(0), "status");
     assert!(ttfb < LIVE_BOUND, "first byte withheld {ttfb:?}");
     assert!(
@@ -298,9 +293,7 @@ fn shell_writer_pipeline_output_passthrough() {
 #[test]
 fn shell_writer_pipeline_substitution_collects() {
     let cat = resolve_tool("cat");
-    let outcome = rubash_c(&format!(
-        "x=$({{ echo A; }} | \"{cat}\"); echo \"[$x]\"\n"
-    ));
+    let outcome = rubash_c(&format!("x=$({{ echo A; }} | \"{cat}\"); echo \"[$x]\"\n"));
     assert_eq!(outcome.code, Some(0), "status");
     assert_eq!(
         String::from_utf8_lossy(&outcome.stdout),

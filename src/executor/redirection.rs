@@ -2432,8 +2432,7 @@ impl Executor {
                         // an open read description records ReadOnly
                         // for the target; any other model leaves
                         // the fd to the output graph.
-                        let source_is_read_description =
-                            source_target == OutputTarget::Closed;
+                        let source_is_read_description = source_target == OutputTarget::Closed;
                         state.fds.insert(fd, source_target);
                         if source_is_read_description {
                             state.list_binds.insert(fd, ListBound::ReadOnly);
@@ -2538,8 +2537,7 @@ impl Executor {
                         // must not read the Closed model in `fds` as
                         // a closed descriptor. Any other model means
                         // the output graph owns the fd outright.
-                        let source_is_read_description =
-                            source_target == OutputTarget::Closed;
+                        let source_is_read_description = source_target == OutputTarget::Closed;
                         state.fds.insert(target_fd, source_target);
                         if source_is_read_description {
                             state.list_binds.insert(target_fd, ListBound::ReadOnly);

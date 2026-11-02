@@ -75,7 +75,10 @@ fn coproc_bang_body_is_syntax_error() {
         stderr.contains("syntax error near unexpected token `!'"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("`coproc ! echo hi; echo rc=$?'"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("`coproc ! echo hi; echo rc=$?'"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(2));
 }
 
@@ -105,14 +108,16 @@ fn coproc_bang_brace_name_is_syntax_error_not_identifier_error() {
         stderr.contains("syntax error near unexpected token `!'"),
         "stderr: {stderr}"
     );
-    assert!(!stderr.contains("not a valid identifier"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("not a valid identifier"),
+        "stderr: {stderr}"
+    );
     assert_eq!(code, Some(2));
 }
 
 #[test]
 fn coproc_bang_aborts_script_at_offending_line() {
-    let (stdout, stderr, code) =
-        rubash_script("echo before\ncoproc a ! b\necho after\n");
+    let (stdout, stderr, code) = rubash_script("echo before\ncoproc a ! b\necho after\n");
     assert_eq!(stdout, "before\n");
     assert!(
         stderr.contains("syntax error near unexpected token `!'"),

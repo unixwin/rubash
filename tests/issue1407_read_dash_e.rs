@@ -35,8 +35,7 @@ fn rubash_with_stdin(script: &str, stdin: &str) -> (String, String, Option<i32>)
 
 #[test]
 fn read_dash_e_accepted() {
-    let (stdout, stderr, code) =
-        rubash_with_stdin(r#"read -E x; echo "rc=$? x=[$x]""#, "hello\n");
+    let (stdout, stderr, code) = rubash_with_stdin(r#"read -E x; echo "rc=$? x=[$x]""#, "hello\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty());
     assert!(stdout.contains("rc=0 x=[hello]"));

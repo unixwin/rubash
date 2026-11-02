@@ -57,10 +57,7 @@ fn issue1974_own_pid_fd_operand_reads_like_self() {
     let dir = tempdir("operand");
     seed_file(&dir);
     for spelling in ["/proc/$$/fd/3", "/proc/self/fd/3"] {
-        let run = rubash_c(
-            &format!("exec 3<in.txt; cat {spelling}"),
-            &dir,
-        );
+        let run = rubash_c(&format!("exec 3<in.txt; cat {spelling}"), &dir);
         assert_eq!(run.code, Some(0), "{spelling}: stderr={}", run.stderr);
         assert_eq!(run.stdout, "pidfd-content-42\n", "{spelling}");
     }
@@ -72,14 +69,20 @@ fn issue1974_own_pid_fd_redirect_and_comsub_serve() {
     seed_file(&dir);
     // Separate runs per face: both faces dup the same open file
     // description, so they share fd 3's offset.
-    let run = rubash_c("exec 3<in.txt; read -r line < /proc/$$/fd/3; echo \"read:$line\"", &dir);
+    let run = rubash_c(
+        "exec 3<in.txt; read -r line < /proc/$$/fd/3; echo \"read:$line\"",
+        &dir,
+    );
     assert_eq!(run.code, Some(0), "stderr={}", run.stderr);
     assert!(
         run.stdout.contains("read:pidfd-content-42"),
         "stdout={}",
         run.stdout
     );
-    let run = rubash_c("exec 3<in.txt; x=$(cat /proc/$$/fd/3); echo \"comsub:$x\"", &dir);
+    let run = rubash_c(
+        "exec 3<in.txt; x=$(cat /proc/$$/fd/3); echo \"comsub:$x\"",
+        &dir,
+    );
     assert_eq!(run.code, Some(0), "stderr={}", run.stderr);
     assert!(
         run.stdout.contains("comsub:pidfd-content-42"),

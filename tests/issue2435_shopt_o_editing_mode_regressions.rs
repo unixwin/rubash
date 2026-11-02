@@ -73,7 +73,11 @@ fn issue2435_shopt_u_o_vi_does_not_move_the_keymap_back() {
     let r = run("shopt -s -o vi; shopt -u -o vi; bind -p");
     assert_eq!(line_count(&r.stdout), 424, "dump: {:?}", r.stdout);
     let listing = run("shopt -s -o vi; shopt -u -o vi; shopt -o vi");
-    assert!(listing.stdout.contains("off"), "listing: {:?}", listing.stdout);
+    assert!(
+        listing.stdout.contains("off"),
+        "listing: {:?}",
+        listing.stdout
+    );
 }
 
 #[test]
@@ -92,9 +96,8 @@ fn issue2435_redundant_shopt_s_o_vi_rebinds_editing_mode() {
     // GNU fires set_edit_mode on every FLAG_ON write, not only on
     // off->on transitions: after the user rebinds the mode through
     // the variable, re-setting the already-on option binds it again.
-    let r = run(
-        "shopt -s -o vi; bind 'set editing-mode emacs'; shopt -s -o vi; bind -q backward-char",
-    );
+    let r =
+        run("shopt -s -o vi; bind 'set editing-mode emacs'; shopt -s -o vi; bind -q backward-char");
     assert_eq!(
         r.stdout,
         "backward-char can be invoked via \"\\eOD\", \"\\e[D\".\n"

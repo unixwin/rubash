@@ -70,10 +70,7 @@ fn run_script(dir: &Path, script: &str) -> (i32, String, String) {
 #[test]
 fn declare_spaced_subscript_compound_is_a_syntax_error() {
     let dir = scratch("exact");
-    let (status, stdout, stderr) = run_script(
-        &dir,
-        "declare b[1 + 1]=(x y)\necho after rc=$?\n",
-    );
+    let (status, stdout, stderr) = run_script(&dir, "declare b[1 + 1]=(x y)\necho after rc=$?\n");
     assert_eq!(status, 2);
     assert_eq!(stdout, "");
     assert_eq!(
@@ -86,10 +83,8 @@ fn declare_spaced_subscript_compound_is_a_syntax_error() {
 #[test]
 fn syntax_error_aborts_at_the_offending_command() {
     let dir = scratch("goodline");
-    let (status, stdout, stderr) = run_script(
-        &dir,
-        "echo first\ndeclare b[1 + 1]=(x y)\necho after\n",
-    );
+    let (status, stdout, stderr) =
+        run_script(&dir, "echo first\ndeclare b[1 + 1]=(x y)\necho after\n");
     // GNU reads and executes complete commands in order: the good
     // line runs, the bad line is a parse error (status 2), and
     // nothing after it runs.
@@ -144,10 +139,7 @@ fn unspaced_and_standalone_forms_still_fail_at_execution() {
     let dir = scratch("guards");
     // Unspaced subscript in the same operand position: one word,
     // runtime diagnostic, the script carries on.
-    let (status, stdout, stderr) = run_script(
-        &dir,
-        "declare b[1+1]=(x y)\necho after rc=$?\n",
-    );
+    let (status, stdout, stderr) = run_script(&dir, "declare b[1+1]=(x y)\necho after rc=$?\n");
     assert_eq!(status, 0);
     assert_eq!(stdout, "after rc=1\n");
     assert_eq!(

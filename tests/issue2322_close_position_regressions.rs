@@ -287,7 +287,10 @@ fn unrelated_close_does_not_block_dup() {
         "exec 9<seed.txt\nexec 8<other.txt\nv=8\n\"@RUBASH@\" reader10.sh 9<f9.txt {v}<&- {w}<&9\necho \"rc=$? w=[${w-UNSET}]\"\n",
     );
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "CHILD-RAN\nfd10=[F9]\nfd9=[READ9-FAIL]\nrc=0 w=[UNSET]\n");
+    assert_eq!(
+        stdout,
+        "CHILD-RAN\nfd10=[F9]\nfd9=[READ9-FAIL]\nrc=0 w=[UNSET]\n"
+    );
 }
 
 /// Close-position also governs a dup whose source is bound ONLY by

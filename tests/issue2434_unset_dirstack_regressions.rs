@@ -81,10 +81,7 @@ dirs
 "#,
     );
     assert_eq!(err, "");
-    assert_eq!(
-        out,
-        "count=0 all=[]\nWORK/a WORK/b WORK/a\n"
-    );
+    assert_eq!(out, "count=0 all=[]\nWORK/a WORK/b WORK/a\n");
     let _ = fs::remove_dir_all(&dir);
 }
 

@@ -69,7 +69,11 @@ fn rm_non_empty_directory_without_recursive_flag_fails_and_survives() {
     let (out, dir) = run_in_scratch("rm tree", "nonempty");
     let survived = dir.join("tree").join("inner").join("f").exists();
     clean(dir);
-    assert_eq!(out.status, 1, "stdout={:?} stderr={:?}", out.stdout, out.stderr);
+    assert_eq!(
+        out.status, 1,
+        "stdout={:?} stderr={:?}",
+        out.stdout, out.stderr
+    );
     assert!(
         out.stderr.contains("Is a directory"),
         "stderr={:?}",
@@ -84,7 +88,11 @@ fn rm_empty_directory_without_flag_fails() {
     let survived = dir.join("empty").exists();
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
-    assert!(out.stderr.contains("Is a directory"), "stderr={:?}", out.stderr);
+    assert!(
+        out.stderr.contains("Is a directory"),
+        "stderr={:?}",
+        out.stderr
+    );
     assert!(survived, "the empty directory was removed");
 }
 
@@ -94,7 +102,11 @@ fn rm_force_does_not_authorize_directory_removal() {
     let survived = dir.join("tree").exists();
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
-    assert!(out.stderr.contains("Is a directory"), "stderr={:?}", out.stderr);
+    assert!(
+        out.stderr.contains("Is a directory"),
+        "stderr={:?}",
+        out.stderr
+    );
     assert!(survived, "-f removed a directory operand");
 }
 
@@ -104,7 +116,11 @@ fn rm_recursive_removes_tree() {
     let survived = dir.join("tree").exists();
     clean(dir);
     assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
-    assert!(!survived, "-r left the tree behind: stderr={:?}", out.stderr);
+    assert!(
+        !survived,
+        "-r left the tree behind: stderr={:?}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -113,7 +129,11 @@ fn rm_capital_r_removes_tree() {
     let survived = dir.join("tree").exists();
     clean(dir);
     assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
-    assert!(!survived, "-R left the tree behind: stderr={:?}", out.stderr);
+    assert!(
+        !survived,
+        "-R left the tree behind: stderr={:?}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -123,7 +143,11 @@ fn rm_dir_flag_removes_only_empty_directory() {
     let tree_kept = dir.join("tree").join("inner").join("f").exists();
     clean(dir);
     assert_eq!(out.status, 0, "stderr={:?}", out.stderr);
-    assert!(empty_gone, "-d left the empty directory: stderr={:?}", out.stderr);
+    assert!(
+        empty_gone,
+        "-d left the empty directory: stderr={:?}",
+        out.stderr
+    );
     assert!(tree_kept, "the fixture tree vanished unexpectedly");
 }
 
@@ -146,7 +170,11 @@ fn rm_missing_operand_is_an_error() {
     let (out, dir) = run_in_scratch("rm", "no-operand");
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
-    assert!(out.stderr.contains("missing operand"), "stderr={:?}", out.stderr);
+    assert!(
+        out.stderr.contains("missing operand"),
+        "stderr={:?}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -154,7 +182,11 @@ fn rm_force_still_reports_missing_operand() {
     let (out, dir) = run_in_scratch("rm -f", "no-operand-force");
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
-    assert!(out.stderr.contains("missing operand"), "stderr={:?}", out.stderr);
+    assert!(
+        out.stderr.contains("missing operand"),
+        "stderr={:?}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -174,7 +206,11 @@ fn rm_missing_operand_and_failing_operand_leave_status_one() {
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
     assert!(out.stderr.contains("missing"), "stderr={:?}", out.stderr);
-    assert!(out.stderr.contains("Is a directory"), "stderr={:?}", out.stderr);
+    assert!(
+        out.stderr.contains("Is a directory"),
+        "stderr={:?}",
+        out.stderr
+    );
     assert!(survived, "rm deleted the directory operand");
 }
 
@@ -184,7 +220,11 @@ fn rm_double_dash_makes_dash_operands_literal() {
     let survived = dir.join("tree").exists();
     clean(dir);
     assert_eq!(out.status, 1, "stderr={:?}", out.stderr);
-    assert!(survived, "rm -- deleted a directory: stderr={:?}", out.stderr);
+    assert!(
+        survived,
+        "rm -- deleted a directory: stderr={:?}",
+        out.stderr
+    );
 }
 
 #[test]

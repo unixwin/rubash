@@ -31,7 +31,8 @@ fn issue1710_export_integer_indexed_append_adds() {
     assert_eq!(stdout, "Q:15\n", "stdout: {stdout}");
     assert_eq!(code, Some(0));
     // Only element 0 is appended to; the remaining elements survive.
-    let (stdout, _, _) = rubash("declare -ia ac=(1 20); export 'ac+=5'; echo \"${ac[0]},${ac[1]}\"");
+    let (stdout, _, _) =
+        rubash("declare -ia ac=(1 20); export 'ac+=5'; echo \"${ac[0]},${ac[1]}\"");
     assert_eq!(stdout, "6,20\n", "stdout: {stdout}");
 }
 
@@ -52,8 +53,7 @@ fn issue1710_integer_assoc_append_adds_at_key_zero() {
     let (stdout, _, _) = rubash("declare -iA n=([0]=10); readonly 'n+=5'; echo \"${n[0]}\"");
     assert_eq!(stdout, "15\n", "stdout: {stdout}");
     // A missing key 0 starts from 0; the other keys are untouched.
-    let (stdout, _, _) =
-        rubash("declare -iA z=([k]=3); export 'z+=2*3'; echo \"${z[0]}|${z[k]}\"");
+    let (stdout, _, _) = rubash("declare -iA z=([k]=3); export 'z+=2*3'; echo \"${z[0]}|${z[k]}\"");
     assert_eq!(stdout, "6|3\n", "stdout: {stdout}");
 }
 

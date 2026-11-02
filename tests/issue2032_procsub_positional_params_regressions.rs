@@ -105,12 +105,7 @@ fn issue2032_input_procsub_redirect_form_inherits_positional_params() {
 #[test]
 fn issue2032_input_procsub_argument_form_inherits_positional_params() {
     let dir = scratch("argform");
-    let (out, err, code) = rubash_c(
-        &dir,
-        "cat <(printf '<%s>\\n' \"$@\")",
-        &["AAA", "BBB"],
-        &[],
-    );
+    let (out, err, code) = rubash_c(&dir, "cat <(printf '<%s>\\n' \"$@\")", &["AAA", "BBB"], &[]);
     assert_eq!(code, Some(0), "stderr: {err}");
     assert_eq!(out, "<AAA>\n<BBB>\n");
 }
@@ -170,7 +165,8 @@ fn issue2032_nested_procsub_inherits_through_both_levels() {
 #[test]
 fn issue2032_output_procsub_body_inherits_positional_params() {
     let dir = scratch("outbody");
-    let script = "printf 'hello\\n' > >(read -r x; printf 'p1=[%s] x=[%s]\\n' \"$1\" \"$x\" > result.txt)\n\
+    let script =
+        "printf 'hello\\n' > >(read -r x; printf 'p1=[%s] x=[%s]\\n' \"$1\" \"$x\" > result.txt)\n\
                   for i in 1 2 3 4 5 6 7 8 9 10; do [ -f result.txt ] && break; sleep 0.2; done\n\
                   cat result.txt";
     let (out, err, code) = rubash_c(&dir, script, &["AAA", "BBB"], &[]);
@@ -181,7 +177,8 @@ fn issue2032_output_procsub_body_inherits_positional_params() {
 #[test]
 fn issue2032_async_child_inherits_positional_params() {
     let dir = scratch("async");
-    let script = "g() { printf 'async: <%s>\\n' \"$@\" > result.txt; }; g \"$@\" & wait; cat result.txt";
+    let script =
+        "g() { printf 'async: <%s>\\n' \"$@\" > result.txt; }; g \"$@\" & wait; cat result.txt";
     let (out, err, code) = rubash_c(&dir, script, &["AAA", "BBB"], &[]);
     assert_eq!(code, Some(0), "stderr: {err}");
     assert_eq!(out, "async: <AAA>\nasync: <BBB>\n");

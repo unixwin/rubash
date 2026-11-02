@@ -52,8 +52,7 @@ impl IsolatedPath {
         for tool in ["cat", "sleep"] {
             let target = format!("/usr/bin/{tool}");
             if std::path::Path::new(&target).exists() {
-                std::os::unix::fs::symlink(&target, dir.join(tool))
-                    .expect("symlink tool");
+                std::os::unix::fs::symlink(&target, dir.join(tool)).expect("symlink tool");
             }
         }
         IsolatedPath { dir }
@@ -177,10 +176,7 @@ fn issue1653_first_word_reports_its_own_name() {
         &path,
     );
     assert_eq!(code, 0, "stdout: {stdout}, stderr: {stderr}");
-    assert!(
-        stdout.contains("COPROC_PID=\""),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("COPROC_PID=\""), "stdout: {stdout}");
     assert!(
         stderr.contains("FOO: command not found"),
         "stderr: {stderr}"
@@ -195,10 +191,7 @@ fn issue1653_time_dash_p_is_plain_word_after_coproc() {
         &path,
     );
     assert_eq!(code, 0, "stdout: {stdout}, stderr: {stderr}");
-    assert!(
-        stdout.contains("COPROC_PID=\""),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("COPROC_PID=\""), "stdout: {stdout}");
     assert!(
         stderr.contains("time: command not found"),
         "stderr: {stderr}"

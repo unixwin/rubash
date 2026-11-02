@@ -42,8 +42,7 @@ fn rubash_c(script: &str) -> (String, String, Option<i32>) {
 /// `hi cat` (the pipe was dropped and `cat` became an argument).
 #[test]
 fn background_function_comsub_pipeline_keeps_pipe() {
-    let (stdout, stderr, code) =
-        rubash_c(r#"f() { x=$(echo hi | cat); echo "$x"; }; f & wait"#);
+    let (stdout, stderr, code) = rubash_c(r#"f() { x=$(echo hi | cat); echo "$x"; }; f & wait"#);
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "hi\n", "stdout: {stdout}");
     assert!(stderr.is_empty(), "stderr: {stderr}");

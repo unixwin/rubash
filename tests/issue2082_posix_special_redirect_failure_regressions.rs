@@ -186,10 +186,7 @@ fn issue2082_posix_pipeline_stage_redirect_failure_is_contained() {
         "stage-contained",
         "exec 9>&-\nset -o posix\n: <&9 | cat\necho \"AFTER prc=${PIPESTATUS[0]}\"\n",
     );
-    assert_eq!(
-        stdout, "AFTER prc=1\n",
-        "stdout: {stdout} stderr: {stderr}"
-    );
+    assert_eq!(stdout, "AFTER prc=1\n", "stdout: {stdout} stderr: {stderr}");
     assert!(
         stderr.contains("9: Bad file descriptor"),
         "stderr: {stderr}"
@@ -235,10 +232,7 @@ fn issue2082_posix_function_redirect_failure_continues() {
         "function",
         "exec 9>&-\nset -o posix\nf() { echo INFUNC; }\nf <&9\necho \"AFTER rc=$?\"\n",
     );
-    assert_eq!(
-        stdout, "AFTER rc=1\n",
-        "stdout: {stdout} stderr: {stderr}"
-    );
+    assert_eq!(stdout, "AFTER rc=1\n", "stdout: {stdout} stderr: {stderr}");
     assert_eq!(code, Some(0));
 }
 
@@ -251,9 +245,6 @@ fn issue2082_posix_command_prefix_redirect_failure_continues() {
         "command-prefix",
         "exec 9>&-\nset -o posix\ncommand : <&9\necho \"AFTER rc=$?\"\n",
     );
-    assert_eq!(
-        stdout, "AFTER rc=1\n",
-        "stdout: {stdout} stderr: {stderr}"
-    );
+    assert_eq!(stdout, "AFTER rc=1\n", "stdout: {stdout} stderr: {stderr}");
     assert_eq!(code, Some(0));
 }
