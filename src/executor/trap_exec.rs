@@ -4400,6 +4400,10 @@ impl Executor {
                 // GNU process_substitute records the child in $!
                 // (subst.c assigns last_made_pid).
                 self.shell_state.last_background_pid = Some(pid);
+                // rubash#2560: ... and as last_procsub_child
+                // (subst.c procsub_add), which a bare `wait`
+                // settles when it is still $!.
+                self.shell_state.last_procsub_pid = Some(pid);
                 let file = crate::fd::handle_to_file(crate::fd::into_handle(reader));
                 Some(FileFd::from_file(file, format!("<({source})").into()))
             }
@@ -5475,6 +5479,9 @@ impl Executor {
             Some(pid) => {
                 self.shell_state.job_table.procsub_placeholders.insert(pid);
                 self.shell_state.last_background_pid = Some(pid);
+                // rubash#2560: most recent procsub child (GNU
+                // last_procsub_child), placeholder form.
+                self.shell_state.last_procsub_pid = Some(pid);
                 Some(pid)
             }
             None => None,

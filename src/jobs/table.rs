@@ -187,6 +187,15 @@ impl JobTable {
         pgrp: u32,
         stage_commands: Vec<String>,
     ) -> JobId {
+        // GNU jobs.c:572 (stop_pipeline, run for every pipeline launch
+        // before alloc_job_entry): cleanup_dead_jobs first — a slot
+        // whose job was consumed by an operand `wait` (marked
+        // J_NOTIFIED by wait_for_job/wait_for_single_pid, jobs.c:3434 /
+        // 2776) is collected here, so the new job reuses its number
+        // instead of stacking on top of the corpse (rubash#2529:
+        // `wait %1; sleep &` numbered the new job [2], and the
+        // misnumbered %1 then missed the live job in `kill`).
+        self.cleanup_dead_jobs();
         // GNU jobs.c:586-614 alloc_job_entry: a non-interactive shell scans
         // forward from js.j_lastj and takes the first free slot — the job
         // number is the slot index, which keeps holes open for jobs that
@@ -455,6 +464,17 @@ impl JobTable {
         self.pid_to_job.get(&pid).copied()
     }
 
+    /// The job recorded for `pid` currently sits in the Stopped
+    /// state — GNU's `JOBSTATE (job) == JSTOPPED` as waitchld last
+    /// recorded it, which is the state an operand `wait` answers
+    /// from (jobs.c:3064, rubash#2539).
+    pub fn job_recorded_stopped(&self, pid: u32) -> bool {
+        self.pid_to_job
+            .get(&pid)
+            .and_then(|job_id| self.jobs.get(job_id))
+            .is_some_and(|job| job.state == ProcessState::Stopped)
+    }
+
     /// Record that a new top-level reader command has started
     /// (rubash#1494's notification-lag clock).
     pub fn note_reader_command(&mut self) {
@@ -501,6 +521,17 @@ impl JobTable {
         }
     }
 
+    /// True when `pid` was fatally signalled by the shell's own
+    /// `kill` during the current or the immediately preceding
+    /// reader command (see note_reader_command for why the window
+    /// spans the boundary). Peek form: does not consume the mark.
+    pub fn fresh_fatal_live(&self, pid: u32) -> bool {
+        let now = self.reader_command_seq;
+        self.fresh_fatal_marks
+            .iter()
+            .any(|(marked, seq)| *marked == pid && *seq + 1 >= now)
+    }
+
     /// True (once) when `pid` was fatally signalled by the shell's
     /// own `kill` during the current or the immediately preceding
     /// reader command (see note_reader_command for why the window
@@ -536,12 +567,41 @@ impl JobTable {
     /// one command too early for that microsecond case (#1607) and
     /// never published at all where the reader's cadence differs
     /// (#1612).
-    pub fn apply_deferred_state_marks(&mut self, observe_event: bool) {
+    ///
+    /// `hold_running_for_stopped` is the operand wait's gate
+    /// (rubash#2539): GNU wait_for (jobs.c:3064) answers from the
+    /// state waitchld last RECORDED — it calls waitchld only while
+    /// the target child/job is recorded RUNNING, so a job recorded
+    /// STOPPED keeps its stop answer (128+WSTOPSIG, jobs.c:3255-3257)
+    /// even when a SIGCONT and a death are already pending. A
+    /// `Running` mark for such a job is therefore held back for the
+    /// wait's own refresh; it publishes at the next ordinary
+    /// notification point, like the unreaped WCONTINUED report.
+    pub fn apply_deferred_state_marks(
+        &mut self,
+        observe_event: bool,
+        hold_running_for_stopped: bool,
+    ) {
         const AGED: std::time::Duration = std::time::Duration::from_millis(5);
         let now = self.reader_command_seq;
         let mut pending = std::mem::take(&mut self.deferred_state_marks);
         let mut ready = Vec::new();
         pending.retain(|(pid, state, seq, sent)| {
+            // The hold covers only the CONT+KILL shape: a fatal
+            // signal from the shell's own `kill` is live in the
+            // fresh-fatal window for this pid, so the recorded
+            // STOPPED state must outrank both pending reports at
+            // this wait. A LONE pending CONT (no fatal signal)
+            // publishes normally — GNU records it and the wait
+            // then blocks for the live job (oracle v7 probe;
+            // the disown -r cleanup waits rely on it).
+            if hold_running_for_stopped
+                && *state == DeferredJobState::Running
+                && self.job_recorded_stopped(*pid)
+                && self.fresh_fatal_live(*pid)
+            {
+                return true;
+            }
             if observe_event || (*seq < now && sent.elapsed() >= AGED) {
                 ready.push((*pid, *state));
                 false

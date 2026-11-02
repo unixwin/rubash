@@ -120,7 +120,7 @@ impl Executor {
         // (jobs.c list_all_jobs/list_one_job call cleanup_dead_jobs,
         // which reaps coprocs) — the same disposal point as the wait
         // family (rubash#2053).
-        let _ = self.apply_pending_job_completions(true);
+        let _ = self.apply_pending_job_completions(true, false);
         self.flush_pending_coproc_retirements();
         let mut stderr = Vec::new();
         let action = crate::builtins::jobs::execute_with_io(
@@ -383,7 +383,11 @@ impl Executor {
     }
 
     fn execute_wait_inner(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
-        self.refresh_background_jobs_observed()?;
+        // rubash#2539: the wait's entry refresh runs under the
+        // recorded-state gate (jobs.c:3064) — a job recorded STOPPED
+        // keeps that answer for this wait even if SIGCONT/death
+        // reports are already pending.
+        self.refresh_background_jobs_observed_for_wait()?;
         // GNU wait.def wait_builtin() internal_getopt "fnp:": a dangling
         // `-p` (no joined text, no next word) is a getopt error, reported
         // before any validation or waiting, and returns EX_USAGE
@@ -674,6 +678,17 @@ impl Executor {
                     _ => {}
                 }
             }
+            // rubash#2560: GNU wait_for_background_pids' procsub
+            // step (jobs.c:2853-2858, no WAIT_WAITS_FOR_ALL_PROCSUBS
+            // in the oracle build): procsub_waitpid on the last
+            // procsub child when it is $! — this BLOCKS for a live
+            // consumer/producer, which the placeholder sweep below
+            // never does (a real `>(...)` consumer lives in
+            // background_children, not in the placeholder set).
+            if let Some(interrupt) = self.wait_last_procsub_if_last_async()? {
+                self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
+                return Ok(interrupt);
+            }
             // rubash#1022: GNU's no-operand wait also reaps finished
             // process substitutions (jobs.c waits the last procsub when it
             // is $!). Completed placeholders are already dead, so the
@@ -820,6 +835,18 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 return Ok(status);
             }
+        }
+
+        // rubash#2560: a bare wait that reached here (no background
+        // jobs to wait for) still runs wait_for_background_pids'
+        // procsub step (jobs.c:2853-2858) — settle the last procsub
+        // child when it is $! — followed by the delete_procsubs
+        // sweep, before the empty wait reports success.
+        if cmd.words.len() == 1 {
+            if let Some(interrupt) = self.wait_last_procsub_if_last_async()? {
+                return Ok(interrupt);
+            }
+            self.sweep_procsub_placeholders();
         }
 
         let mut stderr = Vec::new();
@@ -1105,7 +1132,7 @@ impl Executor {
         if !self.shell_state.coproc_names.is_empty() || !self.pending_coproc_retirements.is_empty()
         {
             let _ = self.refresh_background_jobs();
-            let _ = self.apply_pending_job_completions(true);
+            let _ = self.apply_pending_job_completions(true, false);
             self.flush_pending_coproc_retirements();
         }
     }
@@ -1179,6 +1206,33 @@ impl Executor {
             .collect();
         for pid in candidates {
             self.reap_procsub_placeholder(pid, false);
+        }
+    }
+
+    /// rubash#2560: the bare wait's procsub step — GNU
+    /// wait_for_background_pids (jobs.c:2853-2858): without
+    /// WAIT_WAITS_FOR_ALL_PROCSUBS (the oracle build does not
+    /// define it), only the LAST procsub child is waited, and only
+    /// when it is also the last asynchronous pid ($!):
+    /// procsub_waitpid (jobs.c:1131) blocks in wait_for for it.
+    /// Returns Some(status) when a trapped signal interrupted the
+    /// block, mirroring the per-job pass's interrupt arm.
+    fn wait_last_procsub_if_last_async(&mut self) -> Result<Option<i32>, ExecuteError> {
+        let Some(procsub_pid) = self.shell_state.last_procsub_pid else {
+            return Ok(None);
+        };
+        if self.shell_state.last_background_pid != Some(procsub_pid) {
+            return Ok(None);
+        }
+        if !self.background_children.contains_key(&procsub_pid) {
+            // Already reaped and recorded, or a fork placeholder
+            // whose recorded status the placeholder sweep settles:
+            // procsub_waitpid returns the recorded status at once.
+            return Ok(None);
+        }
+        match self.wait_for_background_pid(procsub_pid, false)? {
+            WaitPidOutcome::Interrupted(status) => Ok(Some(status)),
+            _ => Ok(None),
         }
     }
 
@@ -1368,7 +1422,7 @@ impl Executor {
     /// command's redirects, so a dead coproc's `name`/`name_PID` are gone
     /// before that command expands.
     pub(in crate::executor) fn refresh_background_jobs(&mut self) -> Result<(), ExecuteError> {
-        self.refresh_background_jobs_impl(false)
+        self.refresh_background_jobs_impl(false, false)
     }
 
     /// The wait/fg form: an explicit wait observes reap state
@@ -1377,7 +1431,37 @@ impl Executor {
     pub(in crate::executor) fn refresh_background_jobs_observed(
         &mut self,
     ) -> Result<(), ExecuteError> {
-        self.refresh_background_jobs_impl(true)
+        self.refresh_background_jobs_impl(true, false)
+    }
+
+    /// The operand-wait form (rubash#2539): like the observed
+    /// refresh, but under GNU wait_for's recorded-state gate
+    /// (jobs.c:3064 wait_for): waitchld is consulted only for
+    /// children/jobs recorded RUNNING, so for a job recorded STOPPED
+    /// neither a pending SIGCONT publication nor a pending death
+    /// completion may land during the wait's own refresh — the wait
+    /// answers 128+WSTOPSIG from the recorded state (jobs.c:3255)
+    /// and prints no death notice. The held state lands at the next
+    /// ordinary notification point instead.
+    ///
+    /// The gate is scoped to NON-interactive invocation (GNU
+    /// 5.3.20 probes, 2026-11-02): in a script, a stopped job that
+    /// is CONT+KILLed or plain KILLed on an earlier line still
+    /// answers 147 to the next line's wait — script lines give
+    /// waitchld no recording opportunity before wait_for's gate
+    /// evaluates. An interactive shell blocks in the reader
+    /// between commands and its SIGCHLD handler records every
+    /// pending change there, so the same lines interactively
+    /// answer 137 (the death is already recorded when the wait
+    /// runs) — interactively the ungated observed refresh is the
+    /// faithful emulation of that recording point. A foreground
+    /// wait between the kill and the wait is a recording point in
+    /// both modes and is unaffected (the state lands at that
+    /// refresh, before the wait's own).
+    pub(in crate::executor) fn refresh_background_jobs_observed_for_wait(
+        &mut self,
+    ) -> Result<(), ExecuteError> {
+        self.refresh_background_jobs_impl(true, !self.invocation_interactive())
     }
 
     /// Record that this executor blocked in wait() for a foreground
@@ -1401,7 +1485,11 @@ impl Executor {
         self.note_foreground_wait();
     }
 
-    fn refresh_background_jobs_impl(&mut self, force_observe: bool) -> Result<(), ExecuteError> {
+    fn refresh_background_jobs_impl(
+        &mut self,
+        force_observe: bool,
+        wait_gate: bool,
+    ) -> Result<(), ExecuteError> {
         // part_036 (jobs.c waitchld lag): a reap becomes VISIBLE in the
         // job table only at a GNU observation point — the shell blocked
         // in wait() for a foreground process, the reader advanced to a
@@ -1416,7 +1504,12 @@ impl Executor {
             self.reader_command_line.get(),
             self.foreground_wait_count.get(),
         );
-        let observation_happened = mark != self.reap_prev_mark.get();
+        let prev_mark = self.reap_prev_mark.get();
+        let observation_happened = mark != prev_mark;
+        // rubash#2529: the reader-boundary cleanup below keys on the
+        // run/line components only — GNU's read_command boundary is
+        // per freshly read list, never between one list's elements.
+        let line_advanced = mark.0 != prev_mark.0 || mark.1 != prev_mark.1;
         // rubash#1607/#1612: publication of the shell's own kill
         // state marks uses a NARROWER event set than reap visibility.
         // A mere reader-line advance must not publish (kill -STOP,
@@ -1439,8 +1532,8 @@ impl Executor {
         // per-command boundary that reaps finished children.
         self.shell_state
             .job_table
-            .apply_deferred_state_marks(state_observe);
-        self.apply_pending_job_completions(observe)?;
+            .apply_deferred_state_marks(state_observe, wait_gate);
+        self.apply_pending_job_completions(observe, wait_gate)?;
         let mut finished = Vec::new();
         for (pid, child) in &mut self.background_children {
             let mut reaped = child.try_wait()?;
@@ -1554,7 +1647,15 @@ impl Executor {
                 && term_signal.is_some()
                 && !self.shell_state.coproc_names.contains_key(&pid)
                 && self.shell_state.job_table.take_fresh_fatal(pid);
-            if !fresh_fatal && observe {
+            // rubash#2539: under the operand wait's recorded-state
+            // gate a completion for a job recorded STOPPED is held
+            // like an unobserved one — wait_for (jobs.c:3064) never
+            // reaps it during this wait, so the wait must not see
+            // the death (nor queue its notice). It applies at the
+            // next ordinary notification point.
+            let stopped_recorded =
+                wait_gate && self.shell_state.job_table.job_recorded_stopped(pid);
+            if !fresh_fatal && observe && !stopped_recorded {
                 self.apply_job_completion(pid, status, term_signal)?;
             } else {
                 self.pending_job_completions
@@ -1571,16 +1672,45 @@ impl Executor {
         if force_observe || foreground_blocked {
             self.flush_pending_coproc_retirements();
         }
+        // GNU parse.y:2533 read_command -> notify_and_cleanup
+        // (jobs.c:3642-3652): once per freshly read command list,
+        // after the reap/notify half, cleanup_dead_jobs (jobs.c:1303)
+        // deletes the DEADJOB && IS_NOTIFIED entries. An entry an
+        // operand wait consumed on an earlier line (the wait marked
+        // it notified, jobs.c:3434/2776) is therefore gone before
+        // this line's operands resolve: `kill %n` answers "no such
+        // job" instead of silently succeeding against the corpse,
+        // and a repeated `wait %n` on a later line reports 127
+        // (rubash#2529). Gated on the reader line advancing so no
+        // cleanup runs between the `;` elements of one list, where
+        // GNU retains the entry.
+        if line_advanced {
+            self.shell_state.job_table.cleanup_dead_jobs();
+        }
         Ok(())
     }
 
     /// Apply stashed reap results once an observation point arrives.
-    fn apply_pending_job_completions(&mut self, observe: bool) -> Result<(), ExecuteError> {
+    /// Under the operand wait's recorded-state gate (rubash#2539)
+    /// a stashed completion for a job recorded STOPPED stays
+    /// stashed: wait_for (jobs.c:3064) answers that wait from the
+    /// recorded stop state, not from a death waitchld has not
+    /// recorded for it.
+    fn apply_pending_job_completions(
+        &mut self,
+        observe: bool,
+        wait_gate: bool,
+    ) -> Result<(), ExecuteError> {
         if !observe || self.pending_job_completions.is_empty() {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_job_completions);
         for (pid, status, term_signal) in pending {
+            if wait_gate && self.shell_state.job_table.job_recorded_stopped(pid) {
+                self.pending_job_completions
+                    .push((pid, status, term_signal));
+                continue;
+            }
             self.apply_job_completion(pid, status, term_signal)?;
         }
         Ok(())
