@@ -4,7 +4,14 @@
 //! `case '='` (subst.c:10346) routes the still-subscripted name to
 //! parameter_brace_expand_rhs (subst.c:8096), and the bind fails with
 //! `name[@]: bad array subscript` (EX_BADUSAGE, status 2) in every
-//! command position. The one legal base is an associative array,
+//! command position. The status the shell surfaces is mode-dependent:
+//! a script file's reader_loop preserves the pre-set EX_BADUSAGE
+//! (subst.c:8164; eval.c:111-118), while a `-c` string runs under the
+//! parse_and_execute catch (builtins/evalstring.c:423-450), which
+//! folds it to 1. This harness invokes `-c`, so the five
+//! simple-command pins below assert rc=1; GNU gives 2 for the same
+//! shapes from files, and rubash matches GNU in both modes (oracle
+//! matrix in the rubash#2528 investigation). The one legal base is an associative array,
 //! where the literal "@" / "*" text is an ordinary key. The same
 //! issue's second root: the error operators (`:?` / `?`) on a BARE
 //! array name read the raw storage string instead of element 0
@@ -12,7 +19,8 @@
 //! no "0" key or a sparse indexed array with no element 0 wrongly
 //! passed the null test.
 //!
-//! Expected outputs verified against GNU bash 5.3.20 (script files).
+//! Expected outputs verified against GNU bash 5.3.20 in both modes
+//! (script files and `-c` strings); this harness uses `-c`.
 
 use std::process::Command;
 
@@ -33,7 +41,7 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 fn issue1597_unset_at_assignment_is_bad_subscript() {
     let (stdout, stderr, code) = rubash("echo ${never_set_xyz[@]:=dv}\necho \"rc=$?\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "rc=2\n");
+    assert_eq!(stdout, "rc=1\n");
     assert!(
         stderr.contains("never_set_xyz[@]: bad array subscript"),
         "stderr: {stderr}"
@@ -44,7 +52,7 @@ fn issue1597_unset_at_assignment_is_bad_subscript() {
 fn issue1597_unset_star_assignment_plain_equals_is_bad_subscript() {
     let (stdout, stderr, code) = rubash("echo ${never_set_xyz[*]=dv}\necho \"rc=$?\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "rc=2\n");
+    assert_eq!(stdout, "rc=1\n");
     assert!(
         stderr.contains("never_set_xyz[*]: bad array subscript"),
         "stderr: {stderr}"
@@ -55,7 +63,7 @@ fn issue1597_unset_star_assignment_plain_equals_is_bad_subscript() {
 fn issue1597_scalar_null_at_assignment_is_bad_subscript() {
     let (stdout, stderr, code) = rubash("v=''\necho ${v[@]:=dv}\necho \"rc=$? v=[$v]\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "rc=2 v=[]\n");
+    assert_eq!(stdout, "rc=1 v=[]\n");
     assert!(
         stderr.contains("v[@]: bad array subscript"),
         "stderr: {stderr}"
@@ -76,7 +84,7 @@ fn issue1597_scalar_set_at_assignment_does_not_trigger() {
 fn issue1597_empty_indexed_array_at_assignment_is_bad_subscript() {
     let (stdout, stderr, code) = rubash("a=()\necho ${a[@]:=dv}\necho \"rc=$?\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "rc=2\n");
+    assert_eq!(stdout, "rc=1\n");
     assert!(
         stderr.contains("a[@]: bad array subscript"),
         "stderr: {stderr}"
@@ -89,7 +97,7 @@ fn issue1597_single_empty_element_array_at_assignment_is_bad_subscript() {
     // empty element joins to "" and still triggers the bind.
     let (stdout, stderr, code) = rubash("a=(\"\")\necho ${a[@]:=dv}\necho \"rc=$?\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "rc=2\n");
+    assert_eq!(stdout, "rc=1\n");
     assert!(
         stderr.contains("a[@]: bad array subscript"),
         "stderr: {stderr}"
@@ -126,6 +134,11 @@ fn issue1597_assoc_star_assignment_binds_literal_star_key() {
 
 #[test]
 fn issue1597_bad_subscript_status_in_pipeline() {
+    // NOTE: ps=2 is the file-mode value. GNU `-c` gives 1 here, but
+    // the element takes the inline echo/printf slot route, which does
+    // not fold the DISCARD status yet (rubash#2556) — so under this
+    // `-c` harness the pin currently passes on the file-mode value.
+    // When #2556 lands, flip this expectation to ps=1 in the same PR.
     let (stdout, _, code) =
         rubash("echo ${never_set_xyz[@]:=dv} | cat\necho \"ps=${PIPESTATUS[0]}\"");
     assert_eq!(code, Some(0));
