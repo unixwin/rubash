@@ -41,6 +41,28 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     Some((base, subscript))
 }
 
+/// A subscript that is a clean decimal integer literal (`-3`, `0`, `42`,
+/// `+7`): evaluating it through evalexp reads no variable, draws no RNG
+/// and writes nothing, so its value is decidable without evaluation.
+/// Multi-digit forms with a leading zero are excluded — shell arithmetic
+/// reads those as octal (`08` is an evalexp error), not as the decimal
+/// value written here — as is anything carrying names, expansions or
+/// operators (rubash#2527).
+fn clean_integer_literal_subscript(key: &str) -> Option<i128> {
+    let key = key.trim();
+    let (sign, digits) = match key.strip_prefix('-') {
+        Some(rest) => (-1i128, rest),
+        None => (1i128, key.strip_prefix('+').unwrap_or(key)),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    if digits.len() > 1 && digits.starts_with('0') {
+        return None;
+    }
+    digits.parse::<i128>().ok().map(|value| sign * value)
+}
+
 /// Byte length of the parameter-reference portion of a `${...}` body,
 /// mirroring GNU `subst.c:791 string_extract` with `SX_VARNAME` as called
 /// from `parameter_brace_expand` (`subst.c:9807`, delimiter set
@@ -1634,7 +1656,15 @@ impl Executor {
             if !is_parameter_error_name(var_name) {
                 continue;
             }
-            let value = self.parameter_error_value(var_name);
+            // rubash#2527: the verdict must not come from an evaluating
+            // fetch — the real expansion fetches the parameter itself,
+            // and GNU fetches exactly once (subst.c:9777
+            // parameter_brace_expand → one array_value_internal). A
+            // subscript the probe cannot settle without evaluating is
+            // left to that single real fetch.
+            let Some(value) = self.pre_scan_operator_value(var_name) else {
+                continue;
+            };
             let word_evaluated = match op {
                 ":=" | ":-" => value.as_deref().map(str::is_empty).unwrap_or(true),
                 "=" | "-" => value.is_none(),
@@ -1647,6 +1677,109 @@ impl Executor {
             return self.parameter_expansion_error_in_word(word);
         }
         None
+    }
+
+    /// rubash#2527: the set/null verdict the error pre-scan needs for an
+    /// operator's left-hand side, derived WITHOUT evaluating a subscript.
+    /// GNU `parameter_brace_expand` (subst.c:9777) fetches the parameter
+    /// exactly once — `array_value_internal` (arrayfunc.c) evaluates the
+    /// subscript inside that single fetch and prints `err_badarraysub`
+    /// there — so a layered pre-scan that fetches an element reference
+    /// runs the subscript (and its diagnostic) a second time when the
+    /// real expansion repeats the fetch. Plain names and the `[@]`/`[*]`
+    /// joins read storage without evaluating anything and keep the
+    /// ordinary fetch. An element reference is answered from the same
+    /// sources the fetch's own legs read — the live dynamic view, the
+    /// typed assoc cell / storage mirror, `resolve_indexed_array_subscript`
+    /// over the storage render, and the scalar leg's element-0 rule —
+    /// whose values the fetch is invariant-bound to agree with, and only
+    /// for subscript shapes whose evaluation is provably side-effect-free
+    /// (a clean integer literal; expansion-free assoc key text). Any
+    /// other subscript returns `None` (undecidable): the caller skips
+    /// the span and the real expansion's single fetch adjudicates it.
+    fn pre_scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+        if !name.contains('[') {
+            return Some(self.parameter_error_value(name));
+        }
+        if name.ends_with("[@]") || name.ends_with("[*]") {
+            return Some(self.parameter_operator_value(name));
+        }
+        let (array_name, key) = parse_array_subscript(name)?;
+        // Nameref/storage resolution, mirroring the prologue of
+        // array_element_parameter_value_uncached: assoc-ness is judged
+        // on the storage (resolved) name.
+        let pre_attrs = self.shell_state.env_vars.attr_of(array_name);
+        let storage_owned: String;
+        let storage_name: &str = if pre_attrs.nameref {
+            match self.resolved_variable_name(array_name) {
+                Some(resolved) => {
+                    storage_owned = resolved;
+                    &storage_owned
+                }
+                // The fetch itself answers None for an unresolvable
+                // nameref, so the verdict is decided: unset.
+                None => return Some(None),
+            }
+        } else {
+            array_name
+        };
+        let assoc_marked = if pre_attrs.nameref {
+            is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, storage_name)
+        } else {
+            pre_attrs.assoc
+        };
+        if assoc_marked {
+            if key == "*" {
+                return Some(self.parameter_operator_value(name));
+            }
+            // assoc_subscript_key expands the key text; only
+            // expansion-free key text is provably side-effect-free.
+            if key.contains('$') || key.contains('`') {
+                return None;
+            }
+            let key = self.assoc_subscript_key(key);
+            if key.is_empty() {
+                // The fetch answers Some("") here (its diagnostic is
+                // printed by the real fetch, once).
+                return Some(Some(String::new()));
+            }
+            if let Some(settled) = self.assoc_element_value_settled(array_name, &key) {
+                return Some(settled);
+            }
+            let storage = self.parameter_array_storage(array_name).unwrap_or_default();
+            return Some(assoc_value_at(&storage, &key));
+        }
+        let index = clean_integer_literal_subscript(key)?;
+        if let Some(values) = self.dynamic_stack_array_values(array_name) {
+            if storage_name == "PIPESTATUS" {
+                return Some(self.pipestatus_element(index));
+            }
+            return Some(crate::executor::dynamic_arrays::dense_view_element(
+                &values, index,
+            ));
+        }
+        let storage = self.parameter_array_storage(array_name);
+        let storage_is_none = storage.is_none();
+        let storage = storage.unwrap_or_default();
+        if !self.parameter_is_array_variable(storage_name) {
+            // The fetch's scalar leg: element 0 is the scalar itself
+            // (a live dynamic value shadows the stored seed), an unset
+            // base has no element 0, and any other index is unset.
+            if index == 0 {
+                if let Some(dynamic) = self.dynamic_parameter_value(storage_name) {
+                    return Some(Some(dynamic));
+                }
+                if storage_is_none {
+                    return Some(None);
+                }
+                return Some(Some(shell_safe_value(&storage)));
+            }
+            return Some(None);
+        }
+        Some(
+            resolve_indexed_array_subscript(&storage, index)
+                .and_then(|resolved| array_value_at(&storage, resolved)),
+        )
     }
 
     fn parameter_expansion_error_in_word_context(
@@ -2176,15 +2309,22 @@ impl Executor {
                             })
                         }
                     } else {
-                        self.parameter_error_value(name).is_some_and(|value| {
-                            parameter_substring_has_negative_result(
-                                crate::executor::expand_braced_indices::parameter_char_length(
-                                    &value,
-                                ),
-                                offset,
-                                length,
-                            )
-                        })
+                        // rubash#2527: same single-fetch discipline as
+                        // nested_operator_word_error — a subscripted
+                        // element name is answered by the pure probe,
+                        // never by an evaluating fetch the real
+                        // expansion would repeat.
+                        self.pre_scan_operator_value(name)
+                            .and_then(|value| value)
+                            .is_some_and(|value| {
+                                parameter_substring_has_negative_result(
+                                    crate::executor::expand_braced_indices::parameter_char_length(
+                                        &value,
+                                    ),
+                                    offset,
+                                    length,
+                                )
+                            })
                     };
                     if is_invalid {
                         return Some((

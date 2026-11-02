@@ -752,12 +752,17 @@ impl Executor {
             // rubash#1542: an expansion-phase DISCARD harvested from the
             // element clone keeps its pre-set class status (EX_BADUSAGE
             // 2 for a failed `${var:=word}` bind) — except when this
-            // pipeline itself runs inside a command-substitution body,
-            // where the body's parse_and_execute catch
-            // (builtins/evalstring.c:423-426) folds it to
-            // EXECUTION_FAILURE like every DISCARD in that frame.
+            // pipeline itself runs inside a parse_and_execute catch,
+            // which folds it to EXECUTION_FAILURE like every DISCARD in
+            // that frame (builtins/evalstring.c:423-450): a command-
+            // substitution body (discard_fold_frame) or an enclosing
+            // parse_and_execute frame — eval, or the `-c` driver's
+            // run_one_command frame (shell.c; rubash#2528: GNU gives
+            // element status 1 under `-c` and inside eval, 2 from the
+            // script reader). The script reader_loop (eval.c:111-118)
+            // is not such a catch and preserves the 2.
             (Err(ExecuteError::ExpansionFailure(code)), Ok(_)) => {
-                if code == 2 && self.discard_fold_frame() {
+                if code == 2 && (self.discard_fold_frame() || self.in_parse_and_execute_frame()) {
                     1
                 } else {
                     code
@@ -1046,12 +1051,17 @@ impl Executor {
             // rubash#1542: an expansion-phase DISCARD harvested from the
             // element clone keeps its pre-set class status (EX_BADUSAGE
             // 2 for a failed `${var:=word}` bind) — except when this
-            // pipeline itself runs inside a command-substitution body,
-            // where the body's parse_and_execute catch
-            // (builtins/evalstring.c:423-426) folds it to
-            // EXECUTION_FAILURE like every DISCARD in that frame.
+            // pipeline itself runs inside a parse_and_execute catch,
+            // which folds it to EXECUTION_FAILURE like every DISCARD in
+            // that frame (builtins/evalstring.c:423-450): a command-
+            // substitution body (discard_fold_frame) or an enclosing
+            // parse_and_execute frame — eval, or the `-c` driver's
+            // run_one_command frame (shell.c; rubash#2528: GNU gives
+            // element status 1 under `-c` and inside eval, 2 from the
+            // script reader). The script reader_loop (eval.c:111-118)
+            // is not such a catch and preserves the 2.
             (Err(ExecuteError::ExpansionFailure(code)), Ok(_)) => {
-                if code == 2 && self.discard_fold_frame() {
+                if code == 2 && (self.discard_fold_frame() || self.in_parse_and_execute_frame()) {
                     1
                 } else {
                     code
