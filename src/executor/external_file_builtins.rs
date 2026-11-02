@@ -43,36 +43,18 @@ impl Executor {
                 | "/bin/tty"
                 | "/usr/bin/tty"
         );
-        // GNU findcmd.c:365/416 (search_for_command): a plain name resolved
-        // through PATH for execution enters the hash table with
-        // times_found=1. The emulated commands below stand in for that PATH
-        // binary, so record the same resolution — `hash -t`/`hash -l`/
-        // `BASH_CMDS` must see it (builtins9.sub: a stale `hash -p` entry
-        // forgotten under checkhash is re-recorded by the next run).
-        if emulated
-            && !name.contains('/')
-            && !name.contains('\\')
-            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
-            && self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_TEMP_PATH")
-                .map(String::as_str)
-                != Some("1")
-        {
-            if let Some(program) =
-                crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
-            {
-                let display = super::execution_misc::shell_display_path(
-                    &program.to_string_lossy().replace('\\', "/"),
-                );
-                crate::builtins::hash::record_command_resolution(
-                    &mut self.shell_state.env_vars,
-                    name,
-                    &display,
-                );
-            }
-        }
+        // GNU findcmd.c:344 search_for_command — called exactly ONCE per
+        // command execution (execute_cmd.c:5808 execute_disk_command) —
+        // is the single hash-table interaction an execution produces:
+        // either a phash_search hit bump (findcmd.c:365 ->
+        // hashlib.c:254 times_found++) or a phash_insert with found=1
+        // (findcmd.c:416/423/426 -> hashcmd.c:117). This layer's consult
+        // is not an execution: when the emulation declines, the
+        // fall-through resolution in external_inner performs that one
+        // interaction, so recording here up front double-counted every
+        // consult-then-decline run (`sed --version` -> 2 hits, GNU 1;
+        // rubash#2518). Record only after this layer has answered.
+        //
         // GNU redir.c do_redirections opens every redirection in the
         // forked child before exec: file targets are created/truncated
         // and a failed open kills the command with status 1. The
@@ -80,10 +62,14 @@ impl Executor {
         // write, so without this walk an fd>=3 target was never opened
         // at all and a failing one was silently ignored (rubash#1593:
         // `cat 3>f` created nothing, `cat 3>sub/f` ran with rc 0).
+        // search_for_command (and with it the hash record above) runs
+        // before the fork whose child opens redirections, so the
+        // redirect-killed path records too (rubash#2518).
         if self.apply_redirect_setup_side_effects(cmd)? {
+            self.record_emulated_command_resolution(name, emulated);
             return Ok(true);
         }
-        match cmd.words[0].as_str() {
+        let handled = match cmd.words[0].as_str() {
             "/bin/pwd" | "/usr/bin/pwd" => {
                 // Issue #2093 (GNU findcmd.c:383-385): a slash-bearing word
                 // is execve'd verbatim — when the shell path layer
@@ -133,6 +119,54 @@ impl Executor {
             #[cfg(windows)]
             "tput" | "/bin/tput" | "/usr/bin/tput" => self.external_tput(cmd),
             _ => Ok(false),
+        }?;
+        // rubash#2518: only an ANSWERED invocation may record — the
+        // emulation stood in for the PATH binary the way GNU's single
+        // search_for_command would have resolved it. A decline (Ok(false))
+        // leaves the count entirely to the real-path record in
+        // external_inner, which is GNU's one interaction for the
+        // execution. `tput` records itself inside external_tput and is
+        // kept out by the `emulated` gate below.
+        if handled {
+            self.record_emulated_command_resolution(name, emulated);
+        }
+        Ok(handled)
+    }
+
+    /// GNU findcmd.c:365/416 (search_for_command): a plain name resolved
+    /// through PATH for execution enters the hash table with
+    /// times_found=1; a repeat run bumps times_found. The emulated
+    /// commands stand in for that PATH binary, so an ANSWERED emulation
+    /// records the same resolution — `hash -t`/`hash -l`/`BASH_CMDS`
+    /// must see it (builtins9.sub: a stale `hash -p` entry forgotten
+    /// under checkhash is re-recorded by the next run). Called only
+    /// after this layer handled the command: the consult itself must
+    /// not count (rubash#2518).
+    fn record_emulated_command_resolution(&mut self, name: &str, emulated: bool) {
+        if !emulated
+            || name.contains('/')
+            || name.contains('\\')
+            || !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "hashall")
+            || self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_TEMP_PATH")
+                .map(String::as_str)
+                == Some("1")
+        {
+            return;
+        }
+        if let Some(program) =
+            crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
+        {
+            let display = super::execution_misc::shell_display_path(
+                &program.to_string_lossy().replace('\\', "/"),
+            );
+            crate::builtins::hash::record_command_resolution(
+                &mut self.shell_state.env_vars,
+                name,
+                &display,
+            );
         }
     }
 
