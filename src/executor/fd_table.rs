@@ -568,6 +568,38 @@ impl FdTable {
     /// opt-in per handle; see the annotated stubs in
     /// fd/windows_impl.rs), so this is a no-op there.
     pub(crate) fn register_inherited_process_fds(&mut self, snapshot: &[(u32, bool, bool)]) {
+        // rubash#2530: fd 0's birth seed above claims only the read
+        // arm (InheritedProcessStdin), but a process can be BORN with
+        // fd 0 open read-write — a parent shell's `<> file` spawn
+        // delivery (GNU make_cmd.c:682-683 r_input_output opens
+        // O_RDWR|O_CREAT, redir.c:725 redir_open), a terminal, an
+        // RDWR /dev/null. GNU keeps no registry to consult: a dup
+        // source is validated against the kernel itself
+        // (redir.c:1160, F_GETFD in do_redirection_internal's r_dup
+        // arm), so a write to fd 0 (`echo x >&0`) succeeds whenever
+        // the inherited description is writable. Adopt the write arm
+        // from the kernel exactly like the fd>=3 arms below: a
+        // duplicate of descriptor 0 itself, so the write side shares
+        // the ONE open file description — and its offset — with the
+        // read side. Only the unclaimed birth seed is reconciled: a
+        // slot the respawn restore claimed (a File read arm) and the
+        // born-closed seed (#2503) keep their restored state.
+        let fd0_unclaimed_birth_seed = self.entries.get(&0).is_some_and(|entry| {
+            !entry.closed
+                && entry.write.is_none()
+                && matches!(entry.read, Some(FdReadEndpoint::InheritedProcessStdin))
+        });
+        if fd0_unclaimed_birth_seed {
+            if let Some((_, true)) = crate::fd::fd_directions(0) {
+                if let Some(handle) = crate::fd::dup_adopted_fd(0) {
+                    let file = Rc::new(FileFd {
+                        handle,
+                        path: crate::fd::inherited_fd_path(0),
+                    });
+                    self.open_output(0, FdWriteEndpoint::File(file), false);
+                }
+            }
+        }
         for &(fd, _, _) in snapshot {
             if self.entries.contains_key(&fd) {
                 continue;
