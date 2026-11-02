@@ -41,7 +41,7 @@ fn run_script_timeout(script: &str, timeout: Duration) -> (String, String, Optio
     let start = Instant::now();
     let status = loop {
         match child.try_wait().expect("try_wait") {
-            Some(status) => break Some(status.code()),
+            Some(status) => break status.code(),
             None => {
                 if start.elapsed() > timeout {
                     let _ = child.kill();
