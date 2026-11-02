@@ -126,6 +126,31 @@ fn attach_child_stdio_closes(process: &mut Command, closed_fds: &[u32]) {
     }
 }
 
+/// rubash#2550: the child stdio slot for an fd-table /dev/full
+/// binding (rubash#1898's symbolic `FdWriteEndpoint::FullDevice`).
+/// GNU's permanent `exec 1>/dev/full` installs the OPENED device in
+/// the shell's own descriptor table (redir.c:237 do_redirections ->
+/// redir.c:790 do_redirection_internal, the open at redir.c:725
+/// redir_open) and a forked child inherits that descriptor
+/// (execute_cmd.c make_child): its writes fail ENOSPC inside the
+/// child, which diagnoses itself and exits nonzero. The symbolic
+/// endpoint carries no handle, so where the platform has the kernel
+/// device, open it fresh for the child — an independent open of
+/// /dev/full is indistinguishable (the device keeps no offset or
+/// state). Where no device exists behind the spelling (the Windows
+/// simulation) or the open fails, the binding stays unresolvable
+/// here and the caller declines to the legacy route, keeping the
+/// #1898 sink contract for the in-shell faces.
+fn full_device_stdio_slot() -> Option<ExternalStdioSlot> {
+    #[cfg(unix)]
+    {
+        if let Ok(file) = OpenOptions::new().write(true).open("/dev/full") {
+            return Some(ExternalStdioSlot::Handle(file));
+        }
+    }
+    None
+}
+
 impl Executor {
     pub(in crate::executor) fn apply_external_redirects(
         &mut self,
@@ -390,16 +415,24 @@ impl Executor {
                     let dup = crate::fd::duplicate_handle(file_fd.handle)?;
                     ExternalStdioSlot::Handle(crate::fd::handle_to_file(dup))
                 }
+                // rubash#2550: a /dev/full binding resolves through
+                // the real device wherever the platform has one (see
+                // full_device_stdio_slot); only where it cannot be
+                // opened does the plan decline like the dedicated
+                // plumbing shapes below.
+                FdWriteEndpoint::FullDevice => {
+                    let Some(slot) = full_device_stdio_slot() else {
+                        return Ok(None);
+                    };
+                    slot
+                }
                 // Coproc / process-substitution endpoints have dedicated
-                // legacy spawn plumbing. A /dev/full binding
-                // (rubash#1898) declines the same way — the legacy
-                // route reopens the spelling into the absorbed sink.
+                // legacy spawn plumbing.
                 // rubash#2042: a 0644-class synthetic /proc binding
                 // declines identically (same platform ceiling — the
                 // child's handle cannot fail EINVAL per write).
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
-                | FdWriteEndpoint::FullDevice
                 // rubash#2385: a complementary channel end declines
                 // identically — the queue cannot be a child handle;
                 // the legacy route's materialization owns the fd.
@@ -463,9 +496,14 @@ impl Executor {
                     }
                 }
                 FdWriteEndpoint::File(_) => None,
+                // rubash#2550: a dup whose source is an ambient
+                // /dev/full binding (e.g. `>&4` after
+                // `exec 4>/dev/full`) resolves through the same real
+                // device as the fd 1/2 seeding (full_device_stdio_slot);
+                // unresolvable only where no device backs the spelling.
+                FdWriteEndpoint::FullDevice => full_device_stdio_slot(),
                 FdWriteEndpoint::CoprocStdin { .. }
                 | FdWriteEndpoint::ProcessSubstitution { .. }
-                | FdWriteEndpoint::FullDevice
                 // rubash#2385: a complementary channel end cannot be
                 // a child handle either — the in-memory queue stays
                 // in the parent (the spawn delivery's sink-file
