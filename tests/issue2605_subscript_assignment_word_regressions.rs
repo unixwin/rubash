@@ -213,3 +213,112 @@ fn redirect_target_and_case_pattern_still_split() {
     assert_eq!(stdout, "rc=127\na[64\nhi\ncase-first\n");
     assert_eq!(stderr, "SCRIPT: line 2: 3]: command not found\n");
 }
+
+#[test]
+fn assignment_word_after_completed_redirect_stays_whole() {
+    let dir = scratch("redirlist");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "> /dev/null a[64|3]=A\n\
+         echo \"whole=${a[64+3]}\"\n\
+         > /dev/null b[64|3]\n\
+         echo \"rc=$?\"\n\
+         > /dev/null a[64|3]=A b[64|3]=B\n\
+         echo \"chain=${a[67]}${b[67]}\"\n",
+    );
+    // PST_REDIRLIST (make_cmd.c:483 set at simple-command creation,
+    // parse.y:3157-3161 in command_token_position): a redirection
+    // list opened AHEAD of the command word leaves the following word
+    // in command position, so its subscript span is whole — with an
+    // `=` tail, as a bare command name, and across an assignment
+    // chain that follows the completed redirection.
+    assert_eq!(stdout, "whole=A\nrc=127\nchain=AB\n");
+    assert_eq!(stderr, "SCRIPT: line 3: b[64|3]: command not found\n");
+}
+
+#[test]
+fn redirect_after_first_word_element_does_not_arm() {
+    let dir = scratch("redir-clear");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "a=1 > /dev/null b[64|3]=B\n\
+         echo \"rc=$?\"\n\
+         > /dev/null a=1 > /dev/null b[64|3]=B\n\
+         echo \"rc2=$?\"\n",
+    );
+    // The first word element joining the simple command clears
+    // PST_REDIRLIST (make_cmd.c:489), so a redirection list opened
+    // AFTER it never arms a later word: `b[64|3]=B` splits at the
+    // pipe into the two missing commands `b[64` and `3]=B`, both
+    // when the element precedes the list and when an assignment
+    // element intervenes between two lists.
+    assert_eq!(stdout, "rc=127\nrc2=127\n");
+    assert_eq!(
+        stderr,
+        "SCRIPT: line 1: b[64: command not found\n\
+         SCRIPT: line 1: 3]=B: command not found\n\
+         SCRIPT: line 3: b[64: command not found\n\
+         SCRIPT: line 3: 3]=B: command not found\n"
+    );
+}
+
+#[test]
+fn redirect_target_variants_split() {
+    let dir = scratch("target-variants");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "d=\"tv$$\"; mkdir \"$d\"; cd \"$d\" || echo CDFAIL\n\
+         echo hi >> a[64|3]\n\
+         echo \"app-rc=$?\"\n\
+         cat <<< a[64|3]\n\
+         echo \"hs-rc=$?\"\n\
+         > a[1 2]\n\
+         echo \"ws-rc=$?\"\n\
+         printf x > 'a[64'\n\
+         echo hi < a[64|3]\n\
+         echo \"in-rc=$?\"\n\
+         test -f 'a[64' && echo \"f64=yes\"\n\
+         test -f 'a[64|3]' || echo \"fwhole=no\"\n\
+         test -f 'a[1' && echo \"f1=yes\"\n\
+         cd ..; rm -rf \"$d\"\n",
+    );
+    // parsing_redirection (parse.y:3147) is uniform across the
+    // redirection operator class: the word after `>>`, `<<<`, `>`
+    // or `<` is a target and splits at the operator inside the
+    // brackets (and at the blank, for the whitespace shape — the
+    // whitespace exemption shares the same position gate). The
+    // `<` line's `hi` is piped into the missing `3]` command, so
+    // it never reaches stdout.
+    assert_eq!(
+        stdout,
+        "app-rc=127\nhs-rc=127\nws-rc=127\nin-rc=127\n\
+         f64=yes\nfwhole=no\nf1=yes\n"
+    );
+    assert_eq!(
+        stderr,
+        "SCRIPT: line 2: 3]: command not found\n\
+         SCRIPT: line 4: 3]: command not found\n\
+         SCRIPT: line 6: 2]: command not found\n\
+         SCRIPT: line 9: 3]: command not found\n"
+    );
+}
+
+#[test]
+fn quoted_close_inside_expansion_subscripts() {
+    let dir = scratch("quoted-close");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "declare -A m\n\
+         m['x]y']=Value\n\
+         echo \"dq=${m[\"x]y\"]}\"\n\
+         echo \"cs=${m[$(echo 'x]y')]}\"\n\
+         echo \"sub=${m['x]y']:1:3}\"\n",
+    );
+    // The expansion-side subscript reader is skipsubscript
+    // (subst.c:2189) = skip_matched_pair with quote/expansion unit
+    // skipping on (subst.c:2083-2186): a `]` inside single or
+    // double quotes, or inside a nested `$(...)`, is data, so all
+    // three reads find the element stored under the key `x]y`.
+    assert_eq!(stdout, "dq=Value\ncs=Value\nsub=alu\n");
+    assert_eq!(stderr, "");
+}
