@@ -118,6 +118,22 @@ impl DevOperandMaterialization {
     pub(in crate::executor) fn has_deferred_flushes(&self) -> bool {
         !self.flushes.is_empty()
     }
+
+    /// rubash#2589: drop the records for the std descriptors (0/1/2).
+    /// For a caller whose std descriptors are its own OS plumbing
+    /// (the Unix concurrent pipeline loop: fd 0 is the upstream pipe,
+    /// fd 1 the capture/inherit wiring — real descriptors by the time
+    /// the child spawns), a literal std operand resolves through the
+    /// child's real descriptor, the kernel serving the spelling
+    /// natively, and the shell's fd-table entries for 0/1/2 must NOT
+    /// be consumed or re-pinned on the stage's behalf (entry 0 in
+    /// particular is the enclosing context's binding, not the
+    /// stage's).
+    pub(in crate::executor) fn exclude_std_fd_records(&mut self) {
+        self.consume_fds.retain(|fd| *fd > 2);
+        #[cfg(unix)]
+        self.unix_fd_attach.retain(|(fd, _)| *fd > 2);
+    }
 }
 
 #[cfg(unix)]
@@ -582,12 +598,35 @@ impl Executor {
                     }
                     continue;
                 }
-                let buffered = match &entry.read {
-                    Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_)) => self
-                        .fd_table
-                        .input_snapshot_bytes(fd)
-                        .map(|(data, offset)| data[offset..].to_vec())
-                        .unwrap_or_default(),
+                let (buffered, consume) = match &entry.read {
+                    Some(FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_)) => {
+                        // rubash#2589: a materialized copy that names a
+                        // reopen origin (the stage-0 copy of a regular
+                        // file, #2502's bytes_with_origin) stands in for
+                        // that file — the spelled operand is a fresh
+                        // open of the origin (redir.c:725 plain open of
+                        // the magic link; the RF_DEVFD dup emulation at
+                        // redir.c:601-603 compiles only without
+                        // HAVE_DEV_FD), so the pipe carries the origin's
+                        // whole bytes and the copy's cursor is NOT
+                        // consumed: the same origin rule the redirect
+                        // path and dev_fd_operand_bytes already apply.
+                        // Without an origin the copy's own remainder is
+                        // the stream serve and the consume record stands.
+                        match self
+                            .fd_alias_reopen_path(fd)
+                            .and_then(|path| std::fs::read(path).ok())
+                        {
+                            Some(bytes) => (bytes, false),
+                            None => (
+                                self.fd_table
+                                    .input_snapshot_bytes(fd)
+                                    .map(|(data, offset)| data[offset..].to_vec())
+                                    .unwrap_or_default(),
+                                true,
+                            ),
+                        }
+                    }
                     _ => {
                         // Output process-substitution endpoints
                         // (`>(...)` spelled as an operand word,
@@ -617,7 +656,9 @@ impl Executor {
                         continue;
                     }
                 };
-                m.consume_fds.push(fd);
+                if consume {
+                    m.consume_fds.push(fd);
+                }
                 let Ok((read_end, write_end)) = crate::fd::create_capture_pipe() else {
                     continue;
                 };
@@ -705,6 +746,16 @@ impl Executor {
         if let Some(read) = &entry.read {
             return match read {
                 FdReadEndpoint::Text(_) | FdReadEndpoint::ProcessSubstitution(_) => {
+                    // rubash#2589: the origin rule from the Unix
+                    // materialize path above — a stage copy naming a
+                    // reopen origin serves the origin file fresh
+                    // (redir.c:725) and the copy is not consumed.
+                    if let Some(bytes) = self
+                        .fd_alias_reopen_path(fd)
+                        .and_then(|path| std::fs::read(path).ok())
+                    {
+                        return dev_operand_temp(&bytes, m);
+                    }
                     let bytes = self
                         .fd_table
                         .input_snapshot_bytes(fd)
