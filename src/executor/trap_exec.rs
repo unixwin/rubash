@@ -4155,11 +4155,14 @@ impl Executor {
         // order is preserved exactly; spill + apply happen just
         // before the spawn below.
         let mut env_entries: Vec<(String, String)> = Vec::new();
-        for (key, value) in &self.shell_state.env_vars {
+        // rubash#2486: the snapshot materializes the attribute markers the
+        // write-behind live table no longer carries; the process-substitute
+        // fork (subst.c:6362) inherits the parent's attributes whole.
+        for (key, value) in self.env_vars_snapshot() {
             if !key.starts_with("__RUBASH_")
-                || super::compound_exec::rubash_spawn_inherited_state(key)
+                || super::compound_exec::rubash_spawn_inherited_state(&key)
             {
-                env_entries.push((key.clone(), value.clone()));
+                env_entries.push((key, value));
             }
         }
         for (name, body) in &self.shell_state.functions {
