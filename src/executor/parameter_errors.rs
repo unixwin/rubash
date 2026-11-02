@@ -1313,7 +1313,7 @@ impl Executor {
                 }
             }
         }
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "failglob") {
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "failglob") {
             for (index, word) in cmd.words.iter().enumerate() {
                 let text = cmd
                     .word_metadata
