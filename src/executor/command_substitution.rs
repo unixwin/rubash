@@ -2125,6 +2125,9 @@ impl Executor {
             // the fold belongs to the parent's in-flight external
             // dispatch, whose child description the fork does not own.
             pending_stdin_fold: None,
+            // rubash#2590: same boundary for own-binding folds — the
+            // fork does not own the parent's in-flight carriers.
+            pending_own_binding_folds: Vec::new(),
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: self.external_file_builtins_enabled,

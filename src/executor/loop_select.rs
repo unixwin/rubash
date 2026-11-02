@@ -415,11 +415,23 @@ impl Executor {
         }
 
         let target = self.expand_redirect_target(redirect);
-        // GNU redir.c resolves /dev/std*, /dev/fd/N, /proc/self/fd/N through
-        // the OS fd-alias layer — a dup of fd N, not a filesystem path
-        // (niubash#118: `< /dev/stdin` used to open CONIN$ and block on the
-        // console even inside a pipeline).
+        // GNU redir.c: a SPELLED `< /dev/fd/N` is r_input -> redir_open
+        // (redir.c:725) — a plain open(2) of the path. On a HAVE_DEV_FD
+        // build the kernel resolves the magic link, so a regular-file
+        // endpoint is served FRESH (its own offset) and the donor fd
+        // does not move; only the dup SPELLING (`<&N`,
+        // r_duplicating_input, redir.c:1193) shares the description.
+        // An endpoint that re-opens fresh (the fd_alias_reopen_path
+        // rule, rubash#2256) is therefore served from its origin file
+        // here; endpoints that cannot re-open (pipes, staged text)
+        // keep the shared serve below (niubash#118: `< /dev/stdin`
+        // resolves through the fd layer, never the console path).
         if let Some(fd) = dev_stdio_redirect_fd(&target) {
+            if let Some(path) = self.fd_alias_reopen_path(fd) {
+                if let Ok(bytes) = fs::read(&path) {
+                    return Some(bytes_to_shell_text(&bytes));
+                }
+            }
             return match self.fd_table.read_endpoint(fd) {
                 Some(FdReadEndpoint::File(_)) => self
                     .fd_table

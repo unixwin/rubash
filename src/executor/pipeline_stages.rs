@@ -273,6 +273,18 @@ impl Executor {
         // source endpoint — dup shares the open file description — and
         // drop the mirror, the live_stdin treatment above. A failed dup
         // (unbound source) keeps the mirror fallback.
+        //
+        // rubash#2591: this bind is only the clone's preliminary
+        // descriptor channel. The element's body re-applies its own
+        // redirections inside the subshell (with_command_input_redirects
+        // → bind_command_fd0_input), and THAT application owns the
+        // open-vs-dup distinction: a SPELLED `< /dev/fd/N` winner is
+        // served there as redir.c:725's plain open (fresh, via
+        // loop_redirect_input's reopen arm) and displaces this bind,
+        // while a `<&N` winner keeps the shared serve this dup models
+        // (redir.c:1193). An earlier funnel-side fresh bind here was
+        // superseded by that inner application on every path and has
+        // been removed — one owner for the distinction, not two.
         if let Some(alias_fd) = self.stage_fd_alias_source(command) {
             if subshell.fd_table.dup_input(0, alias_fd).is_ok() {
                 subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
@@ -1140,6 +1152,12 @@ impl Executor {
         } else {
             self.execute_external_pipeline_stage_inner(&command, input, stdin_inherit)
         };
+        // rubash#2590: the stage's child has exited by now (the inner
+        // funnel reaps it before returning), so settle any own-binding
+        // consumption folds its redirect resolution registered — the
+        // source endpoints' cursors land at the child's true reads
+        // instead of the bind-time drain.
+        self.settle_own_binding_folds();
         self.undo_child_fd_var_redirects();
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let output = result?;

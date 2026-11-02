@@ -98,6 +98,25 @@ pub(in crate::executor) enum PendingStdinChannel {
     FdText { fd: u32, base_offset: usize },
 }
 
+/// rubash#2590: a pending consumption fold for an own input binding
+/// (see `Executor::endpoint_as_own_input_binding`). Resolving a
+/// numbered dup chain (`3<&6 <&3`) against a buffered endpoint
+/// materializes the endpoint's remainder into a carrier file; the
+/// spawn hands the child a duplicate of that ONE description, so the
+/// carrier's file position after the child exits is the child's true
+/// consumption — the PendingStdinFold measurement contract (#2238),
+/// one seam over (a numbered chain instead of fd 0). `base_offset`
+/// is the source endpoint's cursor when the binding was resolved,
+/// in the raw-byte units `FdTable::input_offset` reports; the settle
+/// (`Executor::settle_own_binding_folds`) replaces the bind-time
+/// drain with base + measured.
+#[derive(Debug)]
+pub(in crate::executor) struct OwnBindingFold {
+    pub(in crate::executor) source_fd: u32,
+    pub(in crate::executor) base_offset: usize,
+    pub(in crate::executor) file: std::fs::File,
+}
+
 #[derive(Debug)]
 struct OutputProcessSubstitution {
     path: PathBuf,
@@ -777,8 +796,31 @@ impl Executor {
                 // alias-spelling reopen, which would hand the dup a
                 // fresh description at offset 0 instead of the
                 // endpoint's own.
+                // rubash#2590: snapshot the source cursor BEFORE the
+                // stream serve drains it, and keep a duplicate of the
+                // carrier description as a consumption fold: the
+                // child is handed a dup of this one description, so
+                // its position at child exit is the child's true
+                // consumption, and the settle replaces the bind-time
+                // drain below with base + measured (GNU's dup shares
+                // the one description — a partial reader like
+                // `head -n 1 3<&6 <&3` leaves the shared offset
+                // mid-stream, redir.c:1193 dup2). Only buffered
+                // endpoints report a cursor; handle-backed serves
+                // (InheritedProcessStdin, coproc pipes) keep the
+                // bind-time accounting, as before.
+                let base_offset = self.fd_table.input_offset(source_fd);
                 let file = self.open_fd_read_endpoint_stream(source_fd, target).ok()?;
                 self.fd_table.consume_all_text(source_fd);
+                if let Some(base_offset) = base_offset {
+                    if let Ok(meter) = file.try_clone() {
+                        self.pending_own_binding_folds.push(OwnBindingFold {
+                            source_fd,
+                            base_offset,
+                            file: meter,
+                        });
+                    }
+                }
                 let bound = FileFd::from_file(file, target.to_string().into());
                 self.own_input_bindings.insert(fd, bound.clone());
                 Some(bound)
@@ -1097,6 +1139,8 @@ impl Executor {
         // dispatch (a re-entrant call from a trap body) and is left
         // for that dispatch's own settle.
         let fold_is_ours = self.pending_stdin_fold.is_none();
+        // rubash#2590: the same ownership rule for own-binding folds.
+        let own_folds_ours = self.pending_own_binding_folds.is_empty();
         let (mut cmd, mut process_substitutions) =
             self.command_with_process_substitution_files(cmd)?;
         // rubash#2396: GNU execute_cmd.c:4909-4917 — with autocd set,
@@ -1112,6 +1156,9 @@ impl Executor {
             if fold_is_ours {
                 self.settle_pending_stdin_fold();
             }
+            if own_folds_ours {
+                self.settle_own_binding_folds();
+            }
             self.undo_child_fd_var_redirects();
             self.finish_process_substitutions(process_substitutions)?;
             return Ok(());
@@ -1120,6 +1167,9 @@ impl Executor {
         let result = self.execute_external_inner(&cmd);
         if fold_is_ours {
             self.settle_pending_stdin_fold();
+        }
+        if own_folds_ours {
+            self.settle_own_binding_folds();
         }
         // GNU execute_cmd.c: external commands fork before do_redirections
         // — a `{var}` bind happened only in the child, so the parent's
@@ -3030,6 +3080,36 @@ impl Executor {
             }
         }
         let _ = fs::remove_file(&temp_path);
+    }
+
+    /// rubash#2590: settle the own-binding folds registered during
+    /// this dispatch (see `OwnBindingFold`). Each fold's carrier
+    /// position is the spawned child's true consumption of the bound
+    /// stream, so the source endpoint's cursor lands at base +
+    /// measured instead of the bind-time drain the materialization
+    /// performed — GNU's dup shares the one open file description, so
+    /// a partial reader leaves the shared offset mid-stream and a
+    /// non-reader leaves it untouched (redir.c:1193 dup2). A carrier
+    /// whose position cannot be read keeps the bind-time accounting.
+    /// Called from `execute_external` and the external pipeline-stage
+    /// funnel, the two dispatch points whose children receive the
+    /// bindings.
+    pub(in crate::executor) fn settle_own_binding_folds(&mut self) {
+        if self.pending_own_binding_folds.is_empty() {
+            return;
+        }
+        let folds = std::mem::take(&mut self.pending_own_binding_folds);
+        for mut fold in folds {
+            use std::io::Seek;
+            let Ok(position) = fold.file.seek(std::io::SeekFrom::Current(0)) else {
+                continue;
+            };
+            let target = fold.base_offset.saturating_add(position as usize);
+            self.fd_table.set_input_offset(fold.source_fd, target);
+            self.shell_state
+                .env_vars
+                .insert(fd_stdin_offset_key(fold.source_fd), target.to_string());
+        }
     }
 
     pub(in crate::executor) fn finish_process_substitutions(
