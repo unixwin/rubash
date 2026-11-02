@@ -391,10 +391,8 @@ impl Executor {
                                 if let Some((source_fd, true)) =
                                     super::execution_misc::redirect_target_fd_and_move(&target)
                                 {
-                                    walk_space.insert(
-                                        source_fd,
-                                        super::trap_exec::FdWalkBinding::Closed,
-                                    );
+                                    walk_space
+                                        .insert(source_fd, super::trap_exec::FdWalkBinding::Closed);
                                 }
                             }
                             // Record the descriptor this entry bound (a
@@ -403,10 +401,8 @@ impl Executor {
                             let value_after = self.dynamic_fd_variable_value(name);
                             if let Some(fd) = value_after {
                                 if value_after != value_before {
-                                    walk_space.insert(
-                                        fd,
-                                        super::trap_exec::FdWalkBinding::TableSlot(fd),
-                                    );
+                                    walk_space
+                                        .insert(fd, super::trap_exec::FdWalkBinding::TableSlot(fd));
                                 }
                             }
                         }

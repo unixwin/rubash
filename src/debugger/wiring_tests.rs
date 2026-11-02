@@ -585,7 +585,11 @@ fn p1_entry_skip_never_fires_return_trap_even_when_action_installs_one() {
          RC=$?\n",
     );
     assert_eq!(env_of(&executor, "BODY"), None, "the body was skipped");
-    assert_eq!(env_of(&executor, "RT"), None, "the RETURN trap did not fire");
+    assert_eq!(
+        env_of(&executor, "RT"),
+        None,
+        "the RETURN trap did not fire"
+    );
     assert_eq!(env_of(&executor, "RC").as_deref(), Some("1"));
 }
 

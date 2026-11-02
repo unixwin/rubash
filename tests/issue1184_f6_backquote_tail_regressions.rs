@@ -121,11 +121,7 @@ fn backquote_tail_even_backslash_run_control() {
 /// embedded walkers) keeps the trailing backslash as before.
 #[test]
 fn backquote_tail_assignment_route_control() {
-    assert_gnu(
-        "x=`printf '%s' \\\\`\necho \"[$x]\"\n",
-        "assign",
-        "[\\]\n",
-    );
+    assert_gnu("x=`printf '%s' \\\\`\necho \"[$x]\"\n", "assign", "[\\]\n");
 }
 
 /// Control: a mid-body escaped backslash is untouched either way.

@@ -51,14 +51,10 @@ fn run(script: &str) -> (i32, String, String) {
 
 #[test]
 fn issue1645_jobs_omits_name_for_simple_coproc() {
-    let (code, stdout, _) = run(
-        "coproc sleep 5\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc sleep 5\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
-    assert!(
-        stdout.contains("coproc sleep 5 &"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("coproc sleep 5 &"), "stdout: {stdout}");
     assert!(
         !stdout.contains("coproc COPROC sleep 5"),
         "auto-name must not print for a simple body, stdout: {stdout}"
@@ -67,14 +63,10 @@ fn issue1645_jobs_omits_name_for_simple_coproc() {
 
 #[test]
 fn issue1645_jobs_l_omits_name_for_simple_coproc() {
-    let (code, stdout, _) = run(
-        "coproc sleep 5\njobs -l\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc sleep 5\njobs -l\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
-    assert!(
-        stdout.contains("coproc sleep 5 &"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("coproc sleep 5 &"), "stdout: {stdout}");
     assert!(
         !stdout.contains("coproc COPROC sleep 5"),
         "stdout: {stdout}"
@@ -83,9 +75,8 @@ fn issue1645_jobs_l_omits_name_for_simple_coproc() {
 
 #[test]
 fn issue1645_jobs_keeps_name_for_group_coproc() {
-    let (code, stdout, _) = run(
-        "coproc C1 { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc C1 { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(
         stdout.contains("coproc C1 { sleep 5; } &"),
@@ -95,9 +86,8 @@ fn issue1645_jobs_keeps_name_for_group_coproc() {
 
 #[test]
 fn issue1645_jobs_keeps_default_name_for_unnamed_group_coproc() {
-    let (code, stdout, _) = run(
-        "coproc { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(
         stdout.contains("coproc COPROC { sleep 5; } &"),
@@ -109,25 +99,17 @@ fn issue1645_jobs_keeps_default_name_for_unnamed_group_coproc() {
 fn issue1645_jobs_word_before_simple_body_is_not_a_name() {
     // `coproc FOO sleep 5` is an unnamed coproc of [FOO, sleep, 5];
     // the display must not invent a COPROC prefix for it.
-    let (code, stdout, _) = run(
-        "coproc FOO sleep 5\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc FOO sleep 5\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
-    assert!(
-        stdout.contains("coproc FOO sleep 5 &"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        !stdout.contains("coproc COPROC FOO"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("coproc FOO sleep 5 &"), "stdout: {stdout}");
+    assert!(!stdout.contains("coproc COPROC FOO"), "stdout: {stdout}");
 }
 
 #[test]
 fn issue1645_jobs_keeps_explicit_name_for_group_coproc() {
-    let (code, stdout, _) = run(
-        "coproc FOO { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n",
-    );
+    let (code, stdout, _) =
+        run("coproc FOO { sleep 5; }\njobs\nkill %1 2>/dev/null\nwait 2>/dev/null; true\n");
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(
         stdout.contains("coproc FOO { sleep 5; } &"),
@@ -139,9 +121,7 @@ fn issue1645_jobs_keeps_explicit_name_for_group_coproc() {
 fn issue1645_disown_clears_coproc_listing() {
     // Control from the issue scope: disown + jobs still agrees
     // (empty listing) after the rendering change.
-    let (code, stdout, _) = run(
-        "coproc sleep 5\ndisown\njobs\necho done\n",
-    );
+    let (code, stdout, _) = run("coproc sleep 5\ndisown\njobs\necho done\n");
     assert_eq!(code, 0, "stdout: {stdout}");
     assert!(!stdout.contains("coproc"), "stdout: {stdout}");
     assert!(stdout.contains("done"), "stdout: {stdout}");

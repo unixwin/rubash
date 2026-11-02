@@ -108,11 +108,16 @@ fn issue2437_controls() {
     // shell continues.
     let r = run("help", &["-l", "-c", "logout --help; echo after rc=$?"]);
     assert!(
-        r.stdout.starts_with("logout: logout [n]\n    Exit a login shell.\n"),
+        r.stdout
+            .starts_with("logout: logout [n]\n    Exit a login shell.\n"),
         "help stdout: {}",
         r.stdout
     );
-    assert!(r.stdout.ends_with("after rc=2\n"), "help stdout: {}", r.stdout);
+    assert!(
+        r.stdout.ends_with("after rc=2\n"),
+        "help stdout: {}",
+        r.stdout
+    );
     assert_eq!(r.code, Some(0));
 
     // Too many arguments: the no_args DISCARD class — under `-c` the

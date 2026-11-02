@@ -4815,10 +4815,9 @@ impl Executor {
         // inert in every non-wrapper process, and its span is
         // exactly this wait: it drops when the function returns,
         // after every member has been reaped.
-        let _wrapper_relay_guard =
-            crate::builtins::kill::WrapperRelayTargetGuard::publish(
-                processes.last().map(|child| child.id()).unwrap_or(0),
-            );
+        let _wrapper_relay_guard = crate::builtins::kill::WrapperRelayTargetGuard::publish(
+            processes.last().map(|child| child.id()).unwrap_or(0),
+        );
 
         if let Some(mut stdin) = first_stdin {
             if let Some(base) = stage0_stdin_base {

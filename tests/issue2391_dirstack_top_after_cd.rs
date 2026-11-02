@@ -24,10 +24,7 @@ use std::process::{Command, Stdio};
 const RUBASH: &str = env!("CARGO_BIN_EXE_rubash");
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rubash-issue2391-{tag}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rubash-issue2391-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     for sub in ["a", "b", "x/y"] {
         fs::create_dir_all(dir.join(sub)).expect("create scratch subdir");
@@ -51,8 +48,7 @@ fn run_script(dir: &Path, script: &str) -> String {
         "probe failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8_lossy(&output.stdout)
-        .replace(&dir.to_string_lossy().into_owned(), "WORK")
+    String::from_utf8_lossy(&output.stdout).replace(&dir.to_string_lossy().into_owned(), "WORK")
 }
 
 #[test]

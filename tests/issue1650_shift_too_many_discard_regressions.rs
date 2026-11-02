@@ -63,34 +63,29 @@ fn rubash_c(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn shift_surplus_abandons_function_body_with_status_2() {
-    let (stdout, _stderr, code) = rubash_file(
-        "f() { shift 1 2; echo \"n=$# rc=$?\"; }\nf a b c\necho \"after=$?\"\n",
-    );
+    let (stdout, _stderr, code) =
+        rubash_file("f() { shift 1 2; echo \"n=$# rc=$?\"; }\nf a b c\necho \"after=$?\"\n");
     assert_eq!(stdout, "after=2\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn shift_surplus_skips_rest_of_line_only() {
-    let (stdout, _stderr, code) =
-        rubash_file("shift 1 2; echo same\necho next\n");
+    let (stdout, _stderr, code) = rubash_file("shift 1 2; echo same\necho next\n");
     assert_eq!(stdout, "next\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn shift_surplus_ends_subshell_with_status_2() {
-    let (stdout, _stderr, code) =
-        rubash_file("(shift 1 2; echo inner)\necho after=$?\n");
+    let (stdout, _stderr, code) = rubash_file("(shift 1 2; echo inner)\necho after=$?\n");
     assert_eq!(stdout, "after=2\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn shift_nonnumeric_does_not_discard() {
-    let (stdout, _stderr, code) = rubash_file(
-        "set -- a b\nshift x; echo \"continues rc=$?\"\n",
-    );
+    let (stdout, _stderr, code) = rubash_file("set -- a b\nshift x; echo \"continues rc=$?\"\n");
     assert_eq!(stdout, "continues rc=2\n");
     assert_eq!(code, Some(0));
 }

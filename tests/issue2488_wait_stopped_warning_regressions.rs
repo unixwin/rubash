@@ -67,8 +67,7 @@ fn wait_mixed_operands_warn_only_for_jobspec() {
         let (stdout, stderr, code) = rubash(&script);
         assert_eq!(stdout, "rc=147\nkillrc=143\n", "operands: {operands}");
         assert_eq!(
-            stderr,
-            "bash: line 1: warning: wait_for_job: job 1 is stopped\n",
+            stderr, "bash: line 1: warning: wait_for_job: job 1 is stopped\n",
             "operands: {operands}"
         );
         assert_eq!(code, Some(0), "operands: {operands}");

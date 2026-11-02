@@ -98,10 +98,7 @@ command -v zz_eza_1723 >/dev/null; echo \"found=$?\"
 command -v zz_eza_1723 >/dev/null; echo \"again=$?\"
 ",
     );
-    assert_eq!(
-        stdout, "miss=1\nfound=0\nagain=0\n",
-        "stderr: {stderr:?}"
-    );
+    assert_eq!(stdout, "miss=1\nfound=0\nagain=0\n", "stderr: {stderr:?}");
     assert_eq!(rc, Some(0), "stderr: {stderr:?}");
 }
 
@@ -140,10 +137,7 @@ set -h
 command -v absent_1723 >/dev/null 2>&1; echo \"d=$?\"
 ",
     );
-    assert_eq!(
-        stdout, "a=1\nb=1\nc=1\nd=1\n",
-        "stderr: {stderr:?}"
-    );
+    assert_eq!(stdout, "a=1\nb=1\nc=1\nd=1\n", "stderr: {stderr:?}");
     assert_eq!(rc, Some(0), "stderr: {stderr:?}");
 }
 

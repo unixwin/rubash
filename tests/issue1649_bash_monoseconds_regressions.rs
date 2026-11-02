@@ -55,18 +55,16 @@ fn monoseconds_expands_and_declares() {
 
 #[test]
 fn monoseconds_ticks_with_monotonic_clock() {
-    let (stdout, _stderr, code) = rubash(
-        "a=$BASH_MONOSECONDS; sleep 2; b=$BASH_MONOSECONDS; echo $((b - a))",
-    );
+    let (stdout, _stderr, code) =
+        rubash("a=$BASH_MONOSECONDS; sleep 2; b=$BASH_MONOSECONDS; echo $((b - a))");
     assert_eq!(code, Some(0));
     assert_eq!(stdout.trim(), "2");
 }
 
 #[test]
 fn monoseconds_in_arithmetic_and_v_test() {
-    let (stdout, _stderr, code) = rubash(
-        "echo $((BASH_MONOSECONDS > 0 ? 1 : 0)); [[ -v BASH_MONOSECONDS ]] && echo v-set",
-    );
+    let (stdout, _stderr, code) =
+        rubash("echo $((BASH_MONOSECONDS > 0 ? 1 : 0)); [[ -v BASH_MONOSECONDS ]] && echo v-set");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "1\nv-set\n");
 }

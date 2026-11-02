@@ -4086,8 +4086,7 @@ const WRAPPER_RELAY_SIGNALS: &[libc::c_int] = &[
 /// The currently proxied pid (the last stage of the foreground
 /// pipeline the wrapper is waiting on); 0 = no target published.
 #[cfg(unix)]
-static WRAPPER_RELAY_TARGET: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+static WRAPPER_RELAY_TARGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Saved pre-relay dispositions, indexed by signal number (every
 /// relay signal is < 32). Written once by the install, before the
@@ -4103,8 +4102,7 @@ static WRAPPER_RELAY_PREV_FLAGS: [std::sync::atomic::AtomicU64; 32] =
 /// Write end of the relay self-pipe; -1 until installed. The fd is
 /// O_CLOEXEC, so no spawned child inherits it across exec.
 #[cfg(unix)]
-static WRAPPER_RELAY_PIPE_WR: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(-1);
+static WRAPPER_RELAY_PIPE_WR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
 
 /// RAII publication of the relay target: the executor's pipeline
 /// wait holds one of these for exactly the span in which the
@@ -4120,8 +4118,7 @@ impl WrapperRelayTargetGuard {
         #[cfg(unix)]
         {
             if pid != 0 && background_wrapper_role_armed() {
-                WRAPPER_RELAY_TARGET
-                    .store(pid, std::sync::atomic::Ordering::Release);
+                WRAPPER_RELAY_TARGET.store(pid, std::sync::atomic::Ordering::Release);
                 return Self { pid };
             }
             Self { pid: 0 }
@@ -4158,11 +4155,7 @@ extern "C" fn wrapper_relay_handler(sig: libc::c_int) {
     if fd >= 0 {
         let byte = sig as u8;
         unsafe {
-            libc::write(
-                fd,
-                &byte as *const u8 as *const libc::c_void,
-                1,
-            );
+            libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
         }
     }
 }
@@ -4199,8 +4192,7 @@ fn wrapper_relay_install() {
     for &sig in WRAPPER_RELAY_SIGNALS {
         let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
         unsafe { libc::sigaction(sig, std::ptr::null_mut(), &mut current) };
-        WRAPPER_RELAY_PREV[sig as usize]
-            .store(current.sa_sigaction as u64, Ordering::Relaxed);
+        WRAPPER_RELAY_PREV[sig as usize].store(current.sa_sigaction as u64, Ordering::Relaxed);
         WRAPPER_RELAY_PREV_FLAGS[sig as usize]
             .store(current.sa_flags as i64 as u64, Ordering::Relaxed);
         let action = libc::sigaction {
@@ -4289,10 +4281,8 @@ fn wrapper_relay_deliver(sig: libc::c_int) {
     // fatal set's die-on-delivery model, generalized to whatever
     // was there — default, ignore, or a foreign handler, which
     // the re-raise then invokes with the real delivery info).
-    let prev =
-        WRAPPER_RELAY_PREV[sig as usize].load(Ordering::Relaxed) as usize;
-    let prev_flags =
-        WRAPPER_RELAY_PREV_FLAGS[sig as usize].load(Ordering::Relaxed) as i32;
+    let prev = WRAPPER_RELAY_PREV[sig as usize].load(Ordering::Relaxed) as usize;
+    let prev_flags = WRAPPER_RELAY_PREV_FLAGS[sig as usize].load(Ordering::Relaxed) as i32;
     let action = libc::sigaction {
         sa_sigaction: prev,
         sa_flags: prev_flags,

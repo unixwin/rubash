@@ -127,18 +127,14 @@ fn issue1531_plain_locale_assignments_take_effect_immediately() {
         eprintln!("skip: de_DE.UTF-8 cannot be compiled on this host");
         return;
     };
-    let fixture = std::env::temp_dir().join(format!(
-        "rubash-issue1531-fixture-{}",
-        std::process::id()
-    ));
+    let fixture =
+        std::env::temp_dir().join(format!("rubash-issue1531-fixture-{}", std::process::id()));
     std::fs::create_dir_all(&fixture).expect("create fixture dir");
     for name in NAMES {
         std::fs::write(fixture.join(name), []).expect("create fixture file");
     }
-    let script_path = std::env::temp_dir().join(format!(
-        "rubash-issue1531-probe-{}.sh",
-        std::process::id()
-    ));
+    let script_path =
+        std::env::temp_dir().join(format!("rubash-issue1531-probe-{}.sh", std::process::id()));
     std::fs::write(&script_path, SCRIPT).expect("write probe script");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&script_path)

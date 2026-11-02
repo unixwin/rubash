@@ -135,8 +135,7 @@ fn subshell_inside_command_substitution_restores() {
 #[test]
 #[cfg(unix)]
 fn command_substitution_umask_does_not_leak() {
-    let (stdout, stderr, _) =
-        rubash("umask 022\nx=$(umask 077; echo done)\necho \"$x\"\numask");
+    let (stdout, stderr, _) = rubash("umask 022\nx=$(umask 077; echo done)\necho \"$x\"\numask");
     assert_clean(&stderr);
     assert_eq!(stdout, "done\n0022\n");
 }
@@ -146,10 +145,7 @@ fn command_substitution_umask_does_not_leak() {
 #[test]
 #[cfg(unix)]
 fn exec_model_child_script_umask_does_not_leak() {
-    let dir = std::env::temp_dir().join(format!(
-        "rubash-issue1907-this-sh-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rubash-issue1907-this-sh-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp dir");
     std::fs::write(dir.join("child.sh"), "umask 077\n").expect("write child script");

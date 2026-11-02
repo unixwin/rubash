@@ -115,9 +115,8 @@ fn mapfile_plain_sources_unchanged() {
         "mapfile -t arr < {file}; echo \"n=${{#arr[@]}} ${{arr[0]}} ${{arr[1]}}\""
     ));
     assert_eq!(stdout, "n=2 x y\n");
-    let (stdout, _, _) = rubash_c(
-        "mapfile -t arr <<EOF\np\nq\nEOF\necho \"n=${#arr[@]} ${arr[0]} ${arr[1]}\"",
-    );
+    let (stdout, _, _) =
+        rubash_c("mapfile -t arr <<EOF\np\nq\nEOF\necho \"n=${#arr[@]} ${arr[0]} ${arr[1]}\"");
     assert_eq!(stdout, "n=2 p q\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

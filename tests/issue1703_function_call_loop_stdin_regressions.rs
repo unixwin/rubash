@@ -92,9 +92,8 @@ fn issue1703_read_after_call_in_same_body_continues_stream() {
 
 #[test]
 fn issue1703_function_in_loop_condition_keeps_stream() {
-    let (stdout, _, code) = rubash_file(
-        "f() { :; }\nwhile IFS= read -r L && f; do echo \"got:$L\"; done < in.txt\n",
-    );
+    let (stdout, _, code) =
+        rubash_file("f() { :; }\nwhile IFS= read -r L && f; do echo \"got:$L\"; done < in.txt\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "got:a\ngot:b\ngot:c\n");
 }

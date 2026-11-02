@@ -365,9 +365,7 @@ fn stop_cont_jobspec_stop_whole_pipeline() {
     // pids.last() — the first stage stayed in state S.
     session.send("kill -STOP %1\n");
     wait_until("both stages stopped by kill -STOP %1", LONG, || {
-        stages
-            .iter()
-            .all(|pid| process_state(*pid) == Some('T'))
+        stages.iter().all(|pid| process_state(*pid) == Some('T'))
     });
     session.send("kill -CONT %1\n");
     wait_until("both stages resumed by kill -CONT %1", LONG, || {

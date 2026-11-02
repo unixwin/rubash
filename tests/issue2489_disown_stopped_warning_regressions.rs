@@ -118,9 +118,8 @@ fn disown_all_warns_per_stopped_job() {
 /// A running job is deleted silently — the warning is stopped-only.
 #[test]
 fn disown_running_job_is_silent() {
-    let (stdout, stderr, code) = rubash(
-        "set -m; sleep 0.5 & p1=$!; disown %1; echo disowned; wait $p1; echo \"waitrc=$?\"",
-    );
+    let (stdout, stderr, code) =
+        rubash("set -m; sleep 0.5 & p1=$!; disown %1; echo disowned; wait $p1; echo \"waitrc=$?\"");
     assert_eq!(stdout, "disowned\nwaitrc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));

@@ -74,9 +74,5 @@ if cat /proc/self/status >/dev/null && test -e /proc/self/status; then echo agre
         run.stdout
     );
     assert!(run.stdout.contains("agree-stat"), "stdout={}", run.stdout);
-    assert!(
-        run.stdout.contains("agree-status"),
-        "stdout={}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("agree-status"), "stdout={}", run.stdout);
 }

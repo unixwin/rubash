@@ -55,8 +55,8 @@ fn assert_dies_at(script: &str, n: i32) {
 
 #[cfg(target_os = "linux")]
 const NEWLY_MANAGED: &[&str] = &[
-    "ILL", "TRAP", "ABRT", "FPE", "ALRM", "STKFLT", "XCPU", "XFSZ", "VTALRM", "PROF", "IO",
-    "PWR", "SYS", "URG", "WINCH", "RTMIN", "RTMIN+1", "RTMAX-1", "RTMAX",
+    "ILL", "TRAP", "ABRT", "FPE", "ALRM", "STKFLT", "XCPU", "XFSZ", "VTALRM", "PROF", "IO", "PWR",
+    "SYS", "URG", "WINCH", "RTMIN", "RTMIN+1", "RTMAX-1", "RTMAX",
 ];
 
 #[cfg(not(target_os = "linux"))]
@@ -107,7 +107,10 @@ fn issue_1511_untrapped_signals_still_kill() {
 /// later delivery kills again (the reconcile Default path).
 #[test]
 fn issue_1511_reset_restores_default_death() {
-    assert_dies_at("trap 'echo got' ALRM; trap - ALRM; kill -ALRM $$; echo alive", 14);
+    assert_dies_at(
+        "trap 'echo got' ALRM; trap - ALRM; kill -ALRM $$; echo alive",
+        14,
+    );
 }
 
 /// EXIT-trap reroute (sig.c:226-229): with only an EXIT trap armed, a
@@ -168,5 +171,8 @@ fn issue_1511_signal_storm_completes() {
             "storm output missing handler line for {sig}: {stdout:?}"
         );
     }
-    assert!(stdout.contains("survived"), "storm survivor line: {stdout:?}");
+    assert!(
+        stdout.contains("survived"),
+        "storm survivor line: {stdout:?}"
+    );
 }

@@ -96,23 +96,20 @@ fn coproc_herestring_content_matches_gnu() {
 
 #[test]
 fn coproc_herestring_expansion_and_quotes() {
-    let (stdout, _, code) = rubash_c(
-        "v=WORLD; coproc cat <<< \"hi $v\"; cat <&${COPROC[0]}; wait $COPROC_PID",
-    );
+    let (stdout, _, code) =
+        rubash_c("v=WORLD; coproc cat <<< \"hi $v\"; cat <&${COPROC[0]}; wait $COPROC_PID");
     assert_eq!(stdout, "hi WORLD\n");
     assert_eq!(code, Some(0));
     // Single quotes are literal, double quotes inside survive.
-    let (stdout, _, _) = rubash_c(
-        "coproc cat <<< 'double\"quote'; cat <&${COPROC[0]}; wait $COPROC_PID",
-    );
+    let (stdout, _, _) =
+        rubash_c("coproc cat <<< 'double\"quote'; cat <&${COPROC[0]}; wait $COPROC_PID");
     assert_eq!(stdout, "double\"quote\n");
 }
 
 #[test]
 fn coproc_heredoc_content_and_expansion() {
-    let (stdout, _, code) = rubash_c(
-        "v=W; coproc cat << HDONE\nhi $v\nHDONE\ncat <&${COPROC[0]}; wait $COPROC_PID",
-    );
+    let (stdout, _, code) =
+        rubash_c("v=W; coproc cat << HDONE\nhi $v\nHDONE\ncat <&${COPROC[0]}; wait $COPROC_PID");
     assert_eq!(stdout, "hi W\n");
     assert_eq!(code, Some(0));
 }
@@ -188,14 +185,12 @@ fn coproc_large_heredoc_no_deadlock() {
 
 #[test]
 fn coproc_numbered_and_empty_herestring() {
-    let (stdout, _, code) = rubash_c(
-        "coproc cat 0<<< \"num\"; cat <&${COPROC[0]}; wait $COPROC_PID; echo \"rc=$?\"",
-    );
+    let (stdout, _, code) =
+        rubash_c("coproc cat 0<<< \"num\"; cat <&${COPROC[0]}; wait $COPROC_PID; echo \"rc=$?\"");
     assert_eq!(stdout, "num\nrc=0\n");
     assert_eq!(code, Some(0));
-    let (stdout, _, code) = rubash_c(
-        "coproc cat <<< \"\"; cat <&${COPROC[0]}; echo \"cat_rc=$?\"; wait $COPROC_PID",
-    );
+    let (stdout, _, code) =
+        rubash_c("coproc cat <<< \"\"; cat <&${COPROC[0]}; echo \"cat_rc=$?\"; wait $COPROC_PID");
     assert_eq!(stdout, "\ncat_rc=0\n");
     assert_eq!(code, Some(0));
 }

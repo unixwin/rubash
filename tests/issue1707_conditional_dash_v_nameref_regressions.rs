@@ -29,21 +29,18 @@ fn run(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn issue1707_dash_v_follows_nameref() {
-    let (stdout, _, _) = run(
-        "declare -n dref=nosuchvar\n\
+    let (stdout, _, _) = run("declare -n dref=nosuchvar\n\
          [[ -v dref ]]; echo \"missing=$?\"\n\
          v=1; declare -n ref=v\n\
          [[ -v ref ]]; echo \"set=$?\"\n\
          unset v\n\
-         [[ -v ref ]]; echo \"after-unset=$?\"\n",
-    );
+         [[ -v ref ]]; echo \"after-unset=$?\"\n");
     assert_eq!(stdout, "missing=1\nset=0\nafter-unset=1\n");
 }
 
 #[test]
 fn issue1707_dash_v_nameref_chains_and_cells() {
-    let (stdout, _, _) = run(
-        "declare -n dref=nosuchvar\n\
+    let (stdout, _, _) = run("declare -n dref=nosuchvar\n\
          declare -n r2=dref\n\
          [[ -v r2 ]]; echo \"chain=$?\"\n\
          declare -n emptycell\n\
@@ -51,8 +48,7 @@ fn issue1707_dash_v_nameref_chains_and_cells() {
          v=; declare -n r3=v\n\
          [[ -v r3 ]]; echo \"empty-string-target=$?\"\n\
          declare -n ca=cb; declare -n cb=ca\n\
-         [[ -v ca ]]; echo \"circular=$?\"\n",
-    );
+         [[ -v ca ]]; echo \"circular=$?\"\n");
     assert_eq!(
         stdout,
         "chain=1\nempty-cell=1\nempty-string-target=0\ncircular=1\n"
@@ -61,15 +57,13 @@ fn issue1707_dash_v_nameref_chains_and_cells() {
 
 #[test]
 fn issue1707_dash_v_nameref_array_targets() {
-    let (stdout, _, _) = run(
-        "arr=(x y)\n\
+    let (stdout, _, _) = run("arr=(x y)\n\
          declare -n ra=arr\n\
          [[ -v ra ]]; echo \"whole-array=$?\"\n\
          [[ -v ra[1] ]]; echo \"operand-sub=$?\"\n\
          [[ -v ra[5] ]]; echo \"operand-sub-missing=$?\"\n\
          declare -n rsub='arr[1]'\n\
-         [[ -v rsub ]]; echo \"target-with-sub=$?\"\n",
-    );
+         [[ -v rsub ]]; echo \"target-with-sub=$?\"\n");
     assert_eq!(
         stdout,
         "whole-array=0\noperand-sub=0\noperand-sub-missing=1\ntarget-with-sub=1\n"
@@ -79,13 +73,11 @@ fn issue1707_dash_v_nameref_array_targets() {
 #[test]
 fn issue1707_dash_v_nameref_test_builtin() {
     // The `test`/`[` builtin shares test.c's -v machinery with `[[ ]]`.
-    let (stdout, _, _) = run(
-        "declare -n dref=nosuchvar\n\
+    let (stdout, _, _) = run("declare -n dref=nosuchvar\n\
          [ -v dref ]; echo \"missing=$?\"\n\
          v=1; declare -n ref=v\n\
          [ -v ref ]; echo \"set=$?\"\n\
          [[ -v plain_unset ]]; echo \"plain-unset=$?\"\n\
-         [[ -v v ]]; echo \"plain-set=$?\"\n",
-    );
+         [[ -v v ]]; echo \"plain-set=$?\"\n");
     assert_eq!(stdout, "missing=1\nset=0\nplain-unset=1\nplain-set=0\n");
 }

@@ -36,9 +36,7 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn command_p_skips_hash_table() {
-    let (stdout, stderr, _) = rubash(
-        "hash -p /bin/false myls; command -p myls; echo \"rc=$?\"",
-    );
+    let (stdout, stderr, _) = rubash("hash -p /bin/false myls; command -p myls; echo \"rc=$?\"");
     assert_eq!(stdout, "rc=127\n");
     assert!(
         stderr.contains("myls: command not found"),

@@ -103,11 +103,7 @@ fn issue1935_readwrite_on_0644_class_binds_and_reads() {
         &dir,
     );
     assert_eq!(run.code, Some(0), "stderr={}", run.stderr);
-    assert!(
-        run.stdout.contains("got:Name:"),
-        "stdout={}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("got:Name:"), "stdout={}", run.stdout);
 }
 
 #[test]
@@ -123,11 +119,7 @@ fn issue1935_output_on_0644_class_is_absorbed_not_phantom() {
     );
     assert_eq!(run.code, Some(0), "stderr={}", run.stderr);
     assert!(run.stdout.contains("rc=0"), "stdout={}", run.stdout);
-    assert!(
-        run.stdout.contains("first:Name:"),
-        "stdout={}",
-        run.stdout
-    );
+    assert!(run.stdout.contains("first:Name:"), "stdout={}", run.stdout);
     // No phantom file landed in the session cwd.
     assert!(
         !dir.join("proc").exists(),
@@ -138,7 +130,10 @@ fn issue1935_output_on_0644_class_is_absorbed_not_phantom() {
 #[test]
 fn issue1935_compound_readwrite_on_0444_fails_eacces() {
     let dir = tempdir("compound");
-    let run = rubash_c("{ read -u 3 q; echo should-not-print; } 3<>/proc/stat", &dir);
+    let run = rubash_c(
+        "{ read -u 3 q; echo should-not-print; } 3<>/proc/stat",
+        &dir,
+    );
     assert_eq!(run.code, Some(1), "stdout={}", run.stdout);
     assert!(
         run.stderr.contains("/proc/stat: Permission denied"),
