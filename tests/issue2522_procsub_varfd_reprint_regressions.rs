@@ -24,6 +24,14 @@
 //! other boundary keeps its space (operator→target spacing is
 //! re-parse-neutral: `>& -` is still r_close_this in both shells).
 //!
+//! SPLIT (captain, 2026-11-02): the close-list headline shape and the
+//! fd4 consumer variant exposed a second, distinct mechanism after
+//! this re-print fix — inside the respawned procsub producer, a
+//! `{var}>&N` dup resolves against the producer's ambient fd table
+//! and ignores an earlier same-list plain rebind of N. Those two
+//! pins moved verbatim to rubash#2599; this file keeps the shapes
+//! the re-print fix itself adjudicates.
+//!
 //! Expectations byte-verified against WSL GNU Bash 5.3.20 (script-file
 //! probes; evidence under D:/repo/nbbuild/evidence/procsub-residual/).
 
@@ -62,33 +70,6 @@ fn run_driver(dir: &Path, driver: &str) -> (String, String, Option<i32>) {
         String::from_utf8_lossy(&output.stderr).into_owned(),
         output.status.code(),
     )
-}
-
-/// Wave-3 headline (pc1b): a procsub body whose external child carries a
-/// close-bearing `{v}>&-` list. GNU: the reader's reports reach the
-/// procsub pipe (`w10=OK`, `got4=[]`), the `{w}>&9` descriptor writes W10
-/// into o1.txt, and the only diagnostic is the reader's own fd-4 EBADF
-/// (fd 4 is not inherited into the procsub body). Pre-fix: the re-print
-/// split `{w}>&9` and `{v}>&-`, so fd 1 was closed by the misread `>& -`,
-/// fd 10 never existed, and stdout printed only `rc=0 o1=[]`.
-#[test]
-fn procsub_body_varfd_close_list_delivered() {
-    let dir = scratch("headline");
-    write(
-        &dir,
-        "reader.sh",
-        "if echo W10 >&10; then echo \"w10=OK\"; else echo \"w10=FAIL\"; fi\nline=$(cat <&4 2>&1)\necho \"got4=[$line]\"\n",
-    );
-    let (stdout, stderr, code) = run_driver(
-        &dir,
-        "exec 9>seedout.txt\nv=9\ncat < <(\"@RUBASH@\" reader.sh 9>o1.txt {w}>&9 {v}>&-)\necho \"rc=$? o1=[$(cat o1.txt)]\"\n",
-    );
-    assert_eq!(code, Some(0));
-    assert_eq!(stdout, "w10=OK\ngot4=[]\nrc=0 o1=[W10]\n");
-    assert_eq!(
-        stderr, "reader.sh: line 2: 4: Bad file descriptor\n",
-        "the reader's own fd-4 diagnostic is the only stderr"
-    );
 }
 
 /// Minimal dup face: `{w}>&9` alone (no close entry) inside the procsub
@@ -175,25 +156,5 @@ fn comsub_body_varfd_close_list_untouched() {
     );
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=0 x=[w10=OK\ngot4=[]] o1=[W10]\n");
-    assert_eq!(stderr, "reader.sh: line 2: 4: Bad file descriptor\n");
-}
-
-/// The consumer-side fd juggling variant (wave-3 pc1): the procsub pipe
-/// opened at fd 4 first, then dup'd to stdin — the reader's completion
-/// must still order before the parent continues.
-#[test]
-fn procsub_body_varfd_with_pipe_at_fd4() {
-    let dir = scratch("fd4");
-    write(
-        &dir,
-        "reader.sh",
-        "if echo W10 >&10; then echo \"w10=OK\"; else echo \"w10=FAIL\"; fi\nline=$(cat <&4 2>&1)\necho \"got4=[$line]\"\n",
-    );
-    let (stdout, stderr, code) = run_driver(
-        &dir,
-        "exec 9>seedout.txt\nv=9\ncat 4< <(echo PSIN; \"@RUBASH@\" reader.sh 9>o1.txt {w}>&9 {v}>&-) <&4\necho \"rc=$? o1=[$(cat o1.txt)]\"\n",
-    );
-    assert_eq!(code, Some(0));
-    assert_eq!(stdout, "PSIN\nw10=OK\ngot4=[]\nrc=0 o1=[W10]\n");
     assert_eq!(stderr, "reader.sh: line 2: 4: Bad file descriptor\n");
 }
