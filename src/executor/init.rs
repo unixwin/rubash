@@ -48,6 +48,22 @@ pub static RESPAWNED_CHILD: std::sync::atomic::AtomicBool =
 /// exporting two strings.
 pub const RESPAWN_SPAWNER_PID_KEY: &str = "__RUBASH_SPAWNER_PID";
 
+/// rubash#2521: the fd-delivery contract for the `__RUBASH_FD_*` stamps
+/// the startup restore collects. The whitelist respawn transport
+/// (fd::spawn_whitelisted, whose only caller is
+/// execute_background_ast_command) delivers each stamped descriptor
+/// AT its stamped number; every other stamp producer (the external
+/// ambient pin pass, the input/output procsub spawns, the coproc
+/// spawn) pins each carrier AT its slot fd, so for their stamps the
+/// stamped number is the PARENT's descriptor number and designates
+/// nothing in the child. The whitelist spawner declares its contract
+/// with this key; the restore selects its adoption rule from the
+/// declaration, never from which descriptors happen to be open in
+/// the child — ec40a88e's occupancy probe read the pin transport's
+/// staging leftovers as deliveries and rotated every carrier by one
+/// (the #2521 regression of the #2333 restore).
+pub const FD_DELIVERY_AT_STAMPED_KEY: &str = "__RUBASH_FD_AT_STAMPED";
+
 /// The parent process id of this process, where the platform exposes it
 /// cheaply. Windows enumerates a Toolhelp snapshot, so callers invoke
 /// this only when a provenance claim is actually present.
@@ -863,6 +879,13 @@ impl Executor {
             env_vars.remove(key);
             mirror_env_remove(key);
         }
+        // rubash#2521: the fd-delivery contract declaration (see
+        // FD_DELIVERY_AT_STAMPED_KEY) — consumed here with the other
+        // transport keys so it never surfaces as a shell variable or
+        // rides the process-env mirror into children.
+        let fd_delivery_at_stamped =
+            env_vars.remove(FD_DELIVERY_AT_STAMPED_KEY).as_deref() == Some("1");
+        mirror_env_remove(FD_DELIVERY_AT_STAMPED_KEY);
 
         // Forked-child fd table restore: a `rubash -c` background/subshell
         // child inherits the parent's fd>=3 File endpoints through the
@@ -1288,26 +1311,27 @@ impl Executor {
             // dup_adopted_fd returns None there, and the stamped
             // value stays authoritative.
             let adopted = crate::fd::dup_adopted_fd(fd);
-            // rubash#2212: the #2333 adoption above assumes the
-            // spawn pinned the descriptor AT `fd` (the external
-            // pin transport). The whitelist respawn transport
-            // instead delivers each extra AT ITS STAMPED NUMBER
-            // (fd/unix.rs spawn_whitelisted), and this child's raw
-            // `fd` can be its own startup file (the respawn script
-            // file, opened read-only) — adopting it made `>&3`
-            // write to a read-only descriptor (EBADF) for every
-            // std-stream ambient delivery. Prefer the stamped
-            // descriptor when it is actually open in this process;
-            // fall back to the at-slot adoption when it is not
-            // (the #2333 pin transport, where the stamped number
-            // names a parent descriptor that never crossed).
+            // rubash#2212/#2521: which descriptor a stamp names in
+            // THIS process is a fact of the transport that delivered
+            // it, declared by the spawner (FD_DELIVERY_AT_STAMPED_KEY):
+            // the whitelist respawn transport delivers each extra AT
+            // ITS STAMPED NUMBER (fd/unix.rs spawn_whitelisted), and
+            // this child's raw `fd` can be its own startup file (the
+            // respawn script file, opened read-only) — adopting it
+            // made `>&3` write to a read-only descriptor (EBADF) for
+            // every std-stream ambient delivery. Every other
+            // transport pins the carrier AT `fd` (the #2333 rule
+            // above): there the stamped number is the parent's
+            // descriptor number, and whatever the pin pass left open
+            // at that number in the child is a staging leftover of
+            // ANOTHER slot's carrier — ec40a88e's occupancy probe
+            // ("prefer the stamped descriptor when it is open")
+            // adopted exactly those leftovers and rotated every
+            // carrier by one (#2521).
             let restore_handle = |stamped: crate::fd::HANDLE| {
                 #[cfg(unix)]
-                {
-                    let stamped_open = unsafe { libc::fcntl(stamped, libc::F_GETFD) } >= 0;
-                    if stamped_open {
-                        return crate::fd::dup_adopted_fd(stamped as u32).unwrap_or(stamped);
-                    }
+                if fd_delivery_at_stamped {
+                    return crate::fd::dup_adopted_fd(stamped as u32).unwrap_or(stamped);
                 }
                 adopted.unwrap_or(stamped)
             };
