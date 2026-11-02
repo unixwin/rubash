@@ -936,7 +936,13 @@ pub(crate) fn split_for_completion(
     cursor: usize,
     wordbreaks: &str,
 ) -> (Vec<String>, usize, String) {
-    let cursor = cursor.min(line.len());
+    // The cursor is a host-supplied byte offset (the rl_point equivalent);
+    // a host may legitimately hand over an offset that falls inside a
+    // multi-byte character (boundary-transient editor states), and GNU
+    // readline only ever slices the line at character boundaries. Clamp
+    // down to the nearest boundary instead of panicking on the slice
+    // (rubash#2583).
+    let cursor = line.floor_char_boundary(cursor.min(line.len()));
     let prefix = &line[..cursor];
     let is_break = |c: char| wordbreaks.contains(c);
     let mut words: Vec<String> = Vec::new();
