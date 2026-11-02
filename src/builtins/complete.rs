@@ -1068,7 +1068,25 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         return Vec::new();
     }
     let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
-    let resolved = resolve_compspec(specs, &words, cur_idx);
+    // rubash#2576: GNU bashline.c:1681 — programmable completion is
+    // attempted only when prog_completion_enabled (the progcomp
+    // shopt); `shopt -u progcomp` leaves plain command/file completion.
+    let progcomp_on = crate::builtins::shopt::option_enabled(env_vars, "progcomp");
+    let resolved = if progcomp_on {
+        resolve_compspec(specs, &words, cur_idx)
+    } else {
+        None
+    };
+    // rubash#2576: GNU bashline.c:1879-1884 — with
+    // no_empty_cmd_completion on, completing an EMPTY command word
+    // (no compspec governing) yields no matches at all.
+    if resolved.is_none()
+        && cur_idx == 0
+        && cur_word.is_empty()
+        && crate::builtins::shopt::option_enabled(env_vars, "no_empty_cmd_completion")
+    {
+        return Vec::new();
+    }
 
     let mut candidates: Vec<String> = if let Some(cs) = resolved {
         let mut c = Vec::new();
@@ -1121,6 +1139,32 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     // and -C output are NOT prefix-filtered), then apply the compspec's -X
     // filter over the merged list (pcomplete.c:1402-1407) and its -P/-S
     // wrapping.
+    // rubash#2576: GNU bashline.c:3065-3091 filename_completion_ignore
+    // (rl_ignore_some_completions_function, installed for filename
+    // completion attempts): candidates whose name ends with a $FIGNORE
+    // suffix are excluded. If excluding would empty a non-empty list,
+    // the list survives UNLESS force_fignore is on (allow_empty =
+    // force_fignore for filename completions; default on). This is a
+    // readline-attempt behavior only — GNU's compgen does NOT apply
+    // FIGNORE (oracle: `FIGNORE=.o compgen -A file` lists the .o
+    // files), so it lives here, not in the shared generators.
+    if let Some(fignore) = env_vars.get("FIGNORE") {
+        let suffixes: Vec<&str> = fignore.split(':').filter(|s| !s.is_empty()).collect();
+        if !suffixes.is_empty() {
+            let kept: Vec<String> = candidates
+                .iter()
+                .filter(|candidate| {
+                    let name = candidate.rsplit('/').next().unwrap_or(candidate.as_str());
+                    !suffixes.iter().any(|suffix| name.ends_with(suffix))
+                })
+                .cloned()
+                .collect();
+            if !kept.is_empty() || crate::builtins::shopt::option_enabled(env_vars, "force_fignore")
+            {
+                candidates = kept;
+            }
+        }
+    }
     // rubash#2575: the prefix filter is readline's complete_fncmp —
     // case- and map-aware when the bind variables say so.
     candidates.retain(|c| completion_candidate_matches_word(c, &cur_word, settings));
