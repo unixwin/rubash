@@ -7152,38 +7152,6 @@ impl Executor {
     /// donor's offset unmoved. Mirrors stage_fd_alias_source's
     /// winner search (the redirects list first, then the
     /// synthesized `redirect_in`); only consulted when that search
-    /// found an alias winner at all.
-    pub(in crate::executor) fn stage_fd_alias_winner_is_spelled(
-        &self,
-        command: &CommandNode,
-    ) -> bool {
-        let winner = command.redirects.iter().rev().find(|redirect| {
-            redirect.fd.unwrap_or(0) == 0
-                && matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Input
-                        | crate::parser::RedirectKind::DuplicateInput
-                        | crate::parser::RedirectKind::ReadWrite
-                        | crate::parser::RedirectKind::CloseInput
-                        | crate::parser::RedirectKind::HereDoc
-                        | crate::parser::RedirectKind::HereString
-                )
-        });
-        match winner {
-            Some(redirect) => {
-                matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
-                ) && redirect.fd_var.is_none()
-            }
-            None => command.redirect_in.as_ref().is_some_and(|redirect| {
-                matches!(
-                    redirect.kind,
-                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
-                ) && redirect.fd_var.is_none()
-            }),
-        }
-    }
 
     /// rubash#2003: leave the fd that element 0's payload was resolved
     /// from holding that payload as a buffered endpoint, so the stage's
