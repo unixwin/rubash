@@ -3190,9 +3190,12 @@ impl Executor {
                     !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key)
                 })
                 .collect();
-        for (key, value) in &self.shell_state.env_vars {
-            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(key) {
-                env_map.insert(key.clone(), value.clone());
+        // rubash#2486: the snapshot, not the write-behind live table, so
+        // the attribute markers (`__RUBASH_*_VARS`) ride to the respawned
+        // child (same reason as the `cmd &` site in compound_exec.rs).
+        for (key, value) in self.env_vars_snapshot() {
+            if !key.starts_with("__RUBASH_") || rubash_spawn_inherited_state(&key) {
+                env_map.insert(key, value);
             }
         }
         env_map.retain(|key, _| {

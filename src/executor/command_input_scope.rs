@@ -1844,7 +1844,7 @@ impl Executor {
     }
 }
 
-fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
+pub(in crate::executor) fn prepare_unquoted_heredoc_expansion(body: &str) -> String {
     let mut output = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
     let mut command_depth = 0usize;
