@@ -10,7 +10,8 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crate::executor::path::{
-    command_lookup_fingerprint, is_executable_file, shell_directory_entries, shell_path_entries,
+    command_lookup_fingerprint, completion_executable_qualifies, shell_directory_entries,
+    shell_path_entries,
 };
 
 use crate::builtins::alias::Alias;
@@ -1716,8 +1717,13 @@ fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec
             // followed (access(2) semantics), while plain non-executable
             // files and directories are excluded (rubash#1265). The old
             // `entry.is_file` test inverted both halves: it dropped
-            // symlink commands and listed non-executables.
-            if is_executable_file(&entry.path) && !entry.path.is_dir() {
+            // symlink commands and listed non-executables. On Windows
+            // the executability face of that rule is
+            // completion_executable_qualifies (PATHEXT-or-extensionless);
+            // is_executable_file's `is_file()` there admits every data
+            // file, which flooded `compgen -c` with the whole
+            // C:\Windows\System32 listing (niubash #803).
+            if completion_executable_qualifies(&entry.path, env_vars) {
                 candidates.push(entry.name);
             }
         }

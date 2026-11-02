@@ -3563,6 +3563,48 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
+/// The completion-listing face of command executability — GNU
+/// bashline.c:2005 command_word_completion_function lists PATH files
+/// through findcmd.c file_status, which requires the execute bit
+/// (findcmd.c:104-135). This is NOT [`is_executable_file`]:
+///
+/// - Unix: identical (access X_OK; symlink-following per rubash#1265).
+/// - Windows: there is no execute bit, and a bare `is_file()` admits
+///   every data file in every PATH directory (C:\Windows\System32 alone
+///   contributes ~4700 DLL/PNG/MOF "commands" to `compgen -c`, niubash
+///   #803). The Windows executability rule is the spawn rule
+///   `executable_candidate` applies: an extension in PATHEXT
+///   (exe/com/bat/cmd/ps1, `executable_extensions`), or no extension at
+///   all (CreateProcess starts extensionless PE images, and the engine's
+///   own resolution accepts the bare file after its PATHEXT probes).
+///   Data files (.dll/.png/.mof/.json/...) are not commands.
+#[cfg(unix)]
+pub(crate) fn completion_executable_qualifies(
+    path: &Path,
+    _env_vars: &HashMap<String, String>,
+) -> bool {
+    is_executable_file(path)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn completion_executable_qualifies(
+    path: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    if path.is_dir() || !path.is_file() {
+        return false;
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        None => true,
+        Some(ext) => {
+            let lower = ext.to_ascii_lowercase();
+            executable_extensions(env_vars)
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&lower))
+        }
+    }
+}
+
 /// Issue #2093: the literal-file existence gate for the registry's
 /// `SlashKind::RedirectToBuiltin` spellings (/bin and /usr/bin of
 /// echo, printf, pwd). GNU findcmd.c:383-385 treats a slash-bearing

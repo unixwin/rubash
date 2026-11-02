@@ -405,6 +405,24 @@ pub struct ShellState {
     pub(crate) coproc_names: HashMap<u32, String>,
     /// pcomplete.c completion spec registry.
     pub(crate) completion_specs: CompletionRegistry,
+    /// pcomplete.c:180 `pcomp_curcs` port: the compspec COPY governing the
+    /// live completion attempt, set for the duration of the governing
+    /// spec's dynamic actions (pcomplete.c:1520-1531
+    /// gen_progcomp_completions saves/restores around nesting) so the bare
+    /// `compopt` form can operate on it (complete.def:862-886
+    /// compopt_builtin). `None` outside a completion function run.
+    pub(crate) pcomp_curcs: Option<crate::builtins::complete::Compspec>,
+    /// pcomplete.c:181 `pcomp_curcmd` port: the command name whose compspec
+    /// `pcomp_curcs` governs (printed by the bare `compopt` report form,
+    /// complete.def:872 print_compopts (pcomp_curcmd, ...)).
+    pub(crate) pcomp_curcmd: Option<String>,
+    /// Readline's RL_STATE_COMPLETING port: set for the whole host completion
+    /// attempt (`Executor::complete_line`), including nested `compgen`
+    /// runs, exactly as rl_complete_internal keeps the bit set while
+    /// programmable completion runs the -F/-C generators. The bare
+    /// `compopt` form is accepted only while this is true AND
+    /// [`Self::pcomp_curcs`] is set (complete.def:865).
+    pub(crate) line_completion_active: bool,
     /// readline binding registry (`bind` builtin's data plane):
     /// function/macro bindings and the `bind -x` command map
     /// (bashline.c:4771 init_unix_command_map). Unlike session_history,
@@ -835,6 +853,11 @@ impl Clone for ShellState {
             last_background_pid: self.last_background_pid,
             coproc_names: self.coproc_names.clone(),
             completion_specs: self.completion_specs.clone(),
+            // pcomplete.c:180-181: process globals — a fork mid-completion
+            // keeps the governing compspec context.
+            pcomp_curcs: self.pcomp_curcs.clone(),
+            pcomp_curcmd: self.pcomp_curcmd.clone(),
+            line_completion_active: self.line_completion_active,
             // Process-global (see field docs): the shared handle, not a copy.
             bind_registry: self.bind_registry.clone(),
             session_history: self

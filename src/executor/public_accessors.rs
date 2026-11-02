@@ -652,8 +652,19 @@ impl Executor {
                     .to_string()
             })
             .collect();
+        // rl_complete_internal sets RL_STATE_COMPLETING for the whole
+        // attempt (readline/complete.c complete_internal) and clears it on
+        // the way out; the bare `compopt` form is admissible only inside
+        // that window (complete.def:865). Host completion is this port's
+        // equivalent of the readline completion attempt, so arm the flag
+        // across the whole call — the dynamic resolution below RUNS the
+        // completion function — including the nested `compgen` runs it
+        // makes (a command-line `compgen` outside a live completion never
+        // passes through here and keeps the flag down, matching
+        // RL_STATE_COMPLETING's scope).
+        self.shell_state.line_completion_active = true;
         let dynamic = self.completion_dynamic_for_line(line, cursor);
-        crate::builtins::complete::complete_line_candidates_with_dynamic(
+        let candidates = crate::builtins::complete::complete_line_candidates_with_dynamic(
             line,
             cursor,
             &self.shell_state.completion_specs,
@@ -662,7 +673,9 @@ impl Executor {
             &function_names,
             &job_names,
             dynamic,
-        )
+        );
+        self.shell_state.line_completion_active = false;
+        candidates
     }
 
     /// The canonical list of shell builtin command names (mirrors
@@ -1300,6 +1313,18 @@ impl Executor {
     pub fn set_invocation_shape(&mut self, interactive: bool, login: bool) {
         if interactive {
             self.set_env("__RUBASH_INTERACTIVE", "1");
+            // GNU's `set -o emacs` view is get_edit_mode (set.def:448-452:
+            // `no_line_editing == 0 && rl_editing_mode == 1`). Only
+            // init_noninteractive sets no_line_editing (shell.c:1854);
+            // an interactive shell keeps readline's emacs default, so
+            // the flag reads ON interactively and OFF under `bash -c`
+            // (probed on WSL GNU bash 5.3: `bash -i -c 'set -o | grep
+            // emacs'` → on, `bash -c ...` → off). Applied at the shape
+            // funnel, which runs before command-line options and startup
+            // files, so an explicit `-o vi` / `+o emacs` still wins
+            // afterwards (the shared setter keeps the vi/emacs mutual
+            // exclusion, set.def:421-446 set_edit_mode).
+            crate::builtins::set::set_shell_option(&mut self.shell_state.env_vars, "emacs", true);
         } else {
             self.remove_env("__RUBASH_INTERACTIVE");
         }
