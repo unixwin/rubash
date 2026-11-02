@@ -1442,12 +1442,21 @@ impl Executor {
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
             )
         };
-        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (dev_args, mut dev_ops) = self.materialize_dev_fd_operands(
             &args,
             dev_stdin,
             crate::executor::dev_fd_operands::DevOperandStdout::Capture,
             Some(program.as_path()),
         );
+        // rubash#2602: the setup span below (process construction,
+        // stdio wiring, the stage's fd delivery) precedes the spawn by
+        // a long stretch, and a failure anywhere in it means no child
+        // ever ran. The deferred finish models the child's reads and
+        // writes, so the record stays disarmed across the span and is
+        // armed once the child exists (below, after the spawn
+        // resolves); from there the two wait paths either finish it
+        // explicitly or settle it through its Drop.
+        dev_ops.disarm_finish();
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
         // record lives until the stage's output is collected below
@@ -1909,6 +1918,11 @@ impl Executor {
             payloads
         };
         let mut child = spawned?;
+        // rubash#2602: the child exists — arm the operand record's
+        // deferred finish (disarmed across the setup span above). A
+        // failed spawn returns just above with the record still
+        // disarmed, so its donors stay untouched.
+        dev_ops.arm_finish();
         adopt_orphan_console(child.id());
         // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
         // values set above, and a live Command keeps the merged pipe's
