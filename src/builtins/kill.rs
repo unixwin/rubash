@@ -866,11 +866,38 @@ pub fn process_exists(pid: u32) -> bool {
     pid == std::process::id() || signal_process(pid, 0).is_ok_or_permission_denied()
 }
 
-/// jobs.c:3926-3928 continue_job: fg/bg resume a stopped job by signalling
-/// SIGCONT to the process group; per-pid delivery is the rubash equivalent
-/// of killpg over the job's process list.
+/// Plain kill(2) to one recorded pid: the delivery primitive for the
+/// kill builtin's pid operands and for fg/bg's shared-group fallback.
+/// It is NOT the resume model for a job-control job: GNU continue_job
+/// (jobs.c:3926-3928) addresses the resume SIGCONT to the job's process
+/// GROUP with killpg, because the group also holds processes the leader
+/// forked after spawn — which no pid list the shell keeps can name — so
+/// per-pid delivery over the job's recorded pids is not a killpg
+/// equivalent there (rubash#2622). fg/bg use
+/// [`send_signal_to_process_group`] whenever the job-control channel is
+/// active; this per-pid path remains for the fallback model, where the
+/// job's members all live in the shell's own process group and every
+/// member is a recorded pid.
 pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
     signal_process(pid, signal)
+}
+
+/// killpg(2) to a job's process group — GNU continue_job's resume
+/// delivery (jobs.c:3926-3928 `killpg (jobs[job]->pgrp, SIGCONT)`;
+/// start_job is jobs.c:3826). Group addressing reaches every member of
+/// the group, including children the job's leader forked after spawn
+/// that the shell never recorded as job pids (rubash#2622).
+#[cfg(unix)]
+pub fn send_signal_to_process_group(pgrp: i32, signal: i32) -> Result<(), &'static str> {
+    let result = unsafe { libc::killpg(pgrp as libc::pid_t, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Err("No such process"),
+        Some(libc::EPERM) => Err("Permission denied"),
+        _ => Err("Failed to signal process"),
+    }
 }
 
 /// Record a console `CTRL_C_EVENT` into this process's self-signal queue.
