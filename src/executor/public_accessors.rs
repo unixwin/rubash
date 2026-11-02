@@ -663,7 +663,22 @@ impl Executor {
         // passes through here and keeps the flag down, matching
         // RL_STATE_COMPLETING's scope).
         self.shell_state.line_completion_active = true;
-        let dynamic = self.completion_dynamic_for_line(line, cursor);
+        // rubash#2576: bashline.c:1681 — with progcomp off the dynamic
+        // (-F/-C) hooks never run; the static pipeline falls back to
+        // command/file completion.
+        let dynamic =
+            if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp") {
+                self.completion_dynamic_for_line(line, cursor)
+            } else {
+                None
+            };
+        // rubash#2575: snapshot the bind registry's readline variables
+        // for the candidate filter (the registry is the only store
+        // `bind 'set ...'` writes; the pipeline could not see it
+        // before).
+        let rl_settings = crate::builtins::complete::ReadlineCompletionSettings::from_bind_registry(
+            &self.shell_state.bind_registry.borrow(),
+        );
         let candidates = crate::builtins::complete::complete_line_candidates_with_dynamic(
             line,
             cursor,
@@ -673,6 +688,7 @@ impl Executor {
             &function_names,
             &job_names,
             dynamic,
+            &rl_settings,
         );
         self.shell_state.line_completion_active = false;
         candidates

@@ -455,6 +455,12 @@ pub(crate) fn option_enabled(env_vars: &HashMap<String, String>, name: &str) -> 
         "xpg_echo" => xpg_echo_enabled(),
         "checkhash" => checkhash_enabled(),
         "sourcepath" => sourcepath_enabled(),
+        // rubash#2576: GNU builtins/shopt.def:750-757 set_restricted_shell
+        // — the variable is a VIEW of the invocation state
+        // (shell_is_restricted(shell_name): rbash argv[0] or -r), never
+        // of the shopt state set, so `shopt restricted_shell` and
+        // $BASHOPTS always report the invocation truth.
+        "restricted_shell" => crate::builtins::set::shell_option_enabled(env_vars, "restricted"),
         _ => state_contains(env_vars, name),
     }
 }
@@ -583,6 +589,15 @@ fn set_option_inner(
     enabled: bool,
     rebind_bashopts: bool,
 ) -> Option<String> {
+    // rubash#2576: GNU builtins/shopt.def:750-757 (set_restricted_shell):
+    // a shopt attempt to change restricted_shell is silently forced
+    // back to the invocation value (the setter ignores `mode` and
+    // re-stores shell_is_restricted(shell_name)); status stays 0.
+    let enabled = if name == "restricted_shell" {
+        crate::builtins::set::shell_option_enabled(env_vars, "restricted")
+    } else {
+        enabled
+    };
     // rubash#131: keep the parse-time extglob gate in step with the runtime
     // shopt (GNU builtins/shopt.def updates extglob_flag; reset_parser
     // parse.y:3502 propagates it into the parser's extended_glob). Later
