@@ -51,6 +51,16 @@ pub(in crate::executor) enum DevOperandStdout {
     Capture,
 }
 
+/// rubash#2473: the machine-level proof key that re-arms the #1903
+/// fifo-marker rendezvous for procsub argv operands (see
+/// `procsub_operand_delivery`). "1" asserts the installed WinuxCmd
+/// runtime bridges `!<fifo>` markers on its applet operand READ path —
+/// WinuxCmd 1.1.20 does not (paste/wc/od/comm read the 7 marker bytes
+/// plainly; their own `od` does not rendezvous with their own `mkfifo`
+/// marker — unixwin/WinuxCmd#1493), so the default is the byte-correct
+/// drain for every consumer.
+const PROCSUB_FIFO_MARKER_PROOF_ENV: &str = "RUBASH_PROCSUB_FIFO_MARKER";
+
 enum DevOperandFlush {
     Stdout,
     Stderr,
@@ -328,24 +338,41 @@ enum ProcsubOperandDelivery {
 /// pipe whose bytes ANY consumer opening the name must receive, so
 /// streaming may never change the bytes a non-aware consumer reads.
 ///
-/// The aware class is a property of the resolved program binary, not a
-/// tool-name list: `path::winuxcmd_fifo_marker_aware` (the program IS
-/// the WinuxCmd runtime — the dispatcher or an applet hardlink of it).
-/// The judgment eats the RESOLVED program path (a bare name reaches
-/// this point already PATH-resolved by the spawn sites), never the
-/// argv[0] spelling. Every miss — no program offered, an unresolvable
-/// or unknown consumer, a non-WinuxCmd binary — falls to DrainToTemp:
-/// the failure direction costs the #1959 streaming win for that shape,
-/// never bytes.
+/// rubash#2473: the aware CLASS is no longer PROOF of bridging. Every
+/// `<(...)` occurrence is its own substitution — expand_word_internal
+/// calls process_substitute per occurrence (subst.c:11364-11385), each
+/// with its own pipe (subst.c:6381) under its own /dev/fd name
+/// (move_to_high_fd + make_dev_fd_filename, subst.c:6392-6394) — and the
+/// contract for every one of them is the same: whatever consumer opens
+/// the name receives the producer's bytes. Identity-based awareness
+/// ("the binary IS the WinuxCmd runtime") predicted that the runtime's
+/// applet reads bridge `!<fifo>` markers; measured against WinuxCmd
+/// 1.1.20 the prediction is false on the READ side for the applets that
+/// matter (`paste <(echo 1) <(echo x)` printed `!<fifo>\t!<fifo>`;
+/// `wc -c <(printf hello)` counted the 7 marker bytes; od/comm the
+/// same), and WinuxCmd's own runtime does not rendezvous with its own
+/// mkfifo marker (its `od` reads the marker bytes plainly while the
+/// writer blocks in the pipe open). A wrong prediction here is silent
+/// byte corruption in the operand, so the marker rendezvous now
+/// requires an explicit machine-level proof: `RUBASH_PROCSUB_FIFO_MARKER=1`
+/// asserts "the installed WinuxCmd runtime bridges `!<fifo>` markers on
+/// its applet operand read path" (the WinuxCmd-side read-open gap is
+/// unixwin/WinuxCmd#1493; a version probe can replace the manual key
+/// once a bridging release exists). Without the key every consumer —
+/// including the WinuxCmd class — takes the byte-correct drain; the
+/// failure direction costs the #1959 streaming win, never bytes,
+/// exactly the #2225 safe direction.
 fn procsub_operand_delivery(
     consumer_program: Option<&Path>,
     env_vars: &HashMap<String, String>,
 ) -> ProcsubOperandDelivery {
     #[cfg(windows)]
     {
-        if let Some(program) = consumer_program {
-            if super::path::winuxcmd_fifo_marker_aware(program, env_vars) {
-                return ProcsubOperandDelivery::FifoMarker;
+        if env_vars.get(PROCSUB_FIFO_MARKER_PROOF_ENV) == Some(&"1".to_string()) {
+            if let Some(program) = consumer_program {
+                if super::path::winuxcmd_fifo_marker_aware(program, env_vars) {
+                    return ProcsubOperandDelivery::FifoMarker;
+                }
             }
         }
     }
@@ -1150,7 +1177,10 @@ impl Executor {
 
 #[cfg(test)]
 mod tests {
-    use super::{dev_operand_fd, procsub_operand_delivery, ProcsubOperandDelivery};
+    use super::{
+        dev_operand_fd, procsub_operand_delivery, ProcsubOperandDelivery,
+        PROCSUB_FIFO_MARKER_PROOF_ENV,
+    };
     use std::collections::HashMap;
     use std::path::Path;
 
@@ -1191,6 +1221,10 @@ mod tests {
     /// dispatcher name) exists only there. The applet-identity route is
     /// pinned where the file-identity APIs live
     /// (path::tests::issue2225_fifo_marker_aware_classification).
+    ///
+    /// rubash#2473: the aware CLASS alone is no longer sufficient —
+    /// WinuxCmd 1.1.20's applet reads do not bridge markers, so the
+    /// marker route additionally requires the machine-level proof key.
     #[test]
     fn issue2225_procsub_operand_delivery_falls_to_drain() {
         let env = HashMap::new();
@@ -1213,13 +1247,27 @@ mod tests {
             ProcsubOperandDelivery::DrainToTemp
         );
         // The dispatcher name is the one route decidable from the path
-        // alone — and only on Windows, where the face exists.
+        // alone — and only on Windows, where the face exists. rubash#2473:
+        // without the proof key even the aware class drains (WinuxCmd
+        // 1.1.20 applet reads do not bridge markers); with the key the
+        // #2225 class verdict stands.
         let dispatcher = Path::new(r"C:\tools\winuxcmd\usr\bin\winuxcmd.exe");
+        assert_eq!(
+            procsub_operand_delivery(Some(dispatcher), &env),
+            ProcsubOperandDelivery::DrainToTemp
+        );
+        let mut proof = HashMap::new();
+        proof.insert(PROCSUB_FIFO_MARKER_PROOF_ENV.to_string(), "1".to_string());
         let expected = if cfg!(windows) {
             ProcsubOperandDelivery::FifoMarker
         } else {
             ProcsubOperandDelivery::DrainToTemp
         };
-        assert_eq!(procsub_operand_delivery(Some(dispatcher), &env), expected);
+        assert_eq!(procsub_operand_delivery(Some(dispatcher), &proof), expected);
+        // The key never rescues a consumer outside the runtime class.
+        assert_eq!(
+            procsub_operand_delivery(Some(findstr), &proof),
+            ProcsubOperandDelivery::DrainToTemp
+        );
     }
 }

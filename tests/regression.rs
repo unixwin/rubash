@@ -5435,15 +5435,22 @@ mod issue_2225 {
 
     /// A consumer that IS the WinuxCmd runtime binary (an applet
     /// hardlink of the tree's dispatcher) keeps the #1959 streaming
-    /// route: its operand word is the fifo-marker path. (The route's
-    /// streaming behavior itself stays pinned in
+    /// route: its operand word is the fifo-marker path — but only
+    /// when the runtime has proven its applets consume the marker
+    /// protocol by exporting RUBASH_PROCSUB_FIFO_MARKER=1 (#2473:
+    /// file identity alone stopped being proof when shipped applets
+    /// were measured reading the marker bytes as plain content; the
+    /// unproven default is the byte-correct drain for every
+    /// consumer). This pin exports the key the way a proven runtime
+    /// does. (The route's streaming behavior itself stays pinned in
     /// tests/issue1959_procsub_argv_streaming.rs.)
     #[test]
     fn issue2225_aware_applet_consumer_gets_marker_operand() {
         let dir = case_scratch("2225-applet");
         let (payload, bin) = fake_payload(&dir, true);
         let script = format!(
-            "export WINUXCMD_HOME='{payload}'; PATH='{bin};C:/Windows/System32'; \
+            "export WINUXCMD_HOME='{payload}'; export RUBASH_PROCSUB_FIFO_MARKER=1; \
+             PATH='{bin};C:/Windows/System32'; \
              showop <(printf 'x\\n')\n"
         );
         let stdout = echoed_operand(&dir, &script);
