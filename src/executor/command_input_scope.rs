@@ -289,6 +289,20 @@ impl Executor {
         let mut bound_dynamic_fds: Vec<(String, u32)> = Vec::new();
         let mut saved_dynamic_closes: Vec<SavedDynamicClose> = Vec::new();
         let mut apply_error: Option<ExecuteError> = None;
+        // rubash#2612: the walk space of this list (see FdWalkBinding
+        // in trap_exec.rs). This loop used to service the `{var}`
+        // entries BEFORE the compound's fixed entries were bound
+        // anywhere, so a `{var}` dup copied the source's AMBIENT
+        // binding even when an earlier entry of the compound's own
+        // list rebound it (GNU's do_redirections is one ordered
+        // walk, redir.c:237). The fixed entries are recorded as the
+        // walk passes them — their scoped binds below are unchanged
+        // — and each `{var}` entry resolves against the space the
+        // entries before it evolved. This face performs closes in
+        // the table immediately (defer_closes=false), so the walk
+        // updates after each `{var}` entry mirror the closes and
+        // binds the entry just performed.
+        let mut walk_space = super::trap_exec::FdWalkSpace::new();
         for redirect in &cmd.redirects {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
@@ -308,6 +322,13 @@ impl Executor {
                     .as_deref()
                     .and_then(|name| self.dynamic_fd_variable_value(name));
                 let prior_open = prior_value.map_or(false, |fd| self.fd_table.is_open(fd));
+                let name = redirect.fd_var.as_deref().unwrap_or_default();
+                let is_close = matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::CloseOutput
+                );
+                let value_before = prior_value;
                 match self.execute_dynamic_fd_var_redirect(
                     redirect,
                     false,
@@ -315,21 +336,54 @@ impl Executor {
                     &occupied_slots,
                     &std::collections::HashSet::new(),
                     0,
+                    &walk_space,
                 ) {
                     Ok(_) => {
                         // A close-form entry binds nothing: the
                         // variable still names the CALLER's descriptor,
                         // whose snapshot above is its undo record.
-                        if !matches!(
-                            redirect.kind,
-                            crate::parser::RedirectKind::CloseInput
-                                | crate::parser::RedirectKind::CloseOutput
-                        ) {
-                            if let Some(name) = redirect.fd_var.as_deref() {
-                                if let Some(fd) = self.dynamic_fd_variable_value(name) {
-                                    if Some(fd) != prior_value || !prior_open {
-                                        bound_dynamic_fds.push((name.to_string(), fd));
-                                    }
+                        if !is_close {
+                            if let Some(fd) = self.dynamic_fd_variable_value(name) {
+                                if Some(fd) != prior_value || !prior_open {
+                                    bound_dynamic_fds.push((name.to_string(), fd));
+                                }
+                            }
+                        }
+                        if is_close {
+                            // The arm closed the descriptor the variable
+                            // held; later entries resolve it as closed.
+                            if let Some(fd) = value_before {
+                                walk_space.insert(fd, super::trap_exec::FdWalkBinding::Closed);
+                            }
+                        } else {
+                            // A move-form dup's source close was performed
+                            // in the table by the arm; mirror it in the
+                            // walk space.
+                            if matches!(
+                                redirect.kind,
+                                crate::parser::RedirectKind::DuplicateInput
+                                    | crate::parser::RedirectKind::DuplicateOutput
+                            ) {
+                                let target = self.expand_redirect_target(redirect);
+                                if let Some((source_fd, true)) =
+                                    super::execution_misc::redirect_target_fd_and_move(&target)
+                                {
+                                    walk_space.insert(
+                                        source_fd,
+                                        super::trap_exec::FdWalkBinding::Closed,
+                                    );
+                                }
+                            }
+                            // Record the descriptor this entry bound (a
+                            // failed dup binds nothing and leaves the
+                            // variable's prior value — and the walk — alone).
+                            let value_after = self.dynamic_fd_variable_value(name);
+                            if let Some(fd) = value_after {
+                                if value_after != value_before {
+                                    walk_space.insert(
+                                        fd,
+                                        super::trap_exec::FdWalkBinding::TableSlot(fd),
+                                    );
                                 }
                             }
                         }
@@ -339,6 +393,8 @@ impl Executor {
                         break;
                     }
                 }
+            } else {
+                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
             }
         }
         if let Some(error) = apply_error {

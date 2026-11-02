@@ -142,6 +142,69 @@ fn with_exec_diag_stderr<R>(
     result
 }
 
+/// rubash#2612: one slot of the descriptor space a redirect list's
+/// ordered walk has evolved to at the current walk position — the
+/// space GNU's do_redirections (redir.c:237) resolves every entry
+/// against. The pre-#2612 applier iterated only the list's `{var}`
+/// entries and resolved their dup sources against the AMBIENT
+/// (persistent) fd table, so any same-list entry that rebound or
+/// closed the source first was invisible to the copy: `f 9>o1.txt
+/// {v}>&9` copied fd 9's ambient endpoint instead of o1.txt's
+/// (#2607, and its input-arm / close-reopen siblings). The walk
+/// space restores the single-space model inside rubash's split
+/// architecture: the applier records every entry's effect here as
+/// the walk passes it, while the entries' real application stays
+/// with its existing owners (the builtin/function routing layers,
+/// the compound scope binders, the spawn delivery walk) — nothing
+/// is opened or bound twice, but a `{var}` entry now resolves
+/// exactly what a `{var}` entry of the earlier entry's own shape
+/// would have bound at that position.
+#[derive(Debug, Clone)]
+pub(in crate::executor) enum FdWalkBinding {
+    /// Bound by an earlier entry of this list to a file-shaped
+    /// endpoint (plain open kinds; process-substitution and fd-alias
+    /// targets included — the stored entry is the exact replay
+    /// form). A copy materializes it by applying the stored entry
+    /// as a `{var}` entry, through the same arms that bind `{var}`
+    /// file entries, so endpoint construction has one owner.
+    File(Box<crate::parser::Redirect>),
+    /// Bound by an earlier entry to the binding the persistent fd
+    /// table holds at this slot: an ambient slot the list never
+    /// rebound, or a `{var}` slot bound earlier in this same walk
+    /// (`{var}` entries bind into the table as the walk passes
+    /// them). Copies resolve through the table's own dup machinery.
+    TableSlot(u32),
+    /// Closed by an earlier entry of this list at this position.
+    Closed,
+    /// Bound by an earlier entry whose endpoint this walk does not
+    /// model (a heredoc body carried outside the plain list, an
+    /// unparseable dup target). A copy from it takes the
+    /// closed-source path, like a copy from a descriptor the
+    /// ambient table never had open.
+    Unmodelled,
+}
+
+/// The evolving descriptor space of one redirect list's walk
+/// (see FdWalkBinding). Slots the list has not touched are absent:
+/// they resolve against the ambient fd table, as before.
+pub(in crate::executor) type FdWalkSpace = std::collections::HashMap<u32, FdWalkBinding>;
+
+/// rubash#2612: a `{var}` dup entry's source resolution against
+/// the walk space (see Executor::fd_walk_dup_action).
+#[derive(Debug, Clone)]
+pub(in crate::executor) enum FdWalkDupAction {
+    /// The source is closed (or unbindable) at this walk position:
+    /// the copy fails the way a copy from a closed descriptor
+    /// fails — the variable stays unbound.
+    FailClosed,
+    /// The source was bound by an earlier entry of this list to a
+    /// file-shaped endpoint: materialize the copy by applying this
+    /// stored entry as a `{var}` entry.
+    Replay(crate::parser::Redirect),
+    /// Copy the source from this slot of the persistent fd table.
+    CopyFrom(u32),
+}
+
 impl Executor {
     pub(in crate::executor) fn set_fd_input_text(&mut self, fd: u32, input: String, dynamic: bool) {
         // input is shell text: decode marker pairs back to the raw bytes
@@ -4566,6 +4629,12 @@ impl Executor {
                     &occupied_slots,
                     &std::collections::HashSet::new(),
                     0,
+                    // rubash#2612: this loop is itself GNU's ordered
+                    // walk over the persistent table — fixed entries
+                    // bind into the table in list order around this
+                    // call — so the table IS the evolved descriptor
+                    // space and the walk overlay stays empty.
+                    &FdWalkSpace::new(),
                 ) {
                     Ok(_) => {}
                     Err(ExecuteError::IoError(error)) => {
@@ -5909,6 +5978,159 @@ impl Executor {
         result
     }
 
+    /// rubash#2612: what a `{var}` dup entry's source resolves to
+    /// against the walk space at the entry's position (see
+    /// FdWalkBinding): copy from this table slot, replay this stored
+    /// entry as a `{var}` entry to materialize the copy, or fail the
+    /// copy the way a closed source fails it.
+    pub(in crate::executor) fn fd_walk_dup_action(
+        &self,
+        walk: &FdWalkSpace,
+        source_fd: u32,
+    ) -> FdWalkDupAction {
+        match walk.get(&source_fd) {
+            Some(FdWalkBinding::Closed) | Some(FdWalkBinding::Unmodelled) => {
+                FdWalkDupAction::FailClosed
+            }
+            Some(FdWalkBinding::File(replay)) => FdWalkDupAction::Replay((**replay).clone()),
+            Some(FdWalkBinding::TableSlot(slot)) => FdWalkDupAction::CopyFrom(*slot),
+            None => FdWalkDupAction::CopyFrom(source_fd),
+        }
+    }
+
+    /// rubash#2612: the binding a descriptor holds at the current
+    /// walk position when an entry copies it: the walk's own record
+    /// if the list has touched the descriptor, the ambient table's
+    /// binding (as a TableSlot) if it has not, and Unmodelled when
+    /// the descriptor is open in neither space (a dup of it fails
+    /// in GNU's walk too, redir.c do_redirection_internal's dup arm
+    /// on a closed redir_fd).
+    pub(in crate::executor) fn fd_walk_resolve(
+        &self,
+        walk: &FdWalkSpace,
+        fd: u32,
+    ) -> FdWalkBinding {
+        if let Some(binding) = walk.get(&fd) {
+            return binding.clone();
+        }
+        if self.fd_table.is_open(fd) {
+            FdWalkBinding::TableSlot(fd)
+        } else {
+            FdWalkBinding::Unmodelled
+        }
+    }
+
+    /// rubash#2612: record one FIXED (non-`{var}`) entry's effect on
+    /// the walk space as the ordered walk passes it — the recording
+    /// half of do_redirections' single pass (redir.c:237), shared
+    /// by every applier loop so the loops cannot drift. The entry
+    /// itself is NOT applied here: its owners (routing layers,
+    /// compound binders, delivery) apply it as before. What is
+    /// recorded is exactly the binding a `{var}` entry of the same
+    /// kind and target would have produced at this position.
+    pub(in crate::executor) fn fd_walk_record_fixed_entry(
+        &mut self,
+        walk: &mut FdWalkSpace,
+        redirect: &Redirect,
+    ) {
+        let effective_fd = redirect
+            .fd
+            .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+        // Injected group redirects are the enclosing compound's
+        // bindings, already materialized in the persistent table by
+        // the compound's scoped bind before any body command runs:
+        // they resolve through the table, never through a replay
+        // (a replay would open the compound's file a second time).
+        if crate::executor::support_names::is_injected_group_redirect(redirect) {
+            walk.insert(effective_fd, FdWalkBinding::TableSlot(effective_fd));
+            return;
+        }
+        match redirect.kind {
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                walk.insert(effective_fd, FdWalkBinding::Closed);
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                let target = self.expand_redirect_target(redirect);
+                match redirect_target_fd_and_move(&target) {
+                    Some((source_fd, move_source)) => {
+                        let binding = self.fd_walk_resolve(walk, source_fd);
+                        walk.insert(effective_fd, binding);
+                        if move_source {
+                            walk.insert(source_fd, FdWalkBinding::Closed);
+                        }
+                    }
+                    // A dup kind whose target is not a dup spelling
+                    // binds nothing a `{var}` entry could copy (the
+                    // `{var}` dup arm itself declines it identically).
+                    None => {
+                        walk.insert(effective_fd, FdWalkBinding::Unmodelled);
+                    }
+                }
+            }
+            crate::parser::RedirectKind::Input => {
+                // An fd-alias target (/dev/fd/N and kin) is serviced
+                // by an open over the alias layer, which hands back
+                // the aliased descriptor's own binding (the `{var}`
+                // Input arm's established treatment) — so the walk
+                // records the aliased slot's at-position binding,
+                // not a file replay.
+                let target = self.expand_redirect_target(redirect);
+                if let Some(alias_fd) = crate::special_paths::fd_alias_target(&target) {
+                    let binding = self.fd_walk_resolve(walk, alias_fd);
+                    walk.insert(effective_fd, binding);
+                } else {
+                    walk.insert(
+                        effective_fd,
+                        FdWalkBinding::File(Box::new(redirect.clone())),
+                    );
+                }
+            }
+            crate::parser::RedirectKind::Output
+            | crate::parser::RedirectKind::Append
+            | crate::parser::RedirectKind::ClobberOutput
+            | crate::parser::RedirectKind::ReadWrite => {
+                walk.insert(
+                    effective_fd,
+                    FdWalkBinding::File(Box::new(redirect.clone())),
+                );
+            }
+            crate::parser::RedirectKind::CombinedOutput
+            | crate::parser::RedirectKind::CombinedAppend => {
+                // `>&word` / `&>word`: with a dup-spelling word the
+                // redirector dups the source (r_err_and_out's numeric
+                // form); with a file word it opens the file on the
+                // redirector — recorded as the plain open replay for
+                // the redirector's slot (the paired std slot the C
+                // code also binds is not modelled; see the W20
+                // report).
+                let target = self.expand_redirect_target(redirect);
+                if super::execution_misc::redirect_target_is_dup_spelling(&target) {
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                        let binding = self.fd_walk_resolve(walk, source_fd);
+                        walk.insert(effective_fd, binding);
+                        if move_source {
+                            walk.insert(source_fd, FdWalkBinding::Closed);
+                        }
+                        return;
+                    }
+                }
+                let mut replay = redirect.clone();
+                replay.kind = if redirect.kind == crate::parser::RedirectKind::CombinedOutput {
+                    crate::parser::RedirectKind::Output
+                } else {
+                    crate::parser::RedirectKind::Append
+                };
+                walk.insert(effective_fd, FdWalkBinding::File(Box::new(replay)));
+            }
+            crate::parser::RedirectKind::HereDoc
+            | crate::parser::RedirectKind::HereString
+            | crate::parser::RedirectKind::Unknown => {
+                walk.insert(effective_fd, FdWalkBinding::Unmodelled);
+            }
+        }
+    }
+
     /// GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
     /// every `{var}` redirection allocates a fresh descriptor and assigns
     /// the number to the variable — for builtins, functions and external
@@ -5970,12 +6192,25 @@ impl Executor {
         // survives the rejection. Folded incrementally below from
         // the pending-close records plus the list's fixed entries.
         let mut list_closed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        // rubash#2612: the evolving descriptor space of this walk
+        // (see FdWalkBinding). The overlays above track slot
+        // occupancy and closes for the gates that consult them; the
+        // walk space additionally records every entry's BINDING, so
+        // a `{var}` entry resolves its dup sources and allocation
+        // neighbours against the space GNU's do_redirections
+        // (redir.c:237) would have evolved at its position — not
+        // against the ambient table alone (#2607).
+        let mut walk_space = FdWalkSpace::new();
         let mut folded_closes = 0usize;
         for (position, redirect) in cmd.redirects.iter().enumerate() {
             if let Some(fd) = redirect.fd {
                 occupied_slots.insert(fd);
             }
             let Some(name) = redirect.fd_var.as_deref() else {
+                // rubash#2612: a fixed entry moves the walk space
+                // like any other entry of GNU's single pass — its
+                // binding is what later entries resolve against.
+                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
                 // A fixed entry still moves the walk state: a close
                 // poisons its descriptor, any other bind revives it.
                 let effective_fd =
@@ -6024,15 +6259,23 @@ impl Executor {
                 &occupied_slots,
                 &list_closed,
                 position,
+                &walk_space,
             );
             // rubash#2322: fold the closes THIS entry recorded
             // (close forms and move-form dup sources, stamped with
             // their positions) into the walk overlay, and let a
             // descriptor this entry bound revive its slot.
+            // rubash#2612: the same fold updates the walk space —
+            // a descriptor this entry closed is Closed for every
+            // later entry of the list.
             while folded_closes < self.fd_var_pending_closes.len()
                 && self.fd_var_pending_closes[folded_closes].0 <= position
             {
                 list_closed.insert(self.fd_var_pending_closes[folded_closes].1);
+                walk_space.insert(
+                    self.fd_var_pending_closes[folded_closes].1,
+                    FdWalkBinding::Closed,
+                );
                 folded_closes += 1;
             }
             // rubash#2281: remember the descriptor THIS entry bound
@@ -6057,8 +6300,22 @@ impl Executor {
             // rubash#2322: a descriptor this entry bound is open
             // again for later entries (a same-list rebind after a
             // close revives the slot, redir.c:246 ordered walk).
+            // rubash#2612: in the walk space the bound descriptor
+            // resolves through the table slot the entry just bound
+            // (`{var}` entries bind into the table as the walk
+            // passes them), so a later entry can copy it — or copy
+            // a fixed entry chained onto it — at its position. Only
+            // a value the entry actually moved counts as a bind: a
+            // failed dup leaves the variable naming its prior
+            // descriptor, which this list never bound.
             if let Some(fd) = bound_fd {
                 list_closed.remove(&fd);
+                let prior_fd = prior
+                    .as_deref()
+                    .and_then(|value| value.trim().parse::<u32>().ok());
+                if prior_fd != Some(fd) {
+                    walk_space.insert(fd, FdWalkBinding::TableSlot(fd));
+                }
             }
             self.fd_var_external_undo
                 .push((resolved, prior, prior_typed, bound_fd));
@@ -6571,6 +6828,65 @@ impl Executor {
         }
     }
 
+    /// rubash#2612: resolve one `{var}` dup entry's source against
+    /// the walk space before the ambient copy body runs (see
+    /// FdWalkBinding). Returns the table slot the body must copy
+    /// from plus whether the body's list_closed gate still judges
+    /// the copy, or None when the walk already settled the entry:
+    /// the source is closed at this position (the variable stays
+    /// unbound, exactly the ambient body's verdict for a closed
+    /// source), or an earlier entry's file binding was replayed as
+    /// a `{var}` entry and bound the variable. A move source's
+    /// close is recorded (deferred faces) or performed (immediate
+    /// faces) after a replay, mirroring the ambient body's own
+    /// move handling.
+    ///
+    /// The list_closed gate judges only the untouched-source case:
+    /// a source the walk resolved to a table slot carries a
+    /// binding captured when the resolving entry bound it — GNU's
+    /// dup2 copies are independent from that moment, so a later
+    /// close of the ORIGINAL slot must not poison this copy
+    /// (`8>&9 9>&- {v}<&8` still copies fd 8's seed binding).
+    #[allow(clippy::too_many_arguments)]
+    fn fd_walk_dup_prelude(
+        &mut self,
+        walk: &FdWalkSpace,
+        name: &str,
+        source_fd: u32,
+        move_source: bool,
+        auto_close: bool,
+        defer_closes: bool,
+        occupied_slots: &std::collections::HashSet<u32>,
+        list_closed: &std::collections::HashSet<u32>,
+        position: usize,
+    ) -> Result<Option<(u32, bool)>, ExecuteError> {
+        match self.fd_walk_dup_action(walk, source_fd) {
+            FdWalkDupAction::FailClosed => Ok(None),
+            FdWalkDupAction::CopyFrom(slot) => Ok(Some((slot, slot == source_fd))),
+            FdWalkDupAction::Replay(mut replay) => {
+                replay.fd = None;
+                replay.fd_var = Some(name.to_string());
+                self.execute_dynamic_fd_var_redirect(
+                    &replay,
+                    auto_close,
+                    defer_closes,
+                    occupied_slots,
+                    list_closed,
+                    position,
+                    walk,
+                )?;
+                if move_source {
+                    if defer_closes {
+                        self.fd_var_pending_closes.push((position, source_fd));
+                    } else {
+                        self.close_persistent_fd(source_fd)?;
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
     pub(in crate::executor) fn execute_dynamic_fd_var_redirect(
         &mut self,
         redirect: &Redirect,
@@ -6605,6 +6921,16 @@ impl Executor {
         // position. Meaningful only when defer_closes is set; the
         // immediate faces pass 0.
         position: usize,
+        // rubash#2612: the owning walk's evolving descriptor space
+        // (see FdWalkBinding): a dup entry resolves its source
+        // against the space the entries BEFORE it evolved, exactly
+        // as GNU's do_redirection_internal dup arm reads the live
+        // descriptor the walk has bound at its position
+        // (redir.c:790; the dup2 itself in the r_duplicating arm).
+        // Faces whose own loop maintains the persistent table in
+        // list order (exec's stdio walk) pass an empty space: for
+        // them the table IS the evolved space.
+        walk: &FdWalkSpace,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -6706,6 +7032,25 @@ impl Executor {
             }
             crate::parser::RedirectKind::DuplicateInput => {
                 if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                    // rubash#2612: the source resolves against the
+                    // walk space the earlier entries of this list
+                    // evolved (fd_walk_dup_prelude) — a same-list
+                    // bind or close decides the copy, not the
+                    // ambient table alone (#2607's input arm).
+                    let Some((source_fd, judge_list_closed)) = self.fd_walk_dup_prelude(
+                        walk,
+                        name,
+                        source_fd,
+                        move_source,
+                        auto_close,
+                        defer_closes,
+                        occupied_slots,
+                        list_closed,
+                        position,
+                    )?
+                    else {
+                        return Ok(true);
+                    };
                     // GNU redir.c do_redirection_internal dup/move case:
                     // the descriptor is copied wholesale — the </> letter
                     // never gates on the source's direction, only on it
@@ -6714,7 +7059,9 @@ impl Executor {
                     // a same-list close recorded earlier poisons the
                     // source even though the deferred close has not
                     // touched the table.
-                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
+                    if !self.fd_table.is_open(source_fd)
+                        || (judge_list_closed && list_closed.contains(&source_fd))
+                    {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
@@ -6749,9 +7096,30 @@ impl Executor {
             }
             crate::parser::RedirectKind::DuplicateOutput => {
                 if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                    // rubash#2612: at-position source resolution
+                    // against the walk space, as in the
+                    // DuplicateInput arm above (fd_walk_dup_prelude)
+                    // — this is #2607's own shape (`{v}>&9` after a
+                    // same-list `9>o1.txt`).
+                    let Some((source_fd, judge_list_closed)) = self.fd_walk_dup_prelude(
+                        walk,
+                        name,
+                        source_fd,
+                        move_source,
+                        auto_close,
+                        defer_closes,
+                        occupied_slots,
+                        list_closed,
+                        position,
+                    )?
+                    else {
+                        return Ok(true);
+                    };
                     // rubash#2322: at-position judgment, as in the
                     // DuplicateInput arm above.
-                    if !self.fd_table.is_open(source_fd) || list_closed.contains(&source_fd) {
+                    if !self.fd_table.is_open(source_fd)
+                        || (judge_list_closed && list_closed.contains(&source_fd))
+                    {
                         return Ok(true);
                     }
                     let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
@@ -6853,23 +7221,50 @@ impl Executor {
                 // `exec {fd}</dev/stdin` command-file reader hits this).
                 if redirect.kind == crate::parser::RedirectKind::Input {
                     if let Some(source_fd) = redirect_target_fd(&target) {
-                        if self.fd_table.is_open_for_read(source_fd) {
-                            let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
-                                return Err(ExecuteError::IoError(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    self.fd_dup_error_payload(&target),
-                                )));
-                            };
-                            self.copy_persistent_input_fd(fd, source_fd);
-                            if !self.set_dynamic_fd_variable(name, fd) {
-                                self.close_persistent_fd(fd)?;
-                                return Err(ExecuteError::IoError(std::io::Error::new(
-                                    std::io::ErrorKind::Other,
-                                    format!("{name}: cannot assign fd to variable"),
-                                )));
+                        // rubash#2612: the aliased descriptor
+                        // resolves against the walk space like any
+                        // dup source — a same-list file bind
+                        // replays, a same-list table bind redirects
+                        // the copy, a same-list close leaves the
+                        // literal-path arm below to fail the open,
+                        // as GNU's open of a closed /dev/fd/N does.
+                        match self.fd_walk_dup_action(walk, source_fd) {
+                            FdWalkDupAction::FailClosed => {}
+                            FdWalkDupAction::Replay(mut replay) => {
+                                replay.fd = None;
+                                replay.fd_var = Some(name.to_string());
+                                return self.execute_dynamic_fd_var_redirect(
+                                    &replay,
+                                    auto_close,
+                                    defer_closes,
+                                    occupied_slots,
+                                    list_closed,
+                                    position,
+                                    walk,
+                                );
                             }
-                            close_after_success(self, fd)?;
-                            return Ok(true);
+                            FdWalkDupAction::CopyFrom(slot) => {
+                                if self.fd_table.is_open_for_read(slot) {
+                                    let Some(fd) =
+                                        self.allocate_dynamic_fd_avoiding(occupied_slots)
+                                    else {
+                                        return Err(ExecuteError::IoError(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            self.fd_dup_error_payload(&target),
+                                        )));
+                                    };
+                                    self.copy_persistent_input_fd(fd, slot);
+                                    if !self.set_dynamic_fd_variable(name, fd) {
+                                        self.close_persistent_fd(fd)?;
+                                        return Err(ExecuteError::IoError(std::io::Error::new(
+                                            std::io::ErrorKind::Other,
+                                            format!("{name}: cannot assign fd to variable"),
+                                        )));
+                                    }
+                                    close_after_success(self, fd)?;
+                                    return Ok(true);
+                                }
+                            }
                         }
                     }
                 }
