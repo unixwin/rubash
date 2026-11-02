@@ -849,7 +849,7 @@ impl Executor {
             }
             None => crate::executor::dev_fd_operands::DevOperandStdout::Capture,
         };
-        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (dev_args, mut dev_ops) = self.materialize_dev_fd_operands(
             &stdio.expanded_words[1..],
             dev_stdin,
             dev_stdout,
@@ -951,6 +951,10 @@ impl Executor {
             // full-execution path, whose stdio planner realizes fd 2 from
             // the fd table (the same fall-through every other
             // inexpressible shape in this route takes).
+            // rubash#2602: no child ran on this route, so the operand
+            // record drops disarmed — the full-execution path below
+            // materializes its own records for the child it spawns.
+            dev_ops.disarm_finish();
             return None;
         }
         // rubash#438: /dev/fd/N operand words stay literal on Unix; pin the
@@ -959,7 +963,17 @@ impl Executor {
         crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
         process.current_dir(&self.shell_state.cwd);
         suppress_orphan_console(&mut process);
-        let mut spawned = process.spawn().ok()?;
+        let mut spawned = match process.spawn() {
+            Ok(child) => child,
+            Err(_) => {
+                // rubash#2602: the spawn produced no child — disarm
+                // the operand record before declining, so its donors
+                // stay untouched for the full-execution path's own
+                // materialization.
+                dev_ops.disarm_finish();
+                return None;
+            }
+        };
         adopt_orphan_console(spawned.id());
         if let Some(input) = piped_stdin.as_deref() {
             if let Some(mut child_stdin) = spawned.stdin.take() {
