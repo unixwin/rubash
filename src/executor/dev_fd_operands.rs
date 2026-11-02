@@ -160,6 +160,36 @@ pub(in crate::executor) fn attach_unix_dev_fd_operands(
     }
 }
 
+/// rubash#2484: park an attach source above every descriptor number
+/// the spawn machinery can target, BEFORE the record crosses to the
+/// spawn site. The recorded source is a raw descriptor number in THIS
+/// process, and the child's pin pass (`pin_ambient_fds_in_child`,
+/// registered ahead of the attach closure at every spawn site) dup2's
+/// the shell's ambient bindings onto their fd numbers in the child
+/// first. A source recorded at a number inside that range is
+/// overwritten before the attach pass reads it — systematically the
+/// bats_tee shape: the shell's fd 3 is virtual (no OS descriptor), so
+/// a carrier handle opened in the parent lands on the parent's lowest
+/// free number, 3, and the child's fd-3 pin (the stage pipe) clobbers
+/// it; the attach then copies the PIPE onto the operand number and
+/// the consumer writes into the pipe instead of the carrier.
+/// F_DUPFD_CLOEXEC to the lowest free number above the fd table's
+/// range makes the source unreachable by any pin target (pin targets
+/// are fd-table numbers) and by pin staging (which only takes FREE
+/// numbers, and this one is occupied). A failed park keeps the
+/// original handle — the pre-#2484 behavior — rather than failing
+/// the spawn.
+#[cfg(unix)]
+fn park_attach_source(handle: crate::fd::HANDLE, floor: libc::c_int) -> crate::fd::HANDLE {
+    let parked = unsafe { libc::fcntl(handle as libc::c_int, libc::F_DUPFD_CLOEXEC, floor) };
+    if parked >= 0 {
+        crate::fd::close_handle(handle);
+        parked as crate::fd::HANDLE
+    } else {
+        handle
+    }
+}
+
 /// Whether `arg` is (or `KEY=` carries) a `/dev/std*` / `/dev/fd/N` /
 /// `/proc/self/fd/N` operand naming `fd`.
 pub(in crate::executor) fn dev_operand_targets_fd(arg: &str, fd: u32) -> bool {
@@ -502,6 +532,20 @@ impl Executor {
             // at fd N in the child (attach_unix_dev_fd_operands, called by
             // the spawn paths with this record). File-backed endpoints keep
             // the literal word: the OS resolves it natively.
+            // rubash#2484: every handle recorded for the child attach
+            // is parked above the fd table's number range (see
+            // park_attach_source) so the child's pin pass cannot
+            // overwrite a source before the attach pass reads it.
+            #[cfg(unix)]
+            let attach_floor = self
+                .fd_table
+                .entries
+                .keys()
+                .max()
+                .copied()
+                .unwrap_or(0)
+                .max(63) as libc::c_int
+                + 1;
             #[cfg(unix)]
             for arg in args {
                 let Some((_prefix, value)) = split_dev_operand(arg) else {
@@ -533,7 +577,8 @@ impl Executor {
                 // is unchanged.
                 if let Some(FdReadEndpoint::File(file)) = &entry.read {
                     if let Ok(dup) = crate::fd::duplicate_handle(file.handle) {
-                        m.unix_fd_attach.push((fd, dup));
+                        m.unix_fd_attach
+                            .push((fd, park_attach_source(dup, attach_floor)));
                     }
                     continue;
                 }
@@ -564,7 +609,9 @@ impl Executor {
                         {
                             if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
                                 use std::os::unix::io::IntoRawFd;
-                                m.unix_fd_attach.push((fd, file.into_raw_fd()));
+                                let raw = file.into_raw_fd();
+                                m.unix_fd_attach
+                                    .push((fd, park_attach_source(raw, attach_floor)));
                             }
                         }
                         continue;
@@ -587,7 +634,8 @@ impl Executor {
                     let _ = crate::fd::write_all(write_end, &buffered);
                     crate::fd::close_handle(write_end);
                 });
-                m.unix_fd_attach.push((fd, read_end));
+                m.unix_fd_attach
+                    .push((fd, park_attach_source(read_end, attach_floor)));
             }
             return (args.to_vec(), m);
         }

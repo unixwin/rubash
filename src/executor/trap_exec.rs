@@ -4279,6 +4279,10 @@ impl Executor {
         // transport the output form's plain spawn already uses.
         // Parent-side dups close once the spawn lands.
         let mut ambient_fd_dups: Vec<crate::fd::HANDLE> = Vec::new();
+        // rubash#2484: set when any forwarded fd carries the live
+        // capture scope's shared pipe write end — the producer then
+        // registers as a writer of that scope (see the output form).
+        let mut used_capture_write_end = false;
         #[cfg(unix)]
         let mut ambient_pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
         for (fd, entry) in &self.fd_table.entries {
@@ -4331,6 +4335,23 @@ impl Executor {
                         crate::fd::close_handle(handle);
                     }
                 }
+                // rubash#2484: the capture scope's shared pipe write
+                // end forwards like a file write handle (see the
+                // output form in external_setup.rs).
+                super::external_setup::ProcsubSpawnFd::CaptureWrite(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        env_entries
+                            .push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                        env_entries.push((
+                            format!("__RUBASH_FD_WPATH_{fd}"),
+                            file.path.to_string_lossy().into_owned(),
+                        ));
+                        ambient_fd_dups.push(dup);
+                        #[cfg(unix)]
+                        ambient_pins.push((dup, *fd));
+                        used_capture_write_end = true;
+                    }
+                }
                 _ => {}
             }
         }
@@ -4364,6 +4385,12 @@ impl Executor {
                     crate::fd::close_handle(*dup);
                 }
                 let pid = child_proc.id();
+                // rubash#2484: a producer holding the capture
+                // scope's pipe write end registers as its writer
+                // (see the output form in external_setup.rs).
+                if used_capture_write_end {
+                    super::shell_options::register_background_capture_writer(pid);
+                }
                 self.background_children
                     .insert(pid, crate::fd::SpawnedChild::from(child_proc));
                 // rubash#1952: mark the pid as a streamed procsub
