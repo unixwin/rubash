@@ -4347,6 +4347,7 @@ impl Executor {
                             file.path.to_string_lossy().into_owned(),
                         ));
                         ambient_fd_dups.push(dup);
+                        #[cfg(unix)]
                         ambient_pins.push((dup, *fd));
                         used_capture_write_end = true;
                     }
