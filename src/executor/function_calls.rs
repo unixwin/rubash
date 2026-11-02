@@ -122,9 +122,27 @@ impl Executor {
         // function names (execute_cmd.c execute_intern_function only sets
         // pflags&1 under that ifdef). `!! () { fc -s "$@"; }` under
         // `set -o posix` defines the function (func.tests func5.sub).
-        if marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS)
-            .iter()
-            .any(|name| name == &function.name)
+        // GNU execute_cmd.c:6325-6331 (execute_intern_function): the
+        // `readonly function' error fires only when find_function()
+        // returns an EXISTING function and that function is readonly —
+        // the guard protects a redefinition, never a first definition.
+        // rubash#2543: a respawned `&`/`>(...)` child receives the
+        // `__RUBASH_READONLY_FUNCTIONS` attribute transport at env import
+        // (init.rs) BEFORE its `-c` prelude defines the inherited
+        // functions (background_function_prelude — GNU's fork-inheritance
+        // stand-in; a real fork copies the table by memory,
+        // execute_cmd.c make_child, and defines nothing). Checking the
+        // mark alone made every prelude definition of a readonly
+        // function fail, printing a `name: readonly function' noise wall
+        // and dropping the function entirely from the child (modernish:
+        // 40 lines per async respawn). Gate on the function EXISTING as
+        // GNU does: the prelude's first definition is admitted, and a
+        // redefinition of the now-existing readonly function (by the
+        // child's body) still errors.
+        if self.shell_state.functions.contains_key(&function.name)
+            && marked_env_names(&self.shell_state.env_vars, READONLY_FUNCTIONS)
+                .iter()
+                .any(|name| name == &function.name)
         {
             self.write_diagnostic_fd2(
                 format!(

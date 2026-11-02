@@ -219,7 +219,10 @@ impl Executor {
         }
         // rubash#2202: per-function source-line spans for exactly the
         // bodies background_function_prelude re-renders into the
-        // child. GNU's forked child executes the parent's parsed
+        // child (rubash#2543: background_prelude_function_entries, so
+        // a name skipped because its BASH_FUNC_*%% carrier already
+        // rides the child env gets no dangling span entry). GNU's
+        // forked child executes the parent's parsed
         // tree, whose nodes keep their parse lines (make_cmd.c:196);
         // the respawn child's re-parse collapses every body onto the
         // prelude's own lines, so the recorded span is the only way
@@ -228,10 +231,8 @@ impl Executor {
         // (0 = None) in collect_command_line_spans traversal order;
         // the set rides the indexed-array codec like its siblings.
         let span_entries: Vec<String> = self
-            .shell_state
-            .functions
+            .background_prelude_function_entries()
             .iter()
-            .filter(|(name, _)| is_exportable_function_name(name))
             .map(|(name, body)| {
                 let mut spans = Vec::new();
                 crate::parser::collect_command_line_spans(&body.commands, &mut spans);
@@ -1601,12 +1602,11 @@ impl Executor {
             self.background_command_source(&child_command)
         };
         if !root_spans.is_empty() {
-            let prelude_defs = self
-                .shell_state
-                .functions
-                .keys()
-                .filter(|name| is_exportable_function_name(name))
-                .count();
+            // rubash#2543: count exactly the definitions the rendered
+            // prelude carries (background_prelude_function_entries),
+            // or the child's root-span line math drifts by the skipped
+            // env-carried names.
+            let prelude_defs = self.background_prelude_function_entries().len();
             env_map.insert(
                 FORK_ROOT_SPANS_TRANSPORT.to_string(),
                 encode_root_line_spans(prelude_defs, &root_spans),
@@ -2802,36 +2802,104 @@ impl Executor {
 
     /// Exportable-function prelude shared by both background source forms
     /// (print_cmd-style `name() { ...; }; ` definitions ahead of the body).
+    /// rubash#2543: iterates background_prelude_function_entries, which
+    /// excludes names whose identical `BASH_FUNC_<name>%%` carrier already
+    /// rides this process's environment — every respawn builder seeds the
+    /// child's env from that process env, so those functions are defined
+    /// exactly once in the child by the startup import (GNU
+    /// variables.c:397-446 initialize_shell_variables, the
+    /// parse_and_execute SEVAL_FUNCDEF call at :418). GNU's forked async
+    /// child defines nothing (make_child copies the table whole), so a
+    /// prelude re-definition of an env-imported name is a redefinition —
+    /// one that trips the readonly guard (execute_cmd.c:6325-6331) for
+    /// readonly-marked functions.
     pub(in crate::executor) fn background_function_prelude(&self) -> String {
         let mut source = String::new();
-        for (name, body) in &self.shell_state.functions {
-            if is_exportable_function_name(name) {
-                source.push_str(name);
-                source.push_str("() { ");
-                let body_text = bash_command_sequence_text(&body.commands);
-                source.push_str(&body_text);
-                // print_cmd.c:1520-1529 semicolon(): no `;' after a body
-                // whose last command printed as `... &` — parse.y:1275/1290
-                // only admits newline_list after `&`, and `& ; }` is the
-                // syntax error that killed respawned background children
-                // (rubash#294). `&\n}` is the valid GNU spelling.
-                // Same delimiter-line rule when the body ends with a
-                // heredoc body (rubash#2388's closer logic in
-                // function_command_source_text): the delimiter must stand
-                // alone on its line, so `DELIM; }` leaves the heredoc
-                // unterminated and the respawned child dies at parse
-                // (rubash#2212 cell 118: bats' `usage()` heredoc broke
-                // every async respawn out of bats-main's table).
-                if body_text.ends_with('&')
-                    || crate::executor::command_text::render_ended_with_heredoc()
-                {
-                    source.push_str("\n}; ");
-                } else {
-                    source.push_str("; }; ");
-                }
+        for (name, body) in self.background_prelude_function_entries() {
+            source.push_str(name);
+            source.push_str("() { ");
+            let body_text = bash_command_sequence_text(&body.commands);
+            source.push_str(&body_text);
+            // print_cmd.c:1520-1529 semicolon(): no `;' after a body
+            // whose last command printed as `... &` — parse.y:1275/1290
+            // only admits newline_list after `&`, and `& ; }` is the
+            // syntax error that killed respawned background children
+            // (rubash#294). `&\n}` is the valid GNU spelling.
+            // Same delimiter-line rule when the body ends with a
+            // heredoc body (rubash#2388's closer logic in
+            // function_command_source_text): the delimiter must stand
+            // alone on its line, so `DELIM; }` leaves the heredoc
+            // unterminated and the respawned child dies at parse
+            // (rubash#2212 cell 118: bats' `usage()` heredoc broke
+            // every async respawn out of bats-main's table).
+            if body_text.ends_with('&')
+                || crate::executor::command_text::render_ended_with_heredoc()
+            {
+                source.push_str("\n}; ");
+            } else {
+                source.push_str("; }; ");
             }
         }
         source
+    }
+
+    /// rubash#2543: `BASH_FUNC_<name>%%` carriers present in this
+    /// process's environment that carry the SAME definition as the
+    /// CURRENT function table. The carrier text and the table's
+    /// exportstr need not be byte-identical (GNU's single-line export
+    /// form vs rubash's multiline re-render), so both sides go through
+    /// the SAME canonical printer: parse the carrier with the
+    /// ShellShock-guarded import parser, render it and the table body
+    /// through exported_function_env_value, and compare those. A STALE
+    /// carrier (the parent redefined the function after importing it)
+    /// renders differently and does not skip: the prelude's fresh
+    /// rendering wins, exactly the body GNU's fork would carry.
+    fn env_carried_function_exports(&self) -> std::collections::HashSet<String> {
+        let mut carried = std::collections::HashSet::new();
+        for (env_name, value) in crate::executor::env_helpers::process_env_pairs() {
+            let Some(name) = imported_function_name(&env_name) else {
+                continue;
+            };
+            let Some(body) = self.shell_state.functions.get(name) else {
+                continue;
+            };
+            let Some((carrier_commands, carrier_redirects)) = parse_exported_function_body(&value)
+            else {
+                continue;
+            };
+            let def_redirects = self
+                .shell_state
+                .function_def_infos
+                .get(name)
+                .map(|info| info.def_redirects.as_slice())
+                .unwrap_or(&[]);
+            if exported_function_env_value(&carrier_commands, &carrier_redirects)
+                == exported_function_env_value(&body.commands, def_redirects)
+            {
+                carried.insert(name.to_string());
+            }
+        }
+        carried
+    }
+
+    /// The function-table entries background_function_prelude re-renders
+    /// into a respawned child: every function with an importable name
+    /// (rubash#441: GNU forks inherit the FULL table, not just
+    /// `export -f` names), minus the env-carried names above (rubash#2543:
+    /// the child's startup import defines those once, variables.c:418).
+    /// The FORK_FN_SPANS transport and the prelude-def counts at the
+    /// spawn sites iterate exactly this set, so the child's line-span
+    /// reseeding and its line-offset math stay coherent with the rendered
+    /// source.
+    fn background_prelude_function_entries(&self) -> Vec<(&String, &FunctionBody)> {
+        let env_carried = self.env_carried_function_exports();
+        self.shell_state
+            .functions
+            .iter()
+            .filter(|(name, _)| {
+                is_exportable_function_name(name) && !env_carried.contains(name.as_str())
+            })
+            .collect()
     }
 
     /// Write the serialized `-c` script of a respawned async `&` child to a
