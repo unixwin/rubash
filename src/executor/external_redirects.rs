@@ -284,6 +284,44 @@ impl Executor {
         })
     }
 
+    /// rubash#2522: whether the dup spelling `target` on std fd
+    /// `fd` of this command duplicates a descriptor this command's
+    /// own list binds before the dup's position. GNU's walk
+    /// resolves the source AT the dup's position (redir.c:237
+    /// do_redirections); the legacy stdio arms below resolve dup
+    /// sources against the AMBIENT fd table only, so a list-bound
+    /// source must take the piped drain, whose post-wait routing
+    /// walk resolves the binding positionally — the division of
+    /// labor the stdio planner's own decline names (rubash#2329:
+    /// a list-bound spelling "declines to the legacy route, whose
+    /// walks resolve the binding positionally"). Without this, the
+    /// arm dup'd the ambient descriptor (`9>seed` in the parent
+    /// beat the list's own `9>o1.txt` for a `2>&9`).
+    fn dup_source_bound_by_own_list(&self, cmd: &CommandNode, fd: u32, target: &str) -> bool {
+        let Some((source, _)) = redirect_target_fd_and_move(target) else {
+            return false;
+        };
+        // Self-dup is a no-op (redir.c redir_fd != redirector
+        // guard; rubash#1236) and needs no drain.
+        if source == fd {
+            return false;
+        }
+        let position = cmd
+            .redirects
+            .iter()
+            .rposition(|entry| {
+                entry.fd_var.is_none()
+                    && matches!(entry.kind, crate::parser::RedirectKind::DuplicateOutput)
+                    && entry.fd.unwrap_or(1) == fd
+                    && self.expand_redirect_target(entry) == target
+            })
+            .unwrap_or(cmd.redirects.len());
+        !matches!(
+            self.in_list_binding(cmd, position, source),
+            crate::executor::external_setup::InListBinding::NotBound
+        )
+    }
+
     /// rubash#2522: fold this command's recorded `{var}` output
     /// closes with list position < `before` into `state`, in walk
     /// order (the positional fold the redirect gate performs,
@@ -1036,6 +1074,7 @@ impl Executor {
                     process.stdout(Stdio::null());
                 } else if redirect_target_fd(&target) == Some(2)
                     || self.output_fd_redirects_to_stderr(&target)
+                    || self.dup_source_bound_by_own_list(cmd, 1, &target)
                 {
                     process.stdout(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
@@ -1165,6 +1204,7 @@ impl Executor {
             process.stdout(Stdio::null());
         } else if redirect_target_fd(target) == Some(2)
             || self.output_fd_redirects_to_stderr(target)
+            || self.dup_source_bound_by_own_list(cmd, 1, target)
         {
             process.stdout(Stdio::piped());
             self.external_stdio_piped_fallback = true;
@@ -1214,6 +1254,7 @@ impl Executor {
                 process.stderr(Stdio::null());
             } else if redirect_target_fd(&target) == Some(1)
                 || self.output_fd_redirects_to_stdout(&target)
+                || self.dup_source_bound_by_own_list(cmd, 2, &target)
             {
                 process.stderr(Stdio::piped());
                 self.external_stdio_piped_fallback = true;
@@ -1257,6 +1298,7 @@ impl Executor {
                     process.stderr(Stdio::null());
                 } else if redirect_target_fd(&target) == Some(1)
                     || self.output_fd_redirects_to_stdout(&target)
+                    || self.dup_source_bound_by_own_list(cmd, 2, &target)
                 {
                     process.stderr(Stdio::piped());
                     self.external_stdio_piped_fallback = true;
