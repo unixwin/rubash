@@ -295,7 +295,12 @@ impl Executor {
         if !stream_final_stdout {
             subshell.stdout_capture = Some(Vec::new());
         }
-        subshell.stderr_capture = Some(Vec::new());
+        // rubash#2483: a concurrent driver running this stage against
+        // live streams leaves its stderr uncaptured (see the field doc
+        // on Executor::pipeline_stage_stderr_live).
+        if !self.pipeline_stage_stderr_live {
+            subshell.stderr_capture = Some(Vec::new());
+        }
 
         // GNU execute_cmd.c execute_pipeline + redir.c do_redirection_internal:
         // inside the element's subshell the pipe is bound to fd 1 first and
@@ -589,7 +594,17 @@ impl Executor {
         let alias_bound = self
             .stage_fd_alias_source(command)
             .is_some_and(|alias_fd| subshell.fd_table.dup_input(0, alias_fd).is_ok());
-        if live_stdin || alias_bound {
+        // rubash#2483: an armed `pipeline_stdin_stream` binds the
+        // stage's fd 0 to a live pipe in the fd table (the streaming
+        // tail's and the streaming sandwich's binding) — the mirror
+        // must stay absent exactly as in the live_stdin treatment, or
+        // the body reads the empty staged mirror and sees EOF while
+        // the producer is still writing. The compound funnel receives
+        // the same fact as its `streaming_stdin` parameter; this
+        // funnel's signature predates it, so the arming field itself
+        // is consulted.
+        let streaming_stdin = self.pipeline_stdin_stream.is_some();
+        if live_stdin || alias_bound || streaming_stdin {
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
             subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
         } else {
@@ -618,7 +633,11 @@ impl Executor {
         if !stream_final_stdout {
             subshell.stdout_capture = Some(Vec::new());
         }
-        subshell.stderr_capture = Some(Vec::new());
+        // rubash#2483: same live-stderr arming as the compound stage
+        // (Executor::pipeline_stage_stderr_live).
+        if !self.pipeline_stage_stderr_live {
+            subshell.stderr_capture = Some(Vec::new());
+        }
         // GNU: a pipeline element's forked child runs the element's simple
         // command itself, so the command's assignment words are processed
         // in the child — subst.c:13153 expand_word_list_internal picks

@@ -1245,6 +1245,7 @@ impl Executor {
             stderr_capture: None,
             pipeline_stdout_stream: None,
             pipeline_stdin_stream: None,
+            pipeline_stage_stderr_live: false,
             external_stdio_outcome: None,
             external_stdio_piped_fallback: false,
             host_external_command_handler: None,
