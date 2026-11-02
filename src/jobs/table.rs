@@ -187,6 +187,15 @@ impl JobTable {
         pgrp: u32,
         stage_commands: Vec<String>,
     ) -> JobId {
+        // GNU jobs.c:572 (stop_pipeline, run for every pipeline launch
+        // before alloc_job_entry): cleanup_dead_jobs first — a slot
+        // whose job was consumed by an operand `wait` (marked
+        // J_NOTIFIED by wait_for_job/wait_for_single_pid, jobs.c:3434 /
+        // 2776) is collected here, so the new job reuses its number
+        // instead of stacking on top of the corpse (rubash#2529:
+        // `wait %1; sleep &` numbered the new job [2], and the
+        // misnumbered %1 then missed the live job in `kill`).
+        self.cleanup_dead_jobs();
         // GNU jobs.c:586-614 alloc_job_entry: a non-interactive shell scans
         // forward from js.j_lastj and takes the first free slot — the job
         // number is the slot index, which keeps holes open for jobs that

@@ -1416,7 +1416,12 @@ impl Executor {
             self.reader_command_line.get(),
             self.foreground_wait_count.get(),
         );
-        let observation_happened = mark != self.reap_prev_mark.get();
+        let prev_mark = self.reap_prev_mark.get();
+        let observation_happened = mark != prev_mark;
+        // rubash#2529: the reader-boundary cleanup below keys on the
+        // run/line components only — GNU's read_command boundary is
+        // per freshly read list, never between one list's elements.
+        let line_advanced = mark.0 != prev_mark.0 || mark.1 != prev_mark.1;
         // rubash#1607/#1612: publication of the shell's own kill
         // state marks uses a NARROWER event set than reap visibility.
         // A mere reader-line advance must not publish (kill -STOP,
@@ -1570,6 +1575,21 @@ impl Executor {
         // command still expands <name>/<name>_PID and {name[i]}.
         if force_observe || foreground_blocked {
             self.flush_pending_coproc_retirements();
+        }
+        // GNU parse.y:2533 read_command -> notify_and_cleanup
+        // (jobs.c:3642-3652): once per freshly read command list,
+        // after the reap/notify half, cleanup_dead_jobs (jobs.c:1303)
+        // deletes the DEADJOB && IS_NOTIFIED entries. An entry an
+        // operand wait consumed on an earlier line (the wait marked
+        // it notified, jobs.c:3434/2776) is therefore gone before
+        // this line's operands resolve: `kill %n` answers "no such
+        // job" instead of silently succeeding against the corpse,
+        // and a repeated `wait %n` on a later line reports 127
+        // (rubash#2529). Gated on the reader line advancing so no
+        // cleanup runs between the `;` elements of one list, where
+        // GNU retains the entry.
+        if line_advanced {
+            self.shell_state.job_table.cleanup_dead_jobs();
         }
         Ok(())
     }
