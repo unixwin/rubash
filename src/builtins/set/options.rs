@@ -427,6 +427,22 @@ fn apply_posix_mode_transition(
         "__RUBASH_POSIX_MODE".to_string(),
         if enabled { "1" } else { "0" }.to_string(),
     );
+    // rubash#2588: keep the process-env mirror in the same write —
+    // every other __RUBASH_* state key lives in both storages (the
+    // mirror funnel in Executor::set_env / local_helpers), and init
+    // treats this key as mirrored (mirror_env_remove at construction).
+    // The direct insert left the mirror stale after a script-side
+    // `set -o posix` flip. (Host verification, 2026-11-02: the niu
+    // host reads this key ONLY through the engine's variable store —
+    // niubash-runtime shell.rs posix_mode_active via
+    // executor().get_env and the parse gate via
+    // session variables().resolved_value — never through the process
+    // environment, so this is engine-side storage consistency, not a
+    // host contract.)
+    crate::executor::local_helpers::set_process_env(
+        "__RUBASH_POSIX_MODE",
+        if enabled { "1" } else { "0" },
+    );
     if enabled == prior {
         return;
     }

@@ -671,6 +671,14 @@ impl Executor {
         }
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
+            // rubash#2588: the extglob enabled-line stamp is per-shell
+            // parse state (shopt.rs writes it on `shopt -s extglob`
+            // with THIS shell's current line). An ambient copy in a
+            // fresh shell would mis-gate the command_execute.rs
+            // extglob reparse checks against a foreign parent's line
+            // numbers; a validated respawn keeps it, as the fork
+            // inherits the parent's parse state.
+            env_vars.remove("__RUBASH_EXTGLOB_ENABLED_LINE");
             // rubash#2586: the top-level name is the same script-identity
             // transport as the script name — the source builtin installs
             // it only when absent (source/execution.rs), so an ambient

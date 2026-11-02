@@ -754,7 +754,11 @@ pub(crate) fn remove_trap(env_vars: &mut VarTable, signal: &str) {
 }
 
 fn is_hard_ignored(env_vars: &HashMap<String, String>, signal: &str) -> bool {
-    if matches!(signal, "EXIT" | "DEBUG" | "ERROR" | "RETURN") {
+    // rubash#2588: GNU's pseudo-signal set is EXIT/DEBUG/ERR/RETURN
+    // (signames.h:71-73) — "ERROR" is not a trap name (normalize_signal
+    // never produces it; `trap ... ERROR` is rejected), so the arm
+    // was dead on every call.
+    if matches!(signal, "EXIT" | "DEBUG" | "ERR" | "RETURN") {
         return false;
     }
     orig_ignored_signals(env_vars)
@@ -786,7 +790,7 @@ pub(crate) fn transport_inherited_ignores(env_vars: &HashMap<String, String>) ->
     let mut ignored: Vec<String> = trap_list(env_vars)
         .into_iter()
         .filter(|signal| {
-            !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERROR" | "RETURN")
+            !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERR" | "RETURN")
                 && env_vars
                     .get(&trap_key(signal))
                     .is_some_and(String::is_empty)
@@ -972,7 +976,7 @@ pub(crate) fn mark_startup_ignores(env_vars: &mut VarTable) {
     let ignored: Vec<String> = trap_list(env_vars)
         .into_iter()
         .filter(|signal| {
-            !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERROR" | "RETURN")
+            !matches!(signal.as_str(), "EXIT" | "DEBUG" | "ERR" | "RETURN")
                 && env_vars
                     .get(&trap_key(signal))
                     .is_some_and(String::is_empty)
