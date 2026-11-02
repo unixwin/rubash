@@ -1143,6 +1143,25 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<(String, String, i32)> {
+        // rubash#2558: this pre-scan is a verdict-only pass layered over
+        // the real expansion (GNU's single fetch is subst.c:9777
+        // parameter_brace_expand). Isolate the deferred subscript writes
+        // it queues: roll them back when the scan finds no error, so the
+        // real expansion evaluates each subscript exactly once; keep
+        // them when it reports one, because the command then aborts and
+        // the scan's evaluation is the only one that will ever run.
+        let mark = Self::scan_pending_writes_mark();
+        let verdict = self.parameter_expansion_error_scanned(cmd);
+        if verdict.is_none() {
+            Self::scan_pending_writes_rollback(mark);
+        }
+        verdict
+    }
+
+    fn parameter_expansion_error_scanned(
+        &self,
+        cmd: &CommandNode,
+    ) -> Option<(String, String, i32)> {
         // GNU execute_arith_command owns the whole expansion verdict for an
         // arithmetic command: expand_arith_string (param_expand) reports
         // `<body>: bad substitution` for an unterminated `${` in the body
@@ -1245,7 +1264,8 @@ impl Executor {
         cmd.words.iter().chain(cmd.assignment_values()).any(|word| {
             let masked =
                 Self::mask_recorded_process_substitutions(word, &cmd.process_substitutions);
-            self.parameter_expansion_error_in_word(&masked).is_some()
+            self.parameter_expansion_error_in_word_isolated(&masked)
+                .is_some()
         })
     }
 
@@ -1312,6 +1332,22 @@ impl Executor {
         &self,
         body: &str,
     ) -> Option<(String, String, i32)> {
+        // rubash#2558: same deferred-write isolation as
+        // `parameter_expansion_error` — a no-error heredoc pre-scan must
+        // not leave its subscript evaluations queued for a second
+        // application when the body really expands.
+        let mark = Self::scan_pending_writes_mark();
+        let verdict = self.parameter_expansion_error_in_heredoc_body_scanned(body);
+        if verdict.is_none() {
+            Self::scan_pending_writes_rollback(mark);
+        }
+        verdict
+    }
+
+    fn parameter_expansion_error_in_heredoc_body_scanned(
+        &self,
+        body: &str,
+    ) -> Option<(String, String, i32)> {
         if body.starts_with(crate::lexer::QUOTED_HEREDOC_MARKER) {
             return None;
         }
@@ -1343,6 +1379,26 @@ impl Executor {
         word: &str,
     ) -> Option<(String, String, i32)> {
         self.parameter_expansion_error_in_word_context(word, true)
+    }
+
+    /// Top-level word-scan entry with the rubash#2558 deferred-write
+    /// isolation of `parameter_expansion_error`: for callers that scan
+    /// one word outside the simple-command pre-scan (here-strings,
+    /// [[ ]] terms, for/select lists, the case subject, speculative
+    /// admission probes). Recursive scan calls (nested operator words,
+    /// `:?` message words) must keep using
+    /// `parameter_expansion_error_in_word` directly — they run inside
+    /// an outer scan window whose sequencing they share.
+    pub(in crate::executor) fn parameter_expansion_error_in_word_isolated(
+        &self,
+        word: &str,
+    ) -> Option<(String, String, i32)> {
+        let mark = Self::scan_pending_writes_mark();
+        let verdict = self.parameter_expansion_error_in_word(word);
+        if verdict.is_none() {
+            Self::scan_pending_writes_rollback(mark);
+        }
+        verdict
     }
 
     /// Report a word-expansion error found outside the simple-command

@@ -397,6 +397,43 @@ impl Executor {
         }
     }
 
+    /// rubash#2558: mark the deferred-write queue before a command-level
+    /// `:?`/`?` pre-scan pass, and roll the queue back to the mark when
+    /// the scan reaches no error verdict.
+    ///
+    /// GNU fetches a `${parameter:?word}` parameter exactly once:
+    /// `parameter_brace_expand` (subst.c:9777) calls
+    /// `array_value_internal` (arrayfunc.c), which evaluates the
+    /// subscript inside that single fetch, and the error check reads the
+    /// fetched value (`parameter_brace_expand_error`, subst.c:8216-8230,
+    /// expands the message word only on the error path). Rubash's
+    /// pre-scan is a second, verdict-only fetch layered over the real
+    /// expansion, so the side-effect writes its subscript evaluations
+    /// queue here must not survive a no-error verdict — the real
+    /// expansion is about to evaluate the same subscript for real, and
+    /// applying both copies runs the side effect twice (and the real
+    /// fetch reads the element at the already-advanced index). On an
+    /// error verdict the command aborts before any real expansion, so
+    /// the scan's evaluation is the only one and its writes stay queued
+    /// for the usual apply points, exactly as if no window existed.
+    ///
+    /// The mark is taken at whole-scan granularity, never per fragment:
+    /// later fragments of the same scan legitimately observe earlier
+    /// fragments' queued writes through the overlay (sparse-array
+    /// verdicts depend on it), and nested scan windows compose because
+    /// each rollback only truncates what its own window appended.
+    pub(in crate::executor) fn scan_pending_writes_mark() -> usize {
+        PENDING_SUBSCRIPT_WRITES.with(|w| w.borrow().len())
+    }
+
+    /// Roll back the deferred-write queue to a mark taken by
+    /// `scan_pending_writes_mark`, discarding every write a no-error
+    /// pre-scan pass appended. A queue shorter than the mark (a mid-scan
+    /// apply drained it) truncates as a no-op.
+    pub(in crate::executor) fn scan_pending_writes_rollback(mark: usize) {
+        PENDING_SUBSCRIPT_WRITES.with(|w| w.borrow_mut().truncate(mark));
+    }
+
     pub(in crate::executor) fn expand_braced_indexed_parameter(
         &self,
         name: &str,

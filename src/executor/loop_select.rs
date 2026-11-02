@@ -42,7 +42,7 @@ impl Executor {
                     .map(|metadata| metadata.raw.as_str())
                     .filter(|raw| !raw.is_empty())
                     .unwrap_or(word.as_str());
-                if let Some(error) = self.parameter_expansion_error_in_word(scan_text) {
+                if let Some(error) = self.parameter_expansion_error_in_word_isolated(scan_text) {
                     return self.raise_word_expansion_error(error);
                 }
             }
