@@ -790,7 +790,7 @@ pub(crate) fn apply_completion_actions_with_settings(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
     settings: &ReadlineCompletionSettings,
