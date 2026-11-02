@@ -87,6 +87,60 @@ pub trait CompletionProvider {
     fn candidates(&mut self, line: &str, cursor: usize) -> Vec<Candidate>;
 }
 
+/// How the host editor should treat the engine's candidates for one
+/// completion attempt — the port of pcomplete.c:1458-1477
+/// `pcomp_set_readline_variables`, which bashline.c calls with the
+/// USED compspec's options (compopt mutations included) to set the
+/// `rl_*` variables the host's display/insertion code consumes.
+/// Before rubash#2573 the `-o nospace` / `-o noquote` /
+/// `-o filenames` / `-o fullquote` / `-o nosort` options were parsed
+/// and printed but never crossed this channel, so no host could
+/// honor them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionPolicy {
+    /// COPT_FILENAMES → `rl_filename_completion_desired`: the
+    /// candidates are filenames; the editor applies filename
+    /// quoting/display treatment.
+    pub filename_completion_desired: bool,
+    /// COPT_FULLQUOTE → `rl_full_quoting_desired`: quote the inserted
+    /// match fully, even when it contains no special characters.
+    pub full_quoting_desired: bool,
+    /// COPT_NOSPACE → `rl_completion_suppress_append`: insert the
+    /// match WITHOUT appending a space (the input to the host's
+    /// append-whitespace decision).
+    pub suppress_append: bool,
+    /// NOT COPT_NOQUOTE → `rl_filename_quoting_desired`: filenames
+    /// among the candidates may be quoted on insertion. True unless
+    /// the governing compspec carries `-o noquote`.
+    pub filename_quoting_desired: bool,
+    /// NOT COPT_NOSORT → `rl_sort_completion_matches`: the host may
+    /// sort the matches for display; with `-o nosort` the engine
+    /// preserves generation order and the host must not re-sort.
+    /// True unless the governing compspec carries `-o nosort`.
+    pub sort_matches: bool,
+}
+
+impl Default for CompletionPolicy {
+    fn default() -> Self {
+        CompletionPolicy {
+            filename_completion_desired: false,
+            full_quoting_desired: false,
+            suppress_append: false,
+            filename_quoting_desired: true,
+            sort_matches: true,
+        }
+    }
+}
+
+/// The result of one engine completion attempt: the candidates plus
+/// the insertion/display policy of the compspec that governed the
+/// attempt (see [`super::Session::complete_detailed`]).
+#[derive(Debug, Clone, Default)]
+pub struct CompletionOutcome {
+    pub candidates: Vec<Candidate>,
+    pub policy: CompletionPolicy,
+}
+
 /// Receives [`Diagnostic`] values as they are produced (§6.3).
 pub trait DiagnosticSink {
     fn diagnostic(&mut self, diagnostic: &Diagnostic);

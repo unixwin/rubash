@@ -635,6 +635,21 @@ impl Executor {
     /// compspec's hook with the live COMP_* context bound) and merged by
     /// `complete_line_candidates_with_dynamic` (niubash#520).
     pub fn complete_line(&mut self, line: &str, cursor: usize) -> Vec<String> {
+        self.complete_line_detailed(line, cursor).0
+    }
+
+    /// [`Executor::complete_line`] plus the attempt's insertion/display
+    /// policy (rubash#2573): how the governing compspec's `-o` policy
+    /// options (nospace / noquote / filenames / fullquote / nosort,
+    /// compopt mutations included) say the host editor should treat
+    /// these candidates — pcomplete.c:1458-1477
+    /// pcomp_set_readline_variables. With no governing compspec the
+    /// policy is the default (quote filenames, sort, append).
+    pub fn complete_line_detailed(
+        &mut self,
+        line: &str,
+        cursor: usize,
+    ) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // Job completion names are the command's first word only
         // (rubash#1052; same rule as the compgen path in job_builtins).
@@ -683,7 +698,7 @@ impl Executor {
         let rl_settings = crate::builtins::complete::ReadlineCompletionSettings::from_bind_registry(
             &self.shell_state.bind_registry.borrow(),
         );
-        let candidates = crate::builtins::complete::complete_line_candidates_with_dynamic(
+        let outcome = crate::builtins::complete::complete_line_candidates_with_dynamic_detailed(
             line,
             cursor,
             &self.shell_state.completion_specs,
@@ -695,7 +710,7 @@ impl Executor {
             &rl_settings,
         );
         self.shell_state.line_completion_active = false;
-        candidates
+        outcome
     }
 
     /// The canonical list of shell builtin command names (mirrors

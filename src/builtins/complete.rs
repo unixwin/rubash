@@ -435,6 +435,22 @@ pub(crate) struct JobCandidate {
     pub state: crate::jobs::ProcessState,
 }
 
+/// pcomplete.c:1458-1477 pcomp_set_readline_variables over a set of
+/// COPT_* option bits: the five insert/display faces the host editor
+/// consumes (rubash#2573). Callers pass the EFFECTIVE bits — the
+/// governing spec's options with any compopt mutations folded in
+/// (rubash#2572) — exactly as bashline.c passes the used compspec's
+/// options including the pcomp_curcs mutations.
+pub(crate) fn completion_policy(options: u64) -> crate::api::capabilities::CompletionPolicy {
+    crate::api::capabilities::CompletionPolicy {
+        filename_completion_desired: options & COPT_FILENAMES != 0,
+        full_quoting_desired: options & COPT_FULLQUOTE != 0,
+        suppress_append: options & COPT_NOSPACE != 0,
+        filename_quoting_desired: options & COPT_NOQUOTE == 0,
+        sort_matches: options & COPT_NOSORT == 0,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Completion registry (pcomplib.c prog_completes over hashlib.c).
 // ---------------------------------------------------------------------------
@@ -1179,11 +1195,43 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     dynamic: Option<CompgenDynamic>,
     settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
+    complete_line_candidates_with_dynamic_detailed(
+        line,
+        cursor,
+        specs,
+        env_vars,
+        aliases,
+        function_names,
+        job_names,
+        dynamic,
+        settings,
+    )
+    .0
+}
+
+/// `complete_line_candidates_with_dynamic` plus the attempt's
+/// insertion/display policy (rubash#2573): the policy derives from
+/// the EFFECTIVE option bits — the governing spec's options, or the
+/// compopt-mutated copy's when a live resolution ran (rubash#2572) —
+/// mirroring bashline.c calling pcomp_set_readline_variables with
+/// the used compspec after generation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn complete_line_candidates_with_dynamic_detailed(
+    line: &str,
+    cursor: usize,
+    specs: &CompletionRegistry,
+    env_vars: &crate::shell::var_table::VarTable,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[JobCandidate],
+    dynamic: Option<CompgenDynamic>,
+    settings: &ReadlineCompletionSettings,
+) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
     // rubash#2575: disable-completion on — readline refuses the
     // completion attempt outright (rl_complete_internal with completion
     // disabled produces no matches).
     if settings.disable_completion {
-        return Vec::new();
+        return (Vec::new(), completion_policy(0));
     }
     let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
     // rubash#2576: GNU bashline.c:1681 — programmable completion is
@@ -1209,8 +1257,15 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         && cur_word.is_empty()
         && crate::builtins::shopt::option_enabled(env_vars, "no_empty_cmd_completion")
     {
-        return Vec::new();
+        return (Vec::new(), completion_policy(0));
     }
+    // The effective option bits for this attempt: the live
+    // resolution's read-back when one ran, else the governing spec's
+    // registered options, else none (policy defaults).
+    let effective_options = dynamic
+        .as_ref()
+        .and_then(|d| d.options_override)
+        .or_else(|| resolved.map(|cs| cs.options));
 
     let mut candidates: Vec<String> = if let Some(cs) = resolved {
         let mut c = Vec::new();
@@ -1316,14 +1371,10 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             .collect();
     }
     if let Some(cs) = resolved {
-        // The option bits every post-generation decision consumes: the
-        // registered spec's, replaced by the compopt-mutated governing
-        // copy's when a live -F/-C resolution ran (rubash#2572; GNU's
-        // *foundp |= cs->options fold in gen_progcomp_completions).
-        let effective_options = dynamic
-            .as_ref()
-            .and_then(|d| d.options_override)
-            .unwrap_or(cs.options);
+        // The fallback decisions consume the attempt's effective
+        // option bits (computed at the head of this function —
+        // rubash#2572's override when a live resolution ran).
+        let effective_options = effective_options.unwrap_or(cs.options);
         // The compspec -o fallback options (rubash#2570), in GNU's own
         // layering order. pcomplete.c:1435-1457 gen_compspec_completions:
         // dirnames REPLACES an empty result (the check runs on the
@@ -1365,9 +1416,18 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             }
         }
     }
-    candidates.sort();
-    candidates.dedup();
-    candidates
+    let policy = completion_policy(effective_options.unwrap_or(0));
+    if policy.sort_matches {
+        candidates.sort();
+        candidates.dedup();
+    } else {
+        // -o nosort: rl_sort_completion_matches = 0 — generation order
+        // IS the result; only exact duplicates collapse (readline
+        // never shows the same match twice from one attempt).
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|candidate| seen.insert(candidate.clone()));
+    }
+    (candidates, policy)
 }
 
 /// The `-o bashdefault` fallback set (bashline.c:1830-1967
@@ -2799,7 +2859,7 @@ mod completion_hook_tests {
         crate::shell::var_table::VarTable,
         HashMap<String, crate::builtins::alias::Alias>,
         Vec<String>,
-        Vec<String>,
+        Vec<JobCandidate>,
     ) {
         (
             crate::shell::var_table::VarTable::default(),
@@ -2986,6 +3046,7 @@ mod completion_hook_tests {
         let mut specs = CompletionRegistry::new();
         specs.insert("dyncmd", wordlist_compspec("alpha alpine"));
         let dynamic = CompgenDynamic {
+            options_override: None,
             function_candidates: vec!["zzz".to_string(), "alps".to_string()],
             command_candidates: Vec::new(),
             expanded_wordlist: None,
