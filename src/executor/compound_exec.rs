@@ -33,6 +33,11 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
         "__RUBASH_DIR_STACK",
         "__RUBASH_DISABLED_BUILTINS",
         "__RUBASH_GETOPTS_OFFSET",
+        // rubash#2586: the readonly-OPTIND shadow counter travels with
+        // its OFFSET pair — carrying one without the other left a
+        // respawned child with a stale char offset against a fresh
+        // counter (or vice versa), replaying/skipping getopts args.
+        "__RUBASH_GETOPTS_OPTIND",
         // A GNU fork keeps the variable context stack, so a local that
         // shadows an exported outer binding keeps the shadowed name's
         // child-env contribution — the LOCAL_EXPORT_ENV stash is that
@@ -1520,6 +1525,17 @@ impl Executor {
         // these markers (init.rs keeps them for __RUBASH_SHELL_PID carriers).
         if let Some(script_name) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             env_map.insert("__RUBASH_SCRIPT_NAME".to_string(), script_name.clone());
+            // rubash#2586: the top-level name is part of the same script
+            // identity — a fork keeps it (GNU fork inherits all
+            // variables), so the respawn forwards it with SCRIPT_NAME
+            // instead of letting the child re-derive it from the
+            // respawn's own $0.
+            if let Some(top_level_name) = self.shell_state.env_vars.get("__RUBASH_TOP_LEVEL_NAME") {
+                env_map.insert(
+                    "__RUBASH_TOP_LEVEL_NAME".to_string(),
+                    top_level_name.clone(),
+                );
+            }
             // rubash#2058: the seed line is where the transported body
             // text starts — the first leaf command's line. A compound
             // node's own `line` is its closing line, which put the

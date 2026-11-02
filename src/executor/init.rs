@@ -671,6 +671,14 @@ impl Executor {
         }
         if !internal_respawn {
             env_vars.remove("__RUBASH_SCRIPT_NAME");
+            // rubash#2586: the top-level name is the same script-identity
+            // transport as the script name — the source builtin installs
+            // it only when absent (source/execution.rs), so an ambient
+            // copy inherited from a foreign parent made a fresh shell
+            // report the PARENT's script as BASH_SOURCE[0]'s owner. GNU
+            // derives $0/BASH_SOURCE from the shell's own argv at entry
+            // (shell.c dollar_vars reset), never from the environment.
+            env_vars.remove("__RUBASH_TOP_LEVEL_NAME");
             // rubash#2259: the script's current-line frame is the same
             // diagnostic transport as the script name — a validated
             // respawn child keeps the frame its spawner stamped, any
@@ -706,6 +714,7 @@ impl Executor {
         mirror_env_remove("__RUBASH_COPROC_CHILD");
         if !internal_respawn {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
+            mirror_env_remove("__RUBASH_TOP_LEVEL_NAME");
             mirror_env_remove("__RUBASH_CURRENT_LINE");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
@@ -1692,6 +1701,13 @@ impl Executor {
         mark_env_name(env_vars, INTEGER_VARS, "OPTIND");
         env_vars.remove("OPTARG");
         env_vars.remove("__RUBASH_GETOPTS_OFFSET");
+        // rubash#2586: the readonly-OPTIND shadow counter is the OFFSET
+        // key's pair (temporary_assignments.rs drops both together on an
+        // OPTIND bind). GNU's getopts scan state is the shell-internal
+        // sh_optind (builtins/getopts.def), reset for a new shell — an
+        // ambient shadow surviving fresh construction made getopts
+        // resume a foreign parent's counter and replay consumed args.
+        env_vars.remove("__RUBASH_GETOPTS_OPTIND");
         env_vars
             .entry("BASH_VERSION".to_string())
             .or_insert_with(bash_version_value);
