@@ -34,12 +34,21 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// Monotonic probe-file sequence: the old pid+len name let two tests
+/// whose scripts happen to share a length collide on one path under
+/// parallel test threads (`--test-threads=4`), racing the write/spawn/
+/// remove triple (the -j4 false-red family the Windows acceptance lane
+/// flagged in wave 1).
+static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Run a SCRIPT FILE (the byte-exact baseline shape) and return
 /// (stdout+stderr text, exit code).
 fn rubash_file(script: &str) -> (String, Option<i32>) {
+    let seq = PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(
-        "rubash_i543_{}_{}.sh",
+        "rubash_i543_{}_{}_{}.sh",
         std::process::id(),
+        seq,
         script.len()
     ));
     std::fs::write(&path, script).expect("write probe script");
