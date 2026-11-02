@@ -1893,6 +1893,56 @@ impl Executor {
                 pipestatus_insert_or_replace(entries, index as i64, statuses[index]);
             }
         }
+        // GNU variables.c:6291 set_pipestatus_array writes the ONE
+        // array object; rubash splits that object across the status
+        // vector, the typed cell and the env mirror, so this writer
+        // must move every representation together. The assignment
+        // paths do (they rebuild the vector from the stored form);
+        // this completion writer historically moved only the vector,
+        // so a typed cell a user element assignment materialized
+        // (`PIPESTATUS[2]=5`) kept the assigned value while the
+        // mirror later rebuilt from the vector
+        // (reconcile_pipestatus_mirror) — and the typed-cell
+        // coherence verifier panicked on the disagreement
+        // (rubash#2524). Sync cell and mirror from the vector
+        // whenever they exist; absent representations stay absent
+        // (the dynamic views own those faces).
+        let has_cell = matches!(
+            self.shell_state
+                .variables
+                .get("PIPESTATUS")
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::IndexedArray(_))
+        );
+        let has_mirror = self.shell_state.env_vars.get("PIPESTATUS").is_some();
+        if has_cell || has_mirror {
+            let entries_map: std::collections::BTreeMap<usize, String> = self
+                .shell_state
+                .pipestatus
+                .iter()
+                .map(|(index, status)| (*index as usize, status.to_string()))
+                .collect();
+            if has_cell {
+                let cell: std::collections::BTreeMap<i64, String> = entries_map
+                    .iter()
+                    .map(|(index, value)| (*index as i64, value.clone()))
+                    .collect();
+                if let Some(variable) = self.shell_state.variables.get_mut("PIPESTATUS") {
+                    variable.value = crate::shell::ShellValue::IndexedArray(cell);
+                }
+            }
+            if has_mirror {
+                let render = crate::executor::arrays::format_indexed_array_storage(entries_map);
+                if self.shell_state.env_vars.get("PIPESTATUS") != Some(&render) {
+                    self.shell_state
+                        .env_vars
+                        .insert("PIPESTATUS".to_string(), render);
+                }
+            }
+            if has_cell {
+                self.note_typed_cell_synced("PIPESTATUS");
+            }
+        }
     }
 
     /// Shape bookkeeping after a successful PIPESTATUS bind through
