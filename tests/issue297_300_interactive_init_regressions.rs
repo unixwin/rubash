@@ -23,7 +23,8 @@
 //! Expected outputs are byte-verified against WSL GNU Bash 5.3.0
 //! (/usr/local/bin/bash, script-file probes 2026-09-28/29): `A`-only
 //! stdout, empty stderr, rc 7 for `exit 7` rcfiles across `-i`, `-i -s`,
-//! and `-i -c`; `bash-5.3# exit` on stderr for the reader shape.
+//! and `-i -c`; `<invoked-name>-5.3# exit` on stderr for the reader
+//! shape (probe o4's binary happened to be named `bash`).
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -242,14 +243,37 @@ fn root_mark() -> &'static str {
     "#"
 }
 
+/// The default PS1 is `\s-\v\$ ` and `\s` is the basename of the
+/// shell's invocation name, so the expected prompt must derive
+/// from the binary the harness actually spawns. READJUDICATION
+/// (adj-cli §issue297_300): the original pin hardcoded `bash` —
+/// the basename from its WSL recording; the GNU binary copied to
+/// a file named `rubash` and run the same way prints
+/// `rubash-5.3# exit`, byte-identical to the product under its
+/// real name.
+fn shell_basename() -> String {
+    let path = std::path::Path::new(env!("CARGO_BIN_EXE_rubash"));
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "rubash".to_string());
+    name.strip_suffix(".exe")
+        .map(|s| s.to_string())
+        .unwrap_or(name)
+}
+
 /// The reader shape renders the expanded default prompt exactly like GNU's
-/// non-tty readline path: `bash --rcfile /dev/null -i </dev/null` leaves
-/// `bash-5.3$ exit\n` (or `#` as root) on stderr (clean-env WSL GNU 5.3.0,
-/// probe o4, recorded as root).
+/// non-tty readline path: `<shell> --rcfile /dev/null -i </dev/null` leaves
+/// `<name>-5.3$ exit\n` (or `#` as root) on stderr, where <name> is the
+/// invoked binary's basename (clean-env WSL GNU 5.3.0, probe o4, recorded
+/// as root; name derivation readjudicated — see shell_basename).
 #[test]
 fn interactive_reader_echoes_expanded_default_prompt_at_eof() {
     let run = run_simple(&["--rcfile", "/dev/null", "-i"], b"");
-    assert_eq!(run.stderr, format!("bash-5.3{} exit\n", root_mark()));
+    assert_eq!(
+        run.stderr,
+        format!("{}-5.3{} exit\n", shell_basename(), root_mark())
+    );
     assert_eq!(run.code, Some(0));
 }
 

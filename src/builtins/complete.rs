@@ -29,6 +29,29 @@ pub(crate) fn shell_builtin_names() -> Vec<&'static str> {
     crate::executor::command_registry::introspection_builtin_names()
 }
 
+/// Names the introspection projection carries that GNU does not ship
+/// as builtins: GNU's shell_builtins table has no `env` row (GNU bash
+/// 5.3.20's `compgen -A builtin` lists 61 names, the projection 62,
+/// and this set is exactly the difference, verified name-for-name).
+/// The faces split on it by adjudication: the builtin group of
+/// `-A command` follows GNU's table (bashline.c
+/// command_word_completion_function case 3) and filters these out
+/// (rubash#2538), while `-A builtin`/`-b` and the `enable` faces keep
+/// the full KD-1 unified projection — `env` listed as the extension —
+/// pinned by the issue2036 targets (and `type` classification is the
+/// #2514 R1 ruling). Only the `-A command` group uses the filtered
+/// projection below.
+const NON_GNU_BUILTIN_CANDIDATES: &[&str] = &["env"];
+
+/// The builtin group for `-A command` candidates: the introspection
+/// projection minus NON_GNU_BUILTIN_CANDIDATES (rubash#2538).
+pub(crate) fn compgen_command_builtin_names() -> Vec<&'static str> {
+    shell_builtin_names()
+        .into_iter()
+        .filter(|name| !NON_GNU_BUILTIN_CANDIDATES.contains(name))
+        .collect()
+}
+
 /// The keyword name list for the `keyword` compgen action and the
 /// command-completion candidates: likewise a registry projection
 /// (the hand SHELL_KEYWORDS copy is gone).
@@ -1660,7 +1683,11 @@ fn command_completion_candidates(
     candidates.extend(aliases.keys().cloned());
     candidates.extend(shell_keyword_names().iter().map(|name| (*name).to_string()));
     candidates.extend(function_names.iter().cloned());
-    candidates.extend(shell_builtin_names().iter().map(|name| (*name).to_string()));
+    candidates.extend(
+        compgen_command_builtin_names()
+            .iter()
+            .map(|name| (*name).to_string()),
+    );
     candidates.extend(path_command_completion_candidates(env_vars));
     candidates
 }

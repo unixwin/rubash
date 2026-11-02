@@ -169,17 +169,23 @@ fn comment_with_parentheses_on_brace_line() {
 }
 
 // ---------------------------------------------------------------------------
-// No interference with the assignment-prefix + subshell parse (rubash#453):
-// a definition body may itself use an assignment prefix before a subshell,
-// with a trailing comment on the brace line.
+// Assignment prefix before a subshell inside a body: not a legal
+// shape at all. An assignment prefix is grammatical only before a
+// simple command, never before a subshell compound command, so GNU
+// rejects the whole input at parse time (rc 2, nothing runs) — the
+// "#453 semantics" this pin originally asserted (prefix applies
+// inside the subshell, body keeps x=1) contradict the oracle.
+// READJUDICATION: adj-engine §9; oracle-verified in function-body,
+// top-level, and comment / no-comment variants.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn body_assignment_prefix_subshell_with_brace_line_comment() {
-    // `x=2' is the subshell's environment only: the prefix prints `2' inside
-    // it, and the enclosing body still sees `1' (rubash#453 semantics).
-    assert_ok(
+    // GNU: `syntax error near unexpected token `('`, rc 2, no
+    // output — rubash produces the same diagnostic shape.
+    assert_parse_error(
         "f() { x=1 # c\n  x=2 (echo \"$x\")\n  echo \"$x\"\n}\nf\n",
-        "2\n1\n",
+        "(",
+        "x=2 (echo '$x')",
     );
 }

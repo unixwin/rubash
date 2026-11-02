@@ -2068,7 +2068,10 @@ fn run_init_file(executor: &mut Executor, init_file: &str) -> i32 {
 /// GNU shell.c:722 run_startup_files: the login/interactive startup chain.
 /// A login shell sources /etc/profile then the first existing personal
 /// profile (rubash#487); a non-login interactive shell sources
-/// /etc/bash.bashrc + ~/.bashrc + ~/.niubashrc (--rcfile replaces the
+/// ~/.bashrc + ~/.niubashrc — no system rc: execute_bashrc_file
+/// (shell.c:1130-1141) reads SYS_BASHRC only under `#ifdef SYS_BASHRC`,
+/// which the baseline build leaves undefined (config-top.h:95), so
+/// /etc/bash.bashrc never runs (rubash#2536; --rcfile replaces the
 /// personal rc slot entirely; rubash#1158's .niubashrc sibling is the
 /// owner-decided compatible-reading extension). A login shell NEVER takes
 /// the rc branch (shell.c:1833 if/else), so `bash -lc` reads profiles
@@ -2124,6 +2127,21 @@ fn run_startup_files(executor: &mut Executor, rc_override: Option<&str>) -> Opti
     // branch (no profile, no rc; $BASH_ENV only), exactly like GNU.
     let login = own_login_shell();
     let interactive = own_interactive_shell();
+    // GNU shell.c:660-663 (in main, before run_startup_files): a
+    // non-interactive shell unbinds the environment-imported PS1/PS2.
+    // variables.c imports them like every other environment name;
+    // only the interactive shape keeps them (and otherwise gets the
+    // set_if_not defaults at the reader). rubash imported them and
+    // never unbound, so `rubash -c 'echo $PS1'` echoed the
+    // environment's prompt string where GNU prints nothing, and a
+    // $BASH_ENV file's `[ -z "$PS1" ]` interactivity guard misread
+    // (rubash#2536). The unbind sits after the respawn return above:
+    // a fork keeps the parent's post-unbind binding state, it does
+    // not re-derive it.
+    if !interactive {
+        executor.remove_env("PS1");
+        executor.remove_env("PS2");
+    }
     if !login {
         // The exit door reads the same carrier (the logout-file face
         // in finish_shell): a login mark this process did not earn

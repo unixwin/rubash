@@ -463,6 +463,17 @@ pub(crate) const INVOCATION_STATE_ENV_KEYS: &[&str] = &[
     "__RUBASH_LOGIN_SHELL",
     "__RUBASH_DEBUGGER_MODE",
     "__RUBASH_DEBUGGER_ATTEMPTED",
+    // rubash#2537: the read-from-stdin marker is the same class —
+    // GNU's `read_from_stdin` is a process-local C global
+    // (shell.c:301) that no child inherits; a spawned `rubash -c`
+    // child re-derives its own invocation shape from its argv, so an
+    // inherited copy only forges the `s` in the child's `$-`
+    // (flags.c:294 which_set_flags). Pre-fix the marker was absent
+    // from this set, so arming it mirrored into the process env and
+    // the child-environment composition (compose_child_environment in
+    // readonly_functions.rs) projected it back into plain external
+    // children, whose construction then imported it as their own.
+    crate::script_driver::READ_STDIN_MARKER,
 ];
 
 pub(crate) fn shell_assignment_needs_process_env(name: &str) -> bool {

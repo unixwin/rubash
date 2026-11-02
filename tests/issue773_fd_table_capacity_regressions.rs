@@ -165,11 +165,21 @@ fn dup_semantics_survive_the_raised_table() {
     assert_eq!(stdout, "abcd\n", "stdout: {stdout:?}");
 }
 
-/// The emulated `ulimit -n` default mirrors the oracle (10240 soft) and the
-/// hard default its 1048576, so `ulimit -Sn unlimited` over the finite hard
-/// fails EINVAL exactly like the oracle probe.
+/// The emulated `ulimit -n` defaults mirror the process rlimit,
+/// exactly as GNU's do: GNU `ulimit` reports RLIMIT_NOFILE,
+/// whatever the ambient values are, so the expectation is read
+/// from this test process's own limits at test start.
+/// READJUDICATION (adj-fd §issue773): the original pin hardcoded
+/// 10240/1048576 — the ambient limits of the WSL machine the
+/// probe was recorded on, not GNU constants. In this battery's
+/// VM (ambient 4096/4096) oracle and rubash both print
+/// `4096\n4096\nunl_rc=1`; under a lowered ambient (soft 2048)
+/// both print 2048/4096. `ulimit -Sn unlimited` over a finite
+/// hard limit fails EINVAL (unl_rc=1); over an unlimited hard
+/// limit it succeeds (unl_rc=0).
 #[test]
 fn emulated_ulimit_defaults_match_oracle() {
+    let (soft, hard, unl_rc) = ambient_nofile_expectation();
     let dir = scratch_dir("ulimit");
     let (stdout, _, rc) = run(
         &[
@@ -179,5 +189,39 @@ fn emulated_ulimit_defaults_match_oracle() {
         &dir,
     );
     assert_eq!(rc, Some(0));
-    assert_eq!(stdout, "10240\n1048576\nunl_rc=1\n", "stdout: {stdout:?}");
+    assert_eq!(
+        stdout,
+        format!("{soft}\n{hard}\nunl_rc={unl_rc}\n"),
+        "stdout: {stdout:?}"
+    );
+}
+
+/// The ambient RLIMIT_NOFILE of this test process (inherited by
+/// the spawned shell), formatted the way GNU `ulimit` prints it,
+/// plus the expected status of `ulimit -Sn unlimited`.
+#[cfg(unix)]
+fn ambient_nofile_expectation() -> (String, String, i32) {
+    let mut rl: libc::rlimit = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) };
+    assert_eq!(rc, 0, "getrlimit(RLIMIT_NOFILE) failed");
+    fn fmt(v: libc::rlim_t) -> String {
+        if v == libc::RLIM_INFINITY {
+            "unlimited".to_string()
+        } else {
+            v.to_string()
+        }
+    }
+    let unl_rc = if rl.rlim_max == libc::RLIM_INFINITY {
+        0
+    } else {
+        1
+    };
+    (fmt(rl.rlim_cur), fmt(rl.rlim_max), unl_rc)
+}
+
+/// The non-unix persona has no OS rlimit to mirror; the shell
+/// emulates the defaults recorded from the WSL oracle probe.
+#[cfg(not(unix))]
+fn ambient_nofile_expectation() -> (String, String, i32) {
+    ("10240".to_string(), "1048576".to_string(), 1)
 }

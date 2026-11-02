@@ -321,6 +321,27 @@ impl Executor {
         if self.fd_table.is_open_for_read(fd) {
             return true;
         }
+        // GNU builtins/mapfile.def:258 validates with sh_validfd: the
+        // descriptor must be open in the shell. fd 0's open transports
+        // are wider than the fd table — the FUNCTION_STDIN mirror a
+        // pipeline stage parks its input on, and the inherited process
+        // stdin — and mapfile_input_for_command's fd-0 serve consults
+        // exactly those, so the gate must agree with the serve
+        // (rubash#2534: `printf … | { mapfile -u 0 arr; }` reported
+        // EBADF at the gate while the serve path held the bytes). The
+        // mirror only counts while fd 0 is not closed, mirroring the
+        // serve's own condition in stdin_string_for_command_mut.
+        if fd == 0
+            && ((!self.fd_table.is_closed(0) && self.function_stdin_remaining().is_some())
+                || self
+                    .shell_state
+                    .env_vars
+                    .get(INHERIT_PROCESS_STDIN)
+                    .map(String::as_str)
+                    == Some("1"))
+        {
+            return true;
+        }
         if cmd
             .heredoc_redirects
             .iter()

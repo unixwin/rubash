@@ -637,12 +637,28 @@ impl Printer {
             return;
         }
         self.cprintf(&format!("for {} in ", for_command.variable));
-        for (index, word) in for_command.words.iter().enumerate() {
-            if index > 0 {
-                self.cprintf(" ");
+        if for_command.default_positional {
+            // GNU parse.y:895 (for_command with no `in` clause) materializes
+            // the word list at parse time as the literal quoted word
+            // `"$@"` (add_string_to_list ("\"$@\"", NULL)), so
+            // print_for_command_head (print_cmd.c:602) prints
+            // `for VAR in "$@"`. Printing nothing here instead turned the
+            // exported-function roundtrip (BASH_FUNC_name%% env entries,
+            // variables.c:4875) into an explicit empty list `for VAR in ;`
+            // — zero iterations — so a respawned process-substitution
+            // child re-importing its function table lost the loop body
+            // (rubash#2520). Explicit `for VAR in ;` keeps
+            // default_positional=false and still prints empty.
+            self.cprintf("\"$@\"");
+        } else {
+            for (index, word) in for_command.words.iter().enumerate() {
+                if index > 0 {
+                    self.cprintf(" ");
+                }
+                let rendered =
+                    self.render_standalone_word(word, for_command.word_metadata.get(index));
+                self.cprintf(&rendered);
             }
-            let rendered = self.render_standalone_word(word, for_command.word_metadata.get(index));
-            self.cprintf(&rendered);
         }
         self.print_loop_body(&for_command.body);
     }
@@ -668,12 +684,22 @@ impl Printer {
 
     fn print_select_command(&mut self, select: &SelectCommand) {
         self.cprintf(&format!("select {} in ", select.variable));
-        for (index, word) in select.words.iter().enumerate() {
-            if index > 0 {
-                self.cprintf(" ");
+        if select.default_positional {
+            // GNU parse.y:981 (select_command with no `in` clause)
+            // materializes the literal quoted word `"$@"` the same way
+            // the for grammar does; print_select_command_head
+            // (print_cmd.c:656) prints it, so the exported-function
+            // roundtrip keeps iterating the positional params
+            // (rubash#2520, for/select share the grammar shape).
+            self.cprintf("\"$@\"");
+        } else {
+            for (index, word) in select.words.iter().enumerate() {
+                if index > 0 {
+                    self.cprintf(" ");
+                }
+                let rendered = self.render_standalone_word(word, select.word_metadata.get(index));
+                self.cprintf(&rendered);
             }
-            let rendered = self.render_standalone_word(word, select.word_metadata.get(index));
-            self.cprintf(&rendered);
         }
         self.print_loop_body(&select.body);
     }

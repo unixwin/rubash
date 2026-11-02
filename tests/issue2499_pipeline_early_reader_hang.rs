@@ -62,8 +62,17 @@ struct RunOutcome {
 /// system temp), a closed stdin, and both streams drained live — reading
 /// them only after exit would re-create a write-before-drain deadlock
 /// whenever the probe's output exceeds the pipe capacity.
-fn run_rubash_script(script: &str) -> RunOutcome {
-    let dir = std::env::temp_dir().join(format!("rubash-issue2499-{}", std::process::id()));
+/// `tag` unique per calling test: the five `run_rubash_script` callers
+/// otherwise share one pid-keyed scratch dir, and under parallel test
+/// threads (`--test-threads=4`) two concurrent tests would race the same
+/// dir's remove/create/probe.sh writes (the -j4 false-red family the
+/// Windows acceptance lane flagged in wave 1).
+fn run_rubash_script(tag: &str, script: &str) -> RunOutcome {
+    // `-run-` keeps this CWD sandbox distinct from the calling test's
+    // same-tag FIXTURE dir (`rubash-issue2499-{tag}-{pid}`): the helper
+    // remove_dir_all's its dir first and must never wipe the fixtures.
+    let dir =
+        std::env::temp_dir().join(format!("rubash-issue2499-{tag}-run-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create issue2499 scratch dir");
     let script_path = dir.join("probe.sh");
@@ -199,7 +208,7 @@ fn early_reader_merged_stderr_multiline_argv_comsub_terminates() {
          f 2>&1 | '{head}' -3\n\
          echo \"rc=$?\"\n"
     );
-    let out = run_rubash_script(&script);
+    let out = run_rubash_script("min", &script);
     assert!(
         !out.timed_out,
         "minimal #2499 shape did not terminate within {RUN_LIMIT:?} (pre-#2238 \
@@ -243,7 +252,7 @@ fn early_reader_shape_pipestatus_matches_gnu() {
          f 2>&1 | '{head}' -3\n\
          echo \"ps=${{PIPESTATUS[*]}} rc=$?\"\n"
     );
-    let out = run_rubash_script(&script);
+    let out = run_rubash_script("ps", &script);
     assert!(
         !out.timed_out,
         "pipestatus probe did not terminate within {RUN_LIMIT:?}"
@@ -331,7 +340,7 @@ fn nvm_ls_remote_shape_mocked_download_terminates() {
          echo \"rc=$?\"\n",
         payload = payload_path.to_string_lossy().replace('\\', "/"),
     );
-    let out = run_rubash_script(&script);
+    let out = run_rubash_script("nvm", &script);
     assert!(
         !out.timed_out,
         "nvm ls-remote shape did not terminate within {RUN_LIMIT:?} (rubash#2499: \
@@ -375,7 +384,7 @@ fn control_without_stderr_merge_completes() {
          f 2>/dev/null | '{head}' -3\n\
          echo \"rc=$?\"\n"
     );
-    let out = run_rubash_script(&script);
+    let out = run_rubash_script("ctl", &script);
     assert!(
         !out.timed_out,
         "control (2>/dev/null) did not terminate within {RUN_LIMIT:?}"
@@ -409,7 +418,7 @@ fn control_full_reader_completes() {
          f 2>&1 | '{cat}'\n\
          echo \"rc=$?\"\n"
     );
-    let out = run_rubash_script(&script);
+    let out = run_rubash_script("cat", &script);
     assert!(
         !out.timed_out,
         "control (| cat) did not terminate within {RUN_LIMIT:?}"

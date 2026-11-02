@@ -7,8 +7,10 @@
 //!
 //! - out-of-range (past the end, or negative) is rc 1 and MUST print, and
 //!   leaves `$#`/`$@` untouched;
-//! - non-numeric / surplus operands are rc 2 (`EX_USAGE`) and also leave
-//!   the positional array untouched;
+//! - non-numeric operands are rc 2 (`EX_USAGE`) and also leave the
+//!   positional array untouched; surplus operands take the `no_args`
+//!   DISCARD path instead (see S4) — the rest of the list is
+//!   abandoned, so no following command observes a status at all;
 //! - `shift --` strips the terminator first, bare `shift --` shifts by 1;
 //! - a successful shift rewrites `$#`/`$@`, and function frames are
 //!   isolated from the caller's positionals.
@@ -80,9 +82,19 @@ fn s4_non_numeric_count_is_usage_error() {
         );
         assert_eq!(stdout, "rc=2 n=2 args=a b\n", "operand {operand:?}");
     }
-    let (stdout, stderr, _) = rubash("set -- a b; shift 1 2; echo \"rc=$? n=$#\"");
+    // Surplus operands take a different path from the non-numeric
+    // ones above: get_numeric_arg (builtins/common.c:488) ends in
+    // no_args (common.c:511), and no_args (common.c:139-151)
+    // reports `too many arguments` and does
+    // jump_to_top_level(DISCARD) — the rest of the command list is
+    // abandoned, so the echo never runs. Oracle-verified
+    // (READJUDICATION, adj-semantics §shift s4): script file ->
+    // no stdout, exit 2; -c (this harness) -> no stdout, exit 1.
+    // The original pin expected the echo to run with rc=2.
+    let (stdout, stderr, code) = rubash("set -- a b; shift 1 2; echo \"rc=$? n=$#\"");
     assert!(stderr.contains("too many arguments"), "{stderr:?}");
-    assert_eq!(stdout, "rc=2 n=2\n");
+    assert_eq!(stdout, "", "the DISCARD must abandon the echo: {stdout:?}");
+    assert_eq!(code, Some(1));
 }
 
 /// S5: leading `--` is skipped; bare `shift --` shifts by exactly 1.

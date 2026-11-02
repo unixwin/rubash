@@ -471,7 +471,25 @@ fn run_script_grouped_at_line_offset(
             // exit-shell jump) must not read as `exit`; the errexit break
             // propagates even then (GNU ERREXIT, see above).
             return (
-                executor.last_exit_code(),
+                // rubash#2535: an exit jump ends the run with the
+                // JUMP's status — the group status run_source_impl
+                // adjudicated from the ExitCode payload — not the
+                // executor's current $?. Trap machinery the unwind
+                // crossed legitimately restored $? on its way out
+                // (the ERR runner restores the pre-trap status before
+                // propagating an action's `exit`, trap.c:367 model),
+                // so reading $? here let the trapped command's status
+                // overwrite a sourced `exit 9` in the action: the run
+                // stopped (the jump was honored) but exited 1. GNU's
+                // jump_to_top_level (EXITPROG) ends execution with
+                // the exit's own status (execute_cmd.c:5537). The
+                // parse-abort arm keeps last_exit_code: its status is
+                // a reader-discard value, not a jump payload.
+                if exit_jump && !parse_error {
+                    status
+                } else {
+                    executor.last_exit_code()
+                },
                 (exit_jump && !parse_error) || errexit_stop,
             );
         }
