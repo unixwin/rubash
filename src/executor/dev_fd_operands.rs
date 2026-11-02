@@ -118,6 +118,22 @@ impl DevOperandMaterialization {
     pub(in crate::executor) fn has_deferred_flushes(&self) -> bool {
         !self.flushes.is_empty()
     }
+
+    /// rubash#2589: drop the records for the std descriptors (0/1/2).
+    /// For a caller whose std descriptors are its own OS plumbing
+    /// (the Unix concurrent pipeline loop: fd 0 is the upstream pipe,
+    /// fd 1 the capture/inherit wiring — real descriptors by the time
+    /// the child spawns), a literal std operand resolves through the
+    /// child's real descriptor, the kernel serving the spelling
+    /// natively, and the shell's fd-table entries for 0/1/2 must NOT
+    /// be consumed or re-pinned on the stage's behalf (entry 0 in
+    /// particular is the enclosing context's binding, not the
+    /// stage's).
+    pub(in crate::executor) fn exclude_std_fd_records(&mut self) {
+        self.consume_fds.retain(|fd| *fd > 2);
+        #[cfg(unix)]
+        self.unix_fd_attach.retain(|(fd, _)| *fd > 2);
+    }
 }
 
 #[cfg(unix)]

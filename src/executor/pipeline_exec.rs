@@ -4648,15 +4648,42 @@ impl Executor {
         let mut intermediate_stderr = Vec::new();
         let mut previous_stdout: Option<std::process::ChildStdout> = None;
         let mut first_stdin: Option<std::process::ChildStdin> = None;
+        // rubash#2589: per-stage dev-fd operand records, finished once
+        // every member has been waited (below).
+        let mut stage_dev_ops: Vec<crate::executor::dev_fd_operands::DevOperandMaterialization> =
+            Vec::new();
 
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
+            // rubash#2589: the dev-fd operand pass. The Windows twin's
+            // spawn loop runs it per stage and the sequential paths run
+            // it per command, but this loop never did — a spelled
+            // /dev/fd/N operand in a concurrent stage resolved through
+            // the ambient pins alone, so a stage copy materialized by
+            // an earlier element served its REMAINDER where GNU's
+            // plain open of the magic link (redir.c:725, r_input)
+            // serves the origin fresh. The std descriptors are carved
+            // out of the records: fd 0/1 in this loop are the OS
+            // plumbing itself (upstream pipe, capture wiring), real
+            // descriptors the child resolves natively.
+            let stage_program = if internal_pipeline_program_name(program).is_some() {
+                None
+            } else {
+                Some(program.as_path())
+            };
+            let (dev_args, mut dev_ops) = self.materialize_dev_fd_operands(
+                args,
+                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+                crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+                stage_program,
+            );
+            dev_ops.exclude_std_fd_records();
             let (mut process, _) = external_command_for_named_program_with_exec_name(
                 &program,
                 // The spec's already-expanded first field; re-reading
                 // words[0] with expand_word would re-strip data quotes
                 // (rubash#205) and re-run side effects.
                 Some(expanded_name),
-                &args,
+                &dev_args,
                 &self.shell_state.env_vars,
                 self.bash_argv0_env_supplied(&commands[index].assignments),
                 // rubash#2442: shared execve-filename funnel (see the
@@ -4701,6 +4728,11 @@ impl Executor {
 
             // rubash#1688: pin the ambient descriptors for the stage.
             self.attach_ambient_fd_pins(&commands[index], &mut process);
+            // rubash#2589: the operand pass's descriptor deliveries
+            // (fresh-open handles, endpoint pipes) pin AFTER the
+            // ambient pins so they win their own slots — the order
+            // the plain spawn path relies on.
+            crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
             // rubash#2308: the Text half of the ambient delivery
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
@@ -4741,6 +4773,7 @@ impl Executor {
             if index + 1 < commands.len() {
                 previous_stdout = child.stdout.take();
             }
+            stage_dev_ops.push(dev_ops);
             processes.push(child);
         }
 
@@ -4816,6 +4849,14 @@ impl Executor {
             ));
         }
         results.reverse();
+        // rubash#2589: every member has been waited — settle the
+        // stages' operand records (consume the donor entries the
+        // children took their serves from, close the attach
+        // handles). Finishing earlier would drop a donor entry a
+        // later stage's own operand pass still has to read.
+        for dev_ops in stage_dev_ops {
+            let _ = self.finish_dev_fd_operands(dev_ops);
+        }
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
