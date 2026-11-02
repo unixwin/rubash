@@ -1062,10 +1062,11 @@ impl Executor {
     ) -> io::Result<File> {
         // rubash#2276: a socket endpoint's spelling-open fails ENXIO
         // before any serve — the dup/stream fallback below is the
-        // pipe rule, not the socket rule. (The `<&N` dup face in
-        // apply_external_stdin_redirect only reaches this function
-        // with non-File endpoints, so descriptor dups of a socket —
-        // a File endpoint — never pass through here.)
+        // pipe rule, not the socket rule. (Descriptor-dup faces —
+        // the `<&N` arm in apply_external_stdin_redirect and the
+        // own-input-binding replay — call open_fd_read_endpoint_stream
+        // directly since rubash#2530, so a dup never passes through
+        // this spelling-open dispatch at all.)
         if let Some(error) = self.fd_alias_spelling_open_error(fd) {
             return Err(error);
         }

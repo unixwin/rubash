@@ -761,7 +761,14 @@ impl Executor {
                 Some(file)
             }
             _ => {
-                let file = self.open_fd_read_endpoint(source_fd, target).ok()?;
+                // rubash#2530: an own-input binding feeds a dup
+                // replay (a `<&N` resolution), so it takes the
+                // stream serve like the fd-0 dup arm in
+                // apply_external_stdin_redirect — never the
+                // alias-spelling reopen, which would hand the dup a
+                // fresh description at offset 0 instead of the
+                // endpoint's own.
+                let file = self.open_fd_read_endpoint_stream(source_fd, target).ok()?;
                 self.fd_table.consume_all_text(source_fd);
                 let bound = FileFd::from_file(file, target.to_string().into());
                 self.own_input_bindings.insert(fd, bound.clone());
@@ -892,8 +899,20 @@ impl Executor {
                         // a temp file; inherited stdin dups the real handle.
                         // The child drains the stream, so consume the
                         // parent's copy too (shared-offset semantics).
+                        // rubash#2530: this arm services a DESCRIPTOR dup
+                        // (`<&N`, redir.c:1193 dup2), so it takes the
+                        // stream serve — the endpoint's own description,
+                        // shared offset. The reopen wrapper
+                        // (open_fd_read_endpoint) is the alias-SPELLING
+                        // model (`< /dev/fd/N`, redir.c:603/:629) and
+                        // must not serve a dup: for an inherited stdin
+                        // over a regular file it re-opened the path,
+                        // and the child's reads then advanced a private
+                        // offset while its `>&0` writes used the true
+                        // inherited description — the two directions of
+                        // one `<>` binding diverged.
                         Some(_) => {
-                            let file = self.open_fd_read_endpoint(fd, &target)?;
+                            let file = self.open_fd_read_endpoint_stream(fd, &target)?;
                             self.fd_table.consume_all_text(fd);
                             process.stdin(Stdio::from(file));
                             return Ok(());
