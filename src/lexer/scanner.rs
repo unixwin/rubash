@@ -1,5 +1,7 @@
 use super::brace_scan_cache::{BraceScanCache, HeredocOpEntry, HeredocOpScanResume};
-use super::classification::{is_brace_expansion, is_keyword, is_word_delimiter};
+use super::classification::{
+    is_assignment_word, is_brace_expansion, is_keyword, is_word_delimiter,
+};
 use super::quotes::normalize_backtick_command_substitution;
 use super::token::{Token, TokenKind};
 use crate::token_str::TokStr;
@@ -56,6 +58,28 @@ pub(super) struct LexerParseState {
     cond_rhs_started: bool,
     cond_rhs_paren_depth: i32,
     cond_rhs_last_token_end: usize,
+    /// GNU PST_REDIRLIST (parser.h): set by make_simple_command when a
+    /// simple command is created (make_cmd.c:483) and cleared when its
+    /// first WORD element joins (make_cmd.c:489) — redirection elements
+    /// never clear it, and clean_simple_command drops it at command end
+    /// (make_cmd.c:816). While set, a redirection list is open AHEAD of
+    /// the command word, which is the PST_REDIRLIST arm of
+    /// command_token_position (parse.y:3157-3161): a word read in this
+    /// state is still in command position even though the previous
+    /// token is a completed redirection's target (`> /dev/null
+    /// a[64|3]=A` keeps its subscript span). Maintained by record_token:
+    /// a redirection operator recorded before any word element sets it;
+    /// the first non-target word element clears it (and latches
+    /// `word_element_seen`, so a redirection list opened after the
+    /// command word can never set it again for this command); any
+    /// command-boundary token resets both.
+    redirlist_open: bool,
+    /// Whether a word element (command name, argument, or assignment
+    /// word — GNU's ELEMENT { word }) has joined the current simple
+    /// command. A redirection TARGET is not a word element: it is
+    /// consumed by the redirection production, so recording one leaves
+    /// both redirlist flags untouched.
+    word_element_seen: bool,
 }
 
 impl LexerParseState {
@@ -65,6 +89,39 @@ impl LexerParseState {
     pub(super) fn cond_command_open(state: &Self) -> bool {
         state.in_cond_command
     }
+}
+
+/// The token kinds GNU's parsing_redirection (parse.y:3147) recognizes
+/// as `last_read_token`: every redirection operator. The word scanned
+/// immediately after one of these is that redirection's target.
+pub(super) fn token_is_redirection(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::RedirectOut
+            | TokenKind::RedirectIn
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    )
+}
+
+/// The token kinds that join a simple command as a word ELEMENT (GNU
+/// make_simple_command's element.word: command name, arguments and
+/// assignment words). A redirection target is NOT one of these — it is
+/// consumed by the redirection production — but it arrives wearing one
+/// of these kinds, so record_token tells the two apart by whether the
+/// previous token was a redirection operator.
+fn token_is_word_element(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Word
+            | TokenKind::Assignment
+            | TokenKind::Variable
+            | TokenKind::CommandSubst
+            | TokenKind::BraceExpand
+    )
 }
 
 /// Snapshot of every cross-token Lexer field at a byte offset where a pass
@@ -154,10 +211,27 @@ impl LexerParseState {
     /// separator is emitted downstream of the Lexer, so the line break must
     /// be folded into the carried state explicitly; without it the state
     /// kept the previous line's last word and `{` degraded to word text.
+    ///
+    /// The same '\n' also terminates the current list in the parser, so
+    /// the simple command that was open is complete: its PST_REDIRLIST
+    /// bit is dropped at command end (make_cmd.c:816) and the word-element
+    /// latch is a property of that same command's lifecycle
+    /// (make_cmd.c:483 sets the bit on creation, make_cmd.c:489 clears it
+    /// when the first element joins) — neither survives into the next
+    /// command, whose own make_simple_command starts the pair fresh. A
+    /// boundary token INSIDE one tokenize pass reaches record_token and
+    /// resets the pair there, but the break between two committed logical
+    /// lines never does, so this fold must reset them too: without it the
+    /// latch outlived its command, the next line's first redirection
+    /// operator found `word_element_seen` already set and never opened
+    /// the list, and every subscript word on that line split
+    /// (rubash#2605 round 4).
     pub(super) fn note_line_break(&mut self) {
         let previous = self.last_token.take();
         self.token_before_that = previous;
         self.last_token = Some((TokenKind::Semicolon, TokStr::from(";")));
+        self.redirlist_open = false;
+        self.word_element_seen = false;
     }
 }
 
@@ -323,19 +397,30 @@ impl<'a> Lexer<'a> {
         if self.parse_state.case_pattern || self.parse_state.in_cond_command {
             return false;
         }
+        // GNU parsing_redirection(last_read_token) != 0 (parse.y:3147):
+        // the previous token is a redirection operator, so the word
+        // about to be scanned is that redirection's TARGET. The target
+        // is consumed by the redirection reader, not read in command
+        // position, and command_token_position's PST_REDIRLIST arm is
+        // explicitly closed while parsing_redirection holds
+        // (parse.y:3159-3160) — no assignment span arms here, for the
+        // operator class or for whitespace (`> a[1 2]` splits in GNU).
+        if self
+            .parse_state
+            .last_token
+            .as_ref()
+            .is_some_and(|(kind, _)| token_is_redirection(kind))
+        {
+            return false;
+        }
         match &self.parse_state.last_token {
             None => true,
             Some((TokenKind::Assignment, _)) => true,
-            Some((
-                TokenKind::RedirectOut
-                | TokenKind::RedirectIn
-                | TokenKind::Append
-                | TokenKind::RedirectErr
-                | TokenKind::RedirectErrAppend
-                | TokenKind::HereDoc
-                | TokenKind::HereString,
-                _,
-            )) => true,
+            // PST_REDIRLIST arm (parse.y:3157-3161): a redirection list
+            // is open ahead of this command's first word element, so a
+            // word read after a completed redirection + target is still
+            // in command position (`> /dev/null a[64|3]=A`).
+            _ if self.parse_state.redirlist_open => true,
             _ => self.reserved_word_position(),
         }
     }
@@ -360,6 +445,13 @@ impl<'a> Lexer<'a> {
         // read, which is exactly this capture (and the value the
         // reserved_position stamp above derives from).
         let read_time_reserved_position = self.reserved_word_position();
+        // The same read-time capture for the assignment classification
+        // below: assignment_word_position() judged against the state
+        // in which THIS token was read (last_token still names the
+        // previous token here), exactly as GNU's read_token_word
+        // consults assignment_acceptable(last_read_token) while the
+        // word is being read (parse.y:5792).
+        let read_time_assignment_position = self.assignment_word_position();
         // rubash#1721: stamp the reserved-word verdict for word-path
         // keyword tokens from the reader state in which the token was
         // READ (before this token updates it below) — the same state
@@ -630,9 +722,72 @@ impl<'a> Lexer<'a> {
             && (!read_time_reserved_position || time_after_pipe)
         {
             TokenKind::Word
+        } else if token_is_word_element(&token.kind)
+            && read_time_assignment_position
+            && is_assignment_word(&token.raw)
+        {
+            // GNU parse.y:5846: read_token returns ASSIGNMENT_WORD
+            // only when the word carries both W_ASSIGNMENT and
+            // W_NOSPLIT. W_ASSIGNMENT is general.c:480 assignment()
+            // on the raw token — bracket arm included, so the
+            // array-element form counts (is_assignment_word) — and
+            // W_NOSPLIT is set only when the word was read in
+            // assignment-acceptable position (parse.y:5789-5796).
+            // last_read_token therefore names ASSIGNMENT_WORD after
+            // a command-position assignment word, scalar or element,
+            // which is what keeps command_token_position
+            // (parse.y:3157-3161) armed across a whole assignment
+            // prefix: in `> /dev/null a[64|3]=A b[64|3]=B` the first
+            // element word closes PST_REDIRLIST, so only this
+            // ASSIGNMENT_WORD arm can arm the second word's span
+            // (rubash#2605 round 3). The token-stream kind is
+            // untouched — element words keep riding the parser's
+            // array-element channel; only the reader history is
+            // classified the way GNU's reader classifies it.
+            TokenKind::Assignment
+        } else if token.kind == TokenKind::Assignment && !read_time_assignment_position {
+            // The demotion half of the same parse.y:5846 rule: an
+            // assignment-shaped scalar word read OUTSIDE assignment
+            // position (an argument, a redirect target) is a WORD
+            // in GNU's reader history, however the token stream
+            // classifies it — so it cannot arm a following word's
+            // subscript span either (`echo x=1 a[1 2]=B` splits).
+            TokenKind::Word
         } else {
             token.kind.clone()
         };
+        // PST_REDIRLIST bookkeeping (make_cmd.c:483 sets the flag when a
+        // simple command is created, make_cmd.c:489 clears it when the
+        // first word element joins, make_cmd.c:816 clears it at command
+        // end). Judge by the token's effective kind (history_kind: the
+        // demotion above is exactly what GNU's last_read_token names)
+        // and by the PREVIOUS token, still in last_token here: a
+        // word-element token recorded directly after a redirection
+        // operator is that redirection's TARGET — consumed by the
+        // redirection production, not a word element — so it leaves
+        // both flags untouched, while any other word element latches
+        // word_element_seen and closes the list. A redirection operator
+        // opens the list only before the first word element; any other
+        // token is a command boundary and resets both.
+        let was_redirect_target = token_is_word_element(&history_kind)
+            && self
+                .parse_state
+                .last_token
+                .as_ref()
+                .is_some_and(|(kind, _)| token_is_redirection(kind));
+        if token_is_redirection(&history_kind) {
+            if !self.parse_state.word_element_seen {
+                self.parse_state.redirlist_open = true;
+            }
+        } else if token_is_word_element(&history_kind) {
+            if !was_redirect_target {
+                self.parse_state.word_element_seen = true;
+                self.parse_state.redirlist_open = false;
+            }
+        } else {
+            self.parse_state.word_element_seen = false;
+            self.parse_state.redirlist_open = false;
+        }
         self.parse_state.token_before_that = self.parse_state.last_token.take();
         self.parse_state.last_token = Some((history_kind, TokStr::from(token.value.as_str())));
     }
