@@ -134,15 +134,13 @@ fn issue1597_assoc_star_assignment_binds_literal_star_key() {
 
 #[test]
 fn issue1597_bad_subscript_status_in_pipeline() {
-    // NOTE: ps=2 is the file-mode value. GNU `-c` gives 1 here, but
-    // the element takes the inline echo/printf slot route, which does
-    // not fold the DISCARD status yet (rubash#2556) — so under this
-    // `-c` harness the pin currently passes on the file-mode value.
-    // When #2556 lands, flip this expectation to ps=1 in the same PR.
+    // rubash#2556: this harness runs `-c`, and GNU folds the element
+    // DISCARD to 1 under `-c` (builtins/evalstring.c:423-450); the
+    // file-mode value is 2.
     let (stdout, _, code) =
         rubash("echo ${never_set_xyz[@]:=dv} | cat\necho \"ps=${PIPESTATUS[0]}\"");
     assert_eq!(code, Some(0));
-    assert_eq!(stdout, "ps=2\n");
+    assert_eq!(stdout, "ps=1\n");
 }
 
 #[test]
