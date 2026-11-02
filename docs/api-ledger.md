@@ -622,6 +622,7 @@ item rubash::builtins::bind::parse_inputrc_with_env
 item rubash::builtins::bind::parse_positional_binding
 item rubash::builtins::bind::parse_unix_command_spec
 item rubash::builtins::bind::strip_set_keyword
+item rubash::builtins::complete::JobCandidate
 item rubash::decode_to_visible_text
 item rubash::executor::ExecuteError
 item rubash::executor::bytes_to_shell_text

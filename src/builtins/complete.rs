@@ -430,7 +430,7 @@ impl Compspec {
 /// with the name — a bare name list cannot answer the running/stopped
 /// arms (rubash#2584).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JobCandidate {
+pub struct JobCandidate {
     pub name: String,
     pub state: crate::jobs::ProcessState,
 }
