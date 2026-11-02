@@ -638,18 +638,22 @@ impl Executor {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // Job completion names are the command's first word only
         // (rubash#1052; same rule as the compgen path in job_builtins).
-        let job_names: Vec<String> = self
+        // The process state rides along so the running/stopped action
+        // arms can filter (rubash#2584).
+        let job_names: Vec<crate::builtins::complete::JobCandidate> = self
             .shell_state
             .job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .map(|job| {
-                job.command
+            .map(|job| crate::builtins::complete::JobCandidate {
+                name: job
+                    .command
                     .split_whitespace()
                     .next()
                     .unwrap_or_default()
-                    .to_string()
+                    .to_string(),
+                state: job.state,
             })
             .collect();
         // rl_complete_internal sets RL_STATE_COMPLETING for the whole

@@ -4449,19 +4449,23 @@ impl Executor {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // GNU job completion names a job by its command name only (the
         // first word — `%sleep`, pcomplete.c it_jobs / jobs.c job names),
-        // not the full command line (rubash#1052).
-        let job_names: Vec<String> = self
+        // not the full command line (rubash#1052). The process state
+        // rides along so the running/stopped action arms can filter
+        // (rubash#2584).
+        let job_names: Vec<crate::builtins::complete::JobCandidate> = self
             .shell_state
             .job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .map(|job| {
-                job.command
+            .map(|job| crate::builtins::complete::JobCandidate {
+                name: job
+                    .command
                     .split_whitespace()
                     .next()
                     .unwrap_or_default()
-                    .to_string()
+                    .to_string(),
+                state: job.state,
             })
             .collect();
         // compgen's dynamic inputs — complete.def:669 compgen_builtin drives

@@ -421,6 +421,20 @@ impl Compspec {
     }
 }
 
+/// One job-table entry as the completion actions see it: the candidate
+/// name (the job command's first word) plus the job's process state.
+/// GNU's `job` / `running` / `stopped` actions filter ONE job list by
+/// status (pcomplete.c:570-585 it_init_jobs / it_init_running /
+/// it_init_stopped, all over it_init_joblist with filter -1 = all,
+/// 0 = running only, 1 = stopped only), so the state has to travel
+/// with the name — a bare name list cannot answer the running/stopped
+/// arms (rubash#2584).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JobCandidate {
+    pub name: String,
+    pub state: crate::jobs::ProcessState,
+}
+
 // ---------------------------------------------------------------------------
 // Completion registry (pcomplib.c prog_completes over hashlib.c).
 // ---------------------------------------------------------------------------
@@ -572,7 +586,7 @@ pub fn execute_with_io<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     stdout: &mut E,
     stderr: &mut E,
@@ -610,7 +624,7 @@ pub(crate) fn execute_compgen_with_dynamic<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     dynamic: Option<CompgenDynamic>,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -722,7 +736,7 @@ pub(crate) fn apply_completion_actions(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
 ) -> Vec<String> {
@@ -803,13 +817,23 @@ pub(crate) fn apply_completion_actions_with_settings(
             "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
             "function" => candidates.extend(function_completion_candidates(function_names)),
             "group" => candidates.extend(group_completion_candidates(env_vars)),
-            "job" | "running" => candidates.extend(job_completion_candidates(job_names)),
+            // pcomplete.c it_init_joblist filters: `job` takes every
+            // entry, `running` only JRUNNING jobs, `stopped` only
+            // JSTOPPED ones (rubash#2584).
+            "job" => candidates.extend(job_completion_candidates(job_names, None)),
+            "running" => candidates.extend(job_completion_candidates(
+                job_names,
+                Some(crate::jobs::ProcessState::Running),
+            )),
+            "stopped" => candidates.extend(job_completion_candidates(
+                job_names,
+                Some(crate::jobs::ProcessState::Stopped),
+            )),
             "keyword" => candidates.extend(shell_keyword_names().iter().map(|s| s.to_string())),
             "service" => candidates.extend(service_completion_candidates(word)),
             "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
             "signal" => candidates.extend(signal_completion_candidates()),
-            "stopped" => {}
             "user" => candidates.extend(user_completion_candidates(env_vars)),
             "variable" => candidates.extend(variable_completion_candidates(
                 env_vars,
@@ -1034,7 +1058,7 @@ pub(crate) fn complete_line_candidates(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
 ) -> Vec<String> {
     complete_line_candidates_with_dynamic(
         line,
@@ -1063,7 +1087,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     dynamic: Option<CompgenDynamic>,
     settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
@@ -1351,7 +1375,7 @@ fn execute_compgen<E>(
     env_vars: &crate::shell::var_table::VarTable,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-    job_names: &[String],
+    job_names: &[JobCandidate],
     diagnostic_prefix: &str,
     dynamic: Option<CompgenDynamic>,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -2019,8 +2043,18 @@ fn function_completion_candidates(function_names: &[String]) -> Vec<String> {
     candidates
 }
 
-fn job_completion_candidates(job_names: &[String]) -> Vec<String> {
-    let mut candidates = job_names.to_vec();
+/// Job candidates for one state filter (pcomplete.c it_init_joblist):
+/// `None` yields every job (`-A job`), `Some(state)` only the jobs in
+/// that state (`-A running` / `-A stopped`).
+fn job_completion_candidates(
+    job_names: &[JobCandidate],
+    state: Option<crate::jobs::ProcessState>,
+) -> Vec<String> {
+    let mut candidates: Vec<String> = job_names
+        .iter()
+        .filter(|job| state.is_none_or(|wanted| job.state == wanted))
+        .map(|job| job.name.clone())
+        .collect();
     candidates.sort();
     candidates.dedup();
     candidates
