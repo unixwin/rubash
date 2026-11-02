@@ -322,3 +322,91 @@ fn quoted_close_inside_expansion_subscripts() {
     assert_eq!(stdout, "dq=Value\ncs=Value\nsub=alu\n");
     assert_eq!(stderr, "");
 }
+
+#[test]
+fn quoted_close_expansion_reads_all_forms() {
+    let dir = scratch("quoted-close-all");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "declare -A m\n\
+         m['x]y']=Value\n\
+         echo \"dq=${m[\"x]y\"]}\"\n\
+         echo \"cs=${m[$(echo 'x]y')]}\"\n\
+         echo \"sub=${m['x]y']:1:3}\"\n\
+         echo \"plain=${m['x]y']}\"\n\
+         echo unq=${m['x]y']}\n\
+         s=abcdef\n\
+         echo \"off=${s:${m['x]y']}}\"\n\
+         echo \"def=${m['x]y']:-fallback}\"\n",
+    );
+    // Round 3 (rubash#2605): EVERY subscript reader in the expansion
+    // path is GNU's one skipsubscript (subst.c:2186, flags 0) — the
+    // brace-name gate (subst.c:816 string_extract, subst.c:7595
+    // valid_array_reference), the leading-ref split, the reference
+    // length scan and the substring offset scan
+    // (subst.c:11129 expand_array_subscript) — so the quoted `]`
+    // closes nothing anywhere: the plain and unquoted reads, the
+    // operator form, and a read embedded in a substring OFFSET
+    // expression all resolve the element stored under `x]y`. The
+    // offset read yields `Value`, an unset variable in arithmetic,
+    // i.e. offset 0 — the whole string.
+    assert_eq!(
+        stdout,
+        "dq=Value\ncs=Value\nsub=alu\nplain=Value\nunq=Value\n\
+         off=abcdef\ndef=Value\n"
+    );
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn assignment_prefix_stays_armed_across_element_words() {
+    let dir = scratch("prefix-chain");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "a[64|3]=A b[64|3]=B\n\
+         echo \"plain=${a[67]}${b[67]}\"\n\
+         a[1]=C b[64|3]=D\n\
+         echo \"mixed=${a[1]}${b[67]}\"\n\
+         x=1 a[64|3]=E b[64|3]=F\n\
+         echo \"scalarfirst=${a[67]}${b[67]}\"\n\
+         a[64|3]=G b[64|3]=H | cat\n\
+         echo \"stage-done\"\n",
+    );
+    // Round 3 (rubash#2605): GNU's reader returns ASSIGNMENT_WORD
+    // for every assignment word read in command position — the
+    // element form included (general.c:480 assignment(), bracket
+    // arm; parse.y:5846 with parse.y:5789-5796) — so
+    // command_token_position (parse.y:3157-3161) stays armed across
+    // the whole prefix and every following element word keeps its
+    // span: no split, no pipeline, and no `not a valid identifier`
+    // (that diagnostic belongs only to the tempenv path,
+    // variables.c:3536 assign_in_env — see the boundary pin below).
+    // The pipeline-stage form binds both words in the stage
+    // subshell, silently.
+    assert_eq!(stdout, "plain=AB\nmixed=CD\nscalarfirst=EF\nstage-done\n");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn env_prefix_element_word_keeps_gnu_invalidid_boundary() {
+    let dir = scratch("env-prefix-boundary");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "a[64|3]=K sleep 0\n\
+         echo \"rc=$?\"\n",
+    );
+    // The hard boundary (NOT a defect, oracle-verified): an element
+    // assignment word in front of a real command name is a tempenv
+    // word, and GNU's assign_in_env (variables.c:3536-3566) takes
+    // the name before `=` — `a[64|3]`, brackets included, via
+    // assignment()'s offset (general.c:480) — and valid_identifier
+    // rejects it: sh_invalidid, the word is skipped, the command
+    // still runs and the status is the command's. Round 3 must not
+    // "fix" this face while repairing the assignment-statement
+    // faces above.
+    assert_eq!(stdout, "rc=0\n");
+    assert_eq!(
+        stderr,
+        "SCRIPT: line 1: `a[64|3]': not a valid identifier\n"
+    );
+}
