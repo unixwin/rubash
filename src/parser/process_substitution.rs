@@ -1,6 +1,6 @@
 use super::{
     command_boundary_keyword_allowed, follows_case_in_keyword, is_case_end_keyword, parse,
-    ProcessSubstitution,
+    redirect_fd_var_prefix, ProcessSubstitution,
 };
 use crate::executor::markers::DATA_DOLLAR;
 use crate::lexer::{Token, TokenKind};
@@ -679,7 +679,25 @@ fn process_substitution_source(tokens: &[Token]) -> String {
             continue;
         }
 
-        if !source.is_empty() && !source.ends_with('\n') {
+        // rubash#2522: the re-join must not invent whitespace across the
+        // one boundary whose spacing is grammar-semantic: a `{name}` word
+        // directly followed by a redirection operator is ONE redirector
+        // (REDIR_WORD) — GNU read_token_word returns REDIR_WORD only when
+        // the '<'/'>' immediately follows the '}' (parse.y:5826-5837), and
+        // GNU's own printer re-prints every REDIR_VARASSIGN spelling glued
+        // (print_cmd.c:1237-1297: `{%s}>&%d` at :1244, `{%s}>&%s` at :1260,
+        // `{%s}>&-` at :1297). Operator→target spacing is re-parse-neutral
+        // (`>& -` is still r_close_this), but `{w} >& 9` re-lexes as the
+        // WORD `{w}` plus a plain fd-1 `>&9` dup. The procsub producer
+        // executes this re-print as its body (rubash respawns `rubash -c`,
+        // where GNU's fork gets the VERBATIM string, subst.c:6362
+        // process_substitute → parse_and_execute), so the inserted space
+        // made the producer's external child drop the varfd descriptor and
+        // wire its fd 1 to the dup source. redirect_fd_var_prefix is the
+        // parser's own column-adjacency test for exactly this boundary —
+        // reuse it rather than restating the rule.
+        let glued_var_redirector = redirect_fd_var_prefix(tokens, index).is_some();
+        if !source.is_empty() && !source.ends_with('\n') && !glued_var_redirector {
             source.push(' ');
         }
         source.push_str(&token.raw);
