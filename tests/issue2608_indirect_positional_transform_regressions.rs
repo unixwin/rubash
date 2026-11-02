@@ -130,6 +130,61 @@ fn subscript_holder_and_unset_positional() {
 }
 
 #[test]
+fn subscript_holder_class_and_error_surface() {
+    // The subscripted-holder class beyond literal indices (GNU outputs
+    // generated from the same script file): a variable subscript and
+    // an arithmetic subscript are evaluated like the plain path
+    // evaluates them, an assoc key names the element, and an unset
+    // element expands empty silently. The error surface matches too:
+    // t for a general subscript is the ELEMENT value, so an element
+    // that is not a valid variable name reports
+    // `<t>: invalid variable name` under an operator tail (the
+    // whole-array join is GNU's t for the `[@]`/`[*]` subscript only).
+    assert_gnu(
+        "subclass",
+        concat!(
+            "arr=(x y)\n",
+            "zz=\"hi there\"\n",
+            "holders=(arr zz)\n",
+            "i=1\n",
+            "echo \"varsub_Q=[${!holders[$i]@Q}]\"\n",
+            "echo \"arithsub_Q=[${!holders[i]@Q}]\"\n",
+            "declare -A m=([k]=zz)\n",
+            "echo \"assoc_Q=[${!m[k]@Q}]\"\n",
+            "echo \"unset9_Q=[${!holders[9]@Q}]\"\n",
+        ),
+        concat!(
+            "varsub_Q=['hi there']\n",
+            "arithsub_Q=['hi there']\n",
+            "assoc_Q=['hi there']\n",
+            "unset9_Q=[]\n",
+        ),
+    );
+    for (tag, script) in [
+        (
+            "bad-indexed",
+            "bad=(\"1bad\" x)\necho \"bad0_Q=[${!bad[0]@Q}]\"\necho \"rc=$?\"\necho \"after\"\n",
+        ),
+        (
+            "bad-default",
+            "bad=(\"1bad\" x)\necho \"bad0_def=[${!bad[0]:-d}]\"\necho \"rc=$?\"\necho \"after\"\n",
+        ),
+        (
+            "bad-assoc",
+            "declare -A mb=([k]=\"1bad\")\necho \"badk_Q=[${!mb[k]@Q}]\"\necho \"rc=$?\"\necho \"after\"\n",
+        ),
+    ] {
+        let (stdout, stderr, code) = run_script(tag, script);
+        assert_eq!(code, Some(0), "{tag} exit: stderr: {stderr}");
+        assert_eq!(stdout, "rc=1\nafter\n", "{tag} stdout (stderr: {stderr})");
+        assert!(
+            stderr.contains("1bad: invalid variable name"),
+            "{tag} stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
 fn at_arm_source_controls() {
     // The [@]/[*] arm of the transform entry (source's element values
     // name the target — the rubash#1147 shape) keeps its semantics, and
