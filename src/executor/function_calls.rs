@@ -947,12 +947,39 @@ impl Executor {
                 }
             }
         }
+        // rubash#2546: a fatal ExitCode/LastpipeExit unwind while `set -e`
+        // is live is GNU's longjmp to the top level, which SKIPS every
+        // unwind protect execute_function registered — not only
+        // uw_restore_funcarray_state (the frame leak below) but also
+        // uw_maybe_set_debug_trap / uw_maybe_set_error_trap /
+        // uw_maybe_set_return_trap (execute_cmd.c:5276/5286/5301). The
+        // dying scope's trap table therefore survives into the EXIT
+        // action: an untraced function disarmed the DEBUG trap at entry
+        // (execute_cmd.c:5278 restore_default_signal), the restore never
+        // runs, and run_debug_trap (trap.c:1275, `sigmodes[DEBUG_TRAP] &
+        // SIG_TRAPPED` gate) does not fire for the EXIT action's
+        // commands — GNU prints no DEBUG record for the failing command
+        // (probes 2026-11-02: untraced-function nounset failure under
+        // `set -eu` takes zero in-action DEBUG firings, while a top-level
+        // failure or a functrace'd function takes the re-presentation
+        // firing). With `-e` off the DISCARD unwind runs the protects
+        // first (sig.c:387 top_level_cleanup -> run_unwind_protects),
+        // the trap IS restored before the EXIT trap, and the action's
+        // first command takes its re-presentation firing wearing the
+        // frozen BASH_COMMAND. The gate below (sampled once, reused by
+        // the frame-leak block) is that distinction.
+        let exit_unwind = matches!(
+            result,
+            Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
+        ) && self.errexit_enabled();
         // GNU execute_cmd.c uw_maybe_set_debug_trap: at function exit the
         // saved DEBUG action is restored only when the body did not set a
         // new one, so a trap set inside the function persists after return
         // (trap.tests listing shows the funcdebug action after func).
+        // exit_unwind skips the restore: GNU's protect never runs on the
+        // fatal -e unwind (rubash#2546).
         if let Some(action) = saved_debug_action {
-            if !function_traced {
+            if !function_traced && !exit_unwind {
                 crate::builtins::trap::maybe_restore_debug_trap(
                     &mut self.shell_state.env_vars,
                     action,
@@ -960,9 +987,11 @@ impl Executor {
             }
         }
         // GNU execute_cmd.c uw_maybe_set_error_trap: the saved ERR action
-        // comes back when the body did not set its own.
+        // comes back when the body did not set its own — except on the
+        // fatal -e unwind, where the protect is skipped like the DEBUG
+        // restore above (rubash#2546).
         if let Some(action) = saved_err_action {
-            if !errtrace {
+            if !errtrace && !exit_unwind {
                 crate::builtins::trap::maybe_restore_error_trap(
                     &mut self.shell_state.env_vars,
                     action,
@@ -1045,7 +1074,10 @@ impl Executor {
         // untraced function wrongly fire the inherited trap; restoring only
         // when removed mirrors the unwind-protect registration (traced
         // functions register none, so a body `trap - RETURN` there persists).
-        if return_trap_removed {
+        // exit_unwind skips this restore too: uw_maybe_set_return_trap is
+        // one of the protects the fatal -e longjmp never runs
+        // (rubash#2546, same as the DEBUG/ERR restores above).
+        if return_trap_removed && !exit_unwind {
             if let Some(action) = saved_return_action {
                 crate::builtins::trap::maybe_restore_return_trap(
                     &mut self.shell_state.env_vars,
@@ -1087,10 +1119,9 @@ impl Executor {
             // needs no leak — its trap already ran at the dispatch
             // site with the frames in place — and a leak there is
             // dropped unused by the funnel, so it is harmless.
-            let exit_unwind = matches!(
-                result,
-                Err(ExecuteError::ExitCode(_)) | Err(ExecuteError::LastpipeExit(_))
-            ) && self.errexit_enabled();
+            // (The condition is the one hoisted above the DEBUG
+            // restore — the trap restores and the frame leak key off
+            // the same unwind class, rubash#2546.)
             if exit_unwind {
                 self.shell_state
                     .exit_unwind_leaked_frames
