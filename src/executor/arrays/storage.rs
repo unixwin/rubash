@@ -210,6 +210,27 @@ fn skip_subscript_close(bytes: &[u8]) -> Option<usize> {
     skip_matched_pair_end(bytes, 0, b'[', b']').map(|end| end - 1)
 }
 
+/// Index of the `]` closing the subscript opened at `bytes[open]`
+/// (`bytes[open] == b'['`), per skipsubscript (subst.c:2186) =
+/// skip_matched_pair with FLAGS & 1 == 0 (subst.c:2086-2177). This is
+/// THE shared scan for every raw-text subscript reader in the
+/// expansion path — GNU has exactly one function for the job and
+/// calls it from string_extract (subst.c:816, SX_VARNAME),
+/// valid_array_reference (arrayfunc.c:1318 via
+/// tokenize_array_reference), expand_array_subscript (subst.c:11129)
+/// and general.c:480 assignment() — so a `]` inside a quoted span, a
+/// backquote span or a `$(...)` / `${...}` construct is data at every
+/// one of those readers, never the closer (rubash#2605 round 3: the
+/// `${m['x]y']}` readers each kept a private quote-blind scan and the
+/// reference died at whichever reader ran first). Returns None when
+/// no balance-0 `]` exists.
+pub(in crate::executor) fn skipsubscript_close(bytes: &[u8], open: usize) -> Option<usize> {
+    if bytes.get(open) != Some(&b'[') {
+        return None;
+    }
+    skip_matched_pair_end(bytes, open + 1, b'[', b']').map(|end| end - 1)
+}
+
 /// Byte port of skip_matched_pair (subst.c:2083-2186), FLAGS & 1 == 0:
 /// starting just past an opening delimiter at depth 1, return the index
 /// just past the matching `close`. Nested `open`/`close` pairs adjust the

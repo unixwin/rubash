@@ -33,7 +33,11 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     if !is_shell_name(base) {
         return None;
     }
-    let close = name[open..].find(']')? + open;
+    // The closing `]` is skipsubscript's (subst.c:2186, flags 0 — the
+    // shared scan in arrays/storage.rs): a quoted `]` inside the
+    // subscript (`m['x]y']`) is data, not the closer (rubash#2605
+    // round 3; the naive first-`]` hunt split the key at `'x`).
+    let close = skipsubscript_close(name.as_bytes(), open)?;
     let subscript = &name[open + 1..close];
     if subscript.contains('[') {
         return None;
@@ -86,28 +90,14 @@ fn parameter_reference_len(body: &str) -> usize {
                 break;
             }
         } else if ch == b'[' {
-            // skipsubscript: nested brackets adjust depth, a backslash
-            // protects the next character; an unterminated group leaves
-            // the `[` as ordinary reference text.
-            let mut depth = 1usize;
-            let mut scan = index + 1;
-            let mut close = None;
-            while scan < bytes.len() {
-                match bytes[scan] {
-                    b'\\' => scan += 1,
-                    b'[' => depth += 1,
-                    b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            close = Some(scan);
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                scan += 1;
-            }
-            if let Some(closed) = close {
+            // skipsubscript (subst.c:816): the shared flags-0 scan
+            // (arrays/storage.rs `skipsubscript_close`) — quoted
+            // spans, backquote spans and `$(...)` / `${...}`
+            // constructs are units, so a quoted `]` (`m['x]y']`) does
+            // not close the group early; an unterminated group leaves
+            // the `[` as ordinary reference text (string[ni] != ']'
+            // in string_extract, subst.c:817-818).
+            if let Some(closed) = skipsubscript_close(bytes, index) {
                 index = closed;
             }
         } else if OPERATOR_SET.contains(&ch) {

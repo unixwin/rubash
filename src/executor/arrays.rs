@@ -18,7 +18,7 @@ pub(super) use storage::{
     is_array_storage, is_marked_array_var, normalize_array_expanded_value,
     parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
     parse_expanded_array_subscript, quote_array_value, resolve_indexed_array_subscript,
-    store_indexed_array, store_indexed_array_state, sync_typed_assoc_array,
+    skipsubscript_close, store_indexed_array, store_indexed_array_state, sync_typed_assoc_array,
     sync_typed_indexed_array, sync_typed_indexed_element, upsert_typed_assoc_element,
     AssocElementUpsert,
 };
