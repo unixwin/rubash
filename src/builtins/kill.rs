@@ -4171,8 +4171,21 @@ extern "C" fn wrapper_relay_handler(sig: libc::c_int) {
 fn wrapper_relay_install() {
     use std::sync::atomic::Ordering;
     let mut fds: [libc::c_int; 2] = [0; 2];
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+    // libc::pipe2 is glibc/musl-only; Darwin exposes pipe + fcntl
+    // instead (same pattern as fd/unix.rs create_capture_pipe).
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
         return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
     }
     let (read_end, write_end) = (fds[0], fds[1]);
     // The handler's write must never block on a full pipe.
