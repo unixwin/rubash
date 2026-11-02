@@ -73,6 +73,29 @@ impl SavedOutputFd {
     }
 }
 
+/// Whether a fixed move entry's (`N>&M-` / `N<&M-`) source close,
+/// performed by the compound binders, earns a snapshot in the
+/// scope's saved set — i.e. whether the scope's restore may bring
+/// the caller's source descriptor back (rubash#2612).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::executor) enum MoveSourceSave {
+    /// An in-shell scope (function call, builtin, compound command):
+    /// GNU's undoable rule — do_redirection_internal adds the
+    /// source's undo record, add_undo_redirect (redir_fd,
+    /// r_close_this, -1) at redir.c:1175, only when the redirector
+    /// is open at the entry's walk position (the
+    /// `fcntl (redirector, F_GETFD, 0) != -1` test at redir.c:1173).
+    /// With an inactive redirector the close has no undo record and
+    /// the caller's source stays closed after the scope unwinds.
+    GnuUndoable,
+    /// A fork-emulation scope (the same-exe script face, whose
+    /// segmented binds land on the shared table in place of a
+    /// forked child's own): the scope is a process boundary, so
+    /// every mutation the binder performs must be restored — the
+    /// source is snapshotted unconditionally.
+    RestoreAlways,
+}
+
 /// Saved descriptor state for an fd rebound by a compound command's
 /// output redirection (see open_compound_output_redirects).
 pub(in crate::executor) struct SavedOutputFd {
@@ -1044,6 +1067,44 @@ impl Executor {
         }
     }
 
+    /// Snapshot one numbered input slot into `saved` (the first
+    /// snapshot of a slot wins — it carries the pre-list state the
+    /// scope's restore must replay).
+    fn save_compound_numbered_input_fd(&self, saved: &mut Vec<SavedNumberedFd>, fd: u32) {
+        if saved.iter().any(|saved| saved.fd == fd) {
+            return;
+        }
+        saved.push(SavedNumberedFd {
+            fd,
+            entry: self.fd_table.entries.get(&fd).cloned(),
+            fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
+            fd_stdin_offset: self
+                .shell_state
+                .env_vars
+                .get(&fd_stdin_offset_key(fd))
+                .cloned(),
+            fd_dynamic: self
+                .shell_state
+                .env_vars
+                .get(&fd_dynamic_input_key(fd))
+                .cloned(),
+            fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
+        });
+    }
+
+    /// Whether the descriptor is open at the current walk position.
+    /// GNU's dup/move arm tests the redirector with
+    /// `fcntl (redirector, F_GETFD, 0) != -1` (redir.c:1173) — a
+    /// direction-agnostic open test against the descriptor space as
+    /// the entries before this one evolved it. The binders apply the
+    /// list in order against the live table, so the table state at
+    /// the arm is the at-position state. Fds 0-2 with no table entry
+    /// hold the process's own stdio and count as open (the standing
+    /// rule in validate_builtin_dup_source).
+    fn redirector_open_at_position(&self, fd: u32) -> bool {
+        self.fd_table.is_open(fd) || (fd <= 2 && !self.fd_table.has_entry(fd))
+    }
+
     /// Opens the numbered input redirections of a compound command in the
     /// fd table for the command's whole duration. GNU applies compound
     /// redirections left to right before the command runs (redir.c
@@ -1055,7 +1116,13 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedNumberedFd>, ExecuteError> {
         let mut saved: Vec<SavedNumberedFd> = Vec::new();
-        self.open_compound_numbered_input_redirects_in(cmd, 0, cmd.redirects.len(), &mut saved)?;
+        self.open_compound_numbered_input_redirects_in(
+            cmd,
+            0,
+            cmd.redirects.len(),
+            &mut saved,
+            MoveSourceSave::GnuUndoable,
+        )?;
         Ok(saved)
     }
 
@@ -1073,6 +1140,7 @@ impl Executor {
         start: usize,
         end: usize,
         saved: &mut Vec<SavedNumberedFd>,
+        move_source_save: MoveSourceSave,
     ) -> Result<(), ExecuteError> {
         for redirect in &cmd.redirects[start..end] {
             // The fd before the operator defaults like GNU: input-side
@@ -1111,24 +1179,7 @@ impl Executor {
             if self.redirect_failglob_aborted() {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
-            if !saved.iter().any(|saved| saved.fd == fd) {
-                saved.push(SavedNumberedFd {
-                    fd,
-                    entry: self.fd_table.entries.get(&fd).cloned(),
-                    fd_stdin: self.shell_state.env_vars.get(&fd_stdin_key(fd)).cloned(),
-                    fd_stdin_offset: self
-                        .shell_state
-                        .env_vars
-                        .get(&fd_stdin_offset_key(fd))
-                        .cloned(),
-                    fd_dynamic: self
-                        .shell_state
-                        .env_vars
-                        .get(&fd_dynamic_input_key(fd))
-                        .cloned(),
-                    fd_closed: self.shell_state.env_vars.get(&fd_closed_key(fd)).cloned(),
-                });
-            }
+            self.save_compound_numbered_input_fd(saved, fd);
             match redirect.kind {
                 // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
                 // do_redirection_internal r_close_input).
@@ -1143,43 +1194,23 @@ impl Executor {
                 // scoped slot (e.g. `4<&0` saves stdin for the group).
                 crate::parser::RedirectKind::DuplicateInput => {
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                        // rubash#2614: a move's source close joins the
-                        // restore set only when the destination is open
-                        // at this walk position — GNU registers the
-                        // source's save (redir.c dup/move case:
-                        // add_undo_redirect (redir_fd, r_close_this,
-                        // -1)) only when fcntl(redirector) succeeds,
-                        // and a move onto a closed target closes the
-                        // source for good (rubash#1235). The snapshot at
-                        // the top of the loop covers the destination;
-                        // this is the source's, taken before the dup.
-                        if move_source && source_fd != fd && self.fd_table.is_open(fd) {
-                            if !saved.iter().any(|saved| saved.fd == source_fd) {
-                                saved.push(SavedNumberedFd {
-                                    fd: source_fd,
-                                    entry: self.fd_table.entries.get(&source_fd).cloned(),
-                                    fd_stdin: self
-                                        .shell_state
-                                        .env_vars
-                                        .get(&fd_stdin_key(source_fd))
-                                        .cloned(),
-                                    fd_stdin_offset: self
-                                        .shell_state
-                                        .env_vars
-                                        .get(&fd_stdin_offset_key(source_fd))
-                                        .cloned(),
-                                    fd_dynamic: self
-                                        .shell_state
-                                        .env_vars
-                                        .get(&fd_dynamic_input_key(source_fd))
-                                        .cloned(),
-                                    fd_closed: self
-                                        .shell_state
-                                        .env_vars
-                                        .get(&fd_closed_key(source_fd))
-                                        .cloned(),
-                                });
-                            }
+                        // rubash#2612 (repair): GNU's move arm adds the
+                        // source's undo record — add_undo_redirect
+                        // (redir_fd, r_close_this, -1), redir.c:1175 —
+                        // only when the redirector is open at this
+                        // position (the fcntl test at redir.c:1173);
+                        // with an inactive redirector the source close
+                        // below has no undo record and is permanent.
+                        // Snapshot the source under exactly that
+                        // condition (MoveSourceSave::GnuUndoable), or
+                        // unconditionally in a fork-emulation scope
+                        // (RestoreAlways), before the close.
+                        if move_source
+                            && source_fd != fd
+                            && (move_source_save == MoveSourceSave::RestoreAlways
+                                || self.redirector_open_at_position(fd))
+                        {
+                            self.save_compound_numbered_input_fd(saved, source_fd);
                         }
                         let _ = self.fd_table.dup_input(fd, source_fd);
                         self.shell_state.env_vars.remove(&fd_closed_key(fd));
@@ -1426,9 +1457,13 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<Vec<SavedOutputFd>, ExecuteError> {
         let mut saved: Vec<SavedOutputFd> = Vec::new();
-        if let Err(error) =
-            self.open_compound_output_redirects_in(cmd, 0, cmd.redirects.len(), &mut saved)
-        {
+        if let Err(error) = self.open_compound_output_redirects_in(
+            cmd,
+            0,
+            cmd.redirects.len(),
+            &mut saved,
+            MoveSourceSave::GnuUndoable,
+        ) {
             self.restore_compound_output_redirects(saved);
             return Err(error);
         }
@@ -1465,6 +1500,7 @@ impl Executor {
         start: usize,
         end: usize,
         saved: &mut Vec<SavedOutputFd>,
+        move_source_save: MoveSourceSave,
     ) -> Result<(), ExecuteError> {
         for redirect in &cmd.redirects[start..end] {
             // `{var}`-targeted redirections allocate a persistent dynamic fd
@@ -1516,16 +1552,27 @@ impl Executor {
                         continue;
                     }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
-                        // rubash#2614: the source's close joins the
-                        // restore set only when the destination is open
-                        // at this walk position — GNU registers the
-                        // move source's save (redir.c dup/move case:
-                        // add_undo_redirect (redir_fd, r_close_this,
-                        // -1)) only when fcntl(redirector) succeeds;
-                        // a move onto a closed target closes the
-                        // source for good (rubash#1235), so saving it
-                        // unconditionally over-restored the parent.
-                        if move_source && self.fd_table.is_open(fd) {
+                        // rubash#2612 (repair): GNU's move arm adds the
+                        // source's undo record — add_undo_redirect
+                        // (redir_fd, r_close_this, -1), redir.c:1175 —
+                        // only when the redirector is open at this
+                        // position (the fcntl test at redir.c:1173).
+                        // The unconditional snapshot this arm used to
+                        // take resurrected the caller's source
+                        // descriptor after the scope whenever the
+                        // redirector had been inactive (`f 8>&9-` left
+                        // fd 9 open in the caller; GNU leaves it
+                        // closed). A source an earlier entry of this
+                        // list already snapshotted keeps that record —
+                        // first snapshot wins, as before. A
+                        // fork-emulation scope (RestoreAlways) keeps
+                        // the unconditional snapshot: its binds stand
+                        // in for a forked child's, so the restore must
+                        // cover every mutation.
+                        if move_source
+                            && (move_source_save == MoveSourceSave::RestoreAlways
+                                || self.redirector_open_at_position(fd))
+                        {
                             self.save_compound_output_fd(saved, source_fd);
                         }
                         // GNU dup2 copies the whole descriptor — the group's

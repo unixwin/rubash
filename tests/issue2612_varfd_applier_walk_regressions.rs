@@ -375,6 +375,78 @@ fn move_chain_var_dup_copies_moved_binding() {
 }
 
 // ----------------------------------------------------------------
+// Move-source undo rule (the #2612 repair): GNU's move arm adds
+// the source's undo record — add_undo_redirect (redir_fd,
+// r_close_this, -1), redir.c:1175 — ONLY when the redirector is
+// open at the entry's walk position (the fcntl (redirector,
+// F_GETFD) test, redir.c:1173). The move chain above pins the
+// inactive half; the three cases below pin the active half and
+// the sibling scope/arm faces of the same rule.
+// ----------------------------------------------------------------
+
+/// Same move chain, but fd 8 is already open when the call runs:
+/// the redirector is active at the move's position, so GNU DOES
+/// record the source's undo and fd 9 comes back after the call —
+/// and fd 8 returns to its own prior binding.
+#[test]
+fn move_chain_target_already_open_restores_source() {
+    let dir = scratch("x2b");
+    write(&dir, "data.txt", DATA);
+    write(&dir, "data2.txt", DATA2);
+    let (stdout, stderr, code) = run_driver(
+        &dir,
+        "exec 9>seed.txt\nexec 8>other.txt\nwv() { echo PAY >&$v; }\nwv 8>&9- {v}>&8\necho \"RC=$?\"\nif [ -n \"${v-}\" ]; then echo \"V=BOUND\"; else echo \"V=UNBOUND\"; fi\nif echo POST9 >&9 2>/dev/null; then echo \"nine=open\"; else echo \"nine=closed\"; fi\nif echo POST8 >&8 2>/dev/null; then echo \"eight=open\"; else echo \"eight=closed\"; fi\necho \"seed=[$(cat seed.txt 2>/dev/null)]\"\necho \"other=[$(cat other.txt 2>/dev/null)]\"\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "RC=0\nV=BOUND\nnine=open\neight=open\nseed=[PAY\nPOST9]\nother=[POST8]\n"
+    );
+    assert_eq!(stderr, "");
+}
+
+/// The group face of the inactive half: a brace group's own
+/// `8>&9-` (redirector never bound) closes the caller's fd 9 for
+/// good, exactly like the function face. (The probe writes its
+/// failing redirect with fd 2 pre-bound to /dev/null so the case
+/// pins descriptor state, not the diagnostic channel.)
+#[test]
+fn group_move_with_inactive_redirector_closes_source() {
+    let dir = scratch("x3");
+    write(&dir, "data.txt", DATA);
+    write(&dir, "data2.txt", DATA2);
+    let (stdout, stderr, code) = run_driver(
+        &dir,
+        "exec 9>seed.txt\n{ echo IN >&8; } 8>&9-\necho \"RC=$?\"\nif echo POST 2>/dev/null >&9; then echo \"nine=open\"; else echo \"nine=closed\"; fi\necho \"seed=[$(cat seed.txt 2>/dev/null)]\"\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "RC=0\nnine=closed\nseed=[IN]\n");
+    assert_eq!(stderr, "");
+}
+
+/// The input arm of the rule, active half: `8<&9-` on a function
+/// call whose redirector fd 8 is already open — GNU records the
+/// source's undo, so fd 9 is readable again after the call (at
+/// the shared description's offset, hence at EOF after the body
+/// drained it), and fd 8 keeps its own binding.
+#[test]
+fn input_move_target_already_open_restores_source() {
+    let dir = scratch("x4");
+    write(&dir, "data.txt", DATA);
+    write(&dir, "data2.txt", DATA2);
+    let (stdout, stderr, code) = run_driver(
+        &dir,
+        "exec 9<data.txt\nexec 8<data2.txt\nrv() { cat <&$v; }\nrv 8<&9- {v}<&8\necho \"RC=$?\"\nif [ -n \"${v-}\" ]; then echo \"V=BOUND\"; else echo \"V=UNBOUND\"; fi\nif cat <&9 2>/dev/null; then echo \"nine=open\"; else echo \"nine=closed\"; fi\nif cat <&8 2>/dev/null; then echo \"eight=open\"; else echo \"eight=closed\"; fi\n",
+    );
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(
+        stdout,
+        "D1\nD2\nD3\nRC=0\nV=BOUND\nnine=open\nE1\nE2\neight=open\n"
+    );
+    assert_eq!(stderr, "");
+}
+
+// ----------------------------------------------------------------
 // B1 (spawn row): an external command whose list rebinds 9, dups
 // it into {v}, and points fd 1 at the var's slot (`1>&10` in the
 // audit fixture; here the writer's own $v slot via a second dup

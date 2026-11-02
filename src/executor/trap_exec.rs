@@ -6560,8 +6560,25 @@ impl Executor {
             if cmd.redirects[position].fd_var.is_none() {
                 continue;
             }
-            self.open_compound_numbered_input_redirects_in(cmd, start, position, &mut saved)?;
-            self.open_compound_output_redirects_in(cmd, start, position, &mut saved_outputs)?;
+            // rubash#2612 (repair): this face's binds stand in for a
+            // forked child's (see the fn's #2310 doc), so a fixed
+            // move's source close must be restored with the rest of
+            // the segment — MoveSourceSave::RestoreAlways, not the
+            // in-shell undoable rule.
+            self.open_compound_numbered_input_redirects_in(
+                cmd,
+                start,
+                position,
+                &mut saved,
+                super::command_input_scope::MoveSourceSave::RestoreAlways,
+            )?;
+            self.open_compound_output_redirects_in(
+                cmd,
+                start,
+                position,
+                &mut saved_outputs,
+                super::command_input_scope::MoveSourceSave::RestoreAlways,
+            )?;
             self.apply_script_fd_var_entry(
                 cmd,
                 position,
@@ -6578,12 +6595,14 @@ impl Executor {
             start,
             cmd.redirects.len(),
             &mut saved,
+            super::command_input_scope::MoveSourceSave::RestoreAlways,
         )?;
         self.open_compound_output_redirects_in(
             cmd,
             start,
             cmd.redirects.len(),
             &mut saved_outputs,
+            super::command_input_scope::MoveSourceSave::RestoreAlways,
         )?;
         Ok((saved, saved_outputs))
     }
