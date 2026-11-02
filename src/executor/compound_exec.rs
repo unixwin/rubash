@@ -4742,7 +4742,7 @@ impl Executor {
             let nounset =
                 crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset");
             let failglob =
-                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "failglob");
+                crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "failglob");
             for (index, word) in words.iter().enumerate() {
                 let meta = coproc_cmd.word_metadata.get(index);
                 let value = meta.map(|meta| meta.value.as_str()).unwrap_or(word);

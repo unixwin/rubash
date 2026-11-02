@@ -1313,7 +1313,7 @@ impl Executor {
                 }
             }
         }
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "failglob") {
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "failglob") {
             for (index, word) in cmd.words.iter().enumerate() {
                 let text = cmd
                     .word_metadata
@@ -2210,37 +2210,65 @@ impl Executor {
                     let open = indirect.find('[').unwrap_or(0);
                     let base = &indirect[..open];
                     if !base.is_empty() && is_shell_name(base) {
-                        // The PIPESTATUS array object lives in
-                        // shell_state, not env_vars (rubash#1566): its
-                        // storage render comes from
-                        // parameter_array_storage, so the t-join
-                        // adjudication below sees the same element
-                        // values GNU joins.
-                        let pipestatus_storage;
-                        let base_value = match self.shell_state.env_vars.get(base) {
-                            Some(value) => Some(value),
-                            None if self.pipestatus_cell_exists(base) => {
-                                pipestatus_storage = self.parameter_array_storage(base);
-                                pipestatus_storage.as_ref()
+                        // The join adjudication below is GNU's rule for
+                        // the `[@]`/`[*]` subscript ONLY: AV_ALLOWALL
+                        // makes t the dollar_at join of every element.
+                        // A general subscript names ONE element, and t
+                        // is that element's value — the same fetch the
+                        // plain form validates with above
+                        // (array_element_parameter_value on the full
+                        // reference, subst.c:7924-7945 + 7955-7961).
+                        // Judging the join for every subscript made
+                        // each multi-element array an "invalid variable
+                        // name" under any operator tail
+                        // (`${!holders[0]@a}` with holders=(arr zz)
+                        // reported t="arr zz"; rubash#2608).
+                        let close = Self::skip_indirect_array_subscript(&indirect[open..])
+                            .unwrap_or(indirect.len() - open);
+                        let subscript = &indirect[open + 1..open + close - 1];
+                        if subscript != "@" && subscript != "*" {
+                            if let Some(t) =
+                                self.array_element_parameter_value(&indirect[..open + close])
+                            {
+                                if !Self::is_valid_indirect_target(&t) {
+                                    return Some((t, "invalid variable name".to_string(), 1));
+                                }
                             }
-                            None => None,
-                        };
-                        if let Some(value) = base_value {
-                            // GNU's t here is the dollar_at join of the
-                            // variable's ELEMENT VALUES (array_value with
-                            // AV_ALLOWALL, arrayfunc.c:1563), and validity
-                            // is judged on that join — not on the raw
-                            // storage text, whose in-band separators made
-                            // every multi-element array "invalid" and
-                            // every empty assoc "invalid" too (rubash#1147:
-                            // `${!assoc[@]:-d}` errored on an empty assoc
-                            // whose t is NULL and proceeds silently, and on
-                            // a one-element assoc whose value IS valid).
-                            // An array with no elements yields no t at all;
-                            // a scalar base yields its value as the sole
-                            // element.
-                            let element_values =
-                                if is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base) {
+                        } else {
+                            // The PIPESTATUS array object lives in
+                            // shell_state, not env_vars (rubash#1566): its
+                            // storage render comes from
+                            // parameter_array_storage, so the t-join
+                            // adjudication below sees the same element
+                            // values GNU joins.
+                            let pipestatus_storage;
+                            let base_value = match self.shell_state.env_vars.get(base) {
+                                Some(value) => Some(value),
+                                None if self.pipestatus_cell_exists(base) => {
+                                    pipestatus_storage = self.parameter_array_storage(base);
+                                    pipestatus_storage.as_ref()
+                                }
+                                None => None,
+                            };
+                            if let Some(value) = base_value {
+                                // GNU's t here is the dollar_at join of the
+                                // variable's ELEMENT VALUES (array_value with
+                                // AV_ALLOWALL, arrayfunc.c:1563), and validity
+                                // is judged on that join — not on the raw
+                                // storage text, whose in-band separators made
+                                // every multi-element array "invalid" and
+                                // every empty assoc "invalid" too (rubash#1147:
+                                // `${!assoc[@]:-d}` errored on an empty assoc
+                                // whose t is NULL and proceeds silently, and on
+                                // a one-element assoc whose value IS valid).
+                                // An array with no elements yields no t at all;
+                                // a scalar base yields its value as the sole
+                                // element.
+                                let element_values = if is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    ASSOC_VARS,
+                                    base,
+                                ) {
                                     self.parameter_array_storage(base).map(|storage| {
                                         assoc_hash_ordered_values(
                                             &storage,
@@ -2252,14 +2280,15 @@ impl Executor {
                                 } else {
                                     None
                                 };
-                            let t = match element_values {
-                                Some(values) if !values.is_empty() => Some(values.join(" ")),
-                                Some(_) => None,
-                                None => Some(value.clone()),
-                            };
-                            if let Some(t) = t {
-                                if !Self::is_valid_indirect_target(&t) {
-                                    return Some((t, "invalid variable name".to_string(), 1));
+                                let t = match element_values {
+                                    Some(values) if !values.is_empty() => Some(values.join(" ")),
+                                    Some(_) => None,
+                                    None => Some(value.clone()),
+                                };
+                                if let Some(t) = t {
+                                    if !Self::is_valid_indirect_target(&t) {
+                                        return Some((t, "invalid variable name".to_string(), 1));
+                                    }
                                 }
                             }
                         }
