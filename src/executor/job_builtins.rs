@@ -536,6 +536,9 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             return Ok(interrupt);
         }
+        // rubash#2579: `wait -f` (JWAIT_FORCE, wait.def:134-136) threads
+        // through every wait form below.
+        let wait_force = wait_force_requested(&cmd.words[1..]);
         if let Some(request) = wait_any_request(&cmd.words[1..]) {
             // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
             // `wait -n` returns the first unnotified dead job in slot order,
@@ -637,7 +640,10 @@ impl Executor {
             }
         }
 
-        if cmd.words.len() == 1
+        if (cmd.words.len() == 1
+            || (wait_force
+                && wait_background_operands(&cmd.words[1..])
+                    .is_some_and(|operands| operands.is_empty())))
             && self
                 .shell_state
                 .job_table
@@ -658,7 +664,7 @@ impl Executor {
                 // wait.def:238-245 wait_for_any_job + :328-331: a trapped
                 // signal interrupts the no-operand wait too, returning
                 // 128+sig.
-                match self.wait_for_background_pid(pid, false)? {
+                match self.wait_for_background_pid(pid, false, wait_force)? {
                     WaitPidOutcome::Interrupted(interrupt) => {
                         self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
                         return Ok(interrupt);
@@ -727,44 +733,50 @@ impl Executor {
                 let wait_var = wait_assign_var(&cmd.words[1..])
                     .map(|(name, _index)| (name, self.wait_var_arrayref()));
 
-                let status =
-                    self.wait_for_background_operands(&operands, cmd, wait_var.as_ref())?;
+                let status = self.wait_for_background_operands(
+                    &operands,
+                    cmd,
+                    wait_var.as_ref(),
+                    wait_force,
+                )?;
                 return Ok(status);
             }
         }
 
         if cmd.words.len() == 2 {
             match self.resolve_background_job_operand(&cmd.words[1]) {
-                JobOperandResolution::Pid(pid) => match self.wait_for_background_pid(pid, true)? {
-                    WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
-                        self.write_buffered_builtin_output(cmd, &[], &[])?;
-                        return Ok(status);
-                    }
-                    WaitPidOutcome::Stopped {
-                        job_id,
-                        stop_signal,
-                    } => {
-                        // GNU's stopped report rides only the jobspec
-                        // path: builtins/wait.def:316 sends `%...`
-                        // operands to wait_for_job (jobs.c:3409-3410
-                        // warns when the job is stopped), while a
-                        // numeric pid goes to wait_for_single_pid
-                        // (wait.def:277; jobs.c:2729), which returns
-                        // the stop status silently (rubash#2488).
-                        let mut stderr = Vec::new();
-                        if cmd.words[1].starts_with('%') {
-                            writeln!(
-                                stderr,
-                                "{}warning: wait_for_job: job {} is stopped",
-                                self.diagnostic_prefix(),
-                                job_id
-                            )?;
+                JobOperandResolution::Pid(pid) => {
+                    match self.wait_for_background_pid(pid, true, wait_force)? {
+                        WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
+                            self.write_buffered_builtin_output(cmd, &[], &[])?;
+                            return Ok(status);
                         }
-                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                        return Ok(128 + stop_signal);
+                        WaitPidOutcome::Stopped {
+                            job_id,
+                            stop_signal,
+                        } => {
+                            // GNU's stopped report rides only the jobspec
+                            // path: builtins/wait.def:316 sends `%...`
+                            // operands to wait_for_job (jobs.c:3409-3410
+                            // warns when the job is stopped), while a
+                            // numeric pid goes to wait_for_single_pid
+                            // (wait.def:277; jobs.c:2729), which returns
+                            // the stop status silently (rubash#2488).
+                            let mut stderr = Vec::new();
+                            if cmd.words[1].starts_with('%') {
+                                writeln!(
+                                    stderr,
+                                    "{}warning: wait_for_job: job {} is stopped",
+                                    self.diagnostic_prefix(),
+                                    job_id
+                                )?;
+                            }
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            return Ok(128 + stop_signal);
+                        }
+                        WaitPidOutcome::NotFound => {}
                     }
-                    WaitPidOutcome::NotFound => {}
-                },
+                }
                 JobOperandResolution::Ambiguous => {
                     // GNU wait.def:300-311: a DUP_JOB jobspec is
                     // INVALID_JOB — the get_job_by_name diagnostic is the
@@ -781,7 +793,7 @@ impl Executor {
                 }
                 JobOperandResolution::NoMatch => {
                     if let Ok(pid) = cmd.words[1].parse::<u32>() {
-                        match self.wait_for_background_pid(pid, true)? {
+                        match self.wait_for_background_pid(pid, true, wait_force)? {
                             WaitPidOutcome::Status(status)
                             | WaitPidOutcome::Interrupted(status) => {
                                 self.write_buffered_builtin_output(cmd, &[], &[])?;
@@ -957,6 +969,7 @@ impl Executor {
         operands: &[String],
         cmd: &CommandNode,
         wait_var: Option<&(String, bool)>,
+        force: bool,
     ) -> Result<i32, ExecuteError> {
         let resolved = operands
             .iter()
@@ -999,7 +1012,7 @@ impl Executor {
                     continue;
                 }
             };
-            match self.wait_for_background_pid(pid, true)? {
+            match self.wait_for_background_pid(pid, true, force)? {
                 WaitPidOutcome::Interrupted(interrupt_status) => {
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(interrupt_status);
@@ -1230,7 +1243,7 @@ impl Executor {
             // procsub_waitpid returns the recorded status at once.
             return Ok(None);
         }
-        match self.wait_for_background_pid(procsub_pid, false)? {
+        match self.wait_for_background_pid(procsub_pid, false, false)? {
             WaitPidOutcome::Interrupted(status) => Ok(Some(status)),
             _ => Ok(None),
         }
@@ -2008,6 +2021,7 @@ impl Executor {
         &mut self,
         pid: u32,
         retain_for_explicit_wait: bool,
+        force: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
         // GNU trap.c:604-611: a trapped signal arriving while the wait
         // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
@@ -2027,19 +2041,27 @@ impl Executor {
         // verified GNU 5.3.20: bare wait warns and returns 0, an
         // explicit wait warns and returns 128+stopsig). The caller
         // renders the form-specific warning.
-        if let Some((job_id, stop_signal)) = self
-            .shell_state
-            .job_table
-            .pid_to_job
-            .get(&pid)
-            .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
-            .filter(|job| job.state == crate::jobs::ProcessState::Stopped)
-            .map(|job| (job.id, job.stop_signal.unwrap_or(19)))
-        {
-            return Ok(WaitPidOutcome::Stopped {
-                job_id,
-                stop_signal,
-            });
+        // rubash#2579: with JWAIT_FORCE (wait -f; jobs.c:3423
+        // wait_for_job / jobs.c:2764 wait_for_single_pid) the recorded
+        // stop is NOT a return point — the wait loops until the job is
+        // JDEAD, so skip the stopped short-circuit and let the poll loop
+        // below block on the child handle until it actually terminates
+        // (a stopped child's try_wait simply keeps returning None).
+        if !force {
+            if let Some((job_id, stop_signal)) = self
+                .shell_state
+                .job_table
+                .pid_to_job
+                .get(&pid)
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                .filter(|job| job.state == crate::jobs::ProcessState::Stopped)
+                .map(|job| (job.id, job.stop_signal.unwrap_or(19)))
+            {
+                return Ok(WaitPidOutcome::Stopped {
+                    job_id,
+                    stop_signal,
+                });
+            }
         }
         if let Some(status) = self
             .shell_state
@@ -2164,7 +2186,7 @@ impl Executor {
             // No live handle (a recorded completion, a procsub
             // placeholder, ...): the poll-based wait owns those
             // shapes exactly as before.
-            return self.wait_for_background_pid(pid, false);
+            return self.wait_for_background_pid(pid, false, false);
         };
         self.procsub_stream_children.remove(&pid);
         let raw = loop {
@@ -3141,10 +3163,10 @@ impl Executor {
         let wait_result = if fg_tty.is_some() {
             self.wait_for_fg_job_control(pid)
         } else {
-            self.wait_for_background_pid(pid, false)
+            self.wait_for_background_pid(pid, false, false)
         };
         #[cfg(not(unix))]
-        let wait_result = self.wait_for_background_pid(pid, false);
+        let wait_result = self.wait_for_background_pid(pid, false, false);
         // jobs.c:3253: the shell takes its terminal back on every way
         // out of the wait.
         #[cfg(unix)]
@@ -5088,11 +5110,13 @@ struct WaitAnyRequest {
     operands: Vec<String>,
     assign_var: Option<String>,
     assign_var_index: Option<usize>,
+    force: bool,
 }
 
 fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
     let mut index = 0;
     let mut wait_any = false;
+    let mut force = false;
     let mut assign_var = None;
     let mut assign_var_index = None;
     while let Some(word) = words.get(index) {
@@ -5107,7 +5131,7 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
         for (offset, option) in word[1..].char_indices() {
             match option {
                 'n' => wait_any = true,
-                'f' => {}
+                'f' => force = true,
                 'p' => {
                     let value_start = 1 + offset + option.len_utf8();
                     let (name, name_index) = if value_start < word.len() {
@@ -5143,7 +5167,37 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
         operands: words[index..].to_vec(),
         assign_var,
         assign_var_index,
+        force,
     })
+}
+
+/// Whether the wait command carries `-f` (GNU builtins/wait.def:134-136:
+/// `case 'f': wflags |= JWAIT_FORCE`). Same internal_getopt "fnp:" walk
+/// as the sibling scanners: `-p` consumes its argument, scanning stops
+/// at the first operand or `--`.
+fn wait_force_requested(words: &[String]) -> bool {
+    let mut index = 0;
+    let mut force = false;
+    while let Some(word) = words.get(index) {
+        if word == "--" || !word.starts_with('-') || word == "-" {
+            break;
+        }
+        for (offset, option) in word[1..].char_indices() {
+            match option {
+                'f' => force = true,
+                'n' => {}
+                'p' => {
+                    if offset + 2 >= word.len() {
+                        index += 1;
+                    }
+                    break;
+                }
+                _ => return false,
+            }
+        }
+        index += 1;
+    }
+    force
 }
 
 fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
