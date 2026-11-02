@@ -4480,6 +4480,10 @@ impl Executor {
         // shell engine, so resolve them here before the builtin generates
         // candidates from the static actions.
         let mut dynamic: Option<crate::builtins::complete::CompgenDynamic> = None;
+        // rubash#2587: a -W wordlist expansion failure aborts the whole
+        // compgen (GNU gen_wordlist_matches jumps out of the generation);
+        // recorded here and honored just before the execute call.
+        let mut wordlist_error: Option<String> = None;
         // rubash#1798: the fd table saved while the compgen command's
         // own stdio redirects are bound as the resolution frame (see
         // the will_run branch below); restored after the final output.
@@ -4588,15 +4592,24 @@ impl Executor {
                             self.run_compgen_completion_command(command, "compgen", &word);
                     }
                     if parsed.words.is_some() {
-                        resolved.expanded_wordlist = Some(
-                            self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")),
-                        );
+                        match self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")) {
+                            Ok(expanded) => resolved.expanded_wordlist = Some(expanded),
+                            Err(error) => wordlist_error = Some(error),
+                        }
                     }
                     dynamic = Some(resolved);
                 }
             }
         }
-        let status = match if matches!(
+        if let Some(error) = &wordlist_error {
+            // The diagnostic travels through the builtin's own stderr
+            // (its redirects apply); no candidates are produced and the
+            // builtin fails, like the aborted GNU generation.
+            let _ = writeln!(stderr, "{diagnostic_prefix}compgen: {error}");
+        }
+        let status = match if wordlist_error.is_some() {
+            Ok(1)
+        } else if matches!(
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
         ) {
@@ -4875,7 +4888,23 @@ impl Executor {
             );
         }
         if let Some(wordlist) = spec.words.as_deref() {
-            dynamic.expanded_wordlist = Some(self.expand_compgen_wordlist(wordlist));
+            match self.expand_compgen_wordlist(wordlist) {
+                Ok(expanded) => dynamic.expanded_wordlist = Some(expanded),
+                Err(_) => {
+                    // rubash#2587: GNU aborts this spec's whole
+                    // generation when the wordlist expansion fails
+                    // (gen_wordlist_matches jumps out) — the -F/-C
+                    // results gathered above are discarded with it.
+                    // The host channel carries no diagnostic; the
+                    // failure surfaces as no candidates from this
+                    // spec. Some(vec![]) (not None): None would fall
+                    // back to literal splitting and leak the unexpanded
+                    // wordlist text as candidates.
+                    dynamic.expanded_wordlist = Some(Vec::new());
+                    dynamic.function_candidates = Vec::new();
+                    dynamic.command_candidates = Vec::new();
+                }
+            }
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
         self.shell_state.pcomp_curcs = saved_curcs;
@@ -4967,9 +4996,16 @@ impl Executor {
     /// and are retained in the pieces), then expand each word with the
     /// shellexp rules: a quoted word keeps one field per array element
     /// and never glob-splits; an unquoted word goes through the
-    /// for-list expander (parameter expansion, field splitting, pathname
-    /// expansion).
-    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Vec<String> {
+    /// shellexp expander (brace/tilde/parameter expansion and field
+    /// splitting — WEXP_SHELLEXP has no WEXP_PATHEXP, subst.c:12575,
+    /// so pathname expansion NEVER runs on wordlist elements; the
+    /// for-list expander this used to call globbed them and, under
+    /// failglob, failed the element into an `Err` that
+    /// `unwrap_or_default` silently swallowed — rubash#2587). An
+    /// expansion failure aborts the whole wordlist generation, like
+    /// the jump out of gen_wordlist_matches in GNU, instead of
+    /// dropping one element and returning a truncated success.
+    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Result<Vec<String>, String> {
         // subst.c:2630: with delims == NULL the splitter reads
         // ifs_value — the shell's current IFS (this command's tempenv
         // frame included), or the default " \t\n" while IFS is unset.
@@ -4992,13 +5028,10 @@ impl Executor {
                     values.push(self.expand_word(&word));
                 }
             } else {
-                values.extend(
-                    self.expand_for_word_values_result(&word, None, None)
-                        .unwrap_or_default(),
-                );
+                values.extend(self.expand_shellexp_word_values_result(&word)?);
             }
         }
-        values
+        Ok(values)
     }
 
     /// rubash#1799: the PIPESTATUS cell facts for the -A variable /
