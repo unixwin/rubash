@@ -3575,7 +3575,9 @@ fn builtin_output_write_is_unchecked(cmd: &CommandNode) -> bool {
 /// that applier when this holds (rubash#2613); lists without `{var}`
 /// entries take the exact pre-#2613 path.
 pub(in crate::executor) fn command_has_dynamic_fd_var_redirects(cmd: &CommandNode) -> bool {
-    cmd.redirects.iter().any(|redirect| redirect.fd_var.is_some())
+    cmd.redirects
+        .iter()
+        .any(|redirect| redirect.fd_var.is_some())
         || cmd
             .heredoc_redirects
             .iter()

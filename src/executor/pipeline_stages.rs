@@ -717,8 +717,7 @@ impl Executor {
         // adjudicated the list under their own bracket, so a failure
         // verdict here is not expected; the bindings that stand are
         // what the walk consumes either way.)
-        let stage_call_has_varfd =
-            super::redirection::command_has_dynamic_fd_var_redirects(&call);
+        let stage_call_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(&call);
         if stage_call_has_varfd {
             let _ = subshell.apply_dynamic_fd_var_redirects(&call, true);
         }
