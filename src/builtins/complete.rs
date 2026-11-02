@@ -1202,9 +1202,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // are never -X filtered and never -P/-S wrapped, so this block
         // sits after both.
         if candidates.is_empty() && cs.options & COPT_DIRNAMES != 0 {
-            candidates = directory_candidates_matching(&cur_word, env_vars);
+            candidates = directory_candidates_matching(&cur_word, env_vars, settings);
         } else if cs.options & COPT_PLUSDIRS != 0 {
-            candidates.extend(directory_candidates_matching(&cur_word, env_vars));
+            candidates.extend(directory_candidates_matching(&cur_word, env_vars, settings));
         }
         // bashline.c:1801-1822 attempt_shell_completion: with the
         // compspec's generators (and the dirnames/plusdirs step) still
@@ -1229,7 +1229,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
                 ));
             }
             if cs.options & COPT_DEFAULT != 0 {
-                candidates.extend(filename_candidates_matching(&cur_word, env_vars));
+                candidates.extend(filename_candidates_matching(&cur_word, env_vars, settings));
             }
         }
     }
@@ -1436,9 +1436,14 @@ where
     // appends directory completions (word-filtered like the CA_DIRECTORY
     // action, never -X filtered, never -P/-S wrapped).
     if selected.is_empty() && parsed.options & COPT_DIRNAMES != 0 {
-        selected = directory_candidates_matching(word, env_vars);
+        selected =
+            directory_candidates_matching(word, env_vars, &ReadlineCompletionSettings::default());
     } else if parsed.options & COPT_PLUSDIRS != 0 {
-        selected.extend(directory_candidates_matching(word, env_vars));
+        selected.extend(directory_candidates_matching(
+            word,
+            env_vars,
+            &ReadlineCompletionSettings::default(),
+        ));
     }
 
     write_compgen_matches(selected.iter().map(String::as_str), &parsed, stdout)
@@ -1447,24 +1452,27 @@ where
 /// pcomplete.c:1431-1450: gen_action_completions(CA_DIRECTORY, word) —
 /// directory entries under the word's directory prefix, filtered by the
 /// word prefix the way the file/directory actions filter.
-fn directory_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
-    path_completion_candidates(
-        word,
-        PathCompletionKind::Directory,
-        env_vars,
-        &ReadlineCompletionSettings::default(),
-    )
-    .into_iter()
-    .filter(|candidate| candidate.starts_with(word))
-    .collect()
+fn directory_candidates_matching(
+    word: &str,
+    env_vars: &HashMap<String, String>,
+    settings: &ReadlineCompletionSettings,
+) -> Vec<String> {
+    path_completion_candidates(word, PathCompletionKind::Directory, env_vars, settings)
+        .into_iter()
+        .filter(|candidate| candidate.starts_with(word))
+        .collect()
 }
 
 /// The `-o default` fallback (bashline.c:1808-1810: COPT_DEFAULT leaves
 /// readline's default filename completion open) — filename candidates
 /// under the word's directory prefix, word-filtered like the
 /// CA_FILE action.
-fn filename_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
-    path_completion_candidates(word, PathCompletionKind::File, env_vars)
+fn filename_candidates_matching(
+    word: &str,
+    env_vars: &HashMap<String, String>,
+    settings: &ReadlineCompletionSettings,
+) -> Vec<String> {
+    path_completion_candidates(word, PathCompletionKind::File, env_vars, settings)
         .into_iter()
         .filter(|candidate| candidate.starts_with(word))
         .collect()
