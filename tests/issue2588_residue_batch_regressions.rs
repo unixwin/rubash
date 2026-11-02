@@ -69,16 +69,27 @@ fn issue_2588_err_trap_fires_and_error_is_not_a_trap_name() {
 
 #[test]
 fn issue_2588_pipestatus_scope_restore_still_works() {
-    // Guard for leg (a): a function-local PIPESTATUS snapshot/restore
-    // round-trip (the renamed key's only job) keeps the outer vector.
-    let script = "echo a | echo b\necho \"outer=${PIPESTATUS[*]}\"\nf() { local PIPESTATUS; echo x | echo y | echo z; }\nf\necho \"after=${PIPESTATUS[*]}\"\n";
+    // Guard for leg (a), expectations re-derived from the GNU 5.3.20
+    // oracle by the captain (the original pin asserted `after=0 0`,
+    // which is neither GNU's nor rubash's behavior): PIPESTATUS is
+    // set from the last foreground pipeline; a function call collapses
+    // it to the call's single status on return; a `local PIPESTATUS`
+    // shadows reads with an empty array and does not intercept the
+    // pipeline-status machinery. All three lines below are byte-equal
+    // on GNU and on master without this tranche, so the renamed key
+    // must keep them exactly.
+    let script = "false | true\necho \"outer=${PIPESTATUS[*]}\"\nf() { local PIPESTATUS; echo x | cat | cat; echo \"inner=${PIPESTATUS[*]}\"; }\nf\necho \"after=${PIPESTATUS[*]} n=${#PIPESTATUS[@]}\"\n";
     let (stdout, stderr, _code) = run_script(script);
     assert!(
-        stdout.contains("outer=0 0"),
+        stdout.contains("outer=1 0"),
         "stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
-        stdout.contains("after=0 0"),
+        stdout.contains("inner=\n"),
+        "stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("after=0 n=1"),
         "stdout: {stdout}, stderr: {stderr}"
     );
 }
