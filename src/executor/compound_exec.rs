@@ -75,6 +75,31 @@ pub(in crate::executor) fn rubash_spawn_inherited_state(key: &str) -> bool {
 /// the same round-trip the array-variable transport uses.
 pub(in crate::executor) const POSITIONAL_PARAMS_TRANSPORT: &str = "__RUBASH_POSITIONAL_PARAMS";
 
+/// RAII scope for the executor's `expansion_probe_active` flag
+/// (rubash#2585); restores the prior value on drop, so a nested probe
+/// scope cannot disarm an outer one and early returns are covered —
+/// the same shape as `SpeculativeExpansionGuard` for the thread-local
+/// SPECULATIVE_EXPANSION flag (pipeline_exec.rs).
+pub(in crate::executor) struct ExpansionProbeGuard {
+    flag: std::rc::Rc<std::cell::Cell<bool>>,
+    saved: bool,
+}
+
+impl ExpansionProbeGuard {
+    pub(in crate::executor) fn new(flag: &std::rc::Rc<std::cell::Cell<bool>>) -> Self {
+        Self {
+            saved: flag.replace(true),
+            flag: flag.clone(),
+        }
+    }
+}
+
+impl Drop for ExpansionProbeGuard {
+    fn drop(&mut self) {
+        self.flag.set(self.saved);
+    }
+}
+
 impl Executor {
     /// The live positional window (`shift`-visible `$1..$#`) rendered
     /// for a fork-shaped respawn; see POSITIONAL_PARAMS_TRANSPORT.
@@ -2141,9 +2166,19 @@ impl Executor {
         let saved_evalerror_pending = self.evalerror_pending.get();
         let saved_failglob_pending = self.evalerror_failglob_pending.get();
         let saved_evalerror_line = self.evalerror_line.get();
-        self.expansion_probe_active.set(true);
-        let probe = self.expand_command_words(command);
-        self.expansion_probe_active.set(false);
+        // rubash#2585: arm the probe through the RAII guard, not a
+        // bare set(true)/set(false) pair — a NESTED probe (a comsub or
+        // async gate inside the probed expansion arming its own probe
+        // on this same executor) used to run its unconditional
+        // set(false) and silently disarm the outer probe, re-admitting
+        // the doubled `no match` report and the armed evalerror
+        // discard this probe exists to suppress. The guard restores
+        // the PRIOR value on drop, the SpeculativeExpansionGuard shape
+        // (pipeline_exec.rs).
+        let probe = {
+            let _probe_guard = ExpansionProbeGuard::new(&self.expansion_probe_active);
+            self.expand_command_words(command)
+        };
         let expanded = match probe {
             Ok(expanded) => expanded,
             Err(_) => {
@@ -8120,5 +8155,42 @@ mod arith_counter_fast_loop_tests {
             executor.execute_ast(&ast).ok();
             assert_eq!(executor.get_env("i"), Some("3"), "{script:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod expansion_probe_guard_tests {
+    //! rubash#2585: the probe guard must restore the PRIOR value, so a
+    //! nested probe scope leaves an outer probe armed (the plain-bool
+    //! set(true)/set(false) pair let the inner scope's set(false)
+    //! silently disarm the outer one).
+    use super::ExpansionProbeGuard;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[test]
+    fn issue2585_nested_guard_restores_outer_armed_state() {
+        let flag = Rc::new(Cell::new(false));
+        {
+            let _outer = ExpansionProbeGuard::new(&flag);
+            assert!(flag.get());
+            {
+                let _inner = ExpansionProbeGuard::new(&flag);
+                assert!(flag.get());
+            }
+            // Inner drop must restore the outer scope's `true`, not `false`.
+            assert!(flag.get());
+        }
+        assert!(!flag.get());
+    }
+
+    #[test]
+    fn issue2585_guard_restores_prior_true() {
+        let flag = Rc::new(Cell::new(true));
+        {
+            let _guard = ExpansionProbeGuard::new(&flag);
+            assert!(flag.get());
+        }
+        assert!(flag.get());
     }
 }
