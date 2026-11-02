@@ -36,6 +36,161 @@ pub(crate) fn is_assignment(word: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// GNU general.c:480 `assignment()` on the raw token, bracket arm
+/// included — the reader's own classification (parse.y:5789-5796):
+/// a word is an assignment word when it is a legal variable name, or
+/// `name[subscript]` with the subscript closed by skipsubscript's
+/// balance-0 `]`, immediately followed by `=` or `+=`. Unlike
+/// [`is_assignment`] this accepts the array-element form
+/// (`a[64|3]=A`), which is exactly the form GNU returns
+/// ASSIGNMENT_WORD for (parse.y:5846, when the word was also read in
+/// assignment-acceptable position). Used for the reader-history
+/// classification in scanner.rs record_token; the token-stream kind
+/// keeps using is_assignment (element words ride the parser's own
+/// array-element channel there).
+pub(crate) fn is_assignment_word(word: &str) -> bool {
+    let bytes = word.as_bytes();
+    // legal_variable_starter on the first character (general.c:499).
+    if !matches!(bytes.first(), Some(b) if b.is_ascii_alphabetic() || *b == b'_') {
+        return false;
+    }
+    let mut indx = 0usize;
+    while indx < bytes.len() {
+        let c = bytes[indx];
+        if c == b'=' {
+            // general.c:507: `=` at indx (never 0 — the starter check
+            // above consumed a name character class member).
+            return indx > 0;
+        }
+        if c == b'[' {
+            // general.c:512-521: skipsubscript to the balance-0 `]`,
+            // then `=` or `+=` must follow immediately.
+            let Some(close) = skip_subscript_close(bytes, indx) else {
+                return false;
+            };
+            let newi = close + 1;
+            if bytes.get(newi) == Some(&b'+') && bytes.get(newi + 1) == Some(&b'=') {
+                return true;
+            }
+            return bytes.get(newi) == Some(&b'=');
+        }
+        // general.c:525: `+=` for the scalar form.
+        if c == b'+' && bytes.get(indx + 1) == Some(&b'=') {
+            return true;
+        }
+        // general.c:530: variable names contain only letters, digits
+        // and `_`; anything else ends the classification.
+        if !(c.is_ascii_alphanumeric() || c == b'_') {
+            return false;
+        }
+        indx += 1;
+    }
+    false
+}
+
+/// Index of the `]` closing the subscript opened at `bytes[open]`,
+/// per skipsubscript (subst.c:2186) = skip_matched_pair with
+/// FLAGS & 1 == 0 (subst.c:2086-2177): brackets nest, a backslash
+/// protects the next byte, and backquote spans, single- and
+/// double-quoted spans and `$(...)` / `${...}` constructs are
+/// skipped as units — a `]` inside one of them is data. The lexer's
+/// own port (the executor keeps its twin in arrays/storage.rs; the
+/// layers do not import each other). None when no balance-0 `]`
+/// exists.
+fn skip_subscript_close(bytes: &[u8], open: usize) -> Option<usize> {
+    if bytes.get(open) != Some(&b'[') {
+        return None;
+    }
+    skip_matched_pair_end(bytes, open + 1, b'[', b']').map(|end| end - 1)
+}
+
+/// Byte port of skip_matched_pair (subst.c:2086-2177), FLAGS & 1 == 0:
+/// starting just past an opening delimiter at depth 1, return the
+/// index just past the matching `close`.
+fn skip_matched_pair_end(bytes: &[u8], mut index: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_backquote_end(bytes, index + 1)?,
+            b'\'' => index = skip_single_quoted_end(bytes, index + 1)?,
+            b'"' => index = skip_double_quoted_end(bytes, index + 1)?,
+            b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                let (nested_open, nested_close) = if bytes[index + 1] == b'(' {
+                    (b'(', b')')
+                } else {
+                    (b'{', b'}')
+                };
+                index = skip_matched_pair_end(bytes, index + 2, nested_open, nested_close)?;
+            }
+            byte if byte == open => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the closing backquote of a span whose text starts
+/// at `index`; a backslash protects the next byte
+/// (skip_matched_pair's backq state, subst.c:2113-2120).
+fn skip_backquote_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the closing `'` of a span whose text starts at
+/// `index`; single quotes admit no escapes (skip_single_quoted,
+/// subst.c:1952).
+fn skip_single_quoted_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Index just past the closing `"` of a span whose text starts at
+/// `index`. Inside double quotes a backslash protects the next byte
+/// and backquote / `$(...)` / `${...}` constructs nest as units
+/// (skip_double_quoted, subst.c:1981).
+fn skip_double_quoted_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_backquote_end(bytes, index + 1)?,
+            b'"' => return Some(index + 1),
+            b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                let (nested_open, nested_close) = if bytes[index + 1] == b'(' {
+                    (b'(', b')')
+                } else {
+                    (b'{', b'}')
+                };
+                index = skip_matched_pair_end(bytes, index + 2, nested_open, nested_close)?;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 /// True when the assignment `=` is immediately followed by an unquoted `(` —
 /// GNU parse.y:5648-5657 read_token_word peeks the character right after the
 /// `=` that ends the assignment name (an `+=` consumes one extra `=`) and

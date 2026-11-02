@@ -1,5 +1,7 @@
 use super::brace_scan_cache::{BraceScanCache, HeredocOpEntry, HeredocOpScanResume};
-use super::classification::{is_brace_expansion, is_keyword, is_word_delimiter};
+use super::classification::{
+    is_assignment_word, is_brace_expansion, is_keyword, is_word_delimiter,
+};
 use super::quotes::normalize_backtick_command_substitution;
 use super::token::{Token, TokenKind};
 use crate::token_str::TokStr;
@@ -426,6 +428,13 @@ impl<'a> Lexer<'a> {
         // read, which is exactly this capture (and the value the
         // reserved_position stamp above derives from).
         let read_time_reserved_position = self.reserved_word_position();
+        // The same read-time capture for the assignment classification
+        // below: assignment_word_position() judged against the state
+        // in which THIS token was read (last_token still names the
+        // previous token here), exactly as GNU's read_token_word
+        // consults assignment_acceptable(last_read_token) while the
+        // word is being read (parse.y:5792).
+        let read_time_assignment_position = self.assignment_word_position();
         // rubash#1721: stamp the reserved-word verdict for word-path
         // keyword tokens from the reader state in which the token was
         // READ (before this token updates it below) — the same state
@@ -695,6 +704,37 @@ impl<'a> Lexer<'a> {
             && is_keyword(&token.value)
             && (!read_time_reserved_position || time_after_pipe)
         {
+            TokenKind::Word
+        } else if token_is_word_element(&token.kind)
+            && read_time_assignment_position
+            && is_assignment_word(&token.raw)
+        {
+            // GNU parse.y:5846: read_token returns ASSIGNMENT_WORD
+            // only when the word carries both W_ASSIGNMENT and
+            // W_NOSPLIT. W_ASSIGNMENT is general.c:480 assignment()
+            // on the raw token — bracket arm included, so the
+            // array-element form counts (is_assignment_word) — and
+            // W_NOSPLIT is set only when the word was read in
+            // assignment-acceptable position (parse.y:5789-5796).
+            // last_read_token therefore names ASSIGNMENT_WORD after
+            // a command-position assignment word, scalar or element,
+            // which is what keeps command_token_position
+            // (parse.y:3157-3161) armed across a whole assignment
+            // prefix: in `> /dev/null a[64|3]=A b[64|3]=B` the first
+            // element word closes PST_REDIRLIST, so only this
+            // ASSIGNMENT_WORD arm can arm the second word's span
+            // (rubash#2605 round 3). The token-stream kind is
+            // untouched — element words keep riding the parser's
+            // array-element channel; only the reader history is
+            // classified the way GNU's reader classifies it.
+            TokenKind::Assignment
+        } else if token.kind == TokenKind::Assignment && !read_time_assignment_position {
+            // The demotion half of the same parse.y:5846 rule: an
+            // assignment-shaped scalar word read OUTSIDE assignment
+            // position (an argument, a redirect target) is a WORD
+            // in GNU's reader history, however the token stream
+            // classifies it — so it cannot arm a following word's
+            // subscript span either (`echo x=1 a[1 2]=B` splits).
             TokenKind::Word
         } else {
             token.kind.clone()
