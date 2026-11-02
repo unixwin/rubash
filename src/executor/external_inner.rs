@@ -2807,6 +2807,42 @@ impl Executor {
         parent_side_dups.push(dup);
     }
 
+    /// rubash#2531: stamp ONE resolved description on BOTH env
+    /// channels at `fd` — the spawn-side shape of GNU's dup2
+    /// (redir.c:1193): the child receives the descriptor itself, and
+    /// its startup restore pairs equal HANDLE/WHANDLE values into a
+    /// single shared FileFd (init.rs), so both directions move one
+    /// offset (the numbered walk's `<>` arm stamps the same way).
+    /// A {var} dup resolved against the list's own at-position
+    /// bindings must stamp this way: the ambient stamp loop ran
+    /// before the walk and already stamped the var's slot from the
+    /// applier's AMBIENT copy of the source, and a single-channel
+    /// stamp leaves the other channel's ambient value in place — a
+    /// `>&N` dup then wrote through the at-position description
+    /// while reads still served the ambient one.
+    fn stamp_child_fd_description(
+        &mut self,
+        process: &mut Command,
+        command_fd_pins: &mut FdPinVec,
+        parent_side_dups: &mut Vec<crate::fd::HANDLE>,
+        fd: u32,
+        raw: crate::fd::HANDLE,
+        path_label: String,
+    ) {
+        let Ok(dup) = crate::fd::duplicate_handle_inheritable(raw) else {
+            return;
+        };
+        #[cfg(unix)]
+        command_fd_pins.push((dup, fd));
+        #[cfg(not(unix))]
+        let _ = &*command_fd_pins;
+        process.env(format!("__RUBASH_FD_HANDLE_{fd}"), format!("{dup:#x}"));
+        process.env(format!("__RUBASH_FD_PATH_{fd}"), path_label.clone());
+        process.env(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+        process.env(format!("__RUBASH_FD_WPATH_{fd}"), path_label);
+        parent_side_dups.push(dup);
+    }
+
     /// rubash#2272: deliver one `{var}` redirect's binding to the
     /// spawn. The dynamic-fd applier (trap_exec.rs
     /// apply_dynamic_fd_var_redirects) ran ahead of dispatch and
@@ -3021,15 +3057,19 @@ impl Executor {
         };
         let write = matches!(redirect.kind, crate::parser::RedirectKind::DuplicateOutput);
         // (1) The command's own earlier binding for the source.
+        // rubash#2531: the dup copies the descriptor whole
+        // (redir.c:1193), so the delivery stamps the one description
+        // on both channels — a write-only stamp left the ambient
+        // loop's read stamp (the applier's ambient copy) in place
+        // and the child read the WRONG file through the var's fd.
         if let Some(file) = walk_opened.get(&source_fd).cloned() {
             let var_fd = self.fd_var_delivery_fd(cmd, name, fd_var_claimed);
             let path = file.path.to_string_lossy().into_owned();
-            self.stamp_child_fd_handle(
+            self.stamp_child_fd_description(
                 process,
                 command_fd_pins,
                 parent_side_dups,
                 var_fd,
-                write,
                 file.handle,
                 path,
             );
@@ -3037,17 +3077,19 @@ impl Executor {
         }
         // (2) fd-0 sources: fd-0 entries never enter this walk (the
         // stdin face owns them), so resolve the command's own stdin
-        // binding through the #2235 replay.
+        // binding through the #2235 replay. Same whole-description
+        // stamp as (1): the replayed binding IS fd 0's at-position
+        // descriptor, and a stale ambient write stamp for the var's
+        // slot must not survive beside it.
         if !write && source_fd == 0 {
             if let Some(file) = self.own_input_binding_before(cmd, 0, position) {
                 let var_fd = self.fd_var_delivery_fd(cmd, name, fd_var_claimed);
                 let path = file.path.to_string_lossy().into_owned();
-                self.stamp_child_fd_handle(
+                self.stamp_child_fd_description(
                     process,
                     command_fd_pins,
                     parent_side_dups,
                     var_fd,
-                    false,
                     file.handle,
                     path,
                 );
