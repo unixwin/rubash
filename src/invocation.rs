@@ -92,6 +92,30 @@ impl ShellInvocation {
                 break;
             }
             if arg.starts_with("--") {
+                // shell.c:839-892 parse_long_options: a long option whose
+                // table entry carries a value (`--rcfile`/`--init-file`,
+                // the Charp arm at shell.c:867-872) consumes the NEXT argv
+                // word inside the long-option walk (`argv[++arg_index]`)
+                // and the walk CONTINUES (arg_index++ at :891) — the value
+                // word never ends the option run, so the short-option pass
+                // behind it (shell.c:899's first-operand rule belongs to
+                // parse_shell_options, which only ever sees the remaining
+                // words) still parses words like `-ic`. `--rcfile=value`
+                // is not GNU syntax (parse_long_options STREQs the whole
+                // word), so only the separate-word form consumes a value.
+                let name = &arg[2..];
+                if crate::usage::LONG_OPTIONS_WITH_VALUE.contains(&name) {
+                    expanded.push(arg.to_string());
+                    if let Some(value) = args.get(i + 1) {
+                        expanded.push(value.clone());
+                        i += 2;
+                    } else {
+                        // Missing value: push the word alone; the loop
+                        // below reports `option requires an argument`.
+                        i += 1;
+                    }
+                    continue;
+                }
                 expanded.push(arg.to_string());
                 i += 1;
                 continue;
@@ -942,6 +966,54 @@ mod tests {
         assert!(parsed.shell_flags.contains(&("noexec".into(), true)));
         assert!(parsed.shell_flags.contains(&("errexit".into(), true)));
         assert_eq!(parsed.positional_params, vec!["x"]);
+    }
+
+    /// shell.c:839-892 parse_long_options consumes a value-taking long
+    /// option's NEXT argv word inside its own walk, so the words behind
+    /// the value still parse as options — `bash --rcfile f -ic 'cmd'`
+    /// is GNU-valid (verified WSL GNU 5.3.20: rc sourced, `$-` himBHc).
+    /// The normalizer used to treat the value word as the first operand
+    /// (shell.c:899's rule, which belongs to the SHORT pass) and left
+    /// `-ic` unexpanded, so the loop reported `-ic: invalid option`.
+    #[test]
+    fn parses_short_cluster_after_long_option_value() {
+        for args in [
+            vec![
+                "--rcfile".to_string(),
+                "rc.sh".to_string(),
+                "-ic".to_string(),
+                "echo hi".to_string(),
+            ],
+            vec![
+                "--init-file".to_string(),
+                "rc.sh".to_string(),
+                "-ic".to_string(),
+                "echo hi".to_string(),
+            ],
+            vec![
+                "--rcfile".to_string(),
+                "rc.sh".to_string(),
+                "-i".to_string(),
+                "-c".to_string(),
+                "echo hi".to_string(),
+            ],
+        ] {
+            let parsed = ShellInvocation::parse(&args).unwrap();
+            assert_eq!(parsed.command.as_deref(), Some("echo hi"), "{args:?}");
+            assert_eq!(parsed.rc_file.as_deref(), Some("rc.sh"), "{args:?}");
+            assert!(parsed.interactive, "{args:?}");
+        }
+    }
+
+    /// A value-taking long option at the END of argv still reports the
+    /// GNU missing-argument error (parse_long_options:867-871).
+    #[test]
+    fn rcfile_without_value_reports_requires_argument() {
+        let error = ShellInvocation::parse(&["--rcfile".to_string()]).unwrap_err();
+        assert!(
+            error.contains("option requires an argument"),
+            "got {error:?}"
+        );
     }
 
     #[test]

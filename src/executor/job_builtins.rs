@@ -4208,16 +4208,45 @@ impl Executor {
             } else {
                 None
             };
-            // complete.def:862-869: `list == 0 && wl == 0` is the
-            // completion-state form (RL_STATE_COMPLETING is never set
-            // outside readline completion, so it always errors here).
+            // complete.def:862-886: `list == 0 && wl == 0` is the
+            // completion-state form. Inside a live completion attempt
+            // (RL_STATE_COMPLETING set AND pcomp_curcs != NULL — the
+            // ports are `line_completion_active` / `pcomp_curcs`) it
+            // operates on the governing compspec copy: bare prints the
+            // compopts line, `-o/+o` sets the bits on the copy for the
+            // rest of this attempt. Outside it always errors.
             if parsed.operands.is_empty() && pseudo.is_none() {
-                writeln!(
-                    stderr,
-                    "{diagnostic_prefix}compopt: not currently executing completion function"
-                )?;
+                if !self.shell_state.line_completion_active
+                    || self.shell_state.pcomp_curcs.is_none()
+                {
+                    writeln!(
+                        stderr,
+                        "{diagnostic_prefix}compopt: not currently executing completion function"
+                    )?;
+                    self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                    return Ok(1); // EXECUTION_FAILURE
+                }
+                let curcmd = self.shell_state.pcomp_curcmd.clone().unwrap_or_default();
+                if parsed.on_options == 0 && parsed.off_options == 0 {
+                    // complete.def:870-874 print_compopts (pcomp_curcmd,
+                    // cs, 1) → stdout.
+                    if let Some(cs) = self.shell_state.pcomp_curcs.as_ref() {
+                        crate::builtins::complete::print_compopts_line(&curcmd, cs, &mut stdout)?;
+                    }
+                } else {
+                    // complete.def:876-884: set the -o bits, clear the +o
+                    // bits on the copy. pcomp_set_readline_variables'
+                    // rl_* side effects (nospace/filenames insert
+                    // behavior) are host-editor contract, not engine
+                    // state — the candidate stream carries no insert
+                    // policy today.
+                    if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
+                        cs.options |= parsed.on_options;
+                        cs.options &= !parsed.off_options;
+                    }
+                }
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-                return Ok(1); // EXECUTION_FAILURE
+                return Ok(0); // EXECUTION_SUCCESS
             }
             // complete.def:893-911: `for (l = wl ? wl : list; ...)` — the
             // pseudo word replaces the operand list when present.
@@ -4648,6 +4677,18 @@ impl Executor {
                 )
             };
         let mut dynamic = crate::builtins::complete::CompgenDynamic::default();
+        // pcomplete.c:1520-1531 gen_progcomp_completions: the governing
+        // compspec's COPY becomes `pcomp_curcs` (with `pcomp_curcmd` =
+        // the original command name) for the duration of
+        // gen_compspec_completions — the window in which the -F function,
+        // -C command, and -W expansion run — and the previous values are
+        // restored afterwards (nesting-safe). A `compopt` executed by the
+        // completion function reads and mutates this copy
+        // (complete.def:866-886).
+        let saved_curcs = self.shell_state.pcomp_curcs.take();
+        let saved_curcmd = self.shell_state.pcomp_curcmd.take();
+        self.shell_state.pcomp_curcs = Some(spec.clone());
+        self.shell_state.pcomp_curcmd = Some(cmd_name.clone());
         // rubash#1799: same PIPESTATUS cell rule as the compgen arm.
         dynamic.pipestatus = self.pipestatus_listing();
         if let Some(funcname) = spec.funcname.as_deref() {
@@ -4677,6 +4718,9 @@ impl Executor {
         if let Some(wordlist) = spec.words.as_deref() {
             dynamic.expanded_wordlist = Some(self.expand_compgen_wordlist(wordlist));
         }
+        // pcomplete.c:1530-1531: restore the enclosing completion context.
+        self.shell_state.pcomp_curcs = saved_curcs;
+        self.shell_state.pcomp_curcmd = saved_curcmd;
         Some(dynamic)
     }
 
