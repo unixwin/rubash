@@ -1071,6 +1071,7 @@ impl Executor {
                 xtrace_suspended: Cell::new(0),
                 job_table: crate::jobs::table::JobTable::default(),
                 last_background_pid: None,
+                last_procsub_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
                 pcomp_curcs: None,
