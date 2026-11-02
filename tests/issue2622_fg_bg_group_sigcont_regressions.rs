@@ -168,7 +168,15 @@ fn bg_resumes_unrecorded_children_of_stopped_job() {
     // sleep finishes. Per-pid delivery leaves the sleep stopped, so
     // the echo never comes and the job never completes.
     session.send("bg\n");
-    let after_marker = session.wait_for("\nINNER-BG-DONE", after_notice, LONG);
+    // The resumed job's output lands mid-repaint of the prompt line
+    // (cursor-forward escape, then the text), not at a line start, so
+    // the "\n" needle of the fg twin cannot match. The output is
+    // followed by \r\n; the typed line and bg's job reprint both
+    // carry the marker followed by a quote — "INNER-BG-DONE\r"
+    // matches only the real output. (Captain pin fix: the product
+    // behavior in the failing transcript was already correct — the
+    // marker printed and the job completed.)
+    let after_marker = session.wait_for("INNER-BG-DONE\r", after_notice, LONG);
     session.send("wait %1\n");
     session.send("echo W=$?\n");
     let _ = session.wait_for("W=0", after_marker, LONG);
