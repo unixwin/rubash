@@ -153,8 +153,13 @@ fn issue2562_dup_before_its_binding_still_fails() {
     let (stdout, stderr, code) = run_script(&dir, "case.sh");
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert_eq!(
-        stderr, "case.sh: line 1: 9: Bad file descriptor\n",
+    // The diagnostic prefix is the script name AS INVOKED (GNU
+    // prints the name it was given; the harness passes an absolute
+    // path, a relative invocation prints the bare name) — assert
+    // the single diagnostic and its invariant tail.
+    assert_eq!(stderr.lines().count(), 1, "stderr: {stderr}");
+    assert!(
+        stderr.ends_with("case.sh: line 1: 9: Bad file descriptor\n"),
         "stderr: {stderr}"
     );
 }

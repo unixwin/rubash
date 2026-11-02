@@ -165,8 +165,13 @@ fn issue2552_builtin_varfd_close_keeps_chkwrite_verdict() {
     let (stdout, stderr, code) = run_script(&dir, "case.sh");
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "rc=1\n", "stderr: {stderr}");
-    assert_eq!(
-        stderr, "case.sh: line 2: echo: write error: Bad file descriptor\n",
+    // The diagnostic prefix is the script name AS INVOKED (GNU
+    // prints the name it was given; the harness passes an absolute
+    // path, a relative invocation prints the bare name) — assert
+    // the single line and its invariant tail.
+    assert_eq!(stderr.lines().count(), 1, "stderr: {stderr}");
+    assert!(
+        stderr.ends_with("case.sh: line 2: echo: write error: Bad file descriptor\n"),
         "stderr: {stderr}"
     );
 }
