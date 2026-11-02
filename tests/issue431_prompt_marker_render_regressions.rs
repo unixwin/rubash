@@ -67,7 +67,9 @@ fn inretio_theme_shape_renders_no_markers() {
 /// `\[`-wrapped segments, partly delivered through PROMPT_COMMAND and a
 /// command substitution. The PS1 text is built with printf octal escapes
 /// (`\134` = backslash, `\133` = `[`), so the echoed input line cannot
-/// contaminate the scan. Fragment count across the whole stream must be 0.
+/// contaminate the scan. The built PS1 ends in an UNBALANCED `\[`, which
+/// renders literally once per prompt — see the readjudication note in
+/// the test body for the exact GNU fragment counts.
 #[test]
 fn bashit_theme_shape_leaks_zero_fragments() {
     let stream = run_stdin(
@@ -80,8 +82,23 @@ fn bashit_theme_shape_leaks_zero_fragments() {
         &[],
     );
     let text = String::from_utf8_lossy(&stream);
-    let fragments = text.matches("\\[").count() + text.matches("\\]").count();
-    assert_eq!(fragments, 0, "marker fragments leaked: {text:?}");
+    // READJUDICATION (adj-cli §issue431): the PS1 this printf builds
+    // ends in an unbalanced `\[` before the `$ ` — a balanced pair
+    // is stripped, but the lone trailing marker has no closing
+    // partner and both shells render it literally. GNU bash 5.3.20
+    // under this identical harness emits exactly 2 `\[` fragments
+    // (one per rendered prompt: `ESC[33mdirESC[0m\[$ true`,
+    // `... \[$ exit`) and 0 `\]`, with prompt streams
+    // byte-identical to rubash's. The original pin demanded zero
+    // fragments, which contradicts the oracle; pin GNU's counts.
+    // (The test name predates the readjudication.)
+    let open_fragments = text.matches("\\[").count();
+    let close_fragments = text.matches("\\]").count();
+    assert_eq!(
+        open_fragments, 2,
+        "unbalanced trailing \\[ must render literally once per prompt, as GNU: {text:?}"
+    );
+    assert_eq!(close_fragments, 0, "no \\] fragment may appear: {text:?}");
     assert!(!stream.contains(&0x01), "\\x01 leaked: {text:?}");
     assert!(!stream.contains(&0x02), "\\x02 leaked: {text:?}");
     assert!(

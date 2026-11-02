@@ -81,9 +81,18 @@ fn issue126_function_reprint_has_no_carrier_markers() {
 
 #[test]
 fn issue127_strip_prefix_with_backslashes() {
+    // READJUDICATION (adj-semantics §issue127): the original pin's
+    // Rust literal carried one escape level too many — the script
+    // it wrote had DOUBLED backslashes in the value, so the
+    // single-backslash quoted pattern was not a prefix and GNU
+    // (like rubash) stripped nothing. The literal below writes
+    // the intended single-backslash script; on it, GNU bash
+    // 5.3.20 and rubash both produce `\alice\miniforge3`
+    // byte-identically (quoted pattern treated literally, #127's
+    // actual behavior).
     let s = Scratch::new("i127");
     let (out, err, rc) =
-        s.run("rem='C:\\\\Users\\\\alice\\\\miniforge3'\necho \"${rem#\"C:\\\\Users\"}\"\n");
+        s.run("rem=\'C:\\Users\\alice\\miniforge3\'\necho \"${rem#\"C:\\Users\"}\"\n");
     assert_eq!(rc, 0, "stderr: {err}");
     assert_eq!(out, "\\alice\\miniforge3\n");
 }

@@ -104,9 +104,23 @@ fn procsub_arg_inside_command_substitution() {
 
 #[test]
 fn argv_word_stays_gnu_dev_fd_form() {
-    // GNU prints the literal /dev/fd/N word (the child sees its own
-    // descriptor); the fix must not rewrite argv to a temp path on Unix.
+    // The argv word keeps the literal /dev/fd/N form (the fix must
+    // not rewrite argv to a temp path on Unix) — and that is all
+    // this shape guarantees. READJUDICATION (adj-engine §3): a
+    // process substitution created by a BARE ASSIGNMENT has its fd
+    // closed when the assignment command completes; the variable
+    // keeps only the dangling /dev/fd/N string, so the later
+    // `cat "$p"` fails. GNU bash 5.3.20 fails identically in
+    // script-file, stdin and -c forms (3 runs each):
+    // `cat: /dev/fd/63: No such file or directory`, rc 1, no
+    // output. The original pin's expectation ("x", rc 0) describes
+    // the direct-argument shape pinned by the tests above, not
+    // this one; rubash matches the oracle byte-for-byte here.
     let (stdout, stderr, code) = rubash_stdin("p=<(echo x)\ncat \"$p\"\n");
-    assert_eq!(code, Some(0), "stderr: {stderr}");
-    assert_eq!(stdout, "x\n");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert_eq!(stdout, "");
+    assert!(
+        stderr.contains("/dev/fd/") && stderr.contains("No such file or directory"),
+        "stderr must name the dangling /dev/fd word: {stderr:?}"
+    );
 }
