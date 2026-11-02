@@ -683,7 +683,13 @@ impl Executor {
                 && bytes[index] == b'['
                 && is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name)
             {
-                if let Some(close) = expression[index..].find(']').map(|p| index + p) {
+                // The subscript ends at skipsubscript's balance-0 `]`
+                // (subst.c:11129 expand_array_subscript -> subst.c:2186,
+                // flags 0 — the shared scan in arrays/storage.rs): a
+                // quoted `]` inside the key (`${s:${m['x]y']}}`) is
+                // data, not the closer (rubash#2605 round 3; the naive
+                // first-`]` hunt read the key as `'x`).
+                if let Some(close) = skipsubscript_close(bytes, index) {
                     let raw = &expression[index + 1..close];
                     if !raw.is_empty() {
                         let key = self.expand_subscript_string(raw);

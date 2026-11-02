@@ -925,38 +925,17 @@ pub(in crate::executor) fn braced_name_ends_on_quote(name: &str) -> bool {
         }
     }
     if i < bytes.len() && bytes[i] == b'[' {
-        // GNU skipsubscript (subst.c): a `]` quoted by single quotes, double
-        // quotes or a backslash does not terminate the subscript.
-        let mut depth = 0usize;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'[' => depth += 1,
-                b']' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        i += 1;
-                        break;
-                    }
-                }
-                b'\'' => {
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != b'\'' {
-                        i += 1;
-                    }
-                }
-                b'"' => {
-                    i += 1;
-                    while i < bytes.len() && bytes[i] != b'"' {
-                        if bytes[i] == b'\\' {
-                            i += 1;
-                        }
-                        i += 1;
-                    }
-                }
-                b'\\' => i += 1,
-                _ => {}
-            }
-            i += 1;
+        // The name extraction this verdict mirrors is string_extract
+        // (subst.c:791), whose subscript skip is skipsubscript
+        // (subst.c:816, flags 0): quoted spans, backquote spans and
+        // `$(...)` / `${...}` constructs are units, so a `]` inside
+        // one of them does not terminate the subscript — the shared
+        // scan (arrays/storage.rs `skipsubscript_close`). An
+        // unterminated subscript leaves no terminator to judge, the
+        // same end-of-name state the previous depth scan reached.
+        match brace_subscript_end(bytes, i) {
+            Some(end) => i = end + 1,
+            None => i = bytes.len(),
         }
     }
     // \x17/\x18 are the SQ/DQ data sentinels: an operator word quote-
@@ -1114,29 +1093,21 @@ pub(in crate::executor) fn brace_name_head(bytes: &[u8]) -> &[u8] {
     &bytes[..index.min(bytes.len())]
 }
 
-/// GNU skipsubscript: scan to the matching `]`, nesting `[`/`]` and taking
-/// `\X` pairs as units; quotes do not open nesting here.
+/// GNU skipsubscript (subst.c:2186 -> skip_matched_pair, subst.c:2086)
+/// with flags 0, the one scan behind both call sites here:
+/// string_extract's SX_VARNAME subscript skip (subst.c:816) and
+/// tokenize_array_reference's validity scan (arrayfunc.c:1318, via
+/// valid_array_reference from valid_brace_expansion_word,
+/// subst.c:7595). Brackets nest and `\X` pairs are units — and so are
+/// quoted spans, backquote spans and `$(...)` / `${...}` constructs:
+/// a `]` inside one of them is data, never the closer. (The previous
+/// private scan here counted only backslash pairs and bracket depth,
+/// so the quoted `]` of `m['x]y']` closed the subscript early and
+/// every `${m['x]y']}` read died at this gate as a bad substitution —
+/// rubash#2605 round 3. The scan itself is the shared port in
+/// arrays/storage.rs, `skipsubscript_close`.)
 fn brace_subscript_end(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut index = open;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => index += 2,
-            b'[' => {
-                depth += 1;
-                index += 1;
-            }
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(index);
-                }
-                index += 1;
-            }
-            _ => index += 1,
-        }
-    }
-    None
+    skipsubscript_close(bytes, open)
 }
 
 /// GNU arrayfunc.c:1290 `valid_array_reference` on a name HEAD: an
