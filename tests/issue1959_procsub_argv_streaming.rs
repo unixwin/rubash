@@ -70,12 +70,20 @@ fn path_string(dirs: &[PathBuf]) -> String {
 /// Spawn rubash on `script` inside `dir` with `path` as its whole PATH.
 /// Bounded: a hung run is killed and fails the pin instead of stalling
 /// the suite (the #1820 watchdog precedent).
+///
+/// The fourth return value is the time from spawn until the SHELL's
+/// exit was observed — measured at the `try_wait` hit, BEFORE the
+/// output pipes are drained. Timing assertions must use it, never the
+/// caller's post-return clock: an abandoned producer inherits this
+/// harness's pipes, so `read_to_end` waits out the producer's whole
+/// lifetime for ANY shell (GNU included) and would measure the harness
+/// itself (captain adjudication on rubash#2526, W3 evidence).
 fn run_rubash(
     dir: &Path,
     path: &str,
     script: &str,
     limit: Duration,
-) -> (String, String, Option<i32>) {
+) -> (String, String, Option<i32>, Duration) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
     cmd.arg("-c")
         .arg(script)
@@ -102,10 +110,12 @@ fn run_rubash(
         }
     }
     let mut child = cmd.spawn().expect("spawn rubash");
-    let deadline = Instant::now() + limit;
+    let spawned = Instant::now();
+    let deadline = spawned + limit;
     loop {
         match child.try_wait().expect("poll rubash") {
             Some(status) => {
+                let exit_elapsed = spawned.elapsed();
                 let mut out = child.stdout.take().unwrap();
                 let mut err = child.stderr.take().unwrap();
                 use std::io::Read;
@@ -117,6 +127,7 @@ fn run_rubash(
                     String::from_utf8_lossy(&stdout).into_owned(),
                     String::from_utf8_lossy(&stderr).into_owned(),
                     status.code(),
+                    exit_elapsed,
                 );
             }
             None if Instant::now() >= deadline => {
@@ -155,7 +166,8 @@ fn rendezvous_capable_path() -> Option<String> {
         let shell =
             format!("mkfifo f 2>/dev/null; printf 'zz\\n' | tee f >/dev/null & head -1 f\n");
         let dir = scratch("gate");
-        let (stdout, _stderr, code) = run_rubash(&dir.0, &path, &shell, Duration::from_secs(20));
+        let (stdout, _stderr, code, _exit) =
+            run_rubash(&dir.0, &path, &shell, Duration::from_secs(20));
         drop(dir);
         if code == Some(0) && stdout.contains("zz") {
             return Some(path);
@@ -181,7 +193,7 @@ fn issue1959_pipeline_stage_word_streams_first_bytes() {
         return;
     };
     let dir = scratch("stage-word");
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, _exit) = run_rubash(
         &dir.0,
         &path,
         "rm -f pd\n\
@@ -209,21 +221,22 @@ fn issue1959_abandoned_producer_not_waited_at_boundary() {
         return;
     };
     let dir = scratch("boundary");
-    let started = Instant::now();
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, exit_elapsed) = run_rubash(
         &dir.0,
         &path,
         "head -c 7 <(printf 'first\\nse'; sleep 10)\n\
          echo done\n",
         Duration::from_secs(30),
     );
-    let elapsed = started.elapsed();
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(stdout, "first\nsdone\n", "stderr:\n{stderr}");
+    // The clock that matters is shell-exit (see run_rubash): the drain
+    // of this harness's own pipes afterwards waits out the orphaned
+    // producer for any shell and is not the shell's behaviour.
     assert!(
-        elapsed < Duration::from_secs(5),
+        exit_elapsed < Duration::from_secs(5),
         "the shell blocked {:?} on the abandoned producer (GNU returns at once)",
-        elapsed
+        exit_elapsed
     );
 }
 
@@ -238,7 +251,7 @@ fn issue1959_comsub_external_cat_full_delivery_and_eof() {
         return;
     };
     let dir = scratch("comsub");
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, _exit) = run_rubash(
         &dir.0,
         &path,
         "rm -f pd\n\
@@ -264,7 +277,7 @@ fn issue1959_producer_sees_consumer_output_midflight() {
         return;
     };
     let dir = scratch("midflight");
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, _exit) = run_rubash(
         &dir.0,
         &path,
         "rm -f pd out.txt\n\
@@ -287,7 +300,7 @@ fn issue1959_producer_crash_partial_delivery_then_eof() {
         return;
     };
     let dir = scratch("crash");
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, _exit) = run_rubash(
         &dir.0,
         &path,
         "cat <(printf 'x\\n'; exit 3) > crash-out.txt\n\
@@ -309,7 +322,7 @@ fn issue1959_pipeline_cat_word_head_stage_gnu_wait_shape() {
         return;
     };
     let dir = scratch("cat-stage");
-    let (stdout, stderr, code) = run_rubash(
+    let (stdout, stderr, code, _exit) = run_rubash(
         &dir.0,
         &path,
         "rm -f pd\n\

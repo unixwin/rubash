@@ -43,8 +43,19 @@ fn exit_in_write_procsub_is_child_local() {
 
 #[test]
 fn exit_in_write_procsub_after_body_output() {
+    // Delivery is complete but ORDER between the consumer's output and
+    // the parent's next line is a race in GNU itself (captain
+    // adjudication on rubash#2525, W3 evidence): over 20 runs of this
+    // harness GNU produced `after\ninner` 15 times, `inner\nafter`
+    // twice, and lost the parent line entirely 3 times; rubash
+    // deterministically produces GNU's modal order. The pin therefore
+    // asserts complete delivery + continuation + status, not one
+    // particular interleaving.
     let (stdout, stderr, code) = rubash_stdin("echo hi > >(echo inner; exit 3)\necho after\n");
-    assert_eq!(stdout, "inner\nafter\n", "stderr: {stderr}");
+    assert!(
+        stdout == "inner\nafter\n" || stdout == "after\ninner\n",
+        "expected both lines delivered, got {stdout:?}; stderr: {stderr}"
+    );
     assert_eq!(code, Some(0));
 }
 
