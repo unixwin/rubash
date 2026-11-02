@@ -4387,11 +4387,13 @@ impl Executor {
                     }
                 } else {
                     // complete.def:876-884: set the -o bits, clear the +o
-                    // bits on the copy. pcomp_set_readline_variables'
-                    // rl_* side effects (nospace/filenames insert
-                    // behavior) are host-editor contract, not engine
-                    // state — the candidate stream carries no insert
-                    // policy today.
+                    // bits on the copy. The mutated copy is NOT thrown
+                    // away: completion_dynamic_for_line reads its options
+                    // back into CompgenDynamic::options_override before
+                    // restoring the saved spec (GNU *foundp |= cs->options
+                    // after generation, pcomplete.c gen_progcomp_
+                    // completions), so the fallback decisions and the
+                    // insert policy see the mutated bits (rubash#2572).
                     if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
@@ -4449,19 +4451,23 @@ impl Executor {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // GNU job completion names a job by its command name only (the
         // first word — `%sleep`, pcomplete.c it_jobs / jobs.c job names),
-        // not the full command line (rubash#1052).
-        let job_names: Vec<String> = self
+        // not the full command line (rubash#1052). The process state
+        // rides along so the running/stopped action arms can filter
+        // (rubash#2584).
+        let job_names: Vec<crate::builtins::complete::JobCandidate> = self
             .shell_state
             .job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .map(|job| {
-                job.command
+            .map(|job| crate::builtins::complete::JobCandidate {
+                name: job
+                    .command
                     .split_whitespace()
                     .next()
                     .unwrap_or_default()
-                    .to_string()
+                    .to_string(),
+                state: job.state,
             })
             .collect();
         // compgen's dynamic inputs — complete.def:669 compgen_builtin drives
@@ -4476,6 +4482,10 @@ impl Executor {
         // shell engine, so resolve them here before the builtin generates
         // candidates from the static actions.
         let mut dynamic: Option<crate::builtins::complete::CompgenDynamic> = None;
+        // rubash#2587: a -W wordlist expansion failure aborts the whole
+        // compgen (GNU gen_wordlist_matches jumps out of the generation);
+        // recorded here and honored just before the execute call.
+        let mut wordlist_error: Option<String> = None;
         // rubash#1798: the fd table saved while the compgen command's
         // own stdio redirects are bound as the resolution frame (see
         // the will_run branch below); restored after the final output.
@@ -4584,15 +4594,24 @@ impl Executor {
                             self.run_compgen_completion_command(command, "compgen", &word);
                     }
                     if parsed.words.is_some() {
-                        resolved.expanded_wordlist = Some(
-                            self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")),
-                        );
+                        match self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")) {
+                            Ok(expanded) => resolved.expanded_wordlist = Some(expanded),
+                            Err(error) => wordlist_error = Some(error),
+                        }
                     }
                     dynamic = Some(resolved);
                 }
             }
         }
-        let status = match if matches!(
+        if let Some(error) = &wordlist_error {
+            // The diagnostic travels through the builtin's own stderr
+            // (its redirects apply); no candidates are produced and the
+            // builtin fails, like the aborted GNU generation.
+            let _ = writeln!(stderr, "{diagnostic_prefix}compgen: {error}");
+        }
+        let status = match if wordlist_error.is_some() {
+            Ok(1)
+        } else if matches!(
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
         ) {
@@ -4810,6 +4829,8 @@ impl Executor {
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
+            &self.shell_state.aliases,
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
         )
         .cloned()?;
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
@@ -4871,7 +4892,31 @@ impl Executor {
             );
         }
         if let Some(wordlist) = spec.words.as_deref() {
-            dynamic.expanded_wordlist = Some(self.expand_compgen_wordlist(wordlist));
+            match self.expand_compgen_wordlist(wordlist) {
+                Ok(expanded) => dynamic.expanded_wordlist = Some(expanded),
+                Err(_) => {
+                    // rubash#2587: GNU aborts this spec's whole
+                    // generation when the wordlist expansion fails
+                    // (gen_wordlist_matches jumps out) — the -F/-C
+                    // results gathered above are discarded with it.
+                    // The host channel carries no diagnostic; the
+                    // failure surfaces as no candidates from this
+                    // spec. Some(vec![]) (not None): None would fall
+                    // back to literal splitting and leak the unexpanded
+                    // wordlist text as candidates.
+                    dynamic.expanded_wordlist = Some(Vec::new());
+                    dynamic.function_candidates = Vec::new();
+                    dynamic.command_candidates = Vec::new();
+                }
+            }
+        }
+        // rubash#2572: read the (possibly compopt-mutated) governing
+        // copy's options back into the dynamic result BEFORE the
+        // restore discards it — GNU's `*foundp |= cs->options` fold.
+        // The registry spec itself is never mutated by a live
+        // completion (the mutation lives on the per-attempt copy).
+        if let Some(current) = &self.shell_state.pcomp_curcs {
+            dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
         self.shell_state.pcomp_curcs = saved_curcs;
@@ -4963,9 +5008,16 @@ impl Executor {
     /// and are retained in the pieces), then expand each word with the
     /// shellexp rules: a quoted word keeps one field per array element
     /// and never glob-splits; an unquoted word goes through the
-    /// for-list expander (parameter expansion, field splitting, pathname
-    /// expansion).
-    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Vec<String> {
+    /// shellexp expander (brace/tilde/parameter expansion and field
+    /// splitting — WEXP_SHELLEXP has no WEXP_PATHEXP, subst.c:12575,
+    /// so pathname expansion NEVER runs on wordlist elements; the
+    /// for-list expander this used to call globbed them and, under
+    /// failglob, failed the element into an `Err` that
+    /// `unwrap_or_default` silently swallowed — rubash#2587). An
+    /// expansion failure aborts the whole wordlist generation, like
+    /// the jump out of gen_wordlist_matches in GNU, instead of
+    /// dropping one element and returning a truncated success.
+    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Result<Vec<String>, String> {
         // subst.c:2630: with delims == NULL the splitter reads
         // ifs_value — the shell's current IFS (this command's tempenv
         // frame included), or the default " \t\n" while IFS is unset.
@@ -4988,13 +5040,10 @@ impl Executor {
                     values.push(self.expand_word(&word));
                 }
             } else {
-                values.extend(
-                    self.expand_for_word_values_result(&word, None, None)
-                        .unwrap_or_default(),
-                );
+                values.extend(self.expand_shellexp_word_values_result(&word)?);
             }
         }
-        values
+        Ok(values)
     }
 
     /// rubash#1799: the PIPESTATUS cell facts for the -A variable /
