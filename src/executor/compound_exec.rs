@@ -1482,6 +1482,16 @@ impl Executor {
             super::RESPAWN_SPAWNER_PID_KEY.to_string(),
             super::spawner_stamp_value(),
         );
+        // rubash#2521: this spawn is the whitelist transport
+        // (fd::spawn_whitelisted below) — its fd stamps name
+        // descriptors delivered AT their stamped numbers, and the
+        // child's restore must adopt them there, not at the slot
+        // (FD_DELIVERY_AT_STAMPED_KEY, init.rs). The pin transports
+        // (external / procsub / coproc) never set this key.
+        env_map.insert(
+            super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
+            "1".to_string(),
+        );
         // rubash#2032: GNU's forked async/subshell child inherits the
         // parent's positional parameters (execute_cmd.c:1576
         // execute_in_subshell runs a whole-copy fork); stamp the live

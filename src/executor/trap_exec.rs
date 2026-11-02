@@ -7091,6 +7091,16 @@ impl Executor {
     /// The RLIMIT_NOFILE *soft* limit the {var} allocator must stay below
     /// (GNU redir.c:940 fcntl F_DUPFD semantics), or None for unlimited.
     ///
+    /// On Unix the ulimit builtin drives the REAL setrlimit
+    /// (builtins/ulimit.rs plat::set) and stores nothing, so the
+    /// shell's current soft limit IS the process rlimit — read it
+    /// back with getrlimit, the same source the builtin itself
+    /// reports from. rubash#2532: this function used to consult only
+    /// the env cell below, which is a Windows-only store, so on Unix
+    /// a shell-set `ulimit -n 12` never reached the allocator and
+    /// {var} allocations sailed past the limit the shell had just
+    /// set (both the EMFILE ceiling and the below-base EINVAL).
+    ///
     /// The Windows emulation stores the pair as `"<soft>:<hard>"` decimal
     /// under `__RUBASH_ULIMIT_N` (builtins/ulimit.rs plat::set; u64::MAX
     /// means unlimited) and forwards it to spawned children, so parse the
@@ -7102,6 +7112,16 @@ impl Executor {
     /// allocator silently fell back to its 1024 hard cap.
     pub(in crate::executor) fn open_files_limit(&self) -> Option<u32> {
         const UNLIMITED: u64 = u64::MAX;
+        #[cfg(unix)]
+        {
+            let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+            if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+                if limit.rlim_cur == libc::RLIM_INFINITY {
+                    return None;
+                }
+                return Some(u32::try_from(limit.rlim_cur as u64).unwrap_or(u32::MAX));
+            }
+        }
         let raw = self.shell_state.env_vars.get("__RUBASH_ULIMIT_N");
         let Some(value) = raw else {
             return Some(FdTable::DEFAULT_OPEN_FILES_SOFT_LIMIT);
