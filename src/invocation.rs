@@ -570,11 +570,21 @@ pub fn login_profile_files(home: &str, exists: impl Fn(&str) -> bool) -> Vec<Str
     files
 }
 
-/// GNU shell.c:1863-1880 (the non-login interactive branch of
-/// run_startup_files): sources /etc/bash.bashrc (SYS_BASHRC, the Debian
-/// system rc) and then ~/.bashrc — or `rc_override` (--rcfile/--init-file)
-/// in place of the personal rc. `exists` is injected for host-independent
-/// tests. Login shells never take this branch: the profile chain replaces
+/// GNU shell.c:1235-1236 (the non-login interactive branch of
+/// run_startup_files) calls execute_bashrc_file (shell.c:1130-1141),
+/// which sources the personal rc only: the system rc (SYS_BASHRC,
+/// /etc/bash.bashrc) is read solely under `#ifdef SYS_BASHRC`, and the
+/// baseline build leaves it undefined (vendored config-top.h:95 has
+/// the define commented out), so no system rc ever runs. rubash used
+/// to prepend /etc/bash.bashrc unconditionally (Debian's patched-bash
+/// shape); on a Debian/Ubuntu host that file assigns PS1
+/// unconditionally, clobbering the environment-imported PS1 GNU
+/// honors for interactive shells (variables.c initialize_shell_
+/// variables + shell.c:660-672: imported, unbound only when
+/// non-interactive) — rubash#2536. The chain is therefore the
+/// personal rc — or `rc_override` (--rcfile/--init-file) in its
+/// place. `exists` is injected for host-independent tests. Login
+/// shells never take this branch: the profile chain replaces
 /// it entirely (shell.c:1833 `if (login_shell) ... else if (interactive)`).
 ///
 /// rubash#1158 (owner decision, FALLBACK-ONLY): the personal-rc slot is
@@ -594,10 +604,9 @@ pub fn nonlogin_interactive_files(
     exists: impl Fn(&str) -> bool,
 ) -> Vec<String> {
     let mut files = Vec::new();
-    let system_rc = "/etc/bash.bashrc";
-    if exists(system_rc) {
-        files.push(system_rc.to_string());
-    }
+    // No system-rc slot: SYS_BASHRC is undefined in the baseline
+    // build (see the doc comment above), so /etc/bash.bashrc is
+    // never sourced, however present it is on the host.
     match rc_override {
         Some(rc) => files.push(rc.to_string()),
         None => {
@@ -1315,7 +1324,12 @@ mod tests {
     }
 
     #[test]
-    fn nonlogin_interactive_chain_is_system_rc_then_personal_rc() {
+    fn nonlogin_interactive_chain_is_personal_rc_only() {
+        // rubash#2536: no system-rc slot — execute_bashrc_file reads
+        // SYS_BASHRC only under #ifdef, undefined in the baseline
+        // build, so an existing /etc/bash.bashrc never enters the
+        // chain (its unconditional PS1 assignment used to clobber the
+        // environment-imported PS1 on Debian/Ubuntu hosts).
         let set = |present: &[&str]| {
             let owned: Vec<String> = present.iter().map(|p| p.to_string()).collect();
             move |p: &str| owned.iter().any(|candidate| candidate == p)
@@ -1325,9 +1339,9 @@ mod tests {
             None,
             set(&["/etc/bash.bashrc", "/home/u/.bashrc"]),
         );
-        assert_eq!(files, vec!["/etc/bash.bashrc", "/home/u/.bashrc"]);
+        assert_eq!(files, vec!["/home/u/.bashrc"]);
 
-        // A missing system rc is skipped; the personal rc still runs.
+        // The personal rc runs whether or not a system rc exists.
         let files = crate::invocation::nonlogin_interactive_files(
             "/home/u",
             None,
@@ -1335,13 +1349,14 @@ mod tests {
         );
         assert_eq!(files, vec!["/home/u/.bashrc"]);
 
-        // --rcfile replaces ONLY the personal rc, not the system one.
+        // --rcfile replaces the personal rc; a present system rc
+        // still contributes nothing.
         let files = crate::invocation::nonlogin_interactive_files(
             "/home/u",
             Some("custom.rc"),
             set(&["/etc/bash.bashrc"]),
         );
-        assert_eq!(files, vec!["/etc/bash.bashrc", "custom.rc"]);
+        assert_eq!(files, vec!["custom.rc"]);
     }
 
     #[test]

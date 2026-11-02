@@ -556,6 +556,15 @@ impl Executor {
         env_vars.remove("__RUBASH_INTERACTIVE_FLAG_OFF");
         env_vars.remove("__RUBASH_IS_C");
         env_vars.remove("__RUBASH_LOGIN_SHELL");
+        // rubash#2537: the read-from-stdin marker joins the family
+        // above (it is in INVOCATION_STATE_ENV_KEYS): GNU's
+        // read_from_stdin (shell.c:301) is set by a process's own
+        // invocation handling, never inherited, so an ambient copy —
+        // e.g. one a `-s` parent's mirror wrote into the environment
+        // this `-c` child was spawned with — must not classify this
+        // process as a stdin reader. This process's own drivers /
+        // invocation surface re-arm it after import when they apply.
+        env_vars.remove(crate::script_driver::READ_STDIN_MARKER);
         // rubash#2136: a respawn provenance claim is honored only when
         // the spawner stamp agrees with this process's actual parent
         // (respawn_provenance_validated). An unvalidated claim is
