@@ -7100,6 +7100,50 @@ impl Executor {
         redirect_target_fd(&target).filter(|fd| *fd != 0)
     }
 
+    /// rubash#2591: whether the fd-0 alias winner
+    /// `stage_fd_alias_source` reports is a SPELLED open
+    /// (`< /dev/fd/N`, Input/ReadWrite kind) rather than a `<&N` dup
+    /// (DuplicateInput). GNU binds the two differently inside the
+    /// element's fork: the dup shares the source's open file
+    /// description (redir.c:1193 dup2), while the spelling is a
+    /// plain open of the magic link (redir.c:725) — a fresh
+    /// description at offset 0 for a regular-file target, the
+    /// donor's offset unmoved. Mirrors stage_fd_alias_source's
+    /// winner search (the redirects list first, then the
+    /// synthesized `redirect_in`); only consulted when that search
+    /// found an alias winner at all.
+    pub(in crate::executor) fn stage_fd_alias_winner_is_spelled(
+        &self,
+        command: &CommandNode,
+    ) -> bool {
+        let winner = command.redirects.iter().rev().find(|redirect| {
+            redirect.fd.unwrap_or(0) == 0
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input
+                        | crate::parser::RedirectKind::DuplicateInput
+                        | crate::parser::RedirectKind::ReadWrite
+                        | crate::parser::RedirectKind::CloseInput
+                        | crate::parser::RedirectKind::HereDoc
+                        | crate::parser::RedirectKind::HereString
+                )
+        });
+        match winner {
+            Some(redirect) => {
+                matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                ) && redirect.fd_var.is_none()
+            }
+            None => command.redirect_in.as_ref().is_some_and(|redirect| {
+                matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite
+                ) && redirect.fd_var.is_none()
+            }),
+        }
+    }
+
     /// rubash#2003: leave the fd that element 0's payload was resolved
     /// from holding that payload as a buffered endpoint, so the stage's
     /// descriptor-channel consumers read the same bytes through the

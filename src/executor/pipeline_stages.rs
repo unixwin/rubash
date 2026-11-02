@@ -274,7 +274,25 @@ impl Executor {
         // drop the mirror, the live_stdin treatment above. A failed dup
         // (unbound source) keeps the mirror fallback.
         if let Some(alias_fd) = self.stage_fd_alias_source(command) {
-            if subshell.fd_table.dup_input(0, alias_fd).is_ok() {
+            // rubash#2591: a SPELLED winner (`< /dev/fd/N`) is an
+            // open, not a dup — when the source endpoint re-opens
+            // fresh, bind the clone's fd 0 to a fresh open of the
+            // target instead of dup'ing the shared description: the
+            // dup made `{ cat; } < /dev/fd/6` continue at the donor's
+            // offset (6 of 12) where GNU's plain open of the magic
+            // link (redir.c:725) reads the file from 0.
+            // bind_fd0_fresh_alias declines endpoints that keep the
+            // dup model (pipes and other non-reopening targets), and
+            // a `<&N` winner never reaches it — both keep the dup
+            // bind below (redir.c:1193 dup2, shared offset).
+            let bound = if self.stage_fd_alias_winner_is_spelled(command)
+                && subshell.bind_fd0_fresh_alias(alias_fd)
+            {
+                true
+            } else {
+                subshell.fd_table.dup_input(0, alias_fd).is_ok()
+            };
+            if bound {
                 subshell.shell_state.env_vars.remove(FUNCTION_STDIN);
                 subshell.shell_state.env_vars.remove(FUNCTION_STDIN_OFFSET);
             }
