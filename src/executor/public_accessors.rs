@@ -712,9 +712,13 @@ impl Executor {
     /// `-E` empty-line compspecs govern lines whose command has no own
     /// registration (niubash#520), so their presence also opens the gate.
     pub fn has_compspec(&self, command: &str) -> bool {
+        // -I counts: it governs the command word itself, so the host
+        // gate must open when only an initial-word spec is registered
+        // (rubash#2571).
         self.shell_state.completion_specs.get(command).is_some()
             || self.shell_state.completion_specs.get("-D").is_some()
             || self.shell_state.completion_specs.get("-E").is_some()
+            || self.shell_state.completion_specs.get("-I").is_some()
     }
 
     /// The session's open fd numbers, ascending: every fd-table entry

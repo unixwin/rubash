@@ -1031,7 +1031,15 @@ pub(crate) fn resolve_compspec<'a>(
         return specs.get("-E").or_else(|| specs.get("-D"));
     }
     if cur_idx == 0 {
-        return None;
+        // The -I (initial word) compspec GOVERNS command-word
+        // completion: bashline.c:1682 loads iw_compspec =
+        // progcomp_search(INITIALWORD) unconditionally at the start of
+        // attempt_completion, and bashline.c:1785-1792 runs it for the
+        // command word when no command-specific spec matched (there
+        // is no command name to match yet). Returning None here made
+        // -I dead configuration (rubash#2571); without an -I spec the
+        // host's built-in command completion still applies.
+        return specs.get("-I");
     }
     specs.get(&words[0]).or_else(|| specs.get("-D"))
 }
