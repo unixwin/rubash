@@ -4,8 +4,9 @@
 //! was the process-wide kernel disposition when the kill builtin
 //! raise(2)d the parent-addressed signal. In GNU the subshell is a
 //! separate process; `$$` names the parent shell, whose OWN
-//! disposition judges the delivery: untrapped -> the parent dies by
-//! TERM after the subshell body completes (rc 143, no parent line),
+//! disposition judges the delivery: untrapped -> the parent process
+//! dies by SIGTERM after the subshell body completes (a parent shell
+//! would read wait status 143; no parent line),
 //! trapped -> the parent's trap runs once the foreground subshell
 //! completes and the list continues, ignored -> the delivery drops.
 //! The fix routes own-pid deliveries made from a flat subshell layer
@@ -37,7 +38,13 @@ fn issue1654_subshell_ignore_does_not_shield_parent_from_term() {
     let (stdout, _stderr, code) =
         rubash("(trap '' TERM; kill -s TERM $$; echo sub); echo parent=$?");
     assert_eq!(stdout, "sub\n", "stdout: {stdout}");
-    assert_eq!(code, Some(143));
+    // Process-level expectation (battery READJUDICATION, adj-signals
+    // §issue1654): GNU dies BY SIGTERM in this shape (subprocess
+    // returncode -15), exactly like the control below — 143 is the
+    // shell-layer wait status, not a process exit code, so
+    // ExitStatus::code() is None. The original Some(143) pin
+    // contradicted the oracle.
+    assert_eq!(code, None);
 }
 
 #[test]
@@ -48,7 +55,9 @@ fn issue1654_subshell_catch_trap_does_not_consume_parent_delivery() {
     let (stdout, _stderr, code) =
         rubash("(trap 'echo got' TERM; kill -s TERM $$; echo subalive); echo parentalive");
     assert_eq!(stdout, "subalive\n", "stdout: {stdout}");
-    assert_eq!(code, Some(143));
+    // Signal death, as in the sibling above (adj-signals §issue1654):
+    // GNU returncode -15, so code() is None, not Some(143).
+    assert_eq!(code, None);
 }
 
 #[test]
@@ -78,7 +87,9 @@ fn issue1654_nested_frames_continue_then_parent_dies() {
     let (stdout, _stderr, code) =
         rubash("(( trap '' TERM; kill -s TERM $$; echo sub2 ); echo mid); echo parent");
     assert_eq!(stdout, "sub2\nmid\n", "stdout: {stdout}");
-    assert_eq!(code, Some(143));
+    // Signal death (adj-signals §issue1654): GNU returncode -15, so
+    // code() is None, not Some(143).
+    assert_eq!(code, None);
 }
 
 #[test]
@@ -88,7 +99,10 @@ fn issue1654_exit_trap_runs_on_parent_signal_death() {
          (trap '' TERM; kill -s TERM $$; echo sub); echo parent=$?",
     );
     assert_eq!(stdout, "sub\nEXITED\n", "stdout: {stdout}");
-    assert_eq!(code, Some(143));
+    // The EXIT trap runs, then the signal death lands (adj-signals
+    // §issue1654): GNU returncode -15, so code() is None, not
+    // Some(143).
+    assert_eq!(code, None);
 }
 
 #[test]
@@ -102,7 +116,9 @@ fn issue1654_plain_self_kill_control_unchanged() {
     // shell-layer wait status (128+15), not a process exit code;
     // the original pin's Some(143) could only pass if rubash
     // synthesized exit(143), which would diverge from GNU's
-    // signal-death shape. (The deferred-death shapes in this file
-    // DO synthesize Some(143) and keep their pins.)
+    // signal-death shape. (The battery readjudication later
+    // extended this same correction to the four deferred-death
+    // sibling pins in this file: GNU dies by SIGTERM there too,
+    // so they now pin None as well.)
     assert_eq!(code, None);
 }

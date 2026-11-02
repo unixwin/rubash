@@ -12,9 +12,15 @@
 //! ends and the list continues.
 //!
 //! #1640: a SIGINT addressed to the shell's pid ONLY (the child is
-//! not in the target set) must not abort the builtin sleep: GNU's
-//! real child never receives it, completes, and the recorded
-//! interrupt is forgotten (AFTER prints rc=0).
+//! not in the target set) must not abort the sleep: GNU's real
+//! child never receives it and runs to completion — but GNU then
+//! DISCARDS the rest of the line and reports 130 to the next one
+//! (battery READJUDICATION, adj-signals §issue1640: the
+//! shell-directed interrupt is remembered across the wait and
+//! unwinds once the child exits; AFTER never prints, the next line
+//! reads NEXT_130). The original pin's "the recorded interrupt is
+//! forgotten (AFTER prints rc=0)" expectation contradicted the
+//! oracle.
 //!
 //! Expectations verified against GNU bash 5.3.20 under the same PTY
 //! discipline (pty driver probes: builtin/external/function/subshell
@@ -273,8 +279,24 @@ fn issue1640_shell_directed_int_lets_builtin_sleep_complete() {
         .status()
         .expect("kill binary");
     assert!(status.success());
-    session.wait_for("AFTER1640 rc=0", Duration::from_secs(15));
+    // READJUDICATION (adj-signals §issue1640; oracle re-verified
+    // under this same PTY driver): the sleep runs to completion
+    // (~3s), but the rest of the line is then DISCARDED — AFTER1640
+    // never prints — and the next line reports 130. GNU remembers
+    // the shell-directed interrupt across the wait; it does not
+    // forget it and continue the list with rc=0 as the original
+    // pin expected. (rubash repaints its prompt lazily, so the
+    // discard may only surface once the next line arrives.)
+    session.pump(Duration::from_secs(4));
     session.send_line("echo NEXT_$?");
-    session.wait_for("NEXT_0", Duration::from_secs(10));
+    session.wait_for("NEXT_130", Duration::from_secs(15));
+    // AFTER1640 may appear exactly once in the transcript — the
+    // tty echo of the typed line. A second occurrence would mean
+    // the marker actually ran despite the discard.
+    assert!(
+        session.transcript.matches("AFTER1640").count() <= 1,
+        "AFTER1640 ran despite the discard; transcript: {:?}",
+        session.transcript
+    );
     session.finish();
 }
