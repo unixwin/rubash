@@ -5531,6 +5531,21 @@ impl Executor {
                 } else {
                     self.expansion_fatal_status()
                 }
+            } else if status == 2 {
+                // rubash#2556: status 2 here is the EX_BADUSAGE DISCARD
+                // class (subst.c:8164 pre-set + bash_variable_assignment_
+                // error) — the one gate status a parse_and_execute catch
+                // folds (builtins/evalstring.c:423-450: `-c`, eval, and
+                // comsub-body catches fold to EXECUTION_FAILURE, while
+                // the script reader_loop, eval.c:111-118, preserves 2).
+                // The gate returns before the stage runs, so the stage
+                // wrapper's latch tail never sees this bind; fold here
+                // with the same function and prev-status semantics it
+                // uses, or an inline/builtin/external element keeps 2
+                // under `-c`/eval where GNU gives 1 (oracle-verified
+                // across all three routes). Other gate statuses are
+                // frame-independent (1 stays 1) and untouched.
+                self.param_assign_discard_status(2, self.exit_code)
             } else {
                 status
             };
@@ -5554,6 +5569,12 @@ impl Executor {
                 } else {
                     self.expansion_fatal_status()
                 }
+            } else if status == 2 {
+                // rubash#2556: same EX_BADUSAGE DISCARD fold as the word
+                // gate above — a `:=` bad-subscript bind in a here-string
+                // or heredoc body is the same bind class, and its element
+                // status folds at a parse_and_execute catch identically.
+                self.param_assign_discard_status(2, self.exit_code)
             } else {
                 status
             };

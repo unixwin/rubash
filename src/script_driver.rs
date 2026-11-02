@@ -4152,7 +4152,7 @@ fn stdin_console_size() -> Option<(i32, i32)> {
     None
 }
 
-/// variables.c:1040 sh_set_lines_and_columns: bind LINES then COLUMNS as
+/// variables.c:1039 sh_set_lines_and_columns: bind LINES then COLUMNS as
 /// (non-exported) shell variables. bind_variable does not export, so the
 /// process environment is only updated for names the parent had already
 /// exported (an exported var stays exported across rebinds).
@@ -4165,6 +4165,31 @@ fn bind_lines_columns(executor: &mut Executor, lines: i32, columns: i32) {
         .shell_state
         .env_vars
         .insert("COLUMNS".to_string(), columns.to_string());
+    // variables.c:1051/:1054: GNU binds each name with ONE bind_variable
+    // into its single variable table. Rubash splits that table into the
+    // env mirror above and the scalar records (`shell_state.variables`),
+    // and `$name` expansion reads the record FIRST with a mirror
+    // fallthrough (variable_state.rs shell_variable_value) — so a bind
+    // that wrote only the mirror left any pre-existing record (parent
+    // env import at Executor::new, or one user assignment) stuck at its
+    // old value while the child env tracked the resize: shell-internal
+    // and child views diverged (niubash#822). Dual-write like set_env
+    // (public_accessors.rs): update the record's scalar in place so
+    // attributes survive the rebind — the GNU shape is
+    // bind_variable_internal's existing-entry arm (variables.c:3151
+    // assign_value:), which replaces only the value cell
+    // (variables.c:3207 var_setvalue) and, for an exported entry, flags
+    // the environment rebuild (variables.c:3214-3215) so the exported
+    // value tracks too. Absent records stay absent and keep reading
+    // through the mirror fallthrough, matching set_env's sync and GNU's
+    // "a fresh bind does not export" rule.
+    for (name, value) in [("LINES", lines), ("COLUMNS", columns)] {
+        if let Some(variable) = executor.shell_state.variables.get_mut(name) {
+            if let crate::shell::ShellValue::Scalar(current) = &mut variable.value {
+                *current = value.to_string();
+            }
+        }
+    }
     // G-01: winsize sync writes the process env — serialize it.
     crate::executor::local_helpers::with_process_state_lock(|| {
         if std::env::var_os("LINES").is_some() {

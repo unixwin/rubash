@@ -154,6 +154,22 @@ impl Executor {
         // G-02: no process-cwd save/restore — the stage subshell is a clone
         // with its own session cwd field.
         let mut subshell = self.command_substitution_executor();
+        // rubash#2557: a pipeline element is a forked child — it does
+        // NOT inherit the parent's parse_and_execute catch. The clone
+        // constructor renumbers the parent's frames +1 with the child's
+        // subshell_depth, which keeps in_parse_and_execute_frame()
+        // true inside the clone, so the inner simple command's
+        // param_assign_discard_status folds the element's DISCARD to 1
+        // under `-c`/eval. GNU's forked child runs outside the parent's
+        // parse_and_execute loop: its DISCARD is preserved by
+        // execute_in_subshell's catch (execute_cmd.c:1821-1825 — a
+        // non-EXIT result keeps last_command_exit_value, the pre-set
+        // EX_BADUSAGE 2), and the parent reads the child's exit status.
+        // The compound harvest below is deliberately raw, so the leak
+        // must close at this fork boundary: drop the inherited frames
+        // on the clone. An eval inside the body pushes its own frame
+        // and still folds (child-side catch), matching GNU.
+        subshell.parse_and_execute_frames.clear();
         // rubash#2487: a pipeline element is an execute_in_subshell
         // child — its job_control variable starts erased
         // (jobs.c:5356-5366 without_job_control) even when the

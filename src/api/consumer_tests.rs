@@ -840,3 +840,188 @@ fn issue2084_child_scenario() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// niubash#822 (Bug L): the winsize bind writes BOTH storages
+// ---------------------------------------------------------------------------
+
+/// The shell's own `$name` expansion, captured through a real run — the
+/// value script text observes, not a host-side view. This is the probe
+/// shape the Linux session used (A4/A8): `$COLUMNS` as the shell prints
+/// it.
+fn issue822_expansion(session: &mut Session, dir: &PathBuf, name: &str) -> String {
+    session
+        .run(
+            &format!("printf '%s' \"${name}\" > \"$OUT/val.txt\""),
+            &RunOptions::new(),
+        )
+        .expect("expansion run");
+    read(dir, "val.txt")
+}
+
+#[test]
+fn issue822_winsize_bind_updates_imported_columns_record() {
+    // GNU pin (WSL /usr/local/bin/bash 5.3.x, pty 30x100, parent exports
+    // COLUMNS=200): A1 `$COLUMNS` = 100, A2 child env COLUMNS=100 — the
+    // interactive bind OVERRIDES the imported value in every view, and an
+    // exported COLUMNS stays exported with the new value (A3
+    // `declare -x COLUMNS="100"`).
+    let dir = temp_dir("issue822-import");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = Session::builder()
+        .env("OUT", &dir_text)
+        .build()
+        .expect("session builds");
+    {
+        let executor = session.executor_mut();
+        // Probe A4's storage shape: the parent process exported
+        // COLUMNS=200/LINES=55, and Executor::new imported them as
+        // EXPORTED scalar records (init.rs:949 ->
+        // VariableStore::from_environment, variables.rs:496-515 binds
+        // every valid identifier with exported=true) next to the env
+        // mirror. set_env alone cannot create that record
+        // (public_accessors.rs:887 updates existing records only), so
+        // rebuild the imported pair explicitly.
+        executor.set_env("COLUMNS", "200");
+        executor.set_env("LINES", "55");
+        let mut columns = crate::shell::Variable::scalar("200");
+        columns.exported = true;
+        executor
+            .shell_state
+            .variables
+            .set("COLUMNS", columns)
+            .expect("COLUMNS record binds");
+        let mut lines = crate::shell::Variable::scalar("55");
+        lines.exported = true;
+        executor
+            .shell_state
+            .variables
+            .set("LINES", lines)
+            .expect("LINES record binds");
+    }
+    assert_eq!(issue822_expansion(&mut session, &dir, "COLUMNS"), "200");
+
+    // Session::notify_terminal_size: the host's resize report
+    // (columns=100, rows=30) — the landing the niubash host uses.
+    session.notify_terminal_size(100, 30);
+
+    assert_eq!(
+        issue822_expansion(&mut session, &dir, "COLUMNS"),
+        "100",
+        "$COLUMNS expansion must track the bind (GNU A1), not stay at the imported 200"
+    );
+    assert_eq!(
+        issue822_expansion(&mut session, &dir, "LINES"),
+        "30",
+        "$LINES expansion must track the bind too"
+    );
+    assert_eq!(
+        session.executor_mut().get_env("COLUMNS"),
+        Some("100"),
+        "the env mirror (get_env / child-env composition) tracks as before"
+    );
+    // GNU A3/pin C: an exported COLUMNS stays exported across the rebind
+    // (variables.c:3207 replaces only the value cell; the attribute word
+    // is untouched).
+    assert!(
+        session
+            .variables()
+            .attributes("COLUMNS")
+            .expect("COLUMNS still bound")
+            .exported,
+        "an exported COLUMNS stays exported across the winsize rebind"
+    );
+    // Resizing the other way keeps both views in lockstep (GNU A4/A5).
+    session.notify_terminal_size(120, 40);
+    assert_eq!(issue822_expansion(&mut session, &dir, "COLUMNS"), "120");
+    assert_eq!(issue822_expansion(&mut session, &dir, "LINES"), "40");
+}
+
+#[test]
+fn issue822_winsize_bind_updates_user_assigned_record() {
+    // GNU pin (WSL, pty 30x100): `COLUMNS=55` holds (B1), a resize to
+    // 40x120 rebinds (B2: 120), a resize back to 24x80 rebinds both
+    // dimensions (B3: cols=80 lines=24).
+    let dir = temp_dir("issue822-assign");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = Session::builder()
+        .env("OUT", &dir_text)
+        .build()
+        .expect("session builds");
+    // The assignment machinery itself creates the record (probe A8's
+    // shape) — no store surgery in this test.
+    session
+        .run("COLUMNS=55", &RunOptions::new())
+        .expect("assignment run");
+    assert_eq!(issue822_expansion(&mut session, &dir, "COLUMNS"), "55");
+
+    session.notify_terminal_size(120, 40);
+    assert_eq!(
+        issue822_expansion(&mut session, &dir, "COLUMNS"),
+        "120",
+        "a user-assigned COLUMNS must track the resize (GNU B2)"
+    );
+    session.notify_terminal_size(80, 24);
+    assert_eq!(issue822_expansion(&mut session, &dir, "COLUMNS"), "80");
+    assert_eq!(issue822_expansion(&mut session, &dir, "LINES"), "24");
+    assert_eq!(session.executor_mut().get_env("COLUMNS"), Some("80"));
+}
+
+#[test]
+fn issue822_winsize_bind_creates_no_record() {
+    // Regression guard for the no-record case (fresh shells looked fine
+    // before the fix): with no record, expansion falls through to the
+    // mirror and tracks; the bind itself must not create a record — the
+    // dual-write mirrors set_env, which updates existing scalar records
+    // only — and must not export the name (GNU's fresh bind is a
+    // non-exported shell variable).
+    let ambient_columns = std::env::var_os("COLUMNS");
+    let ambient_lines = std::env::var_os("LINES");
+    std::env::remove_var("COLUMNS");
+    std::env::remove_var("LINES");
+    let dir = temp_dir("issue822-fresh");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = Session::builder()
+        .env("OUT", &dir_text)
+        .build()
+        .expect("session builds");
+    assert!(
+        session
+            .executor_mut()
+            .shell_state
+            .variables
+            .get("COLUMNS")
+            .is_none(),
+        "a scrubbed process env must not seed a COLUMNS record"
+    );
+    session.notify_terminal_size(100, 30);
+    assert_eq!(
+        issue822_expansion(&mut session, &dir, "COLUMNS"),
+        "100",
+        "the mirror fallthrough keeps tracking"
+    );
+    assert!(
+        session
+            .executor_mut()
+            .shell_state
+            .variables
+            .get("COLUMNS")
+            .is_none(),
+        "the bind writes existing records only, like set_env"
+    );
+    assert!(
+        !session
+            .environment()
+            .iter()
+            .any(|(name, _)| name == "COLUMNS"),
+        "the bind must not export COLUMNS to children"
+    );
+    // Restore the runner's ambient environment (tests.rs issue2178
+    // pattern).
+    if let Some(value) = ambient_columns {
+        std::env::set_var("COLUMNS", value);
+    }
+    if let Some(value) = ambient_lines {
+        std::env::set_var("LINES", value);
+    }
+}

@@ -399,6 +399,12 @@ pub struct ShellState {
     /// never cloned. GNU jobs.c last_made_pid ($!).
     pub(crate) job_table: crate::jobs::table::JobTable,
     pub(crate) last_background_pid: Option<u32>,
+    /// GNU jobs.c `last_procsub_child`: the pid of the most recently
+    /// spawned process-substitution child (real consumer/producer or
+    /// fork placeholder). A bare `wait` settles it — and only it —
+    /// when it is also `last_background_pid` (jobs.c
+    /// wait_for_background_pids tail; rubash#2560).
+    pub(crate) last_procsub_pid: Option<u32>,
     /// pids of coproc processes → bound array variable name (coproc.c
     /// coproc_setvars keeps c_name so coproc_unsetvars can unbind even on
     /// bind failure).
@@ -851,6 +857,7 @@ impl Clone for ShellState {
             stdin_redir: Cell::new(self.stdin_redir.get()),
             job_table: self.job_table.clone(),
             last_background_pid: self.last_background_pid,
+            last_procsub_pid: self.last_procsub_pid,
             coproc_names: self.coproc_names.clone(),
             completion_specs: self.completion_specs.clone(),
             // pcomplete.c:180-181: process globals — a fork mid-completion
