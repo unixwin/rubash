@@ -1026,6 +1026,8 @@ pub(crate) fn resolve_compspec<'a>(
     specs: &'a CompletionRegistry,
     words: &[String],
     cur_idx: usize,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
 ) -> Option<&'a Compspec> {
     if words.is_empty() {
         return specs.get("-E").or_else(|| specs.get("-D"));
@@ -1041,7 +1043,75 @@ pub(crate) fn resolve_compspec<'a>(
         // host's built-in command completion still applies.
         return specs.get("-I");
     }
-    specs.get(&words[0]).or_else(|| specs.get("-D"))
+    resolve_command_compspec(specs, &words[0], aliases, progcomp_alias)
+}
+
+/// Verbatim-then-basename lookup (pcomplete.c programmable_completions
+/// steps 1-2): the command as typed, then — when it contains a `/` —
+/// its basename.
+fn lookup_command_compspec<'a>(specs: &'a CompletionRegistry, cmd: &str) -> Option<&'a Compspec> {
+    if let Some(cs) = specs.get(cmd) {
+        return Some(cs);
+    }
+    let base = cmd.rsplit('/').next().unwrap_or(cmd);
+    if base != cmd && !base.is_empty() {
+        return specs.get(base);
+    }
+    None
+}
+
+/// GNU's retry chain for the command word (pcomplete.c:1567+
+/// programmable_completions), when the verbatim lookup misses:
+/// basename retry, then the -D default, then — only with
+/// `shopt -s progcomp_alias` — the alias retry: the line is rebuilt
+/// with the alias value and the whole lookup restarts from the alias
+/// value's first word (delimiters per bashline.c's skip_to_delim set
+/// `"()<>&;| \t\n"`), with the lastcs guard becoming a visited set so
+/// an alias cycle cannot spin. This chain was missing entirely, so a
+/// spec registered for `git` never governed `/usr/bin/git …` or an
+/// alias of git (rubash#2574).
+fn resolve_command_compspec<'a>(
+    specs: &'a CompletionRegistry,
+    ocmd: &str,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
+) -> Option<&'a Compspec> {
+    if let Some(cs) = lookup_command_compspec(specs, ocmd) {
+        return Some(cs);
+    }
+    if let Some(cs) = specs.get("-D") {
+        return Some(cs);
+    }
+    if !progcomp_alias {
+        return None;
+    }
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(ocmd.to_string());
+    let mut current = ocmd;
+    loop {
+        let alias = aliases.get(current)?;
+        let hop = alias_value_first_word(&alias.value);
+        if hop.is_empty() || !visited.insert(hop.to_string()) {
+            return None;
+        }
+        if let Some(cs) = lookup_command_compspec(specs, hop) {
+            return Some(cs);
+        }
+        current = hop;
+    }
+}
+
+/// The first word of an alias value, the way GNU's
+/// programmable_completions rebuilds the command word after an alias
+/// expansion (bashline.c: skip leading blanks with skip_to_delim over
+/// `" \t"`, then take characters until the first shell delimiter in
+/// `"()<>&;| \t\n"`).
+fn alias_value_first_word(value: &str) -> &str {
+    let trimmed = value.trim_start_matches([' ', '\t']);
+    let end = trimmed
+        .find(['(', ')', '<', '>', '&', ';', '|', ' ', '\t', '\n'])
+        .unwrap_or(trimmed.len());
+    &trimmed[..end]
 }
 
 /// Host completion hook. Given the in-progress command `line` and the `cursor`
@@ -1111,7 +1181,13 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     // shopt); `shopt -u progcomp` leaves plain command/file completion.
     let progcomp_on = crate::builtins::shopt::option_enabled(env_vars, "progcomp");
     let resolved = if progcomp_on {
-        resolve_compspec(specs, &words, cur_idx)
+        resolve_compspec(
+            specs,
+            &words,
+            cur_idx,
+            aliases,
+            crate::builtins::shopt::option_enabled(env_vars, "progcomp_alias"),
+        )
     } else {
         None
     };

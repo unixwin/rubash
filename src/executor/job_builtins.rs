@@ -4827,6 +4827,8 @@ impl Executor {
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
+            &self.shell_state.aliases,
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
         )
         .cloned()?;
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
