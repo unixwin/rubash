@@ -1287,6 +1287,7 @@ impl Executor {
             host_external_command_handler: None,
             own_input_bindings: std::collections::HashMap::new(),
             pending_stdin_fold: None,
+            pending_own_binding_folds: Vec::new(),
             #[cfg(windows)]
             elevation_handler: None,
             external_file_builtins_enabled: true,

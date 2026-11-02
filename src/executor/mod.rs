@@ -1905,6 +1905,11 @@ pub struct Executor {
     /// the measured consumption instead of the old drain-to-EOF
     /// accounting. `None` outside that window.
     pending_stdin_fold: Option<external_setup::PendingStdinFold>,
+    /// rubash#2590: consumption folds for own input bindings resolved
+    /// during the in-flight external dispatch (plain or pipeline
+    /// stage); settled when that dispatch's child exits — see
+    /// `external_setup::OwnBindingFold`. Empty outside that window.
+    pending_own_binding_folds: Vec<external_setup::OwnBindingFold>,
     #[cfg(windows)]
     elevation_handler: Option<ElevationHandler>,
     external_file_builtins_enabled: bool,

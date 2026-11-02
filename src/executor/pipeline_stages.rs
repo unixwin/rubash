@@ -1140,6 +1140,12 @@ impl Executor {
         } else {
             self.execute_external_pipeline_stage_inner(&command, input, stdin_inherit)
         };
+        // rubash#2590: the stage's child has exited by now (the inner
+        // funnel reaps it before returning), so settle any own-binding
+        // consumption folds its redirect resolution registered — the
+        // source endpoints' cursors land at the child's true reads
+        // instead of the bind-time drain.
+        self.settle_own_binding_folds();
         self.undo_child_fd_var_redirects();
         let finish_result = self.finish_process_substitutions(process_substitution_files);
         let output = result?;
