@@ -3568,7 +3568,15 @@ pub(crate) fn is_executable_file(path: &Path) -> bool {
 /// through findcmd.c file_status, which requires the execute bit
 /// (findcmd.c:104-135). This is NOT [`is_executable_file`]:
 ///
-/// - Unix: identical (access X_OK; symlink-following per rubash#1265).
+/// - Unix: access X_OK (symlink-following per rubash#1265) MINUS
+///   directories: findcmd.c file_status stats first and returns
+///   FS_EXISTS|FS_DIRECTORY for a directory — "not 'executable' in the
+///   sense of the shell" — while a bare access(X_OK) admits every
+///   directory (search permission), which listed PATH directories as
+///   command candidates (rubash#2600; the Windows arm below has
+///   always excluded them). `is_dir` stats through symlinks, matching
+///   file_status's stat: a symlink to a directory is out, a symlink
+///   to an executable file is in, a dangling symlink fails access.
 /// - Windows: there is no execute bit, and a bare `is_file()` admits
 ///   every data file in every PATH directory (C:\Windows\System32 alone
 ///   contributes ~4700 DLL/PNG/MOF "commands" to `compgen -c`, niubash
@@ -3583,7 +3591,7 @@ pub(crate) fn completion_executable_qualifies(
     path: &Path,
     _env_vars: &HashMap<String, String>,
 ) -> bool {
-    is_executable_file(path)
+    !path.is_dir() && is_executable_file(path)
 }
 
 #[cfg(not(unix))]

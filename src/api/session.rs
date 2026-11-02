@@ -20,8 +20,8 @@ use std::time::Instant;
 #[cfg(windows)]
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
-    Candidate, CompletionProvider, DiagnosticSink, ExternalCommandHandler, RcPolicy, StartupClass,
-    StartupContext,
+    Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
+    RcPolicy, StartupClass, StartupContext,
 };
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
@@ -566,12 +566,22 @@ impl Session {
     /// [`CompletionProvider`]'s candidates merged after (a text
     /// the engine already produced is not duplicated).
     pub fn complete(&mut self, line: &str, cursor: usize) -> Vec<Candidate> {
-        let mut candidates: Vec<Candidate> = self
-            .executor
-            .complete_line(line, cursor)
-            .into_iter()
-            .map(Candidate::new)
-            .collect();
+        self.complete_detailed(line, cursor).candidates
+    }
+
+    /// [`Session::complete`] with the attempt's insertion/display
+    /// policy (rubash#2573): the governing compspec's `-o` policy
+    /// options (nospace / noquote / filenames / fullquote / nosort,
+    /// including `compopt` mutations the completion function made)
+    /// reach the host as a [`CompletionPolicy`] — the
+    /// pcomp_set_readline_variables faces — instead of being dropped
+    /// at the engine boundary. Provider candidates merge exactly as
+    /// in `complete`; the policy describes the ENGINE's attempt (the
+    /// provider has no compspec), so a host applying it to provider
+    /// candidates too is making its own choice.
+    pub fn complete_detailed(&mut self, line: &str, cursor: usize) -> CompletionOutcome {
+        let (texts, policy) = self.executor.complete_line_detailed(line, cursor);
+        let mut candidates: Vec<Candidate> = texts.into_iter().map(Candidate::new).collect();
         if let Some(provider) = self.completion_provider.as_mut() {
             for candidate in provider.candidates(line, cursor) {
                 if !candidates.iter().any(|known| known.text == candidate.text) {
@@ -579,7 +589,7 @@ impl Session {
                 }
             }
         }
-        candidates
+        CompletionOutcome { candidates, policy }
     }
 
     /// Whether a compspec is registered for `command`.

@@ -3324,6 +3324,12 @@ impl Executor {
         let stream_stdout = allow_stream_stdout
             && self.final_member_stdout_streams_to_host(commands[commands.len() - 1]);
         let mut intermediate_stderr = Vec::new();
+        // rubash#2602: the internal-stage re-entry image is
+        // loop-invariant; resolving it before the loop keeps a failure
+        // ahead of every stage's operand materialization (an in-loop
+        // `?` would strand this stage's record before its child exists,
+        // where the RAII finish must not fire).
+        let current_exe = std::env::current_exe()?;
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             // The stage's fd 0/1 are OS pipes owned by this loop, not fd
             // table endpoints — a `/dev/stdin` operand drains the incoming
@@ -3398,7 +3404,7 @@ impl Executor {
             );
             stage_proc_ops.push(proc_ops);
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
-                let mut process = std::process::Command::new(std::env::current_exe()?);
+                let mut process = std::process::Command::new(&current_exe);
                 process.arg(format!("--internal-{name}")).args(&proc_args);
                 (process, false)
             } else {
@@ -3479,19 +3485,30 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#2602: this stage's child never ran, so its
+                    // operand record must not perform the deferred
+                    // finish when it drops with the error return — the
+                    // donor advance models a child's reads, and there
+                    // are none. Earlier stages' records stay armed:
+                    // their children exist and may have consumed, so
+                    // the drop settles them.
+                    stage_dev_ops[index].disarm_finish();
+                    return Err(ExecuteError::IoError(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{}: {}",
+                            program
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("external"),
+                            crate::posix_errors::message(&error)
+                        ),
+                    )));
+                }
+            };
             adopt_orphan_console(child.id());
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
@@ -4648,8 +4665,9 @@ impl Executor {
         let mut intermediate_stderr = Vec::new();
         let mut previous_stdout: Option<std::process::ChildStdout> = None;
         let mut first_stdin: Option<std::process::ChildStdin> = None;
-        // rubash#2589: per-stage dev-fd operand records, finished once
-        // every member has been waited (below).
+        // rubash#2589: per-stage dev-fd operand records; they settle
+        // once every member has been waited, when this Vec drops at
+        // scope end (RAII finish, rubash#2602).
         let mut stage_dev_ops: Vec<crate::executor::dev_fd_operands::DevOperandMaterialization> =
             Vec::new();
 
@@ -4744,19 +4762,30 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#2602: this stage's child never ran, so its
+                    // operand record must not perform the deferred
+                    // finish when it drops with the error return — the
+                    // donor advance models a child's reads, and there
+                    // are none. Earlier stages' records (already in
+                    // `stage_dev_ops`) stay armed: their children exist
+                    // and may have consumed, so the drop settles them.
+                    dev_ops.disarm_finish();
+                    return Err(ExecuteError::IoError(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{}: {}",
+                            program
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("external"),
+                            crate::posix_errors::message(&error)
+                        ),
+                    )));
+                }
+            };
             adopt_orphan_console(child.id());
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
@@ -4849,14 +4878,17 @@ impl Executor {
             ));
         }
         results.reverse();
-        // rubash#2589: every member has been waited — settle the
-        // stages' operand records (consume the donor entries the
-        // children took their serves from, close the attach
-        // handles). Finishing earlier would drop a donor entry a
-        // later stage's own operand pass still has to read.
-        for dev_ops in stage_dev_ops {
-            let _ = self.finish_dev_fd_operands(dev_ops);
-        }
+        // rubash#2589/#2602: every member has been waited — the stages'
+        // operand records settle as `stage_dev_ops` drops at scope end
+        // (DevOperandMaterialization's RAII finish consumes the donor
+        // entries the children took their serves from and closes the
+        // attach handles). The Vec is declared before the spawn loop
+        // and outlives every wait, which is exactly the ordering the
+        // settle needs: finishing earlier would drop a donor entry a
+        // later stage's own operand pass still has to read, and any
+        // `?` above (spawn, feed, waits, drains) now reaches the same
+        // settle through the drop instead of skipping it — the #2602
+        // class. No explicit finish loop remains here.
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))

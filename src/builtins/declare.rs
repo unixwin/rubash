@@ -625,6 +625,13 @@ where
                         // attribute; outside local it is accepted but does not
                         // add a printable variable attribute.
                     }
+                    // rubash#2582: `f`/`F` never reach this scanner —
+                    // both entry routes (execute_declare_command for
+                    // declare/typeset, execute_local for local) consult
+                    // the single GNU letter table in
+                    // executor::declare_local::DECLARE_OPTION_LETTERS
+                    // (declare.def:145) via scan_declare_options and
+                    // divert f/F to execute_declare_functions first.
                     _ => {
                         writeln!(
                             stderr,
