@@ -56,6 +56,28 @@ pub(super) struct LexerParseState {
     cond_rhs_started: bool,
     cond_rhs_paren_depth: i32,
     cond_rhs_last_token_end: usize,
+    /// GNU PST_REDIRLIST (parser.h): set by make_simple_command when a
+    /// simple command is created (make_cmd.c:483) and cleared when its
+    /// first WORD element joins (make_cmd.c:489) — redirection elements
+    /// never clear it, and clean_simple_command drops it at command end
+    /// (make_cmd.c:816). While set, a redirection list is open AHEAD of
+    /// the command word, which is the PST_REDIRLIST arm of
+    /// command_token_position (parse.y:3157-3161): a word read in this
+    /// state is still in command position even though the previous
+    /// token is a completed redirection's target (`> /dev/null
+    /// a[64|3]=A` keeps its subscript span). Maintained by record_token:
+    /// a redirection operator recorded before any word element sets it;
+    /// the first non-target word element clears it (and latches
+    /// `word_element_seen`, so a redirection list opened after the
+    /// command word can never set it again for this command); any
+    /// command-boundary token resets both.
+    redirlist_open: bool,
+    /// Whether a word element (command name, argument, or assignment
+    /// word — GNU's ELEMENT { word }) has joined the current simple
+    /// command. A redirection TARGET is not a word element: it is
+    /// consumed by the redirection production, so recording one leaves
+    /// both redirlist flags untouched.
+    word_element_seen: bool,
 }
 
 impl LexerParseState {
@@ -65,6 +87,39 @@ impl LexerParseState {
     pub(super) fn cond_command_open(state: &Self) -> bool {
         state.in_cond_command
     }
+}
+
+/// The token kinds GNU's parsing_redirection (parse.y:3147) recognizes
+/// as `last_read_token`: every redirection operator. The word scanned
+/// immediately after one of these is that redirection's target.
+pub(super) fn token_is_redirection(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::RedirectOut
+            | TokenKind::RedirectIn
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    )
+}
+
+/// The token kinds that join a simple command as a word ELEMENT (GNU
+/// make_simple_command's element.word: command name, arguments and
+/// assignment words). A redirection target is NOT one of these — it is
+/// consumed by the redirection production — but it arrives wearing one
+/// of these kinds, so record_token tells the two apart by whether the
+/// previous token was a redirection operator.
+fn token_is_word_element(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Word
+            | TokenKind::Assignment
+            | TokenKind::Variable
+            | TokenKind::CommandSubst
+            | TokenKind::BraceExpand
+    )
 }
 
 /// Snapshot of every cross-token Lexer field at a byte offset where a pass
@@ -323,19 +378,30 @@ impl<'a> Lexer<'a> {
         if self.parse_state.case_pattern || self.parse_state.in_cond_command {
             return false;
         }
+        // GNU parsing_redirection(last_read_token) != 0 (parse.y:3147):
+        // the previous token is a redirection operator, so the word
+        // about to be scanned is that redirection's TARGET. The target
+        // is consumed by the redirection reader, not read in command
+        // position, and command_token_position's PST_REDIRLIST arm is
+        // explicitly closed while parsing_redirection holds
+        // (parse.y:3159-3160) — no assignment span arms here, for the
+        // operator class or for whitespace (`> a[1 2]` splits in GNU).
+        if self
+            .parse_state
+            .last_token
+            .as_ref()
+            .is_some_and(|(kind, _)| token_is_redirection(kind))
+        {
+            return false;
+        }
         match &self.parse_state.last_token {
             None => true,
             Some((TokenKind::Assignment, _)) => true,
-            Some((
-                TokenKind::RedirectOut
-                | TokenKind::RedirectIn
-                | TokenKind::Append
-                | TokenKind::RedirectErr
-                | TokenKind::RedirectErrAppend
-                | TokenKind::HereDoc
-                | TokenKind::HereString,
-                _,
-            )) => true,
+            // PST_REDIRLIST arm (parse.y:3157-3161): a redirection list
+            // is open ahead of this command's first word element, so a
+            // word read after a completed redirection + target is still
+            // in command position (`> /dev/null a[64|3]=A`).
+            _ if self.parse_state.redirlist_open => true,
             _ => self.reserved_word_position(),
         }
     }
@@ -633,6 +699,38 @@ impl<'a> Lexer<'a> {
         } else {
             token.kind.clone()
         };
+        // PST_REDIRLIST bookkeeping (make_cmd.c:483 sets the flag when a
+        // simple command is created, make_cmd.c:489 clears it when the
+        // first word element joins, make_cmd.c:816 clears it at command
+        // end). Judge by the token's effective kind (history_kind: the
+        // demotion above is exactly what GNU's last_read_token names)
+        // and by the PREVIOUS token, still in last_token here: a
+        // word-element token recorded directly after a redirection
+        // operator is that redirection's TARGET — consumed by the
+        // redirection production, not a word element — so it leaves
+        // both flags untouched, while any other word element latches
+        // word_element_seen and closes the list. A redirection operator
+        // opens the list only before the first word element; any other
+        // token is a command boundary and resets both.
+        let was_redirect_target = token_is_word_element(&history_kind)
+            && self
+                .parse_state
+                .last_token
+                .as_ref()
+                .is_some_and(|(kind, _)| token_is_redirection(kind));
+        if token_is_redirection(&history_kind) {
+            if !self.parse_state.word_element_seen {
+                self.parse_state.redirlist_open = true;
+            }
+        } else if token_is_word_element(&history_kind) {
+            if !was_redirect_target {
+                self.parse_state.word_element_seen = true;
+                self.parse_state.redirlist_open = false;
+            }
+        } else {
+            self.parse_state.word_element_seen = false;
+            self.parse_state.redirlist_open = false;
+        }
         self.parse_state.token_before_that = self.parse_state.last_token.take();
         self.parse_state.last_token = Some((history_kind, TokStr::from(token.value.as_str())));
     }
