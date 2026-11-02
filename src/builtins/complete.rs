@@ -791,23 +791,71 @@ pub(crate) fn apply_completion_actions(
     candidates
 }
 
+/// The GNU default `COMP_WORDBREAKS` (bashline.c:313
+/// `bash_completer_word_break_characters`), bound at startup from
+/// rl_basic_word_break_characters (init.rs). Used when the variable is
+/// somehow unset.
+pub(crate) const DEFAULT_COMP_WORDBREAKS: &str = " \t\n\"'@><=;|&(:";
+
+/// The live `COMP_WORDBREAKS` value: the variable the shell bound at
+/// startup (or the user rebound), falling back to the GNU default.
+pub(crate) fn comp_wordbreaks(env_vars: &HashMap<String, String>) -> String {
+    match env_vars.get("COMP_WORDBREAKS") {
+        Some(value) if !value.is_empty() => value.clone(),
+        _ => DEFAULT_COMP_WORDBREAKS.to_string(),
+    }
+}
+
 /// Split `line[..cursor]` into words for completion purposes, returning the
 /// word list, the index of the word currently being completed, and that word's
 /// partial text. A trailing separator means a fresh (empty) word is being
 /// completed; an interior cursor completes the partial last word.
-pub(crate) fn split_for_completion(line: &str, cursor: usize) -> (Vec<String>, usize, String) {
+pub(crate) fn split_for_completion(
+    line: &str,
+    cursor: usize,
+    wordbreaks: &str,
+) -> (Vec<String>, usize, String) {
     let cursor = cursor.min(line.len());
     let prefix = &line[..cursor];
+    let is_break = |c: char| wordbreaks.contains(c);
+    let mut words: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_is_break_run = false;
+    for c in prefix.chars() {
+        if c.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            current_is_break_run = false;
+        } else if is_break(c) {
+            if !current.is_empty() && !current_is_break_run {
+                words.push(std::mem::take(&mut current));
+            }
+            current.push(c);
+            current_is_break_run = true;
+        } else {
+            if current_is_break_run {
+                words.push(std::mem::take(&mut current));
+                current_is_break_run = false;
+            }
+            current.push(c);
+        }
+    }
     let ends_with_ws = prefix
         .chars()
         .last()
         .map(|c| c.is_whitespace())
         .unwrap_or(true);
-    let words: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
-    let n = words.len();
     if ends_with_ws {
+        if !current.is_empty() {
+            words.push(current);
+        }
+        let n = words.len();
         (words, n, String::new())
     } else {
+        if !current.is_empty() {
+            words.push(current);
+        }
         let idx = words.len().saturating_sub(1);
         let cur = words.last().cloned().unwrap_or_default();
         (words, idx, cur)
@@ -890,7 +938,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     job_names: &[String],
     dynamic: Option<CompgenDynamic>,
 ) -> Vec<String> {
-    let (words, cur_idx, cur_word) = split_for_completion(line, cursor);
+    let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
     let resolved = resolve_compspec(specs, &words, cur_idx);
 
     let mut candidates: Vec<String> = if let Some(cs) = resolved {

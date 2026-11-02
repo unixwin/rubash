@@ -4801,8 +4801,11 @@ impl Executor {
         line: &str,
         cursor: usize,
     ) -> Option<crate::builtins::complete::CompgenDynamic> {
-        let (words, cur_idx, cur_word) =
-            crate::builtins::complete::split_for_completion(line, cursor);
+        let (words, cur_idx, cur_word) = crate::builtins::complete::split_for_completion(
+            line,
+            cursor,
+            &crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars),
+        );
         let spec = crate::builtins::complete::resolve_compspec(
             &self.shell_state.completion_specs,
             &words,
