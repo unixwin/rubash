@@ -4806,6 +4806,20 @@ impl Executor {
             processes.push(child);
         }
 
+        // rubash#2626: while this process supervises the pipeline,
+        // a background wrapper must be transparent for individually
+        // addressed signals — GNU's `$!` names the last stage, ours
+        // names the wrapper, so the wrapper's relay forwards such
+        // deliveries to the last stage published here (see
+        // builtins::kill::WrapperRelayTargetGuard). The guard is
+        // inert in every non-wrapper process, and its span is
+        // exactly this wait: it drops when the function returns,
+        // after every member has been reaped.
+        let _wrapper_relay_guard =
+            crate::builtins::kill::WrapperRelayTargetGuard::publish(
+                processes.last().map(|child| child.id()).unwrap_or(0),
+            );
+
         if let Some(mut stdin) = first_stdin {
             if let Some(base) = stage0_stdin_base {
                 // Same unit contract as the concurrent path above:
