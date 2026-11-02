@@ -410,3 +410,50 @@ fn env_prefix_element_word_keeps_gnu_invalidid_boundary() {
         "SCRIPT: line 1: `a[64|3]': not a valid identifier\n"
     );
 }
+
+#[test]
+fn redirect_first_commands_do_not_degrade_across_lines() {
+    let dir = scratch("redirlist-cross-line");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "> /dev/null b[64|3]\n\
+         echo \"rc=$?\"\n\
+         > /dev/null a[64|3]=A b[64|3]=B\n\
+         echo \"chain=${a[67]}${b[67]}\"\n",
+    );
+    // Round 4: the redirlist pair (PST_REDIRLIST + the word-element
+    // latch) belongs to ONE simple command — GNU drops the bit at
+    // command end (make_cmd.c:816) and the next command's
+    // make_simple_command starts it fresh (make_cmd.c:483). The
+    // state the lexer carries across logical lines must fold the
+    // terminating '\n' the same way: the bare word on line 1 behaves
+    // in both shells, and the chain on line 3 must still find the
+    // list open even though two complete commands (each with word
+    // elements of its own) intervened. Before the fold, the latch
+    // outlived its command and EVERY word on line 3 split.
+    assert_eq!(stdout, "rc=127\nchain=AB\n");
+    assert_eq!(stderr, "SCRIPT: line 1: b[64|3]: command not found\n");
+}
+
+#[test]
+fn redirect_first_commands_in_a_row_stay_armed() {
+    let dir = scratch("redirlist-row");
+    let (stdout, stderr) = run_script(
+        &dir,
+        "> /dev/null a[64|3]=A\n\
+         echo \"one=${a[67]}\"\n\
+         > /dev/null b[64|3]\n\
+         echo \"rc=$?\"\n\
+         > /dev/null c[64|3]=C d[64|3]=D\n\
+         echo \"two=${c[67]}${d[67]}\"\n\
+         > /dev/null e[64|3]=E\n\
+         echo \"three=${e[67]}\"\n",
+    );
+    // Four redirect-first commands in a row — single assignment,
+    // bare command word, assignment chain, single assignment again —
+    // each separated by an ordinary command: arming is a per-command
+    // property (make_cmd.c:483/489/816), never a property of how
+    // many commands ran before, so every line's span stays whole.
+    assert_eq!(stdout, "one=A\nrc=127\ntwo=CD\nthree=E\n");
+    assert_eq!(stderr, "SCRIPT: line 3: b[64|3]: command not found\n");
+}
