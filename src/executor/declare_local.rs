@@ -31,8 +31,19 @@ fn declare_written_operand_hints(
     hints
 }
 
+/// The ONE declare-family option-letter table: GNU declare.def:145
+/// `#define DECLARE_OPTS "+acfgilnprtuxAFGI"` (the ARRAY_VARS branch —
+/// rubash always has arrays). Every scanner in the family
+/// (`scan_declare_options`, `validate_local_options`, and the routing
+/// in `execute_local`/`execute_declare_command`) derives its letter
+/// set from this constant; rubash#2582 was the three hand-copied
+/// tables disagreeing in both directions (`local -c` rejected by the
+/// local validator, `local -f` accepted there then rejected by the
+/// declare scanner).
+pub(crate) const DECLARE_OPTION_LETTERS: &str = "acfgilnprtuxAFGI";
+
 fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
-    const VALID: &str = "acfgilnprtuxAFGI";
+    const VALID: &str = DECLARE_OPTION_LETTERS;
     let mut letters = Vec::new();
     for arg in args {
         if arg == "--" {
@@ -1714,6 +1725,22 @@ impl Executor {
             )?;
             writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
             (2, Vec::new())
+        } else if scan_declare_options(&cmd.words[1..])
+            .0
+            .iter()
+            .any(|letter| *letter == 'f' || *letter == 'F')
+        {
+            // rubash#2582: GNU's local is declare_internal in a local
+            // context (declare.def), so `-f`/`-F` take the SAME
+            // function-listing path as `declare -f` — the route
+            // execute_declare_command takes via this same scan. The
+            // generic variable path below ends in the builtins::declare
+            // scanner, whose letter table has no f/F (it never sees
+            // them on the declare route), so `local -f g` was rejected
+            // there after validate_local_options had accepted it.
+            let status =
+                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            (status, Vec::new())
         } else {
             let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
             let mut args = match self.rewrite_declare_operand_subscripts(
