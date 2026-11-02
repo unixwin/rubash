@@ -211,10 +211,27 @@ impl LexerParseState {
     /// separator is emitted downstream of the Lexer, so the line break must
     /// be folded into the carried state explicitly; without it the state
     /// kept the previous line's last word and `{` degraded to word text.
+    ///
+    /// The same '\n' also terminates the current list in the parser, so
+    /// the simple command that was open is complete: its PST_REDIRLIST
+    /// bit is dropped at command end (make_cmd.c:816) and the word-element
+    /// latch is a property of that same command's lifecycle
+    /// (make_cmd.c:483 sets the bit on creation, make_cmd.c:489 clears it
+    /// when the first element joins) — neither survives into the next
+    /// command, whose own make_simple_command starts the pair fresh. A
+    /// boundary token INSIDE one tokenize pass reaches record_token and
+    /// resets the pair there, but the break between two committed logical
+    /// lines never does, so this fold must reset them too: without it the
+    /// latch outlived its command, the next line's first redirection
+    /// operator found `word_element_seen` already set and never opened
+    /// the list, and every subscript word on that line split
+    /// (rubash#2605 round 4).
     pub(super) fn note_line_break(&mut self) {
         let previous = self.last_token.take();
         self.token_before_that = previous;
         self.last_token = Some((TokenKind::Semicolon, TokStr::from(";")));
+        self.redirlist_open = false;
+        self.word_element_seen = false;
     }
 }
 
