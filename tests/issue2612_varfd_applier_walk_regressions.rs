@@ -371,7 +371,10 @@ fn move_chain_var_dup_copies_moved_binding() {
         stdout,
         "RC=0\nV=BOUND\nseed=[PAY]\nnine=closed\nseed2=[PAY]\n"
     );
-    assert_eq!(stderr, "");
+    // GNU also leaks the trailing probe's diagnostic: redirections
+    // process left to right, so `>&9` fails before `2>/dev/null` is
+    // applied (oracle-verified byte-identical, bash 5.3.20).
+    assert_eq!(stderr, "driver.sh: line 7: 9: Bad file descriptor\n");
 }
 
 // ----------------------------------------------------------------
