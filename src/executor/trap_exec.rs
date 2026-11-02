@@ -4258,20 +4258,29 @@ impl Executor {
                 line.saturating_sub(1).to_string(),
             ));
         }
-        // rubash#2212: GNU's process_substitute fork (subst.c:6362)
-        // inherits the shell's WHOLE ambient fd table. The output
-        // form's spawn adjudicates it through ambient_procsub_spawn_fd;
-        // the input form must too — an `exec 3>file` / `exec 3<&1` fd
-        // opened by an earlier command reaches a `<(...)` body that
-        // writes `>&3`. Unix-only here: this spawn is a plain
-        // Command::spawn, whose child inherits the inheritable dups
-        // through the raw fd space; the Windows handle-whitelist
-        // transport belongs to the spawn_whitelisted form the output
-        // spawn uses. Parent-side dups close once the spawn lands.
+        // rubash#2212: GNU's process_substitute fork (subst.c:6362,
+        // make_child at 6412) inherits the shell's WHOLE ambient fd
+        // table. The output form's spawn adjudicates it through
+        // ambient_procsub_spawn_fd; the input form must too — an
+        // `exec 3>file` / `exec 3<&1` fd opened by an earlier command
+        // reaches a `<(...)` body that writes `>&3`, and (rubash#2492)
+        // an `exec 8<&0` fd reaches a body that reads `<&8` —
+        // ambient_procsub_spawn_fd materializes that std-stream
+        // endpoint into a dup'd FileFd, so it rides this pass like
+        // any File. Cross-platform: this spawn is a plain
+        // Command::spawn. On Unix the pins below dup2 each dup onto
+        // its slot in pre_exec; on Windows std's spawn passes no
+        // PROC_THREAD_ATTRIBUTE_HANDLE_LIST (verified in the rustc
+        // 1.99 toolchain source — STARTF_USESTDHANDLES with
+        // bInheritHandles=TRUE), so the inheritable dups cross at
+        // their own values, which is exactly what the child's init
+        // trusts verbatim (init.rs, "Windows handle values transfer
+        // verbatim across CreateProcess inheritance") — the same
+        // transport the output form's plain spawn already uses.
+        // Parent-side dups close once the spawn lands.
         let mut ambient_fd_dups: Vec<crate::fd::HANDLE> = Vec::new();
         #[cfg(unix)]
         let mut ambient_pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
-        #[cfg(unix)]
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed {
                 continue;
@@ -4287,6 +4296,7 @@ impl Executor {
                                 file.path.to_string_lossy().into_owned(),
                             ));
                             ambient_fd_dups.push(dup);
+                            #[cfg(unix)]
                             ambient_pins.push((dup, *fd));
                         }
                     }
@@ -4299,6 +4309,7 @@ impl Executor {
                                 file.path.to_string_lossy().into_owned(),
                             ));
                             ambient_fd_dups.push(dup);
+                            #[cfg(unix)]
                             ambient_pins.push((dup, *fd));
                         }
                     }
@@ -4314,6 +4325,7 @@ impl Executor {
                                 path.to_string_lossy().into_owned(),
                             ));
                             ambient_fd_dups.push(dup);
+                            #[cfg(unix)]
                             ambient_pins.push((dup, *fd));
                         }
                         crate::fd::close_handle(handle);
