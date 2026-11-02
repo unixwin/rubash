@@ -171,8 +171,10 @@ pub(in crate::executor) fn clean_negative_literal_subscript(key: &str) -> Option
 ///
 /// GNU arrayfunc.c:1290-1333 tokenize_array_reference (via valid_array_reference):
 /// the subscript ends at the `]` that closes the FIRST `[` — found with
-/// skipsubscript/skip_matched_pair nesting (arrayfunc.c:1318, brackets nest,
-/// backslash escapes the next char) — and the reference is only valid when
+/// skipsubscript/skip_matched_pair (arrayfunc.c:1318; subst.c:2083-2186:
+/// brackets nest, a backslash protects the next char, and quoted spans,
+/// backquote spans and `$(...)` / `${...}` constructs are skipped as
+/// units) — and the reference is only valid when
 /// that `]` is the LAST character (`t[len+1] != '\0'` fails, arrayfunc.c:1322)
 /// and the subscript is non-empty (`len == 1` fails, arrayfunc.c:1322).
 /// A body like `arr[0]#[\'\"]` (bats-preprocess
@@ -184,38 +186,120 @@ pub(in crate::executor) fn clean_negative_literal_subscript(key: &str) -> Option
 /// tail that happened to end in `]` and fed `0]#[\'\"` to arithmetic.
 pub(in crate::executor) fn parse_array_subscript(name: &str) -> Option<(&str, &str)> {
     let (array_name, rest) = name.split_once('[')?;
-    // skip_matched_pair from the opening `[`: depth 1, nested `[`/`]` adjust
-    // depth, a backslash protects the next character, and the first depth-0
-    // `]` closes the subscript.
-    let bytes = rest.as_bytes();
-    let mut depth = 1usize;
-    let mut index = 0usize;
-    let mut close = None;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'\\' => {
-                index += 2;
-                continue;
-            }
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    close = Some(index);
-                    break;
-                }
-            }
-            _ => {}
-        }
-        index += 1;
-    }
-    let close = close?;
-    if close != bytes.len() - 1 || close == 0 {
+    // skipsubscript (subst.c:2189) is skip_matched_pair with FLAGS & 1 == 0
+    // (subst.c:2083-2186): the hunt for the balance-0 `]` treats a
+    // backslash pair, a backquote span, a single- or double-quoted span,
+    // and a `$(...)` / `${...}` construct as indivisible units, so a `]`
+    // inside one of them is data, never the closer (`m['x]y']`,
+    // `m[$(echo 'x]y')]`). The previous scan counted only backslash pairs
+    // and bracket depth, so a quoted `]` ended the subscript early and the
+    // whole reference fell through to `bad substitution`.
+    let close = skip_subscript_close(rest.as_bytes())?;
+    if close != rest.len() - 1 || close == 0 {
         // Closing `]` must end the reference; `[]` is not a valid
         // non-associative subscript (arrayfunc.c:1322 len == 1).
         return None;
     }
     Some((array_name, &rest[..close]))
+}
+
+/// Index of the `]` closing a subscript whose text starts at `bytes[0]`
+/// (just past the opening `[`), per skip_matched_pair (subst.c:2083-2186)
+/// with FLAGS & 1 == 0. Returns None when no balance-0 `]` exists.
+fn skip_subscript_close(bytes: &[u8]) -> Option<usize> {
+    skip_matched_pair_end(bytes, 0, b'[', b']').map(|end| end - 1)
+}
+
+/// Byte port of skip_matched_pair (subst.c:2083-2186), FLAGS & 1 == 0:
+/// starting just past an opening delimiter at depth 1, return the index
+/// just past the matching `close`. Nested `open`/`close` pairs adjust the
+/// depth; a backslash protects the next byte; backquote, single-quoted and
+/// double-quoted spans and `$(...)` / `${...}` constructs are skipped as
+/// units (their delimiters are data). Byte-wise scanning is exact here:
+/// every delimiter is ASCII, and UTF-8 continuation bytes never alias
+/// ASCII. None when the text ends before the balance-0 close.
+fn skip_matched_pair_end(bytes: &[u8], mut index: usize, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 1usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_backquote_end(bytes, index + 1)?,
+            b'\'' => index = skip_single_quoted_end(bytes, index + 1)?,
+            b'"' => index = skip_double_quoted_end(bytes, index + 1)?,
+            b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                let (nested_open, nested_close) = if bytes[index + 1] == b'(' {
+                    (b'(', b')')
+                } else {
+                    (b'{', b'}')
+                };
+                index = skip_matched_pair_end(bytes, index + 2, nested_open, nested_close)?;
+            }
+            byte if byte == open => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close => {
+                depth -= 1;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the closing backquote of a span whose text starts at
+/// `index` (just past the opening backquote); a backslash protects the
+/// next byte (skip_matched_pair's backq state, subst.c:2113-2120).
+fn skip_backquote_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the closing `'` of a span whose text starts at `index`
+/// (just past the opening quote); single quotes admit no escapes
+/// (skip_single_quoted, subst.c:1952).
+fn skip_single_quoted_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        if bytes[index] == b'\'' {
+            return Some(index + 1);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Index just past the closing `"` of a span whose text starts at `index`
+/// (just past the opening quote). Inside double quotes a backslash
+/// protects the next byte and backquote / `$(...)` / `${...}` constructs
+/// nest as units (skip_double_quoted, subst.c:1981).
+fn skip_double_quoted_end(bytes: &[u8], mut index: usize) -> Option<usize> {
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_backquote_end(bytes, index + 1)?,
+            b'"' => return Some(index + 1),
+            b'$' if matches!(bytes.get(index + 1), Some(b'(') | Some(b'{')) => {
+                let (nested_open, nested_close) = if bytes[index + 1] == b'(' {
+                    (b'(', b')')
+                } else {
+                    (b'{', b'}')
+                };
+                index = skip_matched_pair_end(bytes, index + 2, nested_open, nested_close)?;
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 /// Tokenize an array reference in ALREADY-EXPANDED operand text (the `-v' /
