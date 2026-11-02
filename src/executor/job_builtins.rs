@@ -3111,8 +3111,10 @@ impl Executor {
         // when the wait ends (jobs.c:3253) — the reclaim below runs on
         // every wait outcome. Only with the job-control channel live;
         // otherwise fg keeps the shared-group delivery model.
+        #[cfg(not(unix))]
+        let fg_pgrp: Option<i32> = None;
         #[cfg(unix)]
-        let fg_tty = if self.job_control_channel_active() {
+        let (fg_tty, fg_pgrp) = if self.job_control_channel_active() {
             let pgrp = self
                 .shell_state
                 .job_table
@@ -3124,17 +3126,16 @@ impl Executor {
             if let Some(tty) = &tty {
                 super::job_control_wait::give_terminal_to(tty, pgrp);
             }
-            tty
+            (tty, Some(pgrp))
         } else {
-            None
+            (None, None)
         };
-        // SIGCONT follows the target numbering (18 Linux / 19 Darwin) via
-        // kill::SIGCONT_NUMBER — jobs.c:3928 `killpg (..., SIGCONT)` uses
-        // the platform's own number, not a Linux literal.
-        for member in &pids {
-            let _ =
-                crate::builtins::kill::send_signal(*member, crate::builtins::kill::SIGCONT_NUMBER);
-        }
+        // rubash#2622: the resume SIGCONT rides the same channel
+        // decision as the terminal handoff — group-addressed killpg to
+        // the job's pgrp when the channel is live (jobs.c:3926-3928
+        // continue_job), per-pid only in the shared-group fallback
+        // model (see job_control_wait::deliver_job_sigcont).
+        super::job_control_wait::deliver_job_sigcont(fg_pgrp, &pids);
         self.shell_state.job_table.mark_running(pid);
         if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
             entry.foreground = true;
@@ -3290,15 +3291,28 @@ impl Executor {
                         .map(|entry| (entry.command.clone(), entry.pids.clone()))
                         .unwrap_or_default();
                     writeln!(stdout, "[{job_id}]{marker}{command} &")?;
-                    // SIGCONT follows the target numbering (18 Linux / 19
-                    // Darwin) via kill::SIGCONT_NUMBER — see the fg twin above
-                    // (jobs.c:3928).
-                    for member in &pids {
-                        let _ = crate::builtins::kill::send_signal(
-                            *member,
-                            crate::builtins::kill::SIGCONT_NUMBER,
-                        );
-                    }
+                    // rubash#2622: the resume SIGCONT is group-addressed
+                    // killpg to the job's pgrp when the job-control
+                    // channel is live (jobs.c:3926-3928 continue_job),
+                    // per-pid only in the shared-group fallback model —
+                    // see the fg twin above and
+                    // job_control_wait::deliver_job_sigcont.
+                    #[cfg(not(unix))]
+                    let bg_pgrp: Option<i32> = None;
+                    #[cfg(unix)]
+                    let bg_pgrp = if self.job_control_channel_active() {
+                        Some(
+                            self.shell_state
+                                .job_table
+                                .jobs
+                                .get(&job_id)
+                                .map(|entry| entry.pgrp as i32)
+                                .unwrap_or(pid as i32),
+                        )
+                    } else {
+                        None
+                    };
+                    super::job_control_wait::deliver_job_sigcont(bg_pgrp, &pids);
                     self.shell_state.job_table.mark_running(pid);
                     if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
                         entry.background = true;
