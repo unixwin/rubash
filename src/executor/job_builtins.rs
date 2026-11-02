@@ -4387,11 +4387,13 @@ impl Executor {
                     }
                 } else {
                     // complete.def:876-884: set the -o bits, clear the +o
-                    // bits on the copy. pcomp_set_readline_variables'
-                    // rl_* side effects (nospace/filenames insert
-                    // behavior) are host-editor contract, not engine
-                    // state — the candidate stream carries no insert
-                    // policy today.
+                    // bits on the copy. The mutated copy is NOT thrown
+                    // away: completion_dynamic_for_line reads its options
+                    // back into CompgenDynamic::options_override before
+                    // restoring the saved spec (GNU *foundp |= cs->options
+                    // after generation, pcomplete.c gen_progcomp_
+                    // completions), so the fallback decisions and the
+                    // insert policy see the mutated bits (rubash#2572).
                     if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
@@ -4907,6 +4909,14 @@ impl Executor {
                     dynamic.command_candidates = Vec::new();
                 }
             }
+        }
+        // rubash#2572: read the (possibly compopt-mutated) governing
+        // copy's options back into the dynamic result BEFORE the
+        // restore discards it — GNU's `*foundp |= cs->options` fold.
+        // The registry spec itself is never mutated by a live
+        // completion (the mutation lives on the per-attempt copy).
+        if let Some(current) = &self.shell_state.pcomp_curcs {
+            dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
         self.shell_state.pcomp_curcs = saved_curcs;

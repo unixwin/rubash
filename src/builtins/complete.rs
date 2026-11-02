@@ -670,6 +670,16 @@ pub(crate) struct CompgenDynamic {
     /// lives. The executor reads the cell shape from its shell state;
     /// the builtin-side listings cannot see it.
     pub(crate) pipestatus: PipestatusListing,
+    /// The governing spec's option bits AFTER any `compopt` mutations
+    /// the -F/-C generator performed during this resolution
+    /// (rubash#2572). GNU's gen_progcomp_completions copies the spec,
+    /// runs the generator against the copy (compopt mutates the copy),
+    /// and folds the copy's options back into the caller
+    /// (`*foundp |= cs->options`), which is what the caller's fallback
+    /// block and pcomp_set_readline_variables then consume. `None`
+    /// means no live resolution ran, so consumers use the registered
+    /// spec's options.
+    pub(crate) options_override: Option<u64>,
 }
 
 /// PIPESTATUS cell shapes as the -A variable / -A arrayvar listings
@@ -1306,6 +1316,14 @@ pub(crate) fn complete_line_candidates_with_dynamic(
             .collect();
     }
     if let Some(cs) = resolved {
+        // The option bits every post-generation decision consumes: the
+        // registered spec's, replaced by the compopt-mutated governing
+        // copy's when a live -F/-C resolution ran (rubash#2572; GNU's
+        // *foundp |= cs->options fold in gen_progcomp_completions).
+        let effective_options = dynamic
+            .as_ref()
+            .and_then(|d| d.options_override)
+            .unwrap_or(cs.options);
         // The compspec -o fallback options (rubash#2570), in GNU's own
         // layering order. pcomplete.c:1435-1457 gen_compspec_completions:
         // dirnames REPLACES an empty result (the check runs on the
@@ -1315,9 +1333,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // path below mirrors the same block; the fallback candidates
         // are never -X filtered and never -P/-S wrapped, so this block
         // sits after both.
-        if candidates.is_empty() && cs.options & COPT_DIRNAMES != 0 {
+        if candidates.is_empty() && effective_options & COPT_DIRNAMES != 0 {
             candidates = directory_candidates_matching(&cur_word, env_vars, settings);
-        } else if cs.options & COPT_PLUSDIRS != 0 {
+        } else if effective_options & COPT_PLUSDIRS != 0 {
             candidates.extend(directory_candidates_matching(&cur_word, env_vars, settings));
         }
         // bashline.c:1801-1822 attempt_shell_completion: with the
@@ -1331,8 +1349,8 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         // word yields NOTHING (only its $-variable, ~-username and
         // @-hostname shapes fire); both together (the fzf registration)
         // yield filenames for plain words through the -o default half.
-        if candidates.is_empty() && cs.options & (COPT_DEFAULT | COPT_BASHDEFAULT) != 0 {
-            if cs.options & COPT_BASHDEFAULT != 0 {
+        if candidates.is_empty() && effective_options & (COPT_DEFAULT | COPT_BASHDEFAULT) != 0 {
+            if effective_options & COPT_BASHDEFAULT != 0 {
                 candidates.extend(bash_default_candidates(
                     &cur_word,
                     cur_idx,
@@ -1342,7 +1360,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
                     dynamic.as_ref().map(|d| d.pipestatus).unwrap_or_default(),
                 ));
             }
-            if cs.options & COPT_DEFAULT != 0 {
+            if effective_options & COPT_DEFAULT != 0 {
                 candidates.extend(filename_candidates_matching(&cur_word, env_vars, settings));
             }
         }
