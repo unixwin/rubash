@@ -726,6 +726,35 @@ pub(crate) fn apply_completion_actions(
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
 ) -> Vec<String> {
+    apply_completion_actions_with_settings(
+        actions,
+        word,
+        env_vars,
+        aliases,
+        function_names,
+        job_names,
+        underlay,
+        pipestatus,
+        &ReadlineCompletionSettings::default(),
+    )
+}
+
+/// [`apply_completion_actions`] with the live readline-variable
+/// settings (rubash#2575); the compgen builtin keeps the default
+/// settings because pcomplete.c's static generators compare with
+/// STREQN, not readline's complete_fncmp.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn apply_completion_actions_with_settings(
+    actions: u64,
+    word: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    aliases: &HashMap<String, Alias>,
+    function_names: &[String],
+    job_names: &[String],
+    underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    pipestatus: PipestatusListing,
+    settings: &ReadlineCompletionSettings,
+) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     for &(actname, actbit, _) in COMPACTS {
         if actions & actbit == 0 {
@@ -750,6 +779,7 @@ pub(crate) fn apply_completion_actions(
                     word,
                     PathCompletionKind::Directory,
                     env_vars,
+                    settings,
                 ));
             }
             "file" => {
@@ -757,6 +787,7 @@ pub(crate) fn apply_completion_actions(
                     word,
                     PathCompletionKind::File,
                     env_vars,
+                    settings,
                 ));
             }
             "disabled" => candidates.extend(disabled_builtin_completion_candidates(env_vars)),
@@ -791,6 +822,86 @@ pub(crate) fn apply_completion_actions(
     candidates
 }
 
+/// rubash#2575: the readline completion variables the ENGINE pipeline
+/// consults, snapshotted from the bind registry (`bind 'set NAME on'` /
+/// inputrc). Before this, `bind.rs` stored them and `bind -v` reported
+/// them, but no consumer could see the registry: candidate filtering was
+/// unconditionally case-sensitive and dotfiles were listed
+/// unconditionally.
+///
+/// GNU ownership (lib/readline/complete.c): _rl_completion_case_fold
+/// (complete_fncmp, :2428-2457), _rl_completion_case_map ('-' == '_'
+/// when set, same function), _rl_match_hidden_files (:2630-2640 — with
+/// it off, hidden files are skipped only when the typed filename part
+/// is empty), _rl_expand_tilde, and rl_completion_enabled == 0 for
+/// disable-completion (rl_complete_internal returns no matches).
+/// Host-tier variables (mark-directories, visible-stats, ...) shape
+/// the host's display, not the candidate set, and stay host-owned.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ReadlineCompletionSettings {
+    pub ignore_case: bool,
+    pub map_case: bool,
+    pub match_hidden_files: bool,
+    pub expand_tilde: bool,
+    pub disable_completion: bool,
+}
+
+impl Default for ReadlineCompletionSettings {
+    /// The READLINE_VARIABLE_DEFAULTS row values (bind.rs): only
+    /// match-hidden-files defaults on.
+    fn default() -> Self {
+        ReadlineCompletionSettings {
+            ignore_case: false,
+            map_case: false,
+            match_hidden_files: true,
+            expand_tilde: false,
+            disable_completion: false,
+        }
+    }
+}
+
+impl ReadlineCompletionSettings {
+    pub(crate) fn from_bind_registry(registry: &crate::shell::bind_registry::BindRegistry) -> Self {
+        let on = |name: &str| registry.variable_value(name) == Some("on");
+        ReadlineCompletionSettings {
+            ignore_case: on("completion-ignore-case"),
+            map_case: on("completion-map-case"),
+            match_hidden_files: on("match-hidden-files"),
+            expand_tilde: on("expand-tilde"),
+            disable_completion: on("disable-completion"),
+        }
+    }
+}
+
+/// complete_fncmp (lib/readline/complete.c:2433-2457) as a prefix test:
+/// does `candidate` begin with `word`, honoring completion-ignore-case
+/// (case-folding compare) and completion-map-case ('-' and '_' are
+/// equivalent)? Length is measured in chars, like the C in bytes over
+/// the typed word.
+pub(crate) fn completion_candidate_matches_word(
+    candidate: &str,
+    word: &str,
+    settings: &ReadlineCompletionSettings,
+) -> bool {
+    let mut candidate_chars = candidate.chars();
+    for word_char in word.chars() {
+        let Some(candidate_char) = candidate_chars.next() else {
+            return false;
+        };
+        if candidate_char == word_char {
+            continue;
+        }
+        if settings.map_case && matches!((candidate_char, word_char), ('-', '_') | ('_', '-')) {
+            continue;
+        }
+        if settings.ignore_case && candidate_char.to_lowercase().eq(word_char.to_lowercase()) {
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
 /// The GNU default `COMP_WORDBREAKS` (bashline.c:313
 /// `bash_completer_word_break_characters`), bound at startup from
 /// rl_basic_word_break_characters (init.rs). Used when the variable is
@@ -810,6 +921,16 @@ pub(crate) fn comp_wordbreaks(env_vars: &HashMap<String, String>) -> String {
 /// word list, the index of the word currently being completed, and that word's
 /// partial text. A trailing separator means a fresh (empty) word is being
 /// completed; an interior cursor completes the partial last word.
+///
+/// rubash#2578: word boundaries are the `COMP_WORDBREAKS` characters
+/// (bashline.c:313 — readline splits the completion word at
+/// rl_completer_word_break_characters, and pcomplete.c
+/// bind_compfunc_variables exposes exactly this split as COMP_WORDS /
+/// COMP_CWORD to -F functions). Whitespace only separates; a maximal run
+/// of non-whitespace break characters is a word of its own. Probed
+/// against the GNU bash 5.3.20 oracle: `foo a=b` -> [foo a = b] cur `b`,
+/// `foo a==b` -> [foo a == b], `foo a=` -> [foo a =] cur `=`,
+/// `foo a ` -> [foo a ""] cur ``.
 pub(crate) fn split_for_completion(
     line: &str,
     cursor: usize,
@@ -918,6 +1039,7 @@ pub(crate) fn complete_line_candidates(
         function_names,
         job_names,
         None,
+        &ReadlineCompletionSettings::default(),
     )
 }
 
@@ -937,14 +1059,21 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     function_names: &[String],
     job_names: &[String],
     dynamic: Option<CompgenDynamic>,
+    settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
+    // rubash#2575: disable-completion on — readline refuses the
+    // completion attempt outright (rl_complete_internal with completion
+    // disabled produces no matches).
+    if settings.disable_completion {
+        return Vec::new();
+    }
     let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
     let resolved = resolve_compspec(specs, &words, cur_idx);
 
     let mut candidates: Vec<String> = if let Some(cs) = resolved {
         let mut c = Vec::new();
         if cs.actions != 0 {
-            c.extend(apply_completion_actions(
+            c.extend(apply_completion_actions_with_settings(
                 cs.actions,
                 &cur_word,
                 env_vars,
@@ -956,6 +1085,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
                     .as_ref()
                     .map(|dynamic| dynamic.pipestatus)
                     .unwrap_or_default(),
+                settings,
             ));
         }
         if let Some(globpat) = cs.globpat.as_deref() {
@@ -983,7 +1113,7 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     } else if cur_idx == 0 {
         command_completion_candidates(env_vars, aliases, function_names)
     } else {
-        path_completion_candidates(&cur_word, PathCompletionKind::File, env_vars)
+        path_completion_candidates(&cur_word, PathCompletionKind::File, env_vars, settings)
     };
 
     // Keep only static candidates that extend the partial word, then merge
@@ -991,7 +1121,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     // and -C output are NOT prefix-filtered), then apply the compspec's -X
     // filter over the merged list (pcomplete.c:1402-1407) and its -P/-S
     // wrapping.
-    candidates.retain(|c| c.starts_with(&cur_word));
+    // rubash#2575: the prefix filter is readline's complete_fncmp —
+    // case- and map-aware when the bind variables say so.
+    candidates.retain(|c| completion_candidate_matches_word(c, &cur_word, settings));
     if let Some(dynamic) = dynamic.as_ref() {
         candidates.extend(dynamic.function_candidates.iter().cloned());
         candidates.extend(dynamic.command_candidates.iter().cloned());
@@ -1272,10 +1404,15 @@ where
 /// directory entries under the word's directory prefix, filtered by the
 /// word prefix the way the file/directory actions filter.
 fn directory_candidates_matching(word: &str, env_vars: &HashMap<String, String>) -> Vec<String> {
-    path_completion_candidates(word, PathCompletionKind::Directory, env_vars)
-        .into_iter()
-        .filter(|candidate| candidate.starts_with(word))
-        .collect()
+    path_completion_candidates(
+        word,
+        PathCompletionKind::Directory,
+        env_vars,
+        &ReadlineCompletionSettings::default(),
+    )
+    .into_iter()
+    .filter(|candidate| candidate.starts_with(word))
+    .collect()
 }
 
 /// The `-o default` fallback (bashline.c:1808-1810: COPT_DEFAULT leaves
@@ -1348,6 +1485,7 @@ fn path_completion_candidates(
     word: &str,
     kind: PathCompletionKind,
     env_vars: &HashMap<String, String>,
+    settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
     // Programmable-completion words reach the builtin with their quotes
     // already removed, so a quoted tilde-slash arrives as the literal `~/`
@@ -1359,7 +1497,7 @@ fn path_completion_candidates(
     if word.starts_with("~/") {
         if let Some(home) = env_vars.get("HOME").filter(|home| !home.is_empty()) {
             let expanded = format!("{home}{}", &word[1..]);
-            let rewritten = path_completion_candidates(&expanded, kind, env_vars)
+            let rewritten = path_completion_candidates(&expanded, kind, env_vars, settings)
                 .into_iter()
                 .map(|candidate| {
                     candidate
@@ -1378,9 +1516,19 @@ fn path_completion_candidates(
         return Vec::new();
     };
 
+    // rubash#2575: lib/readline/complete.c:2630-2640 — with
+    // match-hidden-files OFF, hidden entries are skipped only when the
+    // typed filename part (after the last `/`) is empty; a typed prefix
+    // (including a typed `.`) still reaches dotfiles through the
+    // prefix filter, exactly like complete_fncmp.
+    let typed_part = word.rsplit('/').next().unwrap_or(word);
+    let skip_hidden = !settings.match_hidden_files && typed_part.is_empty();
     let mut candidates = Vec::new();
     for entry in entries {
         if matches!(kind, PathCompletionKind::Directory) && !entry.is_dir {
+            continue;
+        }
+        if skip_hidden && entry.name.starts_with('.') {
             continue;
         }
         candidates.push(format!("{display_prefix}{}", entry.name));
@@ -2658,6 +2806,7 @@ mod completion_hook_tests {
             &fns,
             &jobs,
             Some(dynamic),
+            &ReadlineCompletionSettings::default(),
         );
         assert_eq!(
             out,
