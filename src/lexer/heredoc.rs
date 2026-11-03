@@ -74,6 +74,27 @@ pub(super) fn heredoc_delimiters(
                 // DATA_BACKSLASH; the shared decoder leaves it in place for
                 // the expansion walkers, so restore the literal here.
                 .replace(crate::executor::markers::DATA_BACKSLASH, "\\");
+            // An escaped blank in the delimiter word (`<<E\ OF`) travels
+            // as ANSI_C_IFS_GUARD + the blank: the guard is an
+            // expansion-time field-splitting marker, not delimiter text —
+            // GNU's delimiter is the dequoted bytes (`E OF`), and with the
+            // guard left in place the terminator line never compares
+            // equal, so the heredoc swallows the rest of the script
+            // (audit A1 F13). Strip live guards only: an E400-escaped
+            // pair is user data and keeps its E401.
+            let value = {
+                let mut stripped = String::with_capacity(value.len());
+                let mut prev_escape = false;
+                for ch in value.chars() {
+                    if ch == crate::executor::markers::ANSI_C_IFS_GUARD && !prev_escape {
+                        prev_escape = false;
+                        continue;
+                    }
+                    prev_escape = ch == crate::executor::markers::LITERAL_CHAR_ESCAPE;
+                    stripped.push(ch);
+                }
+                stripped
+            };
             HereDocDelimiter {
                 value,
                 quoted: context.quoted,

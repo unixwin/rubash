@@ -55,6 +55,18 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         return Some(coproc_bang_error(tokens, start, i));
     }
 
+    // GNU parse.y:1125-1175: the coproc body is a shell_command, and a
+    // function DEFINITION is not one — `coproc f() { ...; }` is a syntax
+    // error at the `)`. The name gate above mistakes the `(` after the
+    // would-be name for a subshell opener, so the `()` spelling reached
+    // the body parse and was silently accepted (audit A1 F06). An empty
+    // subshell body `coproc ( )` is the same error in GNU. This must be
+    // an error NODE, not None: None makes the caller salvage the line
+    // into a simple command the executor re-reads as a coproc.
+    if is_keyword(tokens, i, "(") && is_keyword(tokens, i + 1, ")") {
+        return Some(coproc_funcdef_error(tokens, start, i + 1));
+    }
+
     // Parse the body
     if let Some(token) = tokens.get(i) {
         // Brace group body (single token from lexer)
@@ -204,6 +216,18 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         {
             return Some(coproc_bang_error(tokens, start, i));
         }
+        // The function-definition spelling in the word stream
+        // (`coproc CP f() { ...; }` — the name gate did not commit, so
+        // the words collect here, keyword tokens included): a word
+        // immediately followed by `(` `)` is a definition, which GNU
+        // rejects as a coproc body (A1 F06). Error node, not None —
+        // see the body-position guard above.
+        if !words.is_empty()
+            && is_keyword(tokens, i, "(")
+            && is_keyword(tokens, i + 1, ")")
+        {
+            return Some(coproc_funcdef_error(tokens, start, i + 1));
+        }
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
             let raw = if next_i == i + 1 {
                 tokens[i].raw.as_str()
@@ -319,6 +343,37 @@ fn coproc_missing_command_error(
 /// status 2. The rest of the offending construct (up to the next
 /// command boundary) is swallowed so parsing resumes cleanly at
 /// the next command.
+/// A1 F06: the error node for a function definition offered as a coproc
+/// body — same __RUBASH_PARSE_ERROR_NEAR__ plumbing as coproc_bang_error,
+/// blaming the `)` of the `()` pair (GNU's blamed token for the unnamed
+/// spelling).
+fn coproc_funcdef_error(
+    tokens: &[Token],
+    start: usize,
+    paren: usize,
+) -> (CommandNode, usize) {
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "){}{}",
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            tokens[paren].position,
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        offending_line_text(tokens, paren, None, 0),
+    );
+    let mut end = paren;
+    while end < tokens.len() && tokens[end].kind != TokenKind::Semicolon {
+        end += 1;
+    }
+    finish_coproc_command(command, tokens, end)
+}
+
 fn coproc_bang_error(tokens: &[Token], start: usize, bang: usize) -> (CommandNode, usize) {
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|t| t.position);
@@ -435,7 +490,9 @@ fn is_coproc_shell_command_start(tokens: &[Token], index: usize) -> bool {
             token.value.as_str(),
             "for" | "case" | "select" | "coproc" | "if" | "while" | "until" | "[["
         ) || token.value.starts_with("((")
-            || parse_function_command(tokens, index).is_some()
+        // No function-definition arm: GNU rejects `coproc f() { ...; }`
+        // (and the named/spaced spellings) as a syntax error — a function
+        // definition is never a coproc body (audit A1 F06).
     })
 }
 
@@ -497,9 +554,8 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
     if let Some(parsed) = parse_arithmetic_command(tokens, start) {
         return Some(parsed);
     }
-    if let Some(parsed) = parse_function_command(tokens, start) {
-        return Some(parsed);
-    }
+    // No parse_function_command arm: see is_coproc_shell_command_start —
+    // GNU never accepts a function definition as a coproc body (A1 F06).
 
     // rubash#1653: there is deliberately NO "time" arm here. GNU
     // parse.y:1125-1175 gives coproc only `COPROC shell_command`,
