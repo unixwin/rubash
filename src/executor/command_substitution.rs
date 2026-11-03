@@ -1595,16 +1595,11 @@ impl Executor {
         let mut ast = crate::parser::parse(&tokens);
         normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
-        if ast.commands.iter().any(command_has_parse_error) {
-            // GNU reports the body's syntax error (parse.y yyerror) even
-            // though the enclosing command is what dies — emit the stored
-            // diagnostic instead of silently swallowing it (case-pattern
-            // `$(esac;x)` in comsub-posix6.sub).
-            if let Some(command) = ast.commands.iter().find_map(command_parse_error_node) {
-                self.report_command_parse_error(command);
-            }
-            self.latch_command_substitution_parse_error();
-            self.last_command_substitution_status.set(Some(2));
+        // GNU reports the body's syntax error (parse.y yyerror) even
+        // though the enclosing command is what dies — emit the stored
+        // diagnostic instead of silently swallowing it (case-pattern
+        // `$(esac;x)` in comsub-posix6.sub).
+        if self.report_comsub_body_error_if_any(&ast.commands, Some(source)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
 
@@ -1766,6 +1761,13 @@ impl Executor {
             // parse_error latch onto the parent's abort flag here.
             if subshell.parse_error_occurred {
                 self.latch_command_substitution_parse_error();
+                // rubash#2751: an inner substitution whose diagnostic
+                // was already printed keeps this level silent too —
+                // GNU prints one diagnostic for the whole nesting.
+                if subshell.comsub_error_reported_out.get() {
+                    self.last_command_substitution_error_reported.set(true);
+                    self.comsub_error_reported_out.set(true);
+                }
             }
             let mut status = command_substitution_result_status(result, subshell.exit_code);
             // Bash runs EXIT in the command-substitution child, so an
@@ -2062,6 +2064,8 @@ impl Executor {
             comsub_leading_newlines: Cell::new(0),
             current_shell_substitution_exit: Cell::new(self.current_shell_substitution_exit.get()),
             last_command_substitution_parse_error: Cell::new(false),
+            last_command_substitution_error_reported: Cell::new(false),
+            comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
             parser_error_errexited: Cell::new(false),
@@ -2275,6 +2279,12 @@ impl Executor {
         };
         if subshell.parse_error_occurred {
             self.latch_command_substitution_parse_error();
+            // rubash#2751: propagate "already reported" (see the typed
+            // comsub site) so nested failures print one diagnostic.
+            if subshell.comsub_error_reported_out.get() {
+                self.last_command_substitution_error_reported.set(true);
+                self.comsub_error_reported_out.set(true);
+            }
         }
         let status = command_substitution_result_status(result, subshell.exit_code);
         self.last_command_substitution_status.set(Some(status));
@@ -2870,6 +2880,88 @@ fn command_parse_error_node(command: &CommandNode) -> Option<&CommandNode> {
                 .pipeline_command
                 .as_ref()
                 .and_then(|pipeline| pipeline.stages.iter().find_map(command_parse_error_node))
+        })
+}
+
+/// Every parse-error marker class, for the comsub body screen
+/// (rubash#2751): GNU's read-time body parse fails the whole body
+/// however the error is encoded, so the screen must see NEAR, COND
+/// and both EOF shapes as well as the plain message marker.
+fn command_parse_error_node_any(command: &CommandNode) -> Option<&CommandNode> {
+    if command.has_assignment("__RUBASH_PARSE_ERROR__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_COND__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_EOF__")
+        || command.has_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
+    {
+        return Some(command);
+    }
+    command
+        .and_or_list
+        .as_ref()
+        .and_then(|list| list.commands.iter().find_map(command_parse_error_node_any))
+        .or_else(|| {
+            command.pipeline_command.as_ref().and_then(|pipeline| {
+                pipeline
+                    .stages
+                    .iter()
+                    .find_map(command_parse_error_node_any)
+            })
+        })
+}
+
+impl Executor {
+    /// The comsub body parse-error screen shared by every body
+    /// execution route (rubash#2751): GNU parses the body at read
+    /// time, so a body carrying a parse error — in ANY marker
+    /// encoding — runs NOTHING and reports the error once, in the
+    /// child shape. A route that executes such an AST instead lets
+    /// the body's early commands run and leaves the enclosing
+    /// command's escalation to print a second, wrong-shaped line.
+    /// A lone NEAR `(' node is exempt — it is the rubash#1093
+    /// extglob recovery candidate, whose verdict belongs to the
+    /// execute arm's live-gate reparse. Returns true when an error
+    /// was found (and reported + latched + status 2 set).
+    pub(in crate::executor) fn report_comsub_body_error_if_any(
+        &self,
+        commands: &[CommandNode],
+        body_text: Option<&str>,
+    ) -> bool {
+        let Some(command) = commands
+            .iter()
+            .find_map(command_parse_error_node_any)
+            .filter(|command| !command_is_extglob_recovery_candidate(command))
+        else {
+            return false;
+        };
+        if self.backtick_body_diagnostic.get() {
+            self.report_command_parse_error(command);
+        } else {
+            // GNU's read-time shape — suffixed / re-presented at the
+            // body boundary, exactly one diagnostic; the escalation in
+            // execute_command stands down because the error is already
+            // reported.
+            self.report_comsub_body_parse_error(command, body_text);
+            self.last_command_substitution_error_reported.set(true);
+            self.comsub_error_reported_out.set(true);
+        }
+        self.latch_command_substitution_parse_error();
+        self.last_command_substitution_status.set(Some(2));
+        true
+    }
+}
+
+/// The rubash#1093 candidate: a NEAR node blaming `(' may be a
+/// closed-extglob-gate artifact that the execute arm reparses away
+/// when an earlier line opened the gate at runtime — the comsub body
+/// screen leaves those to execution, exactly as before.
+fn command_is_extglob_recovery_candidate(command: &CommandNode) -> bool {
+    command
+        .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+        .is_some_and(|spec| {
+            spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP)
+                .next()
+                == Some("(")
         })
 }
 

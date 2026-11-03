@@ -1,7 +1,4 @@
-use super::parse_loop::{
-    parse_time_prefixed_compound_command, parse_time_prefixed_shell_command,
-    unclosed_brace_eof_node, unclosed_paren_eof_node,
-};
+use super::parse_loop::{unclosed_brace_eof_node, unclosed_paren_eof_node};
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
@@ -569,7 +566,35 @@ pub(super) fn parse_function_command_with_diagnostic(
             }
             return Some((command, tokens.len()));
         }
-        return None;
+        // GNU parse.y function_def (parse.y:1054-1061): after the name
+        // and `()' the grammar demands a compound_command body, and the
+        // token that arrived instead is the yyerror token (parse.y:6727
+        // -> report_syntax_error, parse.y:6833) — `f()}' names `}',
+        // `f() > /dev/null { ... }' names `>' (redirections on a
+        // definition belong AFTER the body), `f() | cat' names `|'.
+        // Returning None here let the main loop reinterpret the `()'
+        // as a subshell and name `(' instead (rubash#2747).
+        let mut command = CommandNode::new();
+        command.line = Some(tokens[start].position);
+        command.insert_assignment(
+            "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+            format!(
+                "{}{}{}",
+                body_token.value,
+                crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+                body_token.position
+            ),
+        );
+        command.insert_assignment(
+            "__RUBASH_PARSE_SOURCE__".to_string(),
+            super::parse_loop::offending_line_text(
+                tokens,
+                i,
+                diagnostic_text.map(|rc| &**rc),
+                source_line_offset,
+            ),
+        );
+        return Some((command, tokens.len()));
     }
     let open_brace = i;
     i += 1;
@@ -952,8 +977,13 @@ fn parse_function_compound_body(
     }
 
     match tokens.get(start)?.value.as_str() {
-        "time" => parse_time_prefixed_shell_command(tokens, start)
-            .or_else(|| parse_time_prefixed_compound_command(tokens, start)),
+        // No "time" arm: a function body is a compound command
+        // (parse.y function_body), and `time' opens a PIPELINE, not a
+        // compound — GNU rejects every `f() time ...' at the `time'
+        // itself, whatever follows (`time echo', `time { ...; }',
+        // `time if ...' all name `time'). Returning None lets the
+        // caller's offender arm name it (rubash#2747).
+        "time" => None,
         "for" => parse_for_command(tokens, start, None, 0),
         "if" => parse_if_command_standalone(tokens, start, None, 0),
         "while" | "until" => parse_loop_command(tokens, start, None, 0),

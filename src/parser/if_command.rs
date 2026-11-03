@@ -1,6 +1,6 @@
 use super::parse_loop::{
-    mismatched_closer_node, run_inline_section, unclosed_keyword_eof_node, ParseState,
-    SectionOutcome, SectionStop,
+    compound_body_parse_error, mismatched_closer_node, run_inline_section,
+    unclosed_keyword_eof_node, ParseState, SectionOutcome, SectionStop,
 };
 use super::*;
 use crate::lexer::Token;
@@ -113,6 +113,17 @@ fn parse_if_command_after_condition(
     let (then_body, boundary) = parse_if_section_inline(tokens, index, state)?;
     // GNU parse.y: `then`/`elif`/`else` bodies are non-empty command lists.
     if then_body.is_empty() {
+        // An error already latched inside the CONDITION is the report
+        // (GNU yyerror fires at the first offending token, in stream
+        // order): the empty body must not discard it for the caller's
+        // resync guess, which would blame a later token (`if a &&
+        // then; fi' names `then', not `fi' — rubash#2741 face).
+        if let Some(error) = condition
+            .iter()
+            .find_map(|command| compound_body_parse_error(command).cloned())
+        {
+            return Some((error, tokens.len()));
+        }
         return None;
     }
     index = boundary;

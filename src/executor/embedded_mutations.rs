@@ -2212,6 +2212,15 @@ impl Executor {
         );
         let mut commands = crate::parser::parse(&tokens);
         super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
+        // rubash#2751: the same body screen the typed route runs —
+        // a parse-errored body executes nothing and reports once, in
+        // the child shape; executing it here would run the body's
+        // early commands and re-report through the execute arms
+        // under the enclosing script's prefix, with the enclosing
+        // command's escalation printing a second line.
+        if self.report_comsub_body_error_if_any(&commands.commands, Some(source)) {
+            return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
+        }
         if !command_substitution_needs_ast_execution(&commands.commands) {
             return None;
         }

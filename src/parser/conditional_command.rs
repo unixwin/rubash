@@ -43,6 +43,7 @@ pub(super) fn parse_conditional_command(
         &merged_args,
         true,
         stream_eof_line(tokens, diagnostic_text, source_line_offset),
+        cond_follower_text(tokens, end),
     ) {
         command.insert_assignment("__RUBASH_PARSE_ERROR_COND__".to_string(), spec);
         if let Some(source) = conditional_offending_line(
@@ -111,10 +112,72 @@ fn stream_eof_line(
     tokens.last().map(|token| token.position + 1).unwrap_or(1)
 }
 
+/// The source text of the token that follows the closing `]]' when it
+/// is glued to it (no leading whitespace) and is an operator: GNU's
+/// follow-on yyerror (parse.y:6727) runs error_token_from_text with the
+/// reader index sitting after that lookahead token, so the backward
+/// walk runs over the follower's text too — a glued `;' is the report,
+/// a glued `&&' reports its break character `&', a glued `>' reports
+/// the whole `]]>' run. A spaced follower starts a fresh token run and
+/// the report stays the `]]' (rubash#2750). `>>' is capped to its first
+/// character: GNU's reader index for the append operator sits after
+/// the first `>' (`[[ a == ]]>>f' reports `]]>', like the single-`>'
+/// form).
+fn cond_follower_text(tokens: &[Token], end: usize) -> Option<String> {
+    let follower = tokens.get(end + 1)?;
+    if !follower.leading_ws.is_empty() || follower.line_break {
+        return None;
+    }
+    let operator = matches!(
+        follower.kind,
+        TokenKind::Semicolon
+            | TokenKind::And
+            | TokenKind::Or
+            | TokenKind::Pipe
+            | TokenKind::PipeErr
+            | TokenKind::Background
+            | TokenKind::RedirectOut
+            | TokenKind::RedirectIn
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    ) || (follower.kind == TokenKind::Keyword
+        && matches!(follower.value.as_str(), "(" | ")"))
+        // Case-clause terminators lex as words in this position but
+        // are operators to the reader: `[[ a == ]];;' reports the
+        // follow-on `;' exactly like a glued separator.
+        || (follower.kind == TokenKind::Word
+            && matches!(follower.raw.as_str(), ";;" | ";&" | ";;;&"));
+    if !operator {
+        return None;
+    }
+    // Redirect followers contribute only their FIRST character to
+    // the follow-on walk: GNU's reader position when the conditional
+    // parser trips is just past the operator's first byte, so
+    // `==]]>&f' walks to `==]]>' and `==]]<<<x' to `==]]<', exactly
+    // like the `>>' → `>' cap (rubash#2750).
+    if matches!(
+        follower.kind,
+        TokenKind::RedirectOut
+            | TokenKind::RedirectIn
+            | TokenKind::Append
+            | TokenKind::RedirectErr
+            | TokenKind::RedirectErrAppend
+            | TokenKind::HereDoc
+            | TokenKind::HereString
+    ) {
+        return Some(follower.raw.chars().take(1).collect());
+    }
+    Some(follower.raw.clone())
+}
+
 pub(super) fn conditional_syntax_error_spec(
     args: &[CondArg],
     closed: bool,
     stream_eof_line: usize,
+    follower: Option<String>,
 ) -> Option<(String, Option<usize>)> {
     let open_line = args.first().map(|(_, _, _, line)| *line).unwrap_or(1);
     let mut cursor = CondCursor {
@@ -153,7 +216,7 @@ pub(super) fn conditional_syntax_error_spec(
             },
         },
     };
-    Some(fail.encode(args))
+    Some(fail.encode(args, follower.as_deref()))
 }
 
 /// The line of the `\n' token GNU's cond reader reports: a newline ending
@@ -210,7 +273,7 @@ impl CondFail {
     /// Returns (spec, echo_line): echo_line is the offending input line GNU
     /// prints via print_offending_line (parse.y:6814) — None for the EOF
     /// shape, which echoes nothing.
-    fn encode(self, args: &[CondArg]) -> (String, Option<usize>) {
+    fn encode(self, args: &[CondArg], follower: Option<&str>) -> (String, Option<usize>) {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
         let last_line = args.last().map(|(_, _, _, line)| *line).unwrap_or(1);
         let open_line = args.first().map(|(_, _, _, line)| *line).unwrap_or(1);
@@ -243,9 +306,43 @@ impl CondFail {
         // `]]`) it falls back to the last real token before it — `(x'
         // reports `(x' because `(' is not a break character, and `x\n]]'
         // reports `x' not `]]'.
+        // rubash#2750: when the offender is the closing `]]' or the
+        // final collected argument, GNU's reader had already consumed
+        // the glued operator token that follows the conditional as its
+        // lookahead, and error_token_from_text (parse.y:6772-6808)
+        // walks back over that follower's text too — the walk over
+        // (arguments + follower) reproduces the report for every
+        // operator shape (`;' alone, `&' for `&&', the whole `]]>' run
+        // for a glued redirect).
+        let follower_walk = |index: usize| -> Option<String> {
+            let follower = follower?;
+            if index != args.len().saturating_sub(1) {
+                return None;
+            }
+            let mut text: String = args
+                .iter()
+                .flat_map(|(_, raw, ws, _)| [ws.as_str(), raw.as_str()])
+                .collect();
+            text.push_str(follower);
+            Some(walk_back_over_text(&text))
+        };
         let (near, near_line, echo_line) = match &self.offending {
             CondOffending::Index(index) => (
                 glued_semicolon_near(args, *index)
+                    .or_else(|| follower_walk(*index))
+                    .or_else(|| {
+                        // A bare `&&'/`||' offender reports its first
+                        // character alone: the backward walk stops ON
+                        // the token's own break character (parse.y:
+                        // 6787-6793), where walk_back_near_token's
+                        // fragment logic would keep both characters
+                        // (rubash#2750: `[[ && a]]' names `&').
+                        match args[*index].1.as_str() {
+                            "&&" => Some("&".to_string()),
+                            "||" => Some("|".to_string()),
+                            _ => None,
+                        }
+                    })
                     .unwrap_or_else(|| walk_back_near_token(args, *index)),
                 args[*index].3,
                 args[*index].3,
@@ -262,6 +359,7 @@ impl CondFail {
                     .map_or(last_line, |arg| arg.3);
                 let near = end_index
                     .and_then(|index| glued_semicolon_near(args, index))
+                    .or_else(|| follower_walk(end_index.unwrap_or(args.len().saturating_sub(1))))
                     .unwrap_or_else(|| end_near_token(args));
                 (near, end_line, end_line)
             }
@@ -515,6 +613,18 @@ fn end_near_token(args: &[CondArg]) -> String {
         .iter()
         .flat_map(|(_, raw, ws, _)| [ws.as_str(), raw.as_str()])
         .collect();
+    walk_back_over_text(&text)
+}
+
+/// error_token_from_text's backward walk over a reconstructed source
+/// text (parse.y:6772-6808): from the text's end, walk back over
+/// non-break characters (` \n\t;|&' break), landing ON the break
+/// character that stopped the walk — which therefore stays in the
+/// report when it is not whitespace.
+fn walk_back_over_text(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
     let bytes = text.as_bytes();
     let token_end = bytes.len();
     let mut i = token_end - 1;
@@ -1359,6 +1469,53 @@ fn strip_conditional_quote_markers(value: &str) -> String {
 /// conditional terminator (`[[ a =~ ( ]]<>;&) ]]' ends at the FINAL
 /// `]]', rubash#222). A quoted/escaped paren (raw != value) never opens
 /// a group (parse.y:5417 shellquote runs before the `(' special case).
+/// The stream index of an OPERATOR fragment carrying a trailing
+/// `]]' (`==]]', `!=]]', ...), or None. GNU's cond reader returns
+/// such a fragment as ONE token (the classifier rejects it as the
+/// binary operator it almost is); a plain WORD ending in `]]' is
+/// just a word — `]]' closes only as an exact standalone token
+/// (parse.y special_case_tokens) — so word fragments never count
+/// here. Mirrors conditional_end_candidates' paren-depth walk.
+fn conditional_absorbed_closer(tokens: &[Token], start: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    for index in start + 1..tokens.len() {
+        let token = &tokens[index];
+        if token.kind == TokenKind::Keyword && token.raw == "(" && token.value == "(" {
+            depth += 1;
+        } else if token.kind == TokenKind::Keyword && token.raw == ")" && token.value == ")" {
+            depth = (depth - 1).max(0);
+        } else if depth == 0 {
+            let Some(operator) = token.raw.strip_suffix("]]") else {
+                continue;
+            };
+            if matches!(
+                operator,
+                "==" | "!="
+                    | "="
+                    | "=~"
+                    | "<"
+                    | ">"
+                    | "<="
+                    | ">="
+                    | "-eq"
+                    | "-ne"
+                    | "-lt"
+                    | "-le"
+                    | "-gt"
+                    | "-ge"
+                    | "-ef"
+                    | "-nt"
+                    | "-ot"
+                    | "&&"
+                    | "||"
+            ) {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
 fn conditional_end_candidates(tokens: &[Token], start: usize) -> Vec<usize> {
     let mut depth = 0isize;
     let mut candidates = Vec::new();
@@ -1423,15 +1580,27 @@ pub(super) fn conditional_eof_error_command(
     diagnostic_text: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
 ) -> (CommandNode, usize) {
+    // GNU never treats a `]]' SUFFIX as the closer — special_case_
+    // tokens (parse.y) returns COND_END only for a word that is
+    // exactly `]]' — so a WORD fragment (`x]]') bounds nothing: it is
+    // an ordinary argument and the classifier must see the tokens
+    // after it (`[[ x]] echo hi' fails at `echo'). An OPERATOR
+    // fragment (`==]]') is different: the classifier fails AT that
+    // token in stream order, so the collection may stop there, and
+    // the token glued after it is the follow-on the report walks
+    // over (`[[ a ==]]&' names `&') (rubash#2750).
+    let absorbed_closer = conditional_absorbed_closer(tokens, start);
     let merged = merge_pattern_rhs_fragments(collect_conditional_args(
         tokens,
         start + 1,
-        tokens.len() - 1,
+        absorbed_closer.unwrap_or(tokens.len() - 1),
     ));
+    let follower = absorbed_closer.and_then(|end| cond_follower_text(tokens, end));
     let (spec, echo_line) = conditional_syntax_error_spec(
         &merged,
         false,
         stream_eof_line(tokens, diagnostic_text, source_line_offset),
+        follower,
     )
     .unwrap_or_else(|| {
         let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;

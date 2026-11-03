@@ -1307,6 +1307,20 @@ impl CommandNode {
     pub fn has_assignment(&self, name: &str) -> bool {
         self.assignments.iter().any(|(n, _)| n == name)
     }
+    /// Whether the node carries a parse error in ANY of the marker
+    /// encodings (message / near / conditional / EOF / compound-EOF).
+    /// Error-attribution consumers must consult every encoding: a
+    /// check that sees only the message marker treats an
+    /// already-failed compound as clean and lets a later token's
+    /// diagnostic replace the first error (rubash#2750: a word after
+    /// an errored `[[ ]]` discarded the conditional's own report).
+    pub fn has_parse_error_marker(&self) -> bool {
+        self.has_assignment("__RUBASH_PARSE_ERROR__")
+            || self.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+            || self.has_assignment("__RUBASH_PARSE_ERROR_COND__")
+            || self.has_assignment("__RUBASH_PARSE_ERROR_EOF__")
+            || self.has_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__")
+    }
     pub fn assignment_values(&self) -> impl Iterator<Item = &String> {
         self.assignments.iter().map(|(_, v)| v)
     }

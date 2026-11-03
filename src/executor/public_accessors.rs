@@ -241,6 +241,121 @@ impl Executor {
             );
             return;
         }
+        // The COND encoding reaches this renderer through the same
+        // delegate sites (a backtick body whose error is a malformed
+        // conditional): render it like execute_command's COND arm —
+        // each classifier message, then the near/EOF tail — under the
+        // ambient backtick child prefix when that window is live. The
+        // bare-message fallback below would drop the whole report
+        // (`` `[[ a ==]]` ``, rubash#2751).
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
+            let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+            let mut fields = spec.split(sep);
+            let shape = fields.next().unwrap_or("near").to_string();
+            let aux_a = fields.next().unwrap_or_default().to_string();
+            let aux_b = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let prefix_for = |this: &Self, line: usize| {
+                if this.backtick_body_diagnostic.get() {
+                    this.comsub_eof_error_diagnostic(line)
+                } else {
+                    this.parser_error_prefix_for_line(line)
+                }
+            };
+            for field in fields {
+                let (line, message) = field
+                    .split_once('\u{1}')
+                    .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg))
+                    .unwrap_or((1, field));
+                self.write_diagnostic_fd2(
+                    format!("{}{}\n", prefix_for(self, line), message).as_bytes(),
+                );
+                if self.errexit_active_at_diagnostic() {
+                    return;
+                }
+            }
+            if shape == "eof" {
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}syntax error: unexpected end of file from `[[' command on line {aux_a}\n",
+                        prefix_for(self, aux_b)
+                    )
+                    .as_bytes(),
+                );
+                self.errexit_active_at_diagnostic();
+            } else if shape != "bare" {
+                self.write_diagnostic_fd2(
+                    format!("{}syntax error near `{aux_a}'\n", prefix_for(self, aux_b)).as_bytes(),
+                );
+                if self.errexit_active_at_diagnostic() {
+                    return;
+                }
+                if self.offending_line_echo_enabled() {
+                    if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        self.write_diagnostic_fd2(
+                            format!(
+                                "{}`{}'\n",
+                                prefix_for(self, aux_b),
+                                super::command_execute::parse_error_source_display(source)
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        // The NEAR encoding reaches this renderer through the
+        // delegate sites (the backtick child's body report, the
+        // session/function error paths): render it exactly like
+        // execute_command's NEAR arm — the bare-message fallback below
+        // would print `syntax error near unexpected token' with the
+        // offender's name dropped (`` `while do done` ``,
+        // rubash#2751).
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+            let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+            let token = fields.next().unwrap_or_default();
+            let line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| cmd.line.unwrap_or(1));
+            let prefix = if self.backtick_body_diagnostic.get() {
+                self.comsub_eof_error_diagnostic(line)
+            } else {
+                self.parser_error_prefix_for_line(line)
+            };
+            self.write_diagnostic_fd2(
+                format!("{prefix}syntax error near unexpected token `{token}'\n").as_bytes(),
+            );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    self.write_diagnostic_fd2(format!("{prefix}`{source}'\n").as_bytes());
+                }
+            }
+            return;
+        }
+        // The plain-EOF encoding (a body that ran out mid-list, e.g.
+        // `` `echo hi |` ``): GNU's child reports `syntax error:
+        // unexpected end of file' at the end-of-input line — the same
+        // shape execute_command's EOF arm renders.
+        if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
+            let eof_line = cmd.line.map(|line| line + 1).unwrap_or(1);
+            let prefix = if self.backtick_body_diagnostic.get() {
+                self.comsub_eof_error_diagnostic(eof_line)
+            } else {
+                self.parser_error_prefix_for_line(eof_line)
+            };
+            self.write_diagnostic_fd2(
+                format!("{prefix}syntax error: unexpected end of file\n").as_bytes(),
+            );
+            self.errexit_active_at_diagnostic();
+            return;
+        }
         let message = cmd
             .get_assignment("__RUBASH_PARSE_ERROR__")
             .map(String::as_str)
@@ -264,7 +379,18 @@ impl Executor {
             Some(line) => self.parser_error_prefix_for_line(line),
             None => self.parser_error_prefix(),
         };
-        if message.starts_with("syntax error:") || message.starts_with("arithmetic syntax error:") {
+        // A matched-pair EOF message (`unexpected EOF while looking
+        // for matching `)'') is a COMPLETE diagnostic — GNU's
+        // parse_matched_pair reports it through parser_error directly
+        // (parse.y:3908-3915), with no `syntax error near' wrapper and
+        // no offending-line echo. Rendering it through the near arm
+        // below would manufacture the nonsense form `syntax error
+        // near unexpected EOF...' (rubash#2749: the arithmetic-`for'
+        // header scan's EOF node reaches this renderer via eval).
+        let verbatim = message.starts_with("syntax error:")
+            || message.starts_with("arithmetic syntax error:")
+            || message.starts_with("unexpected EOF while looking for matching");
+        if verbatim {
             self.write_diagnostic_fd2(format!("{prefix}{message}\n").as_bytes());
             // GNU error.c:324-327 (parser_error): with
             // exit_immediately_on_error set, the first diagnostic line is
@@ -275,7 +401,7 @@ impl Executor {
                 return;
             }
             // parse.y:6865: the offending-line echo is non-interactive only.
-            if self.offending_line_echo_enabled() {
+            if message.starts_with("syntax error:") && self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
                     self.write_diagnostic_fd2(
                         format!("{prefix}syntax error: `{source}'\n").as_bytes(),
@@ -300,6 +426,264 @@ impl Executor {
                 }
             }
         }
+    }
+
+    /// rubash#2751: report a `$(`-body parse error in GNU's read-time
+    /// shape. GNU parses the body inside the enclosing reader with
+    /// shell_eof_token = `)' (parse.y:4519-4521), so the report is the
+    /// enclosing command's own yyerror, re-presented at the body
+    /// boundary:
+    /// - a NEAR error gains the suffix ` while looking for matching
+    ///   `)'` (`echo $(if then)' names `then' with the suffix);
+    /// - an error that ran the body into its end (plain EOF,
+    ///   compound-EOF, conditional-EOF) names the `)' itself — the
+    ///   token the reader actually tripped on at the body boundary
+    ///   (`echo $(if true; then echo)' names `)');
+    /// - a conditional's follow-on walk (the SHORT near form, which
+    ///   GNU computes with error_token_from_text over the enclosing
+    ///   line) extends over the closing paren ONLY when the paren is
+    ///   glued to the conditional's end (`$([[ a == ]])' names
+    ///   `]])'); a stored near that is itself a break character
+    ///   (`;' from a glued separator follower) stands alone, and a
+    ///   conditional that does not end the body keeps its body-level
+    ///   near. `body_text` is the extracted body, whose end is where
+    ///   the enclosing paren sat.
+    /// The stored `__RUBASH_PARSE_SOURCE__` echo is the body fragment;
+    /// GNU echoes the enclosing line, which no driver→executor channel
+    /// carries today — the fragment is what the node has.
+    pub(in crate::executor) fn report_comsub_body_parse_error(
+        &self,
+        cmd: &crate::parser::CommandNode,
+        body_text: Option<&str>,
+    ) {
+        let sep = crate::executor::markers::PARSE_ERROR_FIELD_SEP;
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
+            let mut fields = spec.split(sep);
+            let shape = fields.next().unwrap_or("near").to_string();
+            let aux_a = fields.next().unwrap_or_default().to_string();
+            let aux_b = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let messages: Vec<(usize, String)> = fields
+                .filter_map(|field| {
+                    field
+                        .split_once('\u{1}')
+                        .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg.to_string()))
+                })
+                .collect();
+            for (line, message) in &messages {
+                self.write_diagnostic_fd2(
+                    format!("{}{}\n", self.parser_error_prefix_for_line(*line), message).as_bytes(),
+                );
+                if self.errexit_active_at_diagnostic() {
+                    return;
+                }
+            }
+            match shape.as_str() {
+                "bare" => {}
+                "eof" => {
+                    let paren_line = aux_b.saturating_sub(1).max(1);
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}syntax error near unexpected token `)'\n",
+                            self.parser_error_prefix_for_line(paren_line)
+                        )
+                        .as_bytes(),
+                    );
+                }
+                _ => {
+                    // The walk extends over the paren only when it was
+                    // glued to the conditional's end: the extracted
+                    // body then ends with the conditional's closing
+                    // token (the node's last word, or the stored near
+                    // itself for the absorbed-closer encoding, whose
+                    // node carries no words). A break-character near
+                    // (`;' / `|' / `&' from a follower) is where the
+                    // walk stopped — it stands alone.
+                    let break_only = matches!(aux_a.as_str(), ";" | "|" | "&");
+                    let closer = cmd.words.last().map(String::as_str).unwrap_or(&aux_a);
+                    let glued = !break_only && body_text.is_some_and(|text| text.ends_with(closer));
+                    let near = if glued {
+                        format!("{aux_a})")
+                    } else {
+                        aux_a.clone()
+                    };
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}syntax error near `{near}'\n",
+                            self.parser_error_prefix_for_line(aux_b)
+                        )
+                        .as_bytes(),
+                    );
+                    if self.errexit_active_at_diagnostic() {
+                        return;
+                    }
+                    if self.offending_line_echo_enabled() {
+                        if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                            self.write_diagnostic_fd2(
+                                format!(
+                                    "{}`{}'\n",
+                                    self.parser_error_prefix_for_line(aux_b),
+                                    super::command_execute::parse_error_source_display(source)
+                                )
+                                .as_bytes(),
+                            );
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+            let mut fields = spec.split(sep);
+            let token = fields.next().unwrap_or_default().to_string();
+            let line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}syntax error near unexpected token `{token}' while looking for matching `)'\n",
+                    self.parser_error_prefix_for_line(line)
+                )
+                .as_bytes(),
+            );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    self.write_diagnostic_fd2(
+                        format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
+                            .as_bytes(),
+                    );
+                }
+            }
+            return;
+        }
+        if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
+            let mut fields = spec.split(sep);
+            let _compound = fields.next();
+            let _open_line = fields.next();
+            let eof_line = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1);
+            let paren_line = eof_line.saturating_sub(1).max(1);
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}syntax error near unexpected token `)'\n",
+                    self.parser_error_prefix_for_line(paren_line)
+                )
+                .as_bytes(),
+            );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}`{}'\n",
+                            self.parser_error_prefix_for_line(paren_line),
+                            source
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            return;
+        }
+        if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
+            let paren_line = cmd.line.unwrap_or(1);
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}syntax error near unexpected token `)'\n",
+                    self.parser_error_prefix_for_line(paren_line)
+                )
+                .as_bytes(),
+            );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}`{}'\n",
+                            self.parser_error_prefix_for_line(paren_line),
+                            source
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            return;
+        }
+        // The message encoding of a near error (`unexpected token
+        // `X'' — push_unexpected_token_error's stored form) gains the
+        // same suffix the NEAR encoding gets above: inside the body
+        // every yyerror report carries shell_eof_token (parse.y:4519).
+        if let Some(message) = cmd.get_assignment("__RUBASH_PARSE_ERROR__") {
+            if message.starts_with("unexpected token `") {
+                let line = cmd.line.unwrap_or(1);
+                let styled = super::command_execute::bash_style_unexpected_token_message(message);
+                self.write_diagnostic_fd2(
+                    format!(
+                        "{}syntax error near {styled} while looking for matching `)'\n",
+                        self.parser_error_prefix_for_line(line)
+                    )
+                    .as_bytes(),
+                );
+                if self.errexit_active_at_diagnostic() {
+                    return;
+                }
+                if self.offending_line_echo_enabled() {
+                    if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        self.write_diagnostic_fd2(
+                            format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
+                                .as_bytes(),
+                        );
+                    }
+                }
+                return;
+            }
+        }
+        // A matched-pair EOF stored as a plain message (the
+        // arithmetic scans' encoding) is the same body-boundary EOF:
+        // the `)' is the token the reader tripped on.
+        if cmd
+            .get_assignment("__RUBASH_PARSE_ERROR__")
+            .is_some_and(|message| message.starts_with("unexpected EOF while looking for matching"))
+        {
+            let paren_line = cmd.line.unwrap_or(1);
+            self.write_diagnostic_fd2(
+                format!(
+                    "{}syntax error near unexpected token `)'\n",
+                    self.parser_error_prefix_for_line(paren_line)
+                )
+                .as_bytes(),
+            );
+            if self.errexit_active_at_diagnostic() {
+                return;
+            }
+            if self.offending_line_echo_enabled() {
+                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    self.write_diagnostic_fd2(
+                        format!(
+                            "{}`{}'\n",
+                            self.parser_error_prefix_for_line(paren_line),
+                            source
+                        )
+                        .as_bytes(),
+                    );
+                }
+            }
+            return;
+        }
+        // Message class: the shared renderer owns it.
+        self.report_command_parse_error(cmd);
     }
 
     /// Pretty-print driver entry (`bash --pretty-print`, eval.c:215-253

@@ -326,10 +326,19 @@ impl Executor {
                 self.last_command_substitution_parse_error.set(false);
             } else {
                 self.mark_parse_error();
-                eprintln!(
-                    "{}syntax error in command substitution",
-                    self.parser_error_prefix()
-                );
+                // rubash#2751: when the body site already printed the
+                // diagnostic in GNU's read-time shape, that report is
+                // the whole story — GNU has no second escalation line,
+                // at any nesting depth. The latch paths that never
+                // reached a reporting site keep the escalation.
+                if self.last_command_substitution_error_reported.replace(false) {
+                    self.comsub_error_reported_out.set(true);
+                } else {
+                    eprintln!(
+                        "{}syntax error in command substitution",
+                        self.parser_error_prefix()
+                    );
+                }
                 self.exit_code = 2;
                 self.last_command_substitution_status.set(None);
                 return Err(ExecuteError::ExitCode(2));
