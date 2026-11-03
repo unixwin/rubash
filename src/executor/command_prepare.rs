@@ -634,11 +634,18 @@ impl Executor {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
             if self.shell_state.parameter_bad_substitution.replace(false) {
-                if self.posix_mode_enabled() && !self.invocation_interactive() {
+                if self.posix_mode_enabled()
+                    && !self.invocation_interactive()
+                    && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
+                {
                     // FORCE_EOF status is context-owned: 127 only at the
                     // `-c` top-level catch (shell.c:1471); a `( ... )`
                     // subshell child contains the jump at
                     // execute_cmd.c:1811 and exits 1 (niubash#163).
+                    // subst.c:10285-10286: at compat level <= 43 the
+                    // bad-substitution return is &expand_wdesc_error even
+                    // in POSIX mode, so the fatal arm is level-gated
+                    // (audit B4-F08).
                     let code = self.expansion_fatal_status();
                     self.exit_code = code;
                     return Err(ExecuteError::ExitCode(code));

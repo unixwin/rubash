@@ -2680,11 +2680,21 @@ impl Executor {
                 // below is the EBADF special case of the same shape.
                 let message = self.fd_table.read_error.take().unwrap_or_default();
                 let fd = read_fd.unwrap_or(0);
-                let assign_status = self.assign_read_scalar_names(
-                    &scalar_names,
-                    initial_text.as_deref().unwrap_or(""),
-                    raw,
-                );
+                // A hard read error binds NOTHING (read.def:911) —
+                // the same rule the EBADF arm below follows
+                // (rubash#1477): only the -i prefill text is bound,
+                // exactly as the readline path would have presented
+                // it. Binding "" here made `read -u 3 v` on a
+                // directory fd clear a pre-existing v (GNU keeps it).
+                let assign_status = if initial_text.is_some() {
+                    self.assign_read_scalar_names(
+                        &scalar_names,
+                        initial_text.as_deref().unwrap_or(""),
+                        raw,
+                    )
+                } else {
+                    0
+                };
                 if assign_status != 0 {
                     return self.finish_read_error(cmd, &stderr, assign_status);
                 }
