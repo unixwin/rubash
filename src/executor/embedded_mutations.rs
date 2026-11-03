@@ -102,6 +102,7 @@ impl Executor {
             false,
             true,
             false,
+            false,
         )
     }
 
@@ -116,7 +117,12 @@ impl Executor {
         // trailing unescape pass must see expansion results protected —
         // the same invariant the assignment-RHS entry documents, with the
         // restore done at this layer instead of by the caller.
-        self.expand_embedded_parameters_mut_inner(word, context, heredoc, false, false, true, true)
+        // rubash#2676: the HereDocument context is GNU's single-pass
+        // heredoc expansion (redir.c:374), so it walks in order; every
+        // other context keeps the pre-scan walk.
+        self.expand_embedded_parameters_mut_inner(
+            word, context, heredoc, false, false, true, true, heredoc,
+        )
     }
 
     // Compound array assignment RHS (`a=( ... )`): GNU defers expansion to
@@ -139,6 +145,7 @@ impl Executor {
             false,
             false,
             true,
+            false,
             false,
             false,
         )
@@ -167,6 +174,7 @@ impl Executor {
             false,
             false,
             false,
+            false,
         )
     }
 
@@ -185,6 +193,10 @@ impl Executor {
         if let Some(pre) = preexpanded_stdin_body(word) {
             return crate::executor::execution_misc::decode_stdin_body_enq(pre);
         }
+        // rubash#2676: same word-expansion frame as the heredoc body
+        // entry — the here-string word is one word, expanded once.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         let expanded = self.expand_here_string_segments(word);
         // GNU redir.c:373-374 (heredoc_expand): the expanded here-string
         // word is final data — heredoc_write emits it verbatim, and a
@@ -223,6 +235,10 @@ impl Executor {
         let mut index = 0usize;
 
         let mut expand_segment = |executor: &mut Self, segment: &str, sink: &mut String| {
+            // rubash#2676: a here-string word expands at the same
+            // do_redirections point as a heredoc body (redir.c:373
+            // heredoc_expand, r_reading_string), in the same single
+            // left-to-right pass — walk it in order too.
             sink.push_str(&executor.expand_embedded_parameters_mut_inner(
                 segment,
                 SubstitutionQuoteContext::Unquoted,
@@ -231,6 +247,7 @@ impl Executor {
                 false,
                 false,
                 false,
+                true,
             ));
         };
 
@@ -397,15 +414,31 @@ impl Executor {
         preserve_quotes: bool,
         protect_rhs_data: bool,
         restore_rhs_data: bool,
+        in_order: bool,
     ) -> String {
-        self.apply_parameter_assignment_expansions_in_word(word);
-        let saved_parameter_state =
+        // rubash#2676: heredoc bodies (and here-string words) expand in
+        // GNU's single left-to-right pass (redir.c:374 heredoc_expand ->
+        // subst.c expand_string_internal), so an in-order walk must NOT
+        // hoist every `${var:=word}` binding ahead of the pass the way
+        // the whole-word pre-scan does for ordinary words — the ordered
+        // pass applies each fragment's assignment as it reaches the
+        // fragment (apply_fragment_assignment_in_order) and renders
+        // against the live environment, so in-pass bindings are visible
+        // to later fragments in document order. Ordinary words keep the
+        // pre-scan: their render pass is `&self` and relies on it.
+        if !in_order {
+            self.apply_parameter_assignment_expansions_in_word(word);
+        }
+        let saved_parameter_state = if in_order {
+            None
+        } else {
             word_contains_current_shell_command_substitution(word).then(|| {
                 (
                     self.shell_state.env_vars.clone(),
                     self.shell_state.pipestatus.clone(),
                 )
-            });
+            })
+        };
         let expanded = self.expand_embedded_parameters_ordered_mut(
             word,
             saved_parameter_state.as_ref(),
@@ -414,6 +447,7 @@ impl Executor {
             alternate,
             preserve_quotes,
             protect_rhs_data,
+            in_order,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
             if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
@@ -498,6 +532,7 @@ impl Executor {
         alternate: bool,
         preserve_quotes: bool,
         protect_rhs_data: bool,
+        in_order: bool,
     ) -> String {
         // GNU subst.c:11862 `add_quoted_string:` -> quote_string
         // (subst.c:4773): a parameter-expansion result merged into the word
@@ -1057,6 +1092,16 @@ impl Executor {
                     let _site_guard = (!whole_braced).then(|| {
                         crate::executor::expand_braced_indices::SubSiteGuard::new(this_frag)
                     });
+                    // rubash#2676: in an in-order (heredoc) walk, this
+                    // fragment's `$` offset in the word — the in-order
+                    // assignment application below derives its quote
+                    // state from the word prefix ending here. `chars`
+                    // still starts at the `{`, so the `$` sits one byte
+                    // before the remaining suffix.
+                    let frag_start = in_order.then(|| {
+                        let suffix: String = chars.clone().collect();
+                        word.len() - suffix.len() - 1
+                    });
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
                         let value = protect_rhs_value(&value, protect_rhs_data);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
@@ -1099,6 +1144,9 @@ impl Executor {
                             let consumed = word.len() - remainder.len();
                             let name = remainder[..close].to_string();
                             chars = word[consumed + close + 1..].chars().peekable();
+                            if let Some(start) = frag_start {
+                                self.apply_fragment_assignment_in_order(&name, word, start);
+                            }
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
                                     executor.expand_word_mut_with_context(
@@ -1126,6 +1174,9 @@ impl Executor {
                                 &format!("\"{word}\""),
                             ) {
                                 continue;
+                            }
+                            if let Some(start) = frag_start {
+                                self.apply_fragment_assignment_in_order(&name, word, start);
                             }
                             let value =
                                 self.expand_with_parameter_env(saved_parameter_state, |executor| {
@@ -1155,6 +1206,9 @@ impl Executor {
                             &format!("\"{word}\""),
                         ) {
                             continue;
+                        }
+                        if let Some(start) = frag_start {
+                            self.apply_fragment_assignment_in_order(&name, word, start);
                         }
                         let value =
                             self.expand_with_parameter_env(saved_parameter_state, |executor| {
