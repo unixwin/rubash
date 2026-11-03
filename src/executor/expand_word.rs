@@ -685,8 +685,50 @@ impl Executor {
             ),
             "$#" => Some(self.shell_state.positional_window().len().to_string()),
             "$-" => Some(self.shell_option_flags()),
-            _ => tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars),
+            _ => {
+                if let Some(expanded) = self.expand_tilde_prefix_word(word) {
+                    return Some(expanded);
+                }
+                tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
+            }
         }
+    }
+
+    /// GNU subst.c:11497-11512 (expand_word_internal, case '~'): the
+    /// tilde pass inside the word walk. The resolved prefix joins the
+    /// word as a quoted string (add_quoted_string, subst.c:11862 —
+    /// [`tilde_expand::protect_tilde_prefix`]) and the walk CONTINUES
+    /// with the remainder: expansions in the remainder run, split and
+    /// quote exactly as if the prefix were literal text in front of
+    /// them. The recursion into expand_word is the continuation — the
+    /// remainder always starts at the `/` that ended the prefix, so it
+    /// re-enters every stage below this one and can never re-trigger
+    /// the tilde pass itself.
+    ///
+    /// Falls back (None) when there is nothing to continue with: a
+    /// word that is exactly a tilde prefix, or a prefix that does not
+    /// resolve — the historical whole-word
+    /// [`tilde_expand::expand_word_prefix`] owns those shapes verbatim
+    /// (including its `:`-glued user tails).
+    fn expand_tilde_prefix_word(&self, word: &str) -> Option<String> {
+        let (prefix, remainder) =
+            tilde_expand::tilde_prefix_split(word, &self.shell_state.env_vars)?;
+        if remainder.is_empty() {
+            return None;
+        }
+        let protected = tilde_expand::protect_tilde_prefix(&prefix, self.current_ifs());
+        Some(format!("{protected}{}", self.expand_word(remainder)))
+    }
+
+    /// The IFS value field splitting will use for a word expanded
+    /// right now: the live variable, or the default whitespace when
+    /// unset (field_split_values_with_ifs's contract in arrays.rs).
+    pub(in crate::executor) fn current_ifs(&self) -> &str {
+        self.shell_state
+            .env_vars
+            .get("IFS")
+            .map(String::as_str)
+            .unwrap_or(" \t\n")
     }
 
     fn expand_assignment_word(&self, word: &str) -> Option<String> {
