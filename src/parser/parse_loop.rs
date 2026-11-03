@@ -870,15 +870,21 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
         }
 
         if connectors.is_empty() || list_commands.len() != connectors.len() + 1 {
-            if list_commands.len() == 1 && !connectors.is_empty() {
+            if !connectors.is_empty() && list_commands.len() == connectors.len() {
+                // GNU parse.y yyerror: a `&&`/`||` with no right-hand
+                // command because input ended reports "syntax error:
+                // unexpected end of file" (the EOF form, at the
+                // end-of-input line) and the whole list is discarded —
+                // for a list of ANY length, not just a single command.
+                // Route through the same __RUBASH_PARSE_ERROR_EOF__
+                // marker the dangling-pipeline fold below uses, so the
+                // report sites render the EOF form (deep-audit B6-F1).
                 let mut command = list_commands
                     .into_iter()
                     .next()
                     .expect("and-or list has a command");
-                command.insert_assignment(
-                    "__RUBASH_PARSE_ERROR__".to_string(),
-                    "unexpected end of file".to_string(),
-                );
+                command
+                    .insert_assignment("__RUBASH_PARSE_ERROR_EOF__".to_string(), "1".to_string());
                 folded.push(command);
                 continue;
             }

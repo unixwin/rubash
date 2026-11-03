@@ -12,11 +12,31 @@ const EX_USAGE: i32 = 2;
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    execute_with_io(args.iter().map(String::as_str), &mut stdout, &mut stderr)
+    execute_with_io(
+        args.iter().map(String::as_str),
+        &diagnostic_prefix(),
+        &mut stdout,
+        &mut stderr,
+    )
+}
+
+/// The fallback diagnostic prefix for the stdio entry point, following the
+/// same pattern as builtins/alias.rs: the executor-dispatched path passes
+/// `Executor::diagnostic_prefix()` explicitly instead.
+fn diagnostic_prefix() -> String {
+    if let (Ok(script), Ok(line)) = (
+        std::env::var("__RUBASH_SCRIPT_NAME"),
+        std::env::var("__RUBASH_CURRENT_LINE"),
+    ) {
+        return format!("{script}: line {line}: ");
+    }
+
+    "rubash: ".to_string()
 }
 
 pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
+    diagnostic_prefix: &str,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -28,7 +48,14 @@ where
     if let Some(arg) = args.into_iter().next() {
         if arg != "--" && arg.starts_with('-') {
             let option = arg.chars().nth(1).unwrap_or('-');
-            writeln!(stderr, "rubash: times: -{}: invalid option", option)?;
+            // GNU builtins/common.c builtin_error: the diagnostic carries
+            // the shell's diagnostic prefix (`bash: line 1: times: ...`),
+            // never a hardcoded program name (deep-audit B6-F2).
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}times: -{}: invalid option",
+                option
+            )?;
             writeln!(stderr, "times: usage: times")?;
             return Ok(EX_USAGE);
         }
@@ -46,7 +73,13 @@ mod tests {
     fn run(args: &[&str]) -> (i32, String, String) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = execute_with_io(args.iter().copied(), &mut stdout, &mut stderr).unwrap();
+        let status = execute_with_io(
+            args.iter().copied(),
+            "bash: line 1: ",
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
 
         (
             status,
@@ -74,6 +107,20 @@ mod tests {
         assert_eq!(status, EX_USAGE);
         assert!(stdout.is_empty());
         assert!(stderr.contains("invalid option"));
+    }
+
+    #[test]
+    fn b6_f2_invalid_option_uses_callers_diagnostic_prefix() {
+        // Deep-audit B6-F2: GNU builtins/common.c builtin_error carries the
+        // shell diagnostic prefix (`bash: line 1: times: -z: invalid
+        // option`); the builtin must not hardcode a program name.
+        let (status, _, stderr) = run(&["-z"]);
+
+        assert_eq!(status, EX_USAGE);
+        assert_eq!(
+            stderr,
+            "bash: line 1: times: -z: invalid option\ntimes: usage: times\n"
+        );
     }
 
     #[test]

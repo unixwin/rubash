@@ -8,6 +8,7 @@ use super::names::valid_identifier;
 use super::output::{
     print_declaration, print_plain_declaration, print_unset_declaration, DeclarationAttrs,
 };
+use super::DynamicDeclarationView;
 use super::{
     ARRAY_VARS, ASSOC_VARS, DECLARED_UNSET_VARS, EXECUTION_FAILURE, EXPORTED_VARS, INTEGER_VARS,
     LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
@@ -20,7 +21,7 @@ pub(super) fn print_declare_names<W, E>(
     options: DeclareOptions,
     plain: bool,
     mut status: i32,
-    dynamic_views: &[(String, String)],
+    dynamic_views: &[DynamicDeclarationView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     stdout: &mut W,
     stderr: &mut E,
@@ -75,22 +76,27 @@ where
         // PIPESTATUS array) have no cell to enumerate, but GNU's full
         // `declare -p` listing includes them once materialized
         // (rubash#1363). The executor passes their views in listing
-        // mode only; merge the names that pass the attribute filters —
-        // a dynamic view is an array cell, and the remaining filters
-        // consult the mark sets exactly like the table-driven listing.
-        for (view_name, _) in dynamic_views {
+        // mode only; merge the names that pass the attribute filters.
+        // The array/integer filters adjudicate by the view's own
+        // attribute class (rubash#2700: the dynamic registry's cells
+        // carry those attributes in GNU but no mark-set entries here);
+        // the remaining filters consult the mark sets exactly like the
+        // table-driven listing.
+        for view in dynamic_views {
+            let view_name = view.name.as_str();
             if listed.iter().any(|name| name == view_name) {
                 continue;
             }
             let passes = (!filter_exported || variables.is_marked(EXPORTED_VARS, view_name))
                 && (!filter_readonly || variables.is_marked(READONLY_VARS, view_name))
+                && (!filter_array || view.array)
                 && (!filter_assoc)
-                && (!filter_integer || variables.is_marked(INTEGER_VARS, view_name))
+                && (!filter_integer || view.integer)
                 && (!filter_uppercase || variables.is_marked(UPPERCASE_VARS, view_name))
                 && (!filter_lowercase || variables.is_marked(LOWERCASE_VARS, view_name))
                 && (!filter_nameref || variables.is_marked(NAMEREF_VARS, view_name));
             if passes {
-                listed.push(view_name.clone());
+                listed.push(view.name.clone());
             }
         }
         // rubash#1569: adjudicate the listing against the pre-frame
@@ -171,8 +177,8 @@ where
         // declare -p RANDOM` prints the next draw with -ix, rubash#541).
         if let Some(rendered) = dynamic_views
             .iter()
-            .find(|(view_name, _)| view_name.as_str() == name.as_str())
-            .map(|(_, text)| text)
+            .find(|view| view.name.as_str() == name.as_str())
+            .map(|view| &view.text)
         {
             writeln!(stdout, "{rendered}")?;
         } else if let Some(Some((under_value, _))) = underlay.get(&name) {

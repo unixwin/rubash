@@ -43,6 +43,9 @@ impl Executor {
         let mut overrides: Vec<(usize, String)> = Vec::new();
         let mut has_t = false;
         let mut has_fd_alias = false;
+        // rubash#2710: bases of `-v` operands, for the frame-array
+        // overlay below (FUNCNAME & friends live outside env_vars).
+        let mut v_bases: Vec<String> = Vec::new();
         let mut index = 0;
         // rubash#1202: the -v subscript rewrite's evalerror diagnostic is
         // a diagnostic OF THIS BUILTIN (GNU test.c via execute_cmd.c
@@ -77,6 +80,7 @@ impl Executor {
             // rewritten value — borrow-only compare, no resolve table scan.
             if current == "-v" && index + 1 < args.len() {
                 let operand = strip(&args[index + 1]);
+                v_bases.push(operand.split('[').next().unwrap_or(operand).to_string());
                 if operand == "-t" {
                     has_t = true;
                 }
@@ -159,13 +163,15 @@ impl Executor {
         // consults the fd-table bindings and leaked the diagnostic to the
         // real stderr under `command test x =~ y 2>/dev/null`
         // (modernish TESTERE.t probe).
+        // rubash#2710: `test -v` over a frame-stack carrier consults
+        // the composed array (GNU find_variable sees the live cells);
+        // the overlay is built only when a `-v` operand names one.
+        let v_bases_ref: Vec<&str> = v_bases.iter().map(String::as_str).collect();
+        let overlaid_env = self.env_with_frame_arrays(&v_bases_ref);
+        let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
         let mut stderr = Vec::new();
-        let status = crate::builtins::test::execute_with_stderr(
-            &merged,
-            bracket,
-            &self.shell_state.env_vars,
-            &mut stderr,
-        )?;
+        let status =
+            crate::builtins::test::execute_with_stderr(&merged, bracket, env_vars, &mut stderr)?;
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }

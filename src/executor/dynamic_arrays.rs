@@ -26,6 +26,14 @@ pub(crate) struct ArithDynamicContext {
     /// element 0 is the text and a negative subscript is INDEX_ERROR
     /// rather than a dense rebase onto the value.
     pipestatus_scalar: Option<String>,
+    /// Dynamic names a plain binding owns at context construction
+    /// (rubash#2720, Executor::dynamic_name_shadowed): find_variable
+    /// reaches the local/tempenv cell before the global dynamic cell,
+    /// so the evaluator must read (and write) the plain cell for these
+    /// names instead of consulting the dynamic getters or running the
+    /// dynamic assignment hooks. PIPESTATUS is not listed: its shape
+    /// pair above already encodes its shadow state.
+    shadowed_names: Vec<String>,
 }
 
 impl ArithDynamicContext {
@@ -42,6 +50,11 @@ impl ArithDynamicContext {
         env_vars: &HashMap<String, String>,
         name: &str,
     ) -> Option<String> {
+        // rubash#2720: a shadowed name belongs to its plain binding;
+        // the evaluator's stored-value legs answer for it.
+        if name != "PIPESTATUS" && self.name_shadowed(name) {
+            return None;
+        }
         match name {
             "BASHPID" => Some(self.bashpid.to_string()),
             "BASH_SUBSHELL" => Some(self.subshell_depth.to_string()),
@@ -77,6 +90,12 @@ impl ArithDynamicContext {
             "PIPESTATUS" => Some(self.pipestatus_first.to_string()),
             _ => None,
         }
+    }
+
+    /// Whether a plain (local/tempenv) binding owned `name` when this
+    /// context was built (rubash#2720).
+    pub(in crate::executor) fn name_shadowed(&self, name: &str) -> bool {
+        self.shadowed_names.iter().any(|bound| bound == name)
     }
 
     /// Arithmetic `${PIPESTATUS[i]}` / `PIPESTATUS[i]` element read
@@ -256,6 +275,49 @@ pub(in crate::executor) fn groups_words() -> Vec<String> {
 }
 
 impl Executor {
+    /// Whether a plain binding currently OWNS `name` in place of the
+    /// dynamic variable of the same name (rubash#2720).
+    ///
+    /// GNU registers the dynamic variables as ordinary SHELL_VAR cells
+    /// in the global table (variables.c:1844
+    /// initialize_dynamic_variables) and every read resolves through
+    /// find_variable, which walks the variable-context stack FIRST: a
+    /// `local` binding is a separate plain cell that owns reads and
+    /// writes while it is visible, and a command-prefix (tempenv)
+    /// binding likewise installs its own cell for the command's
+    /// duration (variables.c push_context / the temporary-environment
+    /// bindings in execute_cmd.c). The dynamic get/set hooks live on the
+    /// global cell, so they answer only when no such plain binding
+    /// shadows them.
+    ///
+    /// Rubash's provider instead answers BY NAME, so every dynamic face
+    /// must yield when this predicate holds. The precedent in-tree is
+    /// DIRSTACK's dirstack_shadowed (same three sources); PIPESTATUS is
+    /// exempt at its own faces because its cell-shape machinery
+    /// (pipestatus_shape) already encodes the shadow state.
+    pub(in crate::executor) fn dynamic_name_shadowed(&self, name: &str) -> bool {
+        self.visible_local_scope_index(name).is_some()
+            || self.tempenv_names.iter().any(|bound| bound == name)
+            || self
+                .function_tempenv_names
+                .iter()
+                .any(|frame| frame.iter().any(|bound| bound == name))
+    }
+
+    /// The write-side twin of dynamic_name_shadowed (rubash#2720):
+    /// whether a bind of `name` at this moment lands on a plain cell
+    /// rather than the global dynamic cell — because a shadow owns the
+    /// name, or because the bind is itself a tempenv bind in flight
+    /// (apply_temporary_assignments raises the flag; the name reaches
+    /// tempenv_names only after its bind lands). The dynamic assignment
+    /// hooks (SECONDS offset, RANDOM seed, the provider swallows) live
+    /// on the dynamic cell, so they stand down when this holds and the
+    /// generic store runs — the DIRSTACK arm's !dirstack_shadowed()
+    /// gate (rubash#2424) is the in-tree precedent.
+    pub(in crate::executor) fn dynamic_bind_targets_plain_cell(&self, name: &str) -> bool {
+        self.applying_temporary_assignments || self.dynamic_name_shadowed(name)
+    }
+
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
         // Hot-path reorder: the UNSET_DYNAMIC_VARS probe below is a
         // SipHash over the name, paid on EVERY variable read (the assoc
@@ -292,6 +354,12 @@ impl Executor {
         // GNU variables.c:3839 unbind_variable: `unset -v` unbinds a
         // dynamic variable for the rest of the shell's lifetime.
         if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return None;
+        }
+        // rubash#2720: a visible local or tempenv binding owns the name
+        // (find_variable's context stack precedes the global dynamic
+        // cell) — the stored read layered after this provider answers.
+        if self.dynamic_name_shadowed(name) {
             return None;
         }
         match name {
@@ -477,30 +545,152 @@ impl Executor {
         trimmed.parse::<i64>().ok()
     }
 
-    pub(in crate::executor) fn apply_declare_random_seeds(&self, args: &[String]) {
+    /// The declare-family dynamic bind hooks (rubash#541, rubash#2720).
+    ///
+    /// GNU variables.c:1393-1408 assign_random: RANDOM is
+    /// INIT_DYNAMIC_VAR with assign_random, so a declare/typeset bind
+    /// reseeds the generator exactly like a plain `RANDOM=<n>`
+    /// assignment (rubash#541's declare -p getter read exposed the
+    /// missing seed as a shifted exp.tests ${#RANDOM} sequence); a
+    /// SECONDS bind likewise moves the offset (get_seconds'
+    /// assignment base). The hooks live on the global dynamic cell, so
+    /// they run only when the declare bind actually targets that cell:
+    /// `binds_global` is the caller's locality verdict (a declare in a
+    /// function without -g creates/binds a LOCAL plain cell — no hook;
+    /// the local builtin without -g likewise), a print invocation
+    /// never binds, and a tempenv shadow owns the name even for a
+    /// global-shaped declare. -g names the global cell explicitly and
+    /// overrides a local shadow (but not a print).
+    pub(in crate::executor) fn apply_declare_dynamic_hooks(
+        &mut self,
+        args: &[String],
+        binds_global: bool,
+    ) {
+        if declare_args_request_print(args) {
+            return;
+        }
+        if !binds_global && !declare_args_force_global(args) {
+            return;
+        }
+        let force_global = declare_args_force_global(args);
         for arg in args {
             let Some((name, value)) = arg.split_once('=') else {
                 continue;
             };
-            if name.ends_with('+') || name != "RANDOM" {
+            if name.ends_with('+') || !matches!(name, "RANDOM" | "SECONDS") {
                 continue;
             }
-            if let Some(seed) = Self::canonical_decimal_seed(value) {
-                self.shell_state.random_state.rseed.set(seed as u32);
-                self.shell_state.random_state.last_value.set(0);
-            } else if let Some(seed) = crate::executor::arithmetic::eval_conditional_arith_value(
-                value,
-                &self.shell_state.env_vars,
-            ) {
-                // Same evalexp seeding as the plain assignment path
-                // (rubash#1082); a failed evaluation leaves the seed
-                // alone — declare's caller surfaces the evalerror.
-                self.shell_state.random_state.rseed.set(seed as u32);
-                self.shell_state.random_state.last_value.set(0);
+            if !force_global && self.dynamic_name_shadowed(name) {
+                continue;
             }
-            // A failed evaluation leaves the seed alone; the evalerror
-            // record stays for the declare caller's diagnostic path.
+            // variables.c:3839: an unset dynamic name binds as an
+            // ordinary variable — the builtin's plain storage owns it.
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+                continue;
+            }
+            match name {
+                "RANDOM" => {
+                    if let Some(seed) = Self::canonical_decimal_seed(value) {
+                        self.shell_state.random_state.rseed.set(seed as u32);
+                        self.shell_state.random_state.last_value.set(0);
+                    } else if let Some(seed) =
+                        crate::executor::arithmetic::eval_conditional_arith_value(
+                            value,
+                            &self.shell_state.env_vars,
+                        )
+                    {
+                        // Same evalexp seeding as the plain assignment path
+                        // (rubash#1082); a failed evaluation leaves the seed
+                        // alone — declare's caller surfaces the evalerror.
+                        self.shell_state.random_state.rseed.set(seed as u32);
+                        self.shell_state.random_state.last_value.set(0);
+                    }
+                    // A failed evaluation leaves the seed alone; the evalerror
+                    // record stays for the declare caller's diagnostic path.
+                }
+                "SECONDS" => {
+                    // The apply_shell_assignment arm's offset computation,
+                    // verbatim: the assigned value becomes the new base.
+                    let assigned = value.trim().parse::<i64>().unwrap_or(0);
+                    let start = self
+                        .shell_state
+                        .env_vars
+                        .get(SHELL_START_EPOCH)
+                        .and_then(|value| value.parse::<i64>().ok())
+                        .unwrap_or_else(current_epoch_seconds);
+                    let elapsed = current_epoch_seconds() - start;
+                    self.shell_state
+                        .env_vars
+                        .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
+                }
+                _ => unreachable!(),
+            }
         }
+    }
+
+    /// The attribute class (integer, array) of a dynamic variable's
+    /// declaration cell — the same per-name split
+    /// dynamic_declaration_view's render arms encode (integer:
+    /// RANDOM/SECONDS/SRANDOM/BASHPID/HISTCMD via their att_integer
+    /// registration, variables.c:1858-1875; array: the stack/group
+    /// carriers). Listing filters adjudicate dynamic names by this
+    /// class (rubash#2700).
+    pub(in crate::executor) fn dynamic_declaration_class(name: &str) -> (bool, bool) {
+        match name {
+            "RANDOM" | "SECONDS" | "SRANDOM" | "BASHPID" | "HISTCMD" => (true, false),
+            "GROUPS" | "PIPESTATUS" | "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO" => {
+                (false, true)
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// The assignment-form listing supply for the dynamic registry's
+    /// VISIBLE class (GROUPS and the source-stack arrays): `set` and
+    /// bare `declare` enumerate them from the live composition, like
+    /// GNU's print_var_list over real cells (rubash#2700). A shadowed
+    /// or unset name is skipped — its plain binding (or absence) owns
+    /// the listing line. PIPESTATUS is not in this class: GNU's `set`
+    /// listing omits it (its cell is unset-valued between commands),
+    /// and the invisible provider scalars never appear in
+    /// print_var_list.
+    pub(in crate::executor) fn dynamic_set_views(
+        &self,
+    ) -> Vec<crate::builtins::set::DynamicSetView> {
+        let mut views = Vec::new();
+        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+                || self.dynamic_name_shadowed(name)
+            {
+                continue;
+            }
+            let values = if name == "GROUPS" {
+                groups_words()
+            } else {
+                self.dynamic_stack_array_values(name).unwrap_or_default()
+            };
+            views.push(crate::builtins::set::DynamicSetView {
+                name: name.to_string(),
+                storage: format_indexed_array_values(values),
+            });
+        }
+        views
+    }
+
+    /// A dynamic variable's declaration view in the builtin's carrier
+    /// type: the rendered text plus its filter class (rubash#2700).
+    pub(in crate::executor) fn dynamic_view(
+        &self,
+        name: &str,
+    ) -> Option<crate::builtins::declare::DynamicDeclarationView> {
+        let text = self.dynamic_declaration_view(name)?;
+        let (integer, array) = Self::dynamic_declaration_class(name);
+        Some(crate::builtins::declare::DynamicDeclarationView {
+            name: name.to_string(),
+            text,
+            integer,
+            array,
+        })
     }
 
     /// GNU variables.c initialize_dynamic_variables registers every dynamic
@@ -513,6 +703,15 @@ impl Executor {
     /// removes the cell for the rest of the shell's lifetime).
     pub(in crate::executor) fn dynamic_declaration_view(&self, name: &str) -> Option<String> {
         if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return None;
+        }
+        // rubash#2720: a shadowed name renders as its plain binding (the
+        // declare storage path below answers) — GNU print_var_list
+        // renders the cell find_variable returns, and the local/tempenv
+        // cell is a plain one (`declare -- SECONDS="42"` inside the
+        // function, not the provider's `declare -i`). PIPESTATUS is
+        // exempt: its arms below dispatch on the shadow-aware shape.
+        if name != "PIPESTATUS" && self.dynamic_name_shadowed(name) {
             return None;
         }
         // rubash#1394: BASH_ARGC/BASH_ARGV are dynamic stack arrays
@@ -766,6 +965,13 @@ impl Executor {
         if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
             return false;
         }
+        // rubash#2720: a shadowed name's set-ness is its plain binding's
+        // (a valued local reads set, a valueless local reads unset) —
+        // GNU var_isset answers for the cell find_variable returns.
+        // PIPESTATUS is exempt: its shape pair already encodes this.
+        if name != "PIPESTATUS" && self.dynamic_name_shadowed(name) {
+            return self.shell_state.env_vars.contains_key(name);
+        }
         if name == "PIPESTATUS" {
             // A PIPESTATUS cell counts as set only once it holds a
             // value: a live array or a scalar (variables.c var_isset —
@@ -865,6 +1071,30 @@ impl Executor {
             } else {
                 None
             },
+            // rubash#2720: snapshot the dynamic names a plain binding
+            // owns, over exactly the class the evaluator can resolve
+            // dynamically (its own RANDOM/SRANDOM/LINENO/env-derived
+            // arms plus the resolve() arms above).
+            shadowed_names: [
+                "SECONDS",
+                "EPOCHSECONDS",
+                "EPOCHREALTIME",
+                "BASH_MONOSECONDS",
+                "RANDOM",
+                "SRANDOM",
+                "LINENO",
+                "BASHPID",
+                "BASH_SUBSHELL",
+                "HISTCMD",
+                "BASH_ARGV0",
+                "FUNCNAME",
+                "GROUPS",
+                "BASH_COMMAND",
+            ]
+            .into_iter()
+            .filter(|name| self.dynamic_name_shadowed(name))
+            .map(str::to_string)
+            .collect(),
         }
     }
 
@@ -1173,6 +1403,45 @@ impl Executor {
             .map(normalize_array_expanded_value)
             .collect::<Vec<_>>();
         Some(self.join_expanded_array_values(values, expression))
+    }
+
+    /// Whether `name` is one of the frame-stack array carriers whose
+    /// storage dynamic_stack_array_values composes live (rubash#2710).
+    pub(in crate::executor) fn is_frame_array_carrier(name: &str) -> bool {
+        matches!(
+            name,
+            "FUNCNAME" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
+        )
+    }
+
+    /// An env map overlaid with the composed frame-array storage for
+    /// the given `-v` operand bases, for consumers whose lookup
+    /// contract is env-only (builtins::test::variable_is_set): GNU
+    /// test.c:650-677 `-v` runs find_variable over the LIVE array
+    /// cells, but the carriers' env cells are refreshed only at frame
+    /// push/pop (and FUNCNAME's is not materialized at all), so the
+    /// bare map answers stale or blind (rubash#2710). The overlay
+    /// inserts the composed storage in the same serialized form the
+    /// cells themselves carry, so every branch of the env-only lookup
+    /// (whole-name, [n], [@]) adjudicates it identically. None when no
+    /// base is a carrier — the caller keeps borrowing the live map, so
+    /// ordinary `-v` operands pay nothing.
+    pub(in crate::executor) fn env_with_frame_arrays(
+        &self,
+        bases: &[&str],
+    ) -> Option<crate::shell::var_table::VarTable> {
+        let mut overlaid: Option<crate::shell::var_table::VarTable> = None;
+        for base in bases {
+            if !Self::is_frame_array_carrier(base) {
+                continue;
+            }
+            let Some(values) = self.dynamic_stack_array_values(base) else {
+                continue;
+            };
+            let map = overlaid.get_or_insert_with(|| self.shell_state.env_vars.clone());
+            map.insert((*base).to_string(), format_indexed_array_values(values));
+        }
+        overlaid
     }
 
     pub(in crate::executor) fn parameter_array_storage(&self, name: &str) -> Option<String> {
