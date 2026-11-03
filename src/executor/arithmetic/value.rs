@@ -458,10 +458,17 @@ impl ConditionalArithParser<'_> {
             self.record_recursion_error(name);
             return None;
         }
+        // rubash#2720: a name a plain local/tempenv binding owned when
+        // the context was built reads as that plain cell (find_variable
+        // precedes the global dynamic cell) — skip every dynamic leg
+        // below and let the stored-value legs answer.
+        let shadowed = self
+            .dynamic_values
+            .is_some_and(|context| context.name_shadowed(name));
         // GNU variables.c:3839 unbind_variable: `unset -v` unbinds a
         // dynamic variable permanently — the name then reads like an
         // ordinary unset variable through the env fallback below.
-        if !is_marked_var(self.env_vars, UNSET_DYNAMIC_VARS, name) {
+        if !shadowed && !is_marked_var(self.env_vars, UNSET_DYNAMIC_VARS, name) {
             if name == "RANDOM" {
                 return self
                     .random_state
@@ -818,7 +825,13 @@ impl ConditionalArithParser<'_> {
             self.env_vars.mark_array_cells_dirty();
         }
         let value = bash_arith(value).to_string();
-        if name == "SECONDS" {
+        // rubash#2720: the dynamic assignment hooks below live on the
+        // global dynamic cell; a name owned by a plain local/tempenv
+        // binding takes the generic store like any ordinary variable.
+        let shadowed = self
+            .dynamic_values
+            .is_some_and(|context| context.name_shadowed(name));
+        if name == "SECONDS" && !shadowed {
             // Assignment resets the reference point so the dynamic value
             // becomes the assigned number and grows from there, matching
             // the parameter-assignment path in temporary_assignments.rs.
@@ -834,7 +847,7 @@ impl ConditionalArithParser<'_> {
             set_process_env(name, value);
             return;
         }
-        if name == "RANDOM" {
+        if name == "RANDOM" && !shadowed {
             if let Some(state) = self.random_state {
                 // GNU variables.c:1393-1408 assign_random: a non-numeric
                 // value fails valid_number and returns without reseeding;
@@ -846,7 +859,7 @@ impl ConditionalArithParser<'_> {
                 }
             }
         }
-        if name == "SRANDOM" {
+        if name == "SRANDOM" && !shadowed {
             return;
         }
         // GNU expr.c assigns through bind_variable: a nameref lvalue resolves

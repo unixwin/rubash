@@ -125,6 +125,12 @@ impl Executor {
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
         self.tempenv_marks.push(self.tempenv_names.len());
+        // rubash#2720: while the bind loop below runs, the dynamic
+        // assignment hooks stand down (see the field's doc) — a tempenv
+        // bind is a fresh plain cell, never a bind of the global dynamic
+        // cell. Saved/restored so a nested apply keeps the outer state.
+        let saved_applying_temporary = self.applying_temporary_assignments;
+        self.applying_temporary_assignments = true;
         // A promoted tempenv local survives the command-end restore, so any
         // names left promoted by a command whose restore was deferred
         // (keep_temporary_assignments) must not skip a later mark's restore.
@@ -687,7 +693,43 @@ impl Executor {
             self.tempenv_names.push(export_target.clone());
             self.mark_exported(&export_target);
         }
+        self.applying_temporary_assignments = saved_applying_temporary;
         (previous, assignments_failed)
+    }
+
+    /// rubash#2720: convert KEPT tempenv binds of the hook-carrying
+    /// dynamic names (SECONDS, RANDOM) to real dynamic binds. A tempenv
+    /// bind is a plain cell (see applying_temporary_assignments), but
+    /// when the binding survives the command — attribute-builtin
+    /// absorption (setattr.def:590-614) or posix special-builtin
+    /// persistence — GNU's merge rebinds it through the underlying
+    /// variable (merge_temporary_env -> bind_variable, variables.c),
+    /// which for a dynamic name runs the cell's assignment hook: the
+    /// kept value becomes the SECONDS offset / the RANDOM seed and no
+    /// plain cell remains, exactly the storage the
+    /// apply_shell_assignment arms keep. Replaying the kept value
+    /// through apply_shell_assignment (with the tempenv flag down and
+    /// no shadow in scope) reproduces that bind verbatim. An
+    /// unset-dynamic name stays a plain cell (variables.c:3839: the
+    /// rebind creates an ordinary variable).
+    pub(in crate::executor) fn convert_kept_tempenv_dynamic_binds(
+        &mut self,
+        names: &std::collections::HashSet<String>,
+    ) {
+        for name in ["SECONDS", "RANDOM"] {
+            if !names.contains(name) {
+                continue;
+            }
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+                continue;
+            }
+            let Some(value) = self.shell_state.env_vars.get(name).cloned() else {
+                continue;
+            };
+            self.shell_state.env_vars.remove(name);
+            self.shell_state.variables.remove(name);
+            self.apply_shell_assignment(name, value);
+        }
     }
 
     /// Whether the tempenv target's current cell is an array
@@ -1533,7 +1575,12 @@ impl Executor {
         // arm below must stand down and let the plain bind happen.
         let dynamic_unbound =
             is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, base_name);
-        if base_name == "SECONDS" && !append && !dynamic_unbound {
+        // rubash#2720: every dynamic arm below lives on the global
+        // dynamic cell; when the bind targets a plain cell instead (a
+        // visible local/tempenv shadow, or a tempenv bind in flight)
+        // the arms stand down and the generic store owns the bind.
+        let dynamic_plain = self.dynamic_bind_targets_plain_cell(base_name);
+        if base_name == "SECONDS" && !append && !dynamic_unbound && !dynamic_plain {
             let assigned = value.trim().parse::<i64>().unwrap_or(0);
             let start = self
                 .shell_state
@@ -1548,7 +1595,7 @@ impl Executor {
             set_process_env(base_name, assigned.to_string());
             return true;
         }
-        if base_name == "RANDOM" && !append {
+        if base_name == "RANDOM" && !append && !dynamic_plain {
             // GNU variables.c:1393-1424 assign_random -> get_random_number
             // seeding: after `unset RANDOM` the cell is unbound
             // (variables.c:3839 unbind_variable) and the name is a plain
@@ -1588,25 +1635,29 @@ impl Executor {
             set_process_env(base_name, value);
             return true;
         }
-        if base_name == "SRANDOM" && !append && !dynamic_unbound {
+        if base_name == "SRANDOM" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "BASHPID" && !append && !dynamic_unbound {
+        if base_name == "BASHPID" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "BASH_SUBSHELL" && !append && !dynamic_unbound {
+        if base_name == "BASH_SUBSHELL" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "FUNCNAME" && !append && !dynamic_unbound {
+        if base_name == "FUNCNAME" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "LINENO" && !append && !dynamic_unbound {
+        if base_name == "LINENO" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "BASH_COMMAND" && !append && !dynamic_unbound {
+        if base_name == "BASH_COMMAND" && !append && !dynamic_unbound && !dynamic_plain {
             return true;
         }
-        if base_name == "DIRSTACK" && !dynamic_unbound && !self.dirstack_shadowed() {
+        if base_name == "DIRSTACK"
+            && !dynamic_unbound
+            && !dynamic_plain
+            && !self.dirstack_shadowed()
+        {
             // GNU variables.c:1612 assign_dirstack: every whole-
             // variable bind of DIRSTACK — scalar, compound, append —
             // routes through the dirstack setter, never through array
