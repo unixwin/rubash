@@ -96,6 +96,13 @@ impl Executor {
         }
 
         if let Some(path) = self.command_path(name, force_path) {
+            // GNU builtins/type.def describe_command (disk-file branch):
+            // a slash-bearing name is reported verbatim, never absolutized
+            // (absolute_program => savestring(pathname); relative slash
+            // names likewise print as given). The resolved absolute path
+            // stays the execution answer; only the display spelling is the
+            // argument itself. A3-R58B.
+            let display: &str = if name.contains('/') { name } else { &path };
             match mode {
                 TypeDescribeMode::Verbose => {
                     if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
@@ -103,11 +110,11 @@ impl Executor {
                     {
                         writeln!(stdout, "{name} is hashed ({path})")?;
                     } else {
-                        writeln!(stdout, "{name} is {path}")?;
+                        writeln!(stdout, "{name} is {display}")?;
                     }
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
-                    writeln!(stdout, "{path}")?
+                    writeln!(stdout, "{display}")?
                 }
                 TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
             }
@@ -220,6 +227,9 @@ impl Executor {
         }
 
         for path in self.command_paths(name, force_path) {
+            // Same verbatim rule as describe_name_with_io (A3-R58B):
+            // slash-bearing names display as given, not absolutized.
+            let display: &str = if name.contains('/') { name } else { &path };
             match mode {
                 TypeDescribeMode::Verbose => {
                     // GNU type.def: the `is hashed (...)` wording lives only
@@ -227,10 +237,10 @@ impl Executor {
                     // never reaches (`all == 0 || CDESC_FORCE_PATH` guard, and
                     // -P clears CDESC_SHORTDESC). `type -a` always prints the
                     // plain `name is path` form.
-                    writeln!(stdout, "{name} is {path}")?;
+                    writeln!(stdout, "{name} is {display}")?;
                 }
                 TypeDescribeMode::Reusable | TypeDescribeMode::PathOnly => {
-                    writeln!(stdout, "{path}")?
+                    writeln!(stdout, "{display}")?
                 }
                 TypeDescribeMode::TypeOnly => writeln!(stdout, "file")?,
             }
