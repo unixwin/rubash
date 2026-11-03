@@ -2158,6 +2158,16 @@ impl Executor {
             return String::new();
         }
         let prepared = prepare_unquoted_heredoc_expansion(body);
+        // rubash#2676: the body is expanded as a word, so install the
+        // word-expansion frame every other word entry installs
+        // (expand_word.rs, parameter_core.rs). Without a word context
+        // the cross-pass site keys are inert (sub_site_key returns
+        // None), the applied-assignment memo never engaged for heredoc
+        // bodies, and a `${var:=$(...)}` word ran its substitution
+        // twice — once when the assignment applied, once when the
+        // fragment rendered.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         let expanded = self.expand_embedded_parameters_mut_with_context(
             &prepared,
             SubstitutionQuoteContext::HereDocument,

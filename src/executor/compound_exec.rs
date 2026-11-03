@@ -2756,6 +2756,24 @@ impl Executor {
         Some(crate::fd::handle_to_file(dup))
     }
 
+    /// rubash#2681: both callers stage the body for a SPAWNED child
+    /// (the async stdio builder and the spawn redirect replay), which
+    /// is GNU's forked-child do_redirections context
+    /// (execute_cmd.c:5522) — the body's expansion effects belong to
+    /// the child and must not leak into the parent, so the expansion
+    /// runs inside the fork boundary. A body already expanded at the
+    /// do_redirections point rides as a Preexpanded carrier and reads
+    /// back verbatim, so the boundary is inert for it.
+    pub(in crate::executor) fn materialize_async_stdin_body(
+        &mut self,
+        command: &CommandNode,
+        index: usize,
+    ) -> Option<(std::fs::File, std::path::PathBuf)> {
+        self.with_forked_heredoc_expansion(|executor| {
+            executor.materialize_async_stdin_body_inner(command, index)
+        })
+    }
+
     /// Expand the body behind `command.redirects[index]` (a HereDoc or
     /// HereString entry) and stage it on a real temp file, mirroring GNU's
     /// here_document_to_fd so the spawned `-c` child reads an actual
@@ -2763,7 +2781,7 @@ impl Executor {
     /// entry correlates by fd, here-string flag, and ordinal among the
     /// matching `redirects` entries, with the fd-0 legacy fields
     /// (`heredoc`/`here_string` and their carriers) as fallback.
-    pub(in crate::executor) fn materialize_async_stdin_body(
+    fn materialize_async_stdin_body_inner(
         &mut self,
         command: &CommandNode,
         index: usize,
@@ -5031,6 +5049,18 @@ impl Executor {
                 respawn_argv_bytes += words_text.len();
                 child.arg("-c").arg(words_text);
             }
+            child
+        } else if !cmd.redirects.is_empty()
+            || !cmd.heredoc_redirects.is_empty()
+            || cmd.heredoc.is_some()
+        {
+            // rubash#2746: a redirection-only coproc body (`coproc >
+            // file') — GNU's grammar admits a simple command of only
+            // redirections as the shell_command, and its child applies
+            // them (through the coproc redirect walk below) and exits.
+            // The respawn child runs an empty command string.
+            let mut child = Command::new(&exe);
+            child.arg("-c").arg("");
             child
         } else {
             eprintln!(

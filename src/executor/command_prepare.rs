@@ -4815,7 +4815,7 @@ fn raw_has_ifs_quote_bytes(raw: &str) -> bool {
 /// lexer, so literal whitespace never reaches field splitting. Quoted-segment
 /// whitespace protection is handled separately by mark_quoted_ifs_from_raw
 /// (rubash#743), which uses the raw word's quote positions.
-fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
+pub(in crate::executor) fn mark_literal_ifs_chars(word: &str, ifs: &str) -> String {
     let chars: Vec<char> = word.chars().collect();
     let mut output = String::with_capacity(word.len());
     let mut index = 0;
@@ -5311,10 +5311,15 @@ fn copy_comsub_body_verbatim_for_ifs_marking(
             ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
     }
 }
-fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix: bool) -> String {
+pub(in crate::executor) fn mark_quoted_ifs_from_raw(
+    raw: &str,
+    cooked_with_marks: &str,
+    ifs: &str,
+    posix: bool,
+) -> String {
     use crate::executor::markers::{
         ANSI_C_IFS_GUARD, CTLESC, DATA_BACKSLASH, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE,
-        DATA_SQUOTE, IFS_GLUE, PARAM_NAME_END_MARKER,
+        DATA_SQUOTE, IFS_GLUE, PARAM_NAME_END_MARKER, QUOTED_EXPANSION_SITE,
     };
 
     const fn is_name_start(c: char) -> bool {
@@ -5331,6 +5336,16 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
     let mut simulated = String::with_capacity(raw.len());
     // Positions in `simulated` that were inside quotes and are IFS chars.
     let mut quoted_ifs_positions = Vec::new();
+    // rubash#2706: byte positions in `simulated` of expansion
+    // introducers (`$`, backtick) whose site is inside a quoted span.
+    // GNU's walk tracks each site's quoting itself and adds a quoted
+    // site's result through add_quoted_string (subst.c:11862); the
+    // cooked word has lost the quote characters, so the site verdict
+    // is carried in-band as QUOTED_EXPANSION_SITE and the expansion
+    // walkers IFS-protect that one result span. `$@`/`$*` sites are
+    // NOT recorded: their results are assembled by the positional
+    // junction machinery, not spliced as one string.
+    let mut quoted_expansion_sites = Vec::new();
     let mut index = 0usize;
     let mut in_single = false;
     let mut in_double = false;
@@ -5475,6 +5490,9 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
             pending_name = false;
             match raw_chars.get(index + 1) {
                 Some('{') => {
+                    if in_double {
+                        quoted_expansion_sites.push(simulated.len());
+                    }
                     // ${...} — verbatim copy through the cook's own span
                     // boundary. The walk routes `${` to
                     // copy_braced_parameter_unquoted (outer) /
@@ -5510,6 +5528,9 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
                     continue;
                 }
                 Some('(') => {
+                    if in_double {
+                        quoted_expansion_sites.push(simulated.len());
+                    }
                     // $(...) — verbatim span copy, case-aware (arm-for-arm
                     // with lexer/quotes.rs copy_dollar_paren_body_raw; GNU
                     // parse.y:4451 parse_comsub + parse.y:3465-3468
@@ -5596,11 +5617,18 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
                 match raw_chars.get(index + 1) {
                     // Special parameters travel as the raw pair.
                     Some(c @ ('?' | '$' | '!' | '#' | '-' | '@' | '*' | '0'..='9')) => {
+                        // rubash#2706: record the quoted site (except
+                        // $@/$* — positional junction machinery, see
+                        // the quoted_expansion_sites declaration).
+                        if !matches!(c, '@' | '*') {
+                            quoted_expansion_sites.push(simulated.len());
+                        }
                         simulated.push(ch);
                         simulated.push(*c);
                         index += 2;
                     }
                     Some(c) if is_name_start(*c) => {
+                        quoted_expansion_sites.push(simulated.len());
                         simulated.push(ch);
                         pending_name = true;
                         index += 1;
@@ -5632,6 +5660,9 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
             // string_extract_double_quoted stripdq; rubash#880). Simulate
             // the same rewrites so the equality guard below sees the cooked
             // bytes the walker produced (no PARAM_NAME_END_MARKER emission).
+            if in_double {
+                quoted_expansion_sites.push(simulated.len());
+            }
             pending_name = false;
             simulated.push(ch);
             index += 1;
@@ -5774,12 +5805,19 @@ fn mark_quoted_ifs_from_raw(raw: &str, cooked_with_marks: &str, ifs: &str, posix
     let mut cooked_pos = 0usize;
     let mut prev_glued = false;
     let quoted_set: std::collections::HashSet<usize> = quoted_ifs_positions.into_iter().collect();
+    let site_set: std::collections::HashSet<usize> = quoted_expansion_sites.into_iter().collect();
     for ch in cooked_with_marks.chars() {
         if ch == IFS_GLUE {
             result.push(ch);
             // Next char is the protected one; don't advance cooked_pos yet.
             prev_glued = true;
             continue;
+        }
+        // rubash#2706: the site marker goes immediately before the
+        // expansion introducer so the walkers' one-shot flag attaches
+        // to exactly that expansion.
+        if site_set.contains(&cooked_pos) {
+            result.push(QUOTED_EXPANSION_SITE);
         }
         if quoted_set.contains(&cooked_pos) && !prev_glued {
             result.push(IFS_GLUE);

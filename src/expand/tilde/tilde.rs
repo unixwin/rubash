@@ -78,6 +78,77 @@ pub fn expand_word_prefix(word: &str, env_vars: &HashMap<String, String>) -> Opt
     }
 }
 
+/// GNU subst.c:11497-11512 (expand_word_internal, case '~'): tilde
+/// expansion is one pass INSIDE the word walk, not a whole-word
+/// rewrite. This splits a cooked word into its tilde prefix and the
+/// remainder: the prefix ends at the first `/`
+/// (general.c:1210 bash_tilde_find_word's scan boundary), the caller
+/// joins the resolved prefix as a quoted string
+/// ([`protect_tilde_prefix`], subst.c:11862 add_quoted_string) and
+/// expands the remainder through the ordinary word pipeline.
+///
+/// Returns None when the word has no tilde prefix or the prefix does
+/// not resolve: GNU's tilde_expand then returns the word unchanged
+/// and the walk continues over the whole word (an unresolved `~$u`
+/// still expands `$u`), which the caller's fall-through reproduces.
+/// The quote veto (a quote character or backslash inside the prefix
+/// region makes bash_tilde_find_word return *lenp == 0) is NOT
+/// decided here: the cooked word has already lost the quote
+/// characters, so the lexer computes the verdict where the raw word
+/// exists and carries it in-band as QUOTED_WORD_PREFIX — vetoed words
+/// never reach this function.
+pub fn tilde_prefix_split<'a>(
+    word: &'a str,
+    env_vars: &HashMap<String, String>,
+) -> Option<(String, &'a str)> {
+    let rest = word.strip_prefix('~')?;
+    let (span, remainder) = match rest.find('/') {
+        Some(index) => (&word[..index + 1], &word[index + 1..]),
+        None => (word, ""),
+    };
+    let value = if span == "~" {
+        tilde_home(env_vars)?
+    } else if let Some(resolved) = special_tilde_expansion(span, env_vars) {
+        resolved?
+    } else {
+        expand_user_tilde_word(span, env_vars)?
+    };
+    Some((value, remainder))
+}
+
+/// The protection GNU gives the expanded tilde prefix:
+/// add_quoted_string (subst.c:11862) runs it through quote_string
+/// (subst.c:4773), CTLESC-protecting every character, so the prefix
+/// neither field-splits nor pathname-expands. Rubash splits that
+/// protection across its two carriers exactly as it does for quoted
+/// literal text: IFS characters take IFS_GLUE (the field splitter's
+/// carrier, via markers::protect_ifs_chars) and glob metacharacters
+/// take CTLESC (the glob layer's carrier).
+pub fn protect_tilde_prefix(value: &str, ifs: &str) -> String {
+    let protected = crate::executor::markers::protect_ifs_chars(value, ifs);
+    if !protected.contains(['*', '?', '[']) {
+        return protected;
+    }
+    let mut output = String::with_capacity(protected.len() + 4);
+    let mut prev_glued = false;
+    for ch in protected.chars() {
+        if ch == crate::executor::markers::IFS_GLUE {
+            prev_glued = true;
+            output.push(ch);
+            continue;
+        }
+        // A glue-preceded char is already spoken for: the splitter
+        // consumes the glue on this char, and a CTLESC behind it
+        // would reach the field as data.
+        if matches!(ch, '*' | '?' | '[') && !prev_glued {
+            output.push(crate::executor::markers::CTLESC);
+        }
+        prev_glued = false;
+        output.push(ch);
+    }
+    output
+}
+
 /// GNU general.c:1120 bash_special_tilde_expansions (the tilde
 /// preexpansion hook) + builtins/pushd.def:620 get_dirstack_from_string:
 /// the special tilde prefixes are `+` ($PWD), `-` ($OLDPWD), and a
