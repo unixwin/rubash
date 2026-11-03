@@ -55,8 +55,7 @@ fn run_interactive(input: &str) -> (String, String, i32) {
 
 #[test]
 fn issue2725_invalid_if_opener_errors_on_its_own_line() {
-    let (stdout, stderr, code) =
-        run_interactive("if then\necho in\nfi\necho after\nexit 4\n");
+    let (stdout, stderr, code) = run_interactive("if then\necho in\nfi\necho after\nexit 4\n");
     assert_eq!(code, 4, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout, "in\nafter\n");
     assert!(
@@ -82,8 +81,7 @@ fn issue2725_invalid_function_opener_errors_immediately() {
 
 #[test]
 fn issue2725_genuinely_incomplete_commands_still_group() {
-    let (stdout, stderr, code) =
-        run_interactive("if true; then\necho grouped\nfi\nexit 6\n");
+    let (stdout, stderr, code) = run_interactive("if true; then\necho grouped\nfi\nexit 6\n");
     assert_eq!(code, 6, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout, "grouped\n");
 
@@ -91,8 +89,7 @@ fn issue2725_genuinely_incomplete_commands_still_group() {
     assert_eq!(code, 7, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout, "cased\n");
 
-    let (stdout, stderr, code) =
-        run_interactive("echo \"multi\nline\"\nexit 8\n");
+    let (stdout, stderr, code) = run_interactive("echo \"multi\nline\"\nexit 8\n");
     assert_eq!(code, 8, "stdout: {stdout}\nstderr: {stderr}");
     assert_eq!(stdout, "multi\nline\n");
 }

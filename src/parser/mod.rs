@@ -50,7 +50,6 @@ mod tests;
 
 pub(crate) use function_command::find_body_parse_error;
 pub use nodes::*;
-pub(crate) use redirections::heredoc_delimiter_text;
 pub use parse_loop::{parse, parse_with_options, ParseLoopOptions};
 pub(crate) use parse_loop::{
     reclassify_leading_assignment_words, scan_time_prefix_tokens, scan_time_prefix_words,
@@ -58,6 +57,7 @@ pub(crate) use parse_loop::{
 pub(crate) use process_substitution::{
     raw_word_has_unquoted_process_substitution, verbatim_process_substitution_span,
 };
+pub(crate) use redirections::heredoc_delimiter_text;
 
 use arithmetic_command::*;
 use arithmetic_for::*;

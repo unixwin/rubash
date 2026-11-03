@@ -10,11 +10,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn marker(tag: &str) -> PathBuf {
-    let path = env::temp_dir().join(format!(
-        "rubash-2686-{}-{}",
-        std::process::id(),
-        tag
-    ));
+    let path = env::temp_dir().join(format!("rubash-2686-{}-{}", std::process::id(), tag));
     let _ = std::fs::remove_file(&path);
     path
 }
@@ -52,7 +48,11 @@ fn issue2686_delimiter_command_substitution_never_executes() {
 #[test]
 fn issue2686_delimiter_backquote_never_executes() {
     let path = marker("backquote");
-    let source = format!("cat <<`touch {}`\nx\n`touch {}`", path.display(), path.display());
+    let source = format!(
+        "cat <<`touch {}`\nx\n`touch {}`",
+        path.display(),
+        path.display()
+    );
     let (stdout, code) = run(&source);
     assert_eq!(code, 0);
     assert_eq!(stdout, "x\n");

@@ -23,7 +23,10 @@ fn run(source: &str) -> (String, String, i32) {
 
 fn assert_syntax_error_near(source: &str, token: &str) {
     let (stdout, stderr, code) = run(source);
-    assert_eq!(code, 2, "source: {source}\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        code, 2,
+        "source: {source}\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert_eq!(stdout, "", "source: {source}");
     assert!(
         stderr.contains(&format!("syntax error near unexpected token `{token}'")),

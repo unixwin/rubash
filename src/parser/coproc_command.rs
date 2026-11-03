@@ -281,11 +281,7 @@ fn coproc_missing_command_error(
     bad: usize,
 ) -> (CommandNode, usize) {
     let (blame, blame_position, source_index) = match tokens.get(bad) {
-        None => (
-            "newline".to_string(),
-            tokens[start].position,
-            start,
-        ),
+        None => ("newline".to_string(), tokens[start].position, start),
         Some(token) if token.kind == TokenKind::Eof => {
             ("newline".to_string(), tokens[start].position, start)
         }

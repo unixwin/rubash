@@ -28,7 +28,10 @@ fn run(source: &str) -> (String, String, i32) {
 
 fn assert_syntax_error_near(source: &str, token: &str) {
     let (stdout, stderr, code) = run(source);
-    assert_eq!(code, 2, "source: {source}\nstdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        code, 2,
+        "source: {source}\nstdout: {stdout}\nstderr: {stderr}"
+    );
     assert_eq!(stdout, "", "source: {source}");
     assert!(
         stderr.contains(&format!("syntax error near unexpected token `{token}'")),
@@ -63,10 +66,7 @@ fn issue2744_and_operator_in_pattern_position_errors() {
 
 #[test]
 fn issue2678_second_word_after_fallthrough_terminator_errors() {
-    assert_syntax_error_near(
-        "case x in x) echo one;& case y in y) echo FALL;; esac",
-        "y",
-    );
+    assert_syntax_error_near("case x in x) echo one;& case y in y) echo FALL;; esac", "y");
 }
 
 #[test]

@@ -4688,8 +4688,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             let group_complete = pending_heredocs.is_empty()
                 && (!stdin_source_needs_more_posix(&pending, stdin_posix)
                     || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
-            if group_complete
-            {
+            if group_complete {
                 // rubash#1214: PS0 (bashline.c/readline display of
                 // *ps0_prompt, decode_prompt_string) is expanded and
                 // written to stderr after a complete command has been

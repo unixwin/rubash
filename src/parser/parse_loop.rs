@@ -3235,8 +3235,7 @@ pub(super) fn parse_time_prefixed_compound_command(
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
     {
-        parse_loop_command(tokens, i, None, 0)
-            .map(|(command, next, _unclaimed)| (command, next))?
+        parse_loop_command(tokens, i, None, 0).map(|(command, next, _unclaimed)| (command, next))?
     } else if is_keyword(tokens, i, "case") {
         parse_case_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "select") {

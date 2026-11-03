@@ -29,9 +29,8 @@ fn run_script(source: &str) -> (String, String, i32) {
 
 #[test]
 fn issue2682_if_condition_heredoc_body_is_delivered() {
-    let (stdout, stderr, code) = run_script(
-        "if cat <<END; then\nhello\nEND\necho in-then\nfi\necho after",
-    );
+    let (stdout, stderr, code) =
+        run_script("if cat <<END; then\nhello\nEND\necho in-then\nfi\necho after");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "hello\nin-then\nafter\n");
     assert_eq!(stderr, "");
@@ -39,27 +38,36 @@ fn issue2682_if_condition_heredoc_body_is_delivered() {
 
 #[test]
 fn issue2682_while_condition_heredoc_body_is_delivered() {
-    let (stdout, stderr, code) = run_script(
-        "while cat <<END; do\nhello\nEND\necho iter\nbreak\ndone\necho after",
-    );
+    let (stdout, stderr, code) =
+        run_script("while cat <<END; do\nhello\nEND\necho iter\nbreak\ndone\necho after");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "hello\niter\nafter\n");
 }
 
 #[test]
 fn issue2682_until_condition_heredoc_body_is_delivered() {
+    // The condition's exit status must be decided by the delivered
+    // body: grep finds `hello' only if the heredoc reached it, so the
+    // until body runs zero times. With the body lost (the pre-fix
+    // behavior) grep read the process stdin instead, failed, and the
+    // body ran.
     let (stdout, stderr, code) = run_script(
-        "until cat <<END; do\nhello\nEND\necho in-body\nbreak\ndone\necho after",
+        "until grep -q hello <<END; do\nhello\nEND\necho in-body\nbreak\ndone\necho after",
     );
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(stdout, "hello\nin-body\nafter\n");
+    assert_eq!(stdout, "after\n");
+
+    let (stdout, stderr, code) = run_script(
+        "until grep -q zzz <<END; do\nhello\nEND\necho in-body\nbreak\ndone\necho after",
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(stdout, "in-body\nafter\n");
 }
 
 #[test]
 fn issue2682_elif_condition_heredoc_body_is_delivered() {
-    let (stdout, stderr, code) = run_script(
-        "if false; then\necho a\nelif cat <<END; then\nhello\nEND\necho elif-body\nfi",
-    );
+    let (stdout, stderr, code) =
+        run_script("if false; then\necho a\nelif cat <<END; then\nhello\nEND\necho elif-body\nfi");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "hello\nelif-body\n");
 }
@@ -71,9 +79,8 @@ fn issue2682_negated_and_chained_and_piped_conditions() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "hello\nin-else\n");
 
-    let (stdout, stderr, code) = run_script(
-        "if cat <<A && cat <<B; then\nbodyA\nA\nbodyB\nB\necho chained\nfi",
-    );
+    let (stdout, stderr, code) =
+        run_script("if cat <<A && cat <<B; then\nbodyA\nA\nbodyB\nB\necho chained\nfi");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "bodyA\nbodyB\nchained\n");
 
@@ -85,24 +92,21 @@ fn issue2682_negated_and_chained_and_piped_conditions() {
 
 #[test]
 fn issue2682_condition_and_body_heredocs_on_the_same_if() {
-    let (stdout, stderr, code) = run_script(
-        "if cat <<C; then\ncondbody\nC\ncat <<B\nbodyline\nB\nfi",
-    );
+    let (stdout, stderr, code) =
+        run_script("if cat <<C; then\ncondbody\nC\ncat <<B\nbodyline\nB\nfi");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "condbody\nbodyline\n");
 }
 
 #[test]
 fn issue2682_same_line_outer_and_condition_heredocs_pair_in_stream_order() {
-    let (stdout, stderr, code) = run_script(
-        "cat <<X; if cat <<Y; then\nbodyX\nX\nbodyY\nY\necho in-then\nfi",
-    );
+    let (stdout, stderr, code) =
+        run_script("cat <<X; if cat <<Y; then\nbodyX\nX\nbodyY\nY\necho in-then\nfi");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "bodyX\nbodyY\nin-then\n");
 
-    let (stdout, stderr, code) = run_script(
-        "cat <<X; while cat <<Y; do\nbodyX\nX\nbodyY\nY\necho in-loop\nbreak\ndone",
-    );
+    let (stdout, stderr, code) =
+        run_script("cat <<X; while cat <<Y; do\nbodyX\nX\nbodyY\nY\necho in-loop\nbreak\ndone");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "bodyX\nbodyY\nin-loop\n");
 }
@@ -138,9 +142,7 @@ fn issue2682_if_condition_heredoc_never_reads_the_process_stdin() {
     };
     let status = status.expect("child status");
     let mut text = String::new();
-    stdout
-        .read_to_string(&mut text)
-        .expect("read child stdout");
+    stdout.read_to_string(&mut text).expect("read child stdout");
     assert!(status.success(), "status: {status:?}");
     assert_eq!(text, "hello\nin-then\nafter\n");
 }

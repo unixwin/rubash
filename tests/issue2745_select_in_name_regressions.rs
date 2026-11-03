@@ -35,13 +35,12 @@ fn run_stdin(source: &str, stdin_text: &str) -> (String, String, i32) {
 
 #[test]
 fn issue2745_select_variable_named_in_without_list() {
-    // EOF on stdin ends the menu loop after one empty read.
-    let (stdout, stderr, code) = run_stdin(
-        "select in; do echo \"picked [$in]\"; break; done",
-        "",
-    );
+    // The head must parse (pre-fix: syntax error near `do', rc 2).
+    // At EOF the menu loop ends without running the body (GNU same).
+    let (stdout, stderr, code) = run_stdin("select in; do echo \"picked [$in]\"; break; done", "");
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert_eq!(stdout, "picked []\n");
+    assert_eq!(stdout, "");
+    assert!(!stderr.contains("syntax error"), "stderr: {stderr}");
 }
 
 #[test]
