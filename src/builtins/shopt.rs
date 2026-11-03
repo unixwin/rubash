@@ -388,7 +388,15 @@ where
                 "{}shopt: {name}: invalid option name",
                 diagnostic_prefix()
             )?;
-            status = EXECUTION_FAILURE;
+            // GNU shopt.def (minus-o forms): a SET/UNSET request reports
+            // the bad name but keeps status 0 — the failure status belongs
+            // to the query/list forms only (`shopt -o badname` and
+            // `shopt -p -o badname` return 1, `shopt -s -o badname`,
+            // `shopt -u -o badname`, and their -p variants return 0;
+            // verified against the 5.3.20 oracle, audit B4-F03).
+            if mode == ShoptMode::List {
+                status = EXECUTION_FAILURE;
+            }
             continue;
         }
         match mode {

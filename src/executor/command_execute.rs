@@ -1639,6 +1639,11 @@ impl Executor {
         // exits with last_command_exit_value (EXECUTION_FAILURE=1). A
         // subshell child contains the jump at execute_cmd.c:1811 and exits
         // 1 (niubash#163), so expansion_fatal_status owns the mapping.
+        // subst.c:10285-10286 gates the fatal arm on the compat level:
+        // `if (shell_compatibility_level <= 43) return
+        // &expand_wdesc_error;` — at compat31..43 a POSIX-mode bad
+        // substitution is the plain error class (command fails with 1,
+        // the script continues) even in POSIX mode (audit B4-F08).
         // rubash#1109: the extract_dollar_brace_string no-closing-brace
         // verdict is DISCARD in every mode (see no_closing_brace_verdict).
         if self.no_closing_brace_failure.replace(false) {
@@ -1647,7 +1652,10 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
-            if self.posix_mode_enabled() && !self.invocation_interactive() {
+            if self.posix_mode_enabled()
+                && !self.invocation_interactive()
+                && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
+            {
                 let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));
