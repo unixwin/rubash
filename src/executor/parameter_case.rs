@@ -111,6 +111,20 @@ pub(in crate::executor) fn parse_parameter_case_mod(name: &str) -> Option<(&str,
     None
 }
 
+/// GNU lib/sh/casemod.c:99 sh_modcase matches each character of the
+/// value against the pattern with `strmatch (pat, s, FNM_EXTMATCH)`:
+/// case-modification patterns are ALWAYS extended-glob patterns,
+/// independent of the extglob shopt (that option gates only the
+/// strmatch callers in conditional/case contexts, which pass
+/// FNM_EXTMATCH conditionally). The case walk therefore routes through
+/// the extglob matcher unconditionally — routing it through the plain
+/// matcher (as before) made every extglob group in a case-mod pattern
+/// (`@(a)`, `?(a)`, `*(a)`, `+(a)`, `!(a)`, with or without
+/// `shopt -s extglob`) silently match nothing.
+fn case_mod_pattern_matches(pattern: &str, single_char: &str) -> bool {
+    crate::executor::conditional::extglob_case_pattern_matches(pattern, single_char)
+}
+
 pub(in crate::executor) fn apply_parameter_case_mod(
     value: &str,
     operation: CaseMod,
@@ -195,7 +209,7 @@ pub(in crate::executor) fn apply_parameter_case_mod(
             true
         } else {
             let mut buf = [0u8; 4];
-            case_pattern_matches(pattern, first.encode_utf8(&mut buf))
+            case_mod_pattern_matches(pattern, first.encode_utf8(&mut buf))
         };
         if !matched {
             return value.to_string();
@@ -223,7 +237,7 @@ pub(in crate::executor) fn apply_parameter_case_mod(
     for ch in value.chars() {
         // Stack buffer instead of the per-character heap `to_string()`.
         let mut buf = [0u8; 4];
-        if !case_pattern_matches(pattern, ch.encode_utf8(&mut buf)) {
+        if !case_mod_pattern_matches(pattern, ch.encode_utf8(&mut buf)) {
             out.push(ch);
             continue;
         }
