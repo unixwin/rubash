@@ -1649,6 +1649,19 @@ impl Executor {
         // defaults. The rebuilds below overwrite the imported values, so the
         // inherited names must be applied first (invocation1.sub/2.sub child
         // inheritance).
+        // The option imports below must consume the values the shell was
+        // BORN with (GNU shell.c:1974-1986 applies the imported strings,
+        // then rebuilds them). Snapshot both before any mutation:
+        // set_shell_option / the compat sync REBUILD BASHOPTS (and
+        // SHELLOPTS) into env_vars as a side effect, and reading the
+        // rebuilt BASHOPTS back as if it were imported re-applies the
+        // compatNN flags through the toggling path, whose
+        // set_compatibility_level side effect rebinds an inherited
+        // verbatim BASH_COMPAT="4.3" to "43" (audit B4-F09; GNU keeps
+        // "4.3" — the rebind fires only for a genuinely imported
+        // BASHOPTS carrying compatNN, shopt.def parse_bashopts).
+        let imported_shellopts = env_vars.get("SHELLOPTS").cloned();
+        let imported_bashopts = env_vars.get("BASHOPTS").cloned();
         // GNU variables.c:5820 + 6257 (sv_strict_posix in the special-var
         // table, run by initialize_shell_variables): an IMPORTED
         // POSIXLY_CORRECT — present with ANY value, even empty — turns
@@ -1664,11 +1677,24 @@ impl Executor {
         // VarTable imports the process environment verbatim — derive the
         // flags here instead (before the BASHOPTS loop, which may itself
         // carry compatNN names additively like initialize_bashopts'
-        // parse_bashopts). Silent: the range diagnostic belongs to bind
-        // time, and this constructor is re-entered for subshells where a
-        // repeat would spam; the level/flags are still exact.
-        let _ = crate::builtins::shopt::sync_compat_flags_from_bash_compat(env_vars);
-        if let Some(value) = env_vars.get("SHELLOPTS").cloned() {
+        // parse_bashopts). The range diagnostic is a BIND-time report:
+        // GNU emits it when initialize_shell_variables binds the imported
+        // value, i.e. at a real process birth — so it is printed only on
+        // the process_startup path; re-entered constructors (in-process
+        // children whose parent session already reported the same value
+        // at bind time) stay silent. The level/flags are still exact.
+        if let Err(diagnostic) =
+            crate::builtins::shopt::sync_compat_flags_from_bash_compat(env_vars)
+        {
+            if process_startup {
+                let shell_name = std::env::args()
+                    .next()
+                    .filter(|arg| !arg.is_empty())
+                    .unwrap_or_else(|| "bash".to_string());
+                eprintln!("{shell_name}: {diagnostic}");
+            }
+        }
+        if let Some(value) = imported_shellopts {
             for name in value.split(':').filter(|name| !name.is_empty()) {
                 if crate::builtins::set::is_shell_option(name) {
                     crate::builtins::set::set_shell_option(env_vars, name, true);
@@ -1688,7 +1714,7 @@ impl Executor {
                 }
             }
         }
-        if let Some(value) = env_vars.get("BASHOPTS").cloned() {
+        if let Some(value) = imported_bashopts {
             for name in value.split(':').filter(|name| !name.is_empty()) {
                 if crate::builtins::shopt::is_supported_option(name) {
                     let _ = crate::builtins::shopt::set_option(env_vars, name, true);

@@ -810,8 +810,12 @@ pub(in crate::executor) fn split_shell_path(path: &str) -> Vec<String> {
     if cfg!(windows) {
         split_windows_shell_path(path)
     } else {
+        // GNU findcmd.c get_next_path_element(): an empty PATH element
+        // (leading ':', trailing ':', or "::") denotes the current
+        // directory — it is replaced with ".", never dropped. Dropping
+        // it made `PATH=:/usr/bin cmd` miss commands in the cwd.
         path.split(':')
-            .filter(|entry| !entry.is_empty())
+            .map(|entry| if entry.is_empty() { "." } else { entry })
             .map(str::to_string)
             .collect()
     }

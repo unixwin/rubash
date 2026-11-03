@@ -1901,6 +1901,13 @@ fn build_recorded_entry(
             ""
         } else if prev_was_body || cur_is_body {
             "\n"
+        } else if lithist {
+            // GNU bashhist.c (lithist): the lines of a multi-line
+            // command are saved with their newlines INSTEAD of the
+            // delimiting characters — every ordinary line boundary,
+            // including the one after a reserved word like `do` where
+            // cmdhist would join with a space (audit B4-F06).
+            "\n"
         } else if prev_text
             .split_whitespace()
             .next_back()
@@ -1908,8 +1915,6 @@ fn build_recorded_entry(
             .unwrap_or(false)
         {
             " "
-        } else if lithist {
-            "\n"
         } else {
             "; "
         };

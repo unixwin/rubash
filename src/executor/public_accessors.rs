@@ -1082,6 +1082,34 @@ impl Executor {
             } else {
                 source.clone()
             }
+        } else if crate::builtins::shopt::option_enabled(
+            &self.shell_state.env_vars,
+            "bash_source_fullpath",
+        ) {
+            // GNU variables.c:5719-5736 push_source: with
+            // bash_source_fullpath set, the pushed BASH_SOURCE entry is
+            // sh_realpath(filename) — canonicalized, symlinks and `..`
+            // resolved — falling back to the filename as given when
+            // realpath fails (audit B4-F01). sh_realpath resolves
+            // against the shell's current directory; rubash's `cd`
+            // maintains that as the logical PWD without chdir'ing the
+            // process, so a relative name is joined onto PWD before
+            // canonicalizing (canonicalize then also makes it
+            // physical, like getcwd-based realpath).
+            let path = if std::path::Path::new(&source).is_absolute() {
+                std::path::PathBuf::from(&source)
+            } else {
+                match self.shell_state.env_vars.get("PWD") {
+                    Some(pwd) if pwd.starts_with('/') => {
+                        std::path::PathBuf::from(pwd.as_str()).join(&source)
+                    }
+                    _ => self.resolve_shell_path(&source),
+                }
+            };
+            std::fs::canonicalize(path)
+                .ok()
+                .map(|path| Self::debugger_source_path(&path))
+                .unwrap_or(source)
         } else {
             source
         };
