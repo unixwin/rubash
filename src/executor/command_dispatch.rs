@@ -22,6 +22,36 @@ impl Executor {
         if self.posix_function_declare_prefix_assignments_are_local(cmd) {
             self.save_assignment_local_names(&cmd.assignments);
         }
+        // rubash#2718: a command with NO command word binds its
+        // assignments permanently as part of word expansion, BEFORE
+        // execute_null_command runs do_redirections over the redirect
+        // list (execute_cmd.c:4626-4635 + :4268-4286) — so the
+        // redirect words expand against the NEW bindings
+        // (`a=newname > ${a}.txt` creates newname.txt). A command WITH
+        // a word is the opposite shape: its assignments are tempenv and
+        // redir.c:298 expands the redirect words with the temp
+        // environment ignored. Apply the standalone bindings here,
+        // ahead of the reject gate, so the gate's open probes and the
+        // redirect-target memo it seeds both see the post-binding
+        // values; the named-command path below is untouched and keeps
+        // the pre-binding expansion.
+        let assignment_raws_pre = (cmd.assignment_raws.len() == cmd.assignments.len())
+            .then(|| cmd.assignment_raws.as_slice());
+        if standalone_assignments {
+            let applied = self.apply_permanent_assignments(&cmd.assignments, assignment_raws_pre);
+            if !applied && self.posix_assignment_failure_is_fatal() {
+                // The FORCE_EOF status is context-owned (shell.c:1471-1472
+                // run_one_command `case FORCE_EOF: return
+                // last_command_exit_value = 127` under -c; eval.c:104-109
+                // reader_loop keeps last_command_exit_value = 1 for scripts;
+                // execute_cmd.c:1811 contains the jump at 1 inside subshell
+                // children — WSL 5.3.0: `(ro=2)` leaves $? = 1 and the
+                // parent runs).
+                let code = self.expansion_fatal_status();
+                self.exit_code = code;
+                return Err(ExecuteError::ExitCode(code));
+            }
+        }
         // GNU redir.c:298 redirection_expand uses expand_words_no_vars:
         // redirect words expand with the temp environment IGNORED
         // (`a=9 echo >&$(echo $a)` sees the outer a, not 9). Expanding here —
@@ -50,28 +80,12 @@ impl Executor {
         let assignment_raws = (cmd.assignment_raws.len() == cmd.assignments.len())
             .then(|| cmd.assignment_raws.as_slice());
         let temporary_assignments = if standalone_assignments {
-            // GNU subst.c expand_word_error + execute_cmd.c: a failed
-            // assignment with no command word aborts the command list in
-            // every mode (the DISCARD jump); POSIX mode additionally EXITS
-            // the non-interactive shell (subst.c:13177-13182
-            // expand_word_list_internal's is_nullcmd arm sets
-            // last_command_exit_value = EXECUTION_FAILURE and calls
-            // posix_variable_assignment_error(0), subst.c:11181-11196 — the
-            // non-interactive posix branch jumps FORCE_EOF;
-            // `ro=2` where ro is readonly).
-            let applied = self.apply_permanent_assignments(&cmd.assignments, assignment_raws);
-            if !applied && self.posix_assignment_failure_is_fatal() {
-                // The FORCE_EOF status is context-owned (shell.c:1471-1472
-                // run_one_command `case FORCE_EOF: return
-                // last_command_exit_value = 127` under -c; eval.c:104-109
-                // reader_loop keeps last_command_exit_value = 1 for scripts;
-                // execute_cmd.c:1811 contains the jump at 1 inside subshell
-                // children — WSL 5.3.0: `(ro=2)` leaves $? = 1 and the
-                // parent runs).
-                let code = self.expansion_fatal_status();
-                self.exit_code = code;
-                return Err(ExecuteError::ExitCode(code));
-            }
+            // rubash#2718: the standalone bindings were already applied
+            // above, ahead of the reject gate (GNU binds a null
+            // command's assignments during word expansion, before
+            // do_redirections expands the redirect words). The failure
+            // adjudication (subst.c:13177-13182's DISCARD jump, the
+            // posix FORCE_EOF) rode that early apply.
             Vec::new()
         } else {
             // rubash#1692: GNU binds a simple command's tempenv only
@@ -238,6 +252,10 @@ impl Executor {
             });
         let in_process_close_snapshots =
             self.apply_fd_var_closes_for_in_process(in_process_dispatch);
+        // rubash#2692: set when the builtin redirect pregate below
+        // refuses the dispatch; adjudicated beside the #2082 gate
+        // conversion further down.
+        let mut builtin_pregate_failed = false;
         let result = if redirect_rejected {
             Ok(())
         } else {
@@ -249,7 +267,50 @@ impl Executor {
             // and skips the dispatch like a gate rejection.
             match self.bind_simple_command_net_inputs(cmd) {
                 Ok(saved_net_binds) => {
-                    let result = self.execute_prepared_command(cmd);
+                    // rubash#2692: GNU execute_builtin_or_function runs
+                    // do_redirections (execute_cmd.c:5606-5614, RX_UNDOABLE)
+                    // BEFORE the builtin body: a failed open undoes the
+                    // partial redirects and returns EX_REDIRFAIL — the
+                    // builtin never runs, so a state-mutating builtin
+                    // (export/readonly/declare/typeset/local/umask/alias/
+                    // trap/shopt/ulimit/set) leaves no trace when any of
+                    // its redirections fails to open. rubash's per-arm
+                    // redirect application gated only the arms that route
+                    // through the no-output or buffered-output helpers;
+                    // the mutating arms applied their effects first and
+                    // surfaced the failure afterwards. This funnel is the
+                    // one point every in-process builtin dispatch passes
+                    // (including `command`/`builtin` re-dispatch, whose
+                    // redirections sit on the outer command, and pipeline
+                    // stage re-dispatch), so the ordered open walk — the
+                    // same one the no-output builtins and `read` use —
+                    // pregates here. Classification: a builtin command
+                    // word only. Functions own their redirect scope (and
+                    // already gate), externals gate in their child setup,
+                    // and a builtin name that resolves external after all
+                    // (disabled builtin) observes the same net effect
+                    // GNU's child-side gate produces. The walk opens in
+                    // list order and stops at the first failure, exactly
+                    // like do_redirections; its opens are the idempotent
+                    // probes the serving arms repeat (targets memoized,
+                    // FIFO rendezvous carved out), and its diagnostic is
+                    // routed through the bindings in effect at the
+                    // failing entry. The pregate form of the walk
+                    // undoes its own file creations on success —
+                    // the dispatch applies the list again, and a
+                    // probe-created file would corrupt that second
+                    // application (see pregate_redirect_open_check).
+                    let pregate_failed = cmd
+                        .words
+                        .first()
+                        .is_some_and(|word| is_shell_builtin_name(word))
+                        && self.pregate_redirect_open_check(cmd)?;
+                    let result = if pregate_failed {
+                        builtin_pregate_failed = true;
+                        Ok(())
+                    } else {
+                        self.execute_prepared_command(cmd)
+                    };
                     self.restore_simple_command_net_inputs(saved_net_binds);
                     result
                 }
@@ -572,6 +633,17 @@ impl Executor {
             )
             && self.posix_special_redirect_failure_exits(cmd)
         {
+            return Err(ExecuteError::ExitCode(1));
+        }
+        // rubash#2692: the builtin pregate's refusal is the same
+        // EX_REDIRFAIL verdict arriving through the third channel —
+        // execute_builtin_or_function's do_redirections failure
+        // (execute_cmd.c:5606-5614) converted by execute_simple_command
+        // (execute_cmd.c:4865-4875): for a special builtin in a
+        // posixly_correct non-interactive shell the shell exits at
+        // EXECUTION_FAILURE. The pregate already rendered the
+        // diagnostic and set status 1.
+        if builtin_pregate_failed && self.posix_special_redirect_failure_exits(cmd) {
             return Err(ExecuteError::ExitCode(1));
         }
         let outcome = if result.is_ok()
