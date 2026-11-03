@@ -143,10 +143,18 @@ pub(in crate::executor) fn split_read_field_ranges(
         // An escaped character (backslash + any char, including IFS chars) is
         // literal data and belongs to the field (GNU read.def / subst.c: read
         // honors backslash escapes before IFS splitting when -r is absent).
-        while i < n && !ifs_chars.contains(&units[i].2) {
+        // A3-F3: escape recognition must precede delimiter recognition,
+        // exactly as GNU read.def:823-833 consumes a backslash as an escape
+        // introducer (CTLESC + pass_next) before testing the delimiter.
+        // Testing IFS membership first made a backslash that IS in IFS
+        // (`IFS='\'`) end the field, instead of escaping the next char.
+        while i < n {
             if interpret_backslashes && units[i].2 == '\\' && i + 1 < n {
                 i += 2;
                 continue;
+            }
+            if ifs_chars.contains(&units[i].2) {
+                break;
             }
             i += 1;
         }
