@@ -11,13 +11,16 @@ pub(super) fn parse_case_command(
     // redirections on the compound command. This covers the common
     // `case word in pattern) list terminator` shape.
     let (word, raw_word, mut i) = collect_case_word(tokens, start + 1)?;
-    while i < tokens.len() && !is_keyword(tokens, i, "in") {
-        // `do`/`then` are command-list reserved words, not material to skip
-        // while looking for the case-word separator. Bash reports malformed
-        // forms such as `case in do do) ...` during parsing.
-        if is_keyword(tokens, i, "do") || is_keyword(tokens, i, "then") {
-            return None;
-        }
+    // GNU parse.y case_clause: after the subject WORD only a newline_list
+    // may intervene before IN. Any other token there — a second word
+    // (`case a b in ...`), a stray `esac` (`case a esac in ...`), `do` /
+    // `then` (`case in do do) ...`) — is a syntax error at that token.
+    // The old skip loop walked past everything except do/then, silently
+    // accepting those malformed headers (audit A1 F03).
+    while i < tokens.len()
+        && tokens[i].kind == TokenKind::Semicolon
+        && tokens[i].line_break
+    {
         i += 1;
     }
     if !is_keyword(tokens, i, "in") {
