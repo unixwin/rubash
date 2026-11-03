@@ -1,12 +1,22 @@
 use super::*;
 use crate::lexer::Token;
 
+/// A heredoc body token that led a loop's body region but pairs with a
+/// `<<` read BEFORE the loop (a command sharing the header line): the
+/// loop's own drain cannot claim it, so it is handed back to the caller,
+/// whose state owns the pairing (rubash#2682).
+pub(super) struct UnclaimedHeredocBody {
+    pub body: String,
+    pub gather_line: usize,
+    pub end_line: Option<usize>,
+}
+
 pub(super) fn parse_loop_command(
     tokens: &[Token],
     start: usize,
     source: Option<&std::rc::Rc<str>>,
     source_line_offset: usize,
-) -> Option<(CommandNode, usize)> {
+) -> Option<(CommandNode, usize, Vec<UnclaimedHeredocBody>)> {
     let (kind, until) = if is_keyword(tokens, start, "while") {
         (LoopKind::While, false)
     } else if is_keyword(tokens, start, "until") {
@@ -16,21 +26,63 @@ pub(super) fn parse_loop_command(
     };
 
     let do_index = find_loop_do(tokens, start + 1)?;
-    let condition =
+    let mut condition =
         parse_loop_body_commands(&tokens[start + 1..do_index], source, source_line_offset);
     if condition.is_empty() {
         return None;
     }
     let condition_terminator = condition_terminator_before(tokens, do_index);
     let condition_terminator_metadata = condition_terminator_metadata_before(tokens, do_index);
-    let (body, done_index) = parse_loop_body(tokens, do_index + 1, source, source_line_offset)?;
+    // rubash#2682: heredoc bodies for the condition's `<<` operators are
+    // emitted right after `do` — they lead the body region. GNU gathered
+    // them into the condition's redirect nodes at the header line's
+    // newline (parse.y:3648-3654 gather_here_documents), before the body
+    // list was read. The body slice is re-parsed by a fresh state that
+    // cannot see the condition, so pair the bodies here, before the
+    // slice parse: the condition's bodies are the LAST of the leading
+    // body tokens (any earlier ones pair with `<<` operators read
+    // before this loop on the same logical line). Without this the
+    // bodies were dumped on the body's first command and the
+    // condition's heredocs were read from the process stdin at
+    // execution time — a hang on a live stdin.
+    let mut body_start = do_index + 1;
+    let lead = tokens[body_start..]
+        .iter()
+        .take_while(|token| token.kind == crate::lexer::TokenKind::HereDocBody)
+        .count();
+    let mut unclaimed: Vec<UnclaimedHeredocBody> = Vec::new();
+    if lead > 0 {
+        let pending = super::redirections::count_pending_heredoc_slots(&condition);
+        let take = pending.min(lead);
+        for token in &tokens[body_start + lead - take..body_start + lead] {
+            super::redirections::fill_pending_heredoc_body_in_commands(
+                &mut condition,
+                &token.value,
+                token.position,
+                token.heredoc_end_line,
+            );
+        }
+        // The leading bodies beyond the condition's own slots pair with
+        // `<<` operators read before this loop on the same logical line;
+        // hand them back to the caller, whose state owns those commands.
+        unclaimed = tokens[body_start..body_start + lead - take]
+            .iter()
+            .map(|token| UnclaimedHeredocBody {
+                body: token.value.clone(),
+                gather_line: token.position,
+                end_line: token.heredoc_end_line,
+            })
+            .collect();
+        body_start += lead;
+    }
+    let (body, done_index) = parse_loop_body(tokens, body_start, source, source_line_offset)?;
     // GNU parse.y:867-872: `DO compound_list DONE` — the loop body cannot
     // be empty; `do done` reports near `done', `do ; done' near `;'
     // (rubash#221). parse_loop_body_commands drops separator-only bodies,
     // so an empty body here is exactly the empty-compound_list case.
     if body.is_empty() {
         if let Some(error) = empty_compound_body_error_node(tokens, do_index + 1, done_index) {
-            return Some((error, done_index + 1));
+            return Some((error, done_index + 1, unclaimed));
         }
     }
 
@@ -56,7 +108,8 @@ pub(super) fn parse_loop_command(
         until,
     }));
 
-    Some(finish_compound_command(command, tokens, done_index + 1))
+    let (command, next) = finish_compound_command(command, tokens, done_index + 1);
+    Some((command, next, unclaimed))
 }
 
 fn find_loop_do(tokens: &[Token], start: usize) -> Option<usize> {

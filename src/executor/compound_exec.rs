@@ -5042,6 +5042,18 @@ impl Executor {
                 child.arg("-c").arg(words_text);
             }
             child
+        } else if !cmd.redirects.is_empty()
+            || !cmd.heredoc_redirects.is_empty()
+            || cmd.heredoc.is_some()
+        {
+            // rubash#2746: a redirection-only coproc body (`coproc >
+            // file') — GNU's grammar admits a simple command of only
+            // redirections as the shell_command, and its child applies
+            // them (through the coproc redirect walk below) and exits.
+            // The respawn child runs an empty command string.
+            let mut child = Command::new(&exe);
+            child.arg("-c").arg("");
+            child
         } else {
             eprintln!(
                 "{}coproc: usage: coproc [NAME] command [args...]",

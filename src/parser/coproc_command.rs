@@ -219,7 +219,42 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     }
 
     if words.is_empty() {
-        return None;
+        // rubash#2746: the coproc grammar (parse.y:1125-1175) is `COPROC
+        // [WORD] shell_command` — with no shell_command at all there is
+        // nothing to fall back to: GNU reports a syntax error at the
+        // token that follows (`coproc' alone names `newline', `coproc |
+        // cat' names `|', `coproc && ...' names `&&'). Returning None
+        // degraded `coproc' to an external command name (127, and the
+        // script kept running). The one body that legitimately has no
+        // words is a redirection-only simple command (`coproc > file'),
+        // which GNU accepts — build it and let the finish machinery
+        // attach the redirections.
+        if tokens.get(i).is_some_and(|token| {
+            matches!(
+                token.kind,
+                TokenKind::RedirectIn
+                    | TokenKind::RedirectOut
+                    | TokenKind::Append
+                    | TokenKind::RedirectErr
+                    | TokenKind::RedirectErrAppend
+                    | TokenKind::HereDoc
+                    | TokenKind::HereString
+            )
+        }) {
+            let mut command = CommandNode::new();
+            command.line = tokens.get(start).map(|t| t.position);
+            command.logical_line = tokens.get(start).map(|t| t.logical_line);
+            command.coproc_command = Some(coproc_command(
+                name,
+                words,
+                word_metadata,
+                CoprocBodyKind::SimpleCommand,
+                None,
+                None,
+            ));
+            return Some(finish_coproc_command(command, tokens, i));
+        }
+        return Some(coproc_missing_command_error(tokens, start, i));
     }
 
     let mut command = CommandNode::new();
@@ -234,6 +269,47 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         None,
     ));
     Some(finish_coproc_command(command, tokens, i))
+}
+
+/// The parse-error node for a `coproc' with no shell_command after it
+/// (rubash#2746): GNU blames the following token — a line break or end
+/// of input is `newline', anything else is the token itself. Consumption
+/// mirrors coproc_bang_error (through the next command separator).
+fn coproc_missing_command_error(
+    tokens: &[Token],
+    start: usize,
+    bad: usize,
+) -> (CommandNode, usize) {
+    let (blame, blame_position, source_index) = match tokens.get(bad) {
+        None => ("newline".to_string(), tokens[start].position, start),
+        Some(token) if token.kind == TokenKind::Eof => {
+            ("newline".to_string(), tokens[start].position, start)
+        }
+        Some(token) if token.kind == TokenKind::Semicolon && token.line_break => {
+            ("newline".to_string(), token.position, bad)
+        }
+        Some(token) => (near_blame_text(token), token.position, bad),
+    };
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{blame}{}{}",
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            blame_position
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        offending_line_text(tokens, source_index, None, 0),
+    );
+    let mut end = bad.min(tokens.len());
+    while end < tokens.len() && tokens[end].kind != TokenKind::Semicolon {
+        end += 1;
+    }
+    finish_coproc_command(command, tokens, end)
 }
 
 /// The parse-error node GNU reports for a `!` where the coproc
@@ -441,7 +517,8 @@ fn parse_coproc_compound_body(tokens: &[Token], start: usize) -> Option<(Command
     match tokens.get(start)?.value.as_str() {
         "for" => parse_for_command(tokens, start, None, 0),
         "if" => parse_if_command_standalone(tokens, start, None, 0),
-        "while" | "until" => parse_loop_command(tokens, start, None, 0),
+        "while" | "until" => parse_loop_command(tokens, start, None, 0)
+            .map(|(command, next, _unclaimed)| (command, next)),
         "case" => parse_case_command(tokens, start, None, 0),
         "select" => parse_select_command(tokens, start, None, 0),
         "coproc" => parse_coproc_command(tokens, start),

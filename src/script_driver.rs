@@ -3090,6 +3090,81 @@ pub(crate) fn command_tree_has_parse_error(command: &CommandNode) -> bool {
     command_tree_walk_nested(command, command_tree_has_parse_error)
 }
 
+/// True when this command (or any nested command) carries the
+/// near-token parse-error marker — a token the parser rejected at its
+/// position, as opposed to an end-of-input shortfall.
+fn command_tree_has_near_marker(command: &CommandNode) -> bool {
+    if command
+        .assignments
+        .iter()
+        .any(|(name, _)| name == "__RUBASH_PARSE_ERROR_NEAR__")
+    {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_near_marker)
+}
+
+/// True when this command (or any nested command) carries one of the
+/// end-of-input marker family — the parse only failed for want of
+/// more input, so an interactive reader should keep gathering.
+fn command_tree_has_eof_marker(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "__RUBASH_PARSE_ERROR_EOF__"
+                | "__RUBASH_PARSE_ERROR_EOF_COMPOUND__"
+                | "__RUBASH_PARSE_ERROR_EOF_PAREN__"
+                | "__RUBASH_PARSE_ERROR_EOF_SUBSHELL__"
+        )
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_eof_marker)
+}
+
+/// True when this command (or any nested command) carries the generic
+/// parse-error marker with an `unexpected token' diagnostic (the
+/// hard-error value family; the same marker's `unexpected end of
+/// file' values are the incomplete family).
+fn command_tree_has_hard_token_error(command: &CommandNode) -> bool {
+    if command.assignments.iter().any(|(name, value)| {
+        name == "__RUBASH_PARSE_ERROR__" && value.starts_with("unexpected token")
+    }) {
+        return true;
+    }
+    command_tree_walk_nested(command, command_tree_has_hard_token_error)
+}
+
+/// rubash#2725: whether the interactive reader's accumulated text is
+/// already a hard syntax error, judged by the real parser (the same
+/// tokenize/parse options `command_paren_verdict_disproved_by_parser`
+/// uses). Hard = a near-token marker anywhere in the tree, or an
+/// `unexpected token' diagnostic with no end-of-input marker anywhere
+/// (a diagnostic raised inside a still-open compound keeps the group
+/// gathering; GNU reports it when the compound completes). Anything
+/// else — clean parses, pure EOF shortfalls, unterminated quotes or
+/// substitutions (which carry no marker) — is genuinely incomplete.
+fn interactive_pending_is_hard_syntax_error(input: &str, parse_posix: bool) -> bool {
+    let tokens = tokenize_with_initial_posix(input, parse_posix);
+    if crate::lexer::heredoc_overflow_line().is_some() {
+        return false;
+    }
+    let ast = crate::parser::parse_with_options(
+        &tokens,
+        crate::parser::ParseLoopOptions {
+            stray_close_is_error: true,
+            source_text: Some(input.into()),
+            diagnostic_text: None,
+            source_line_offset: 0,
+        },
+    );
+    if ast.commands.iter().any(command_tree_has_near_marker) {
+        return true;
+    }
+    ast.commands.iter().any(command_tree_has_hard_token_error)
+        && !ast.commands.iter().any(command_tree_has_eof_marker)
+}
+
 /// Drives `predicate` over every command nested inside `command`
 // (pipeline stages, and-or lists, compound bodies, clause bodies).
 fn command_tree_walk_nested(command: &CommandNode, predicate: fn(&CommandNode) -> bool) -> bool {
@@ -4603,8 +4678,22 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
 
             let stdin_posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
-            if pending_heredocs.is_empty() && !stdin_source_needs_more_posix(&pending, stdin_posix)
-            {
+            // rubash#2725: GNU's interactive reader parses incrementally
+            // (parse.y read_command): a token that is wrong NOW aborts
+            // the command on that line, while end-of-input in the
+            // middle of a compound just reads another line. The
+            // token-level completeness scan cannot tell an invalid
+            // opener (`if then') from an incomplete one (`if true;
+            // then') — both "need more" — so it grouped the following
+            // lines into the dead command and discarded them all with
+            // its one error. When the scan asks for more input, ask
+            // the real parser whether the accumulated text is already
+            // a hard syntax error; if so the group is finished (the
+            // run below reports the error and the reader moves on).
+            let group_complete = pending_heredocs.is_empty()
+                && (!stdin_source_needs_more_posix(&pending, stdin_posix)
+                    || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
+            if group_complete {
                 // rubash#1214: PS0 (bashline.c/readline display of
                 // *ps0_prompt, decode_prompt_string) is expanded and
                 // written to stderr after a complete command has been
