@@ -62,10 +62,7 @@ fn parse_rc(script: &str) -> i32 {
 }
 
 fn run_file(script: &str) -> (i32, String, String) {
-    let path = std::env::temp_dir().join(format!(
-        "rubash-assign-prefix-{}.sh",
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("rubash-assign-prefix-{}.sh", std::process::id()));
     std::fs::write(&path, script).expect("write temp script");
     let output = Command::new(shell_bin())
         .arg(&path)
@@ -107,9 +104,8 @@ fn assignment_prefix_before_compound_rejects() {
 fn extglob_form_is_one_assignment_word() {
     // With extglob set on a prior line the `@(...)` belongs to the
     // assignment word itself; the value is stored literally.
-    let (code, stdout, stderr) = run_file(
-        "shopt -s extglob\nx=plugin::@(disable|enable|load)\necho \"[$x]\"\n",
-    );
+    let (code, stdout, stderr) =
+        run_file("shopt -s extglob\nx=plugin::@(disable|enable|load)\necho \"[$x]\"\n");
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(stdout, "[plugin::@(disable|enable|load)]\n");
 }

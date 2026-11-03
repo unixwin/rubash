@@ -703,6 +703,24 @@ impl Executor {
         // skips the body with status 1 (in the child both end the element);
         // any other failure (default-mode readonly) only diagnosed — the
         // window stays partially applied and the body still runs.
+        // rubash#2613: the clone IS the element's forked child, and
+        // the plain invocation reaches execute_function with the
+        // funnel's dynamic-fd applier bindings already standing in
+        // the executing executor's descriptor table — the call's
+        // redirect walk resolves a numbered reference to a `{var}`
+        // allocation (`{v}>&9 1>&10`) against those bindings. This
+        // stage path never ran the applier, so the allocated slot was
+        // missing from the clone's space and the reference silently
+        // left fd 1 bound to the pipe. Run the SAME applier on the
+        // clone for the duration of the call, then undo: one applier,
+        // one descriptor space. (The driver's gates already
+        // adjudicated the list under their own bracket, so a failure
+        // verdict here is not expected; the bindings that stand are
+        // what the walk consumes either way.)
+        let stage_call_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(&call);
+        if stage_call_has_varfd {
+            let _ = subshell.apply_dynamic_fd_var_redirects(&call, true);
+        }
         // rubash#1605: short of that fatal skip, a final stage whose fd 1
         // IS the shell's own stdout runs the body uncaptured (no
         // thread-local capture frame), exactly as in the compound stage.
@@ -722,6 +740,9 @@ impl Executor {
                 || subshell.execute_function(&function_name, &args, &call),
             )
         };
+        if stage_call_has_varfd {
+            subshell.undo_child_fd_var_redirects();
+        }
         // The window dies with the command, before the element's EXIT
         // trap runs (the trap is subshell teardown, after the command
         // completed and its temp vars were popped). The clone is dropped
@@ -1442,12 +1463,21 @@ impl Executor {
                 crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
             )
         };
-        let (dev_args, dev_ops) = self.materialize_dev_fd_operands(
+        let (dev_args, mut dev_ops) = self.materialize_dev_fd_operands(
             &args,
             dev_stdin,
             crate::executor::dev_fd_operands::DevOperandStdout::Capture,
             Some(program.as_path()),
         );
+        // rubash#2602: the setup span below (process construction,
+        // stdio wiring, the stage's fd delivery) precedes the spawn by
+        // a long stretch, and a failure anywhere in it means no child
+        // ever ran. The deferred finish models the child's reads and
+        // writes, so the record stays disarmed across the span and is
+        // armed once the child exists (below, after the spawn
+        // resolves); from there the two wait paths either finish it
+        // explicitly or settle it through its Drop.
+        dev_ops.disarm_finish();
         // rubash#1905: synthetic /proc operands become spawn-time
         // snapshot files for a child without its own /proc layer; the
         // record lives until the stage's output is collected below
@@ -1909,6 +1939,11 @@ impl Executor {
             payloads
         };
         let mut child = spawned?;
+        // rubash#2602: the child exists — arm the operand record's
+        // deferred finish (disarmed across the setup span above). A
+        // failed spawn returns just above with the record still
+        // disarmed, so its donors stay untouched.
+        dev_ops.arm_finish();
         adopt_orphan_console(child.id());
         // Drop the Command NOW: std retains the `Stdio::from(PipeWriter)`
         // values set above, and a live Command keeps the merged pipe's

@@ -3405,7 +3405,7 @@ impl Executor {
         program: &PathBuf,
         mut process: Command,
         used_shell: bool,
-        dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
+        mut dev_ops: crate::executor::dev_fd_operands::DevOperandMaterialization,
         // rubash#1832: true when the caller composed the process
         // environment to finality itself (the `env` emulation — its
         // composition already folded the tail SHLVL adjustment in and
@@ -3848,6 +3848,11 @@ impl Executor {
                     if let Some((diagnostic, _)) = self.exec_format_refusal(cmd, program) {
                         let mut stderr = Vec::new();
                         let _ = writeln!(&mut stderr, "{diagnostic}");
+                        // rubash#2602: the spawn produced no child and
+                        // no fallback re-spawns it on this path — the
+                        // operand record must not perform the deferred
+                        // finish when it drops (nothing was consumed).
+                        dev_ops.disarm_finish();
                         self.finish_external_error(cmd, &stderr, 126)?;
                         return Ok(());
                     }
@@ -3882,7 +3887,18 @@ impl Executor {
                                 // G-02: children are born in the session cwd.
                                 exe_process.current_dir(&self.shell_state.cwd);
                                 self.apply_external_environment(cmd, &mut exe_process, program);
-                                self.apply_external_redirects(cmd, &mut exe_process)?;
+                                // rubash#2602: a redirect-setup failure
+                                // here means no child ever ran on either
+                                // spawn attempt — disarm the operand
+                                // record before returning. (On success
+                                // the record moves into the recursive
+                                // spawn below, still armed.)
+                                if let Err(error) =
+                                    self.apply_external_redirects(cmd, &mut exe_process)
+                                {
+                                    dev_ops.disarm_finish();
+                                    return Err(error);
+                                }
                                 return self.spawn_external_process(
                                     cmd,
                                     program,
@@ -3903,7 +3919,13 @@ impl Executor {
                         // G-02: children are born in the session cwd.
                         shell_process.current_dir(&self.shell_state.cwd);
                         self.apply_external_environment(cmd, &mut shell_process, program);
-                        self.apply_external_redirects(cmd, &mut shell_process)?;
+                        // rubash#2602: same disarm as the re-entry
+                        // spawn above — a redirect-setup failure means
+                        // no child ever ran.
+                        if let Err(error) = self.apply_external_redirects(cmd, &mut shell_process) {
+                            dev_ops.disarm_finish();
+                            return Err(error);
+                        }
                         return self.spawn_external_process(
                             cmd,
                             program,
@@ -3914,6 +3936,11 @@ impl Executor {
                         );
                     }
                 }
+                // rubash#2602: a plain spawn failure with no fallback
+                // taken — no child ran, so the operand record drops
+                // disarmed (its donors stay untouched, as GNU's fork
+                // failure leaves the parent's offsets alone).
+                dev_ops.disarm_finish();
                 self.report_external_spawn_error(cmd, program, error)?;
             }
         }

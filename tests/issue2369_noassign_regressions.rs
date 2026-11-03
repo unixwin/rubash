@@ -167,10 +167,7 @@ fn script_single_discarded_command_exits_two() {
 /// attempts the bind and discards.
 #[test]
 fn script_funcname_colon_equals_discards() {
-    let run = run_script(
-        "echo \"val=[${FUNCNAME:=X}]\"\necho \"st=$?\"\n",
-        b"",
-    );
+    let run = run_script("echo \"val=[${FUNCNAME:=X}]\"\necho \"st=$?\"\n", b"");
     assert_eq!(run.stdout, "st=2\n", "stderr: {:?}", run.stderr);
     assert_eq!(run.stderr, "");
 }
@@ -202,8 +199,7 @@ fn statement_assign_family_is_silent_noop() {
         b"",
     );
     assert_eq!(
-        run.stdout,
-        "plain=0\nelem=0\ncompound=0\nappend=0\ndeclare=0\nn=1 base=[script.sh]\n",
+        run.stdout, "plain=0\nelem=0\ncompound=0\nappend=0\ndeclare=0\nn=1 base=[script.sh]\n",
         "stderr: {:?}",
         run.stderr
     );
@@ -313,11 +309,7 @@ fn mapfile_refuses_before_consuming_input() {
         "printf 'l1\\nl2\\n' | { mapfile BASH_SOURCE; echo \"map=$?\"; read x; echo \"x=[$x]\"; }\n",
         b"",
     );
-    assert_eq!(
-        run.stdout, "map=1\nx=[l1]\n",
-        "stderr: {:?}",
-        run.stderr
-    );
+    assert_eq!(run.stdout, "map=1\nx=[l1]\n", "stderr: {:?}", run.stderr);
     assert_eq!(run.stderr, "");
 }
 
@@ -376,10 +368,7 @@ fn arithmetic_assignment_fails_silently() {
 /// fails 1, and the target file has still been created.
 #[test]
 fn dynamic_fd_redirect_refuses_after_creating_file() {
-    let run = run_script(
-        "exec {BASH_ARGC}>probe_out.txt; echo \"fd=$?\"\n",
-        b"",
-    );
+    let run = run_script("exec {BASH_ARGC}>probe_out.txt; echo \"fd=$?\"\n", b"");
     assert_eq!(run.stdout, "fd=1\n", "stderr: {:?}", run.stderr);
     assert!(
         run.stderr.contains("cannot assign fd to variable"),
@@ -401,11 +390,7 @@ fn pipestatus_is_not_a_carrier() {
         "printf -v 'PIPESTATUS[0]' 5; echo \"printf=$?\"\necho \"v=[${PIPESTATUS[9]:=5}]\"\n",
         b"",
     );
-    assert_eq!(
-        run.stdout, "printf=0\nv=[5]\n",
-        "stderr: {:?}",
-        run.stderr
-    );
+    assert_eq!(run.stdout, "printf=0\nv=[5]\n", "stderr: {:?}", run.stderr);
     assert_eq!(run.stderr, "");
 }
 

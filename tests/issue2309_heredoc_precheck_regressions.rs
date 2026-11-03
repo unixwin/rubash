@@ -26,11 +26,7 @@ use std::process::{Command, Stdio};
 /// Runs `script` as a file under the built rubash; returns
 /// (stdout, stderr, exit code, script path as invoked).
 fn run_rubash_file(script: &str, tag: &str) -> (String, String, Option<i32>, String) {
-    let path = std::env::temp_dir().join(format!(
-        "issue2309_{}_{}.sh",
-        tag,
-        std::process::id()
-    ));
+    let path = std::env::temp_dir().join(format!("issue2309_{}_{}.sh", tag, std::process::id()));
     std::fs::write(&path, script).expect("write probe script");
     let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(&path)

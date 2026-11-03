@@ -2893,9 +2893,7 @@ impl Executor {
     /// array keys, the ${!prefix@} name list, positional parameters).
     fn glued_list_span_members(&self, kind: &GluedListKind) -> Option<Vec<String>> {
         match kind {
-            GluedListKind::Positional => {
-                Some(self.shell_state.positional_window_cloned())
-            }
+            GluedListKind::Positional => Some(self.shell_state.positional_window_cloned()),
             GluedListKind::ArrayAt(name) => {
                 if !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, name) {
                     if let Some(members) = self.dynamic_stack_array_values(name) {
@@ -2951,8 +2949,7 @@ impl Executor {
         // spellings the raw segment itself carried as syntax are
         // dropped from the expanded text; a quote spelling the segment
         // never had can only be expansion-result data.
-        let had_hoisted_dquote =
-            segment.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE);
+        let had_hoisted_dquote = segment.contains(crate::executor::markers::ASSIGN_DATA_DQUOTE);
         let had_raw_dquote = segment.contains('"');
         let expanded = self.expand_embedded_parameters_compound(segment);
         let text = compound_element_expansion_text(&expanded);
@@ -3907,8 +3904,7 @@ fn glued_list_kind(body: &str) -> Option<GluedListKind> {
     }
     if let Some(rest) = body.strip_prefix('!') {
         if let Some(name) = rest.strip_suffix("[@]") {
-            return is_shell_name(name)
-                .then(|| GluedListKind::IndirectKeys(rest.to_string()));
+            return is_shell_name(name).then(|| GluedListKind::IndirectKeys(rest.to_string()));
         }
         if let Some(prefix) = rest.strip_suffix('@') {
             return (!prefix.is_empty() && is_shell_name(prefix))
@@ -3971,9 +3967,7 @@ fn find_glued_list_span(chars: &[char], from: usize) -> Option<GluedListSpan> {
             '\\' => {
                 if chars.get(index + 1) == Some(&'"') {
                     if let Some((after, kind)) = match_glued_list_span_at(chars, index + 2) {
-                        if chars.get(after) == Some(&'\\')
-                            && chars.get(after + 1) == Some(&'"')
-                        {
+                        if chars.get(after) == Some(&'\\') && chars.get(after + 1) == Some(&'"') {
                             return Some(GluedListSpan {
                                 prefix_end: index + 2,
                                 resume: after,
@@ -4017,13 +4011,8 @@ fn find_glued_list_span(chars: &[char], from: usize) -> Option<GluedListSpan> {
                         inner += 2;
                         continue;
                     }
-                    if chars[inner] == '$'
-                        && chars.get(inner + 1) == Some(&'(')
-                    {
-                        match crate::lexer::skip_parenthesized_unit_corrected(
-                            chars,
-                            inner + 1,
-                        ) {
+                    if chars[inner] == '$' && chars.get(inner + 1) == Some(&'(') {
+                        match crate::lexer::skip_parenthesized_unit_corrected(chars, inner + 1) {
                             Some(end) => {
                                 inner = end;
                                 continue;
@@ -4032,9 +4021,7 @@ fn find_glued_list_span(chars: &[char], from: usize) -> Option<GluedListSpan> {
                         }
                     }
                     if chars[inner] == '$' {
-                        if let Some((after, kind)) =
-                            match_glued_list_span_at(chars, inner)
-                        {
+                        if let Some((after, kind)) = match_glued_list_span_at(chars, inner) {
                             return Some(GluedListSpan {
                                 prefix_end: inner,
                                 resume: after,

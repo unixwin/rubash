@@ -34,6 +34,70 @@ fn dequote_storage_marks(value: &str) -> String {
 }
 
 impl Executor {
+    /// GNU subst.c:7839-7881 parameter_brace_find_indir: the indirect
+    /// holder is itself expanded as a parameter reference, so EVERY legal
+    /// parameter kind can hold the target name — subst.c:7907-7910: "An
+    /// indirect reference to a positional parameter or a special
+    /// parameter is ok." get_var_and_type (subst.c:8540) re-resolves the
+    /// indir through this same function to name the variable a transform
+    /// applies to, and parameter_brace_transform (subst.c:8923) then
+    /// applies the transform to that resolved variable.
+    ///
+    /// This is the holder resolution the plain `${!...}` path performs
+    /// inline in expand_braced_special.rs — `#` reads the last positional
+    /// value, `?` the exit-status text, a bare nameref yields its target
+    /// name (the ksh93 name-of shortcut), a numeric holder reads the
+    /// positional window, a `name[sub]` holder reads the element value,
+    /// and any other name reads the variable's scalar form via
+    /// indirect_source_scalar_value — factored out for the transform
+    /// entry (rubash#2608: this entry consulted env_vars only, so a
+    /// positional holder never resolved and `${!1@a}` silently expanded
+    /// to nothing). `None` means the holder itself does not resolve
+    /// (unset positional, unset element, absent variable): the caller
+    /// falls through and the plain path / word error scan produce GNU's
+    /// outcome for that shape.
+    pub(in crate::executor) fn indirect_holder_target_name(
+        &self,
+        indirect_name: &str,
+    ) -> Option<String> {
+        if indirect_name == "#" {
+            return self.shell_state.positional_window().last().cloned();
+        }
+        if indirect_name == "?" {
+            return Some(self.dollar_question_status().to_string());
+        }
+        if is_shell_name(indirect_name) {
+            if let Some(target_name) = self.nameref_target_name(indirect_name) {
+                return Some(target_name);
+            }
+        }
+        if let Ok(index) = indirect_name.parse::<usize>() {
+            return self
+                .shell_state
+                .positional_window()
+                .get(index.saturating_sub(1))
+                .cloned();
+        }
+        if let Some((base, sub)) = indirect_name
+            .split_once('[')
+            .and_then(|(base, rest)| rest.strip_suffix(']').map(|sub| (base, sub)))
+            .filter(|(base, _)| is_shell_name(base))
+        {
+            let resolved = self.resolved_variable_name(base)?;
+            let base_is_array = is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, &resolved)
+                || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, &resolved)
+                || self.parameter_array_storage(&resolved).is_some();
+            if base_is_array {
+                return self.array_element_parameter_value(&format!("{resolved}[{sub}]"));
+            }
+            if sub == "0" {
+                return self.shell_variable_value(&resolved);
+            }
+            return None;
+        }
+        self.indirect_source_scalar_value(indirect_name)
+    }
+
     pub(in crate::executor) fn indirect_parameter_transform(
         &self,
         name: &str,
@@ -44,7 +108,8 @@ impl Executor {
             .strip_suffix("[@]")
             .or_else(|| indirect_name.strip_suffix("[*]"));
         if ref_name.is_none() {
-            let target_name = self.shell_state.env_vars.get(indirect_name)?;
+            let target_name = self.indirect_holder_target_name(indirect_name)?;
+            let target_name = &target_name;
             if transform == ParameterTransform::Assignment {
                 return Some(self.parameter_assignment_transform(target_name));
             }
@@ -76,7 +141,20 @@ impl Executor {
             return Some(self.apply_parameter_transform_value(&value, transform));
         }
         let ref_name = ref_name?;
-        let raw_value = self.shell_state.env_vars.get(ref_name)?;
+        // The source's own value: an env variable contributes its raw
+        // storage text (the element computation below decodes it); any
+        // other holder kind resolves through the shared holder
+        // resolution (indirect_holder_target_name) — a positional,
+        // special, or `name[sub]` source is a scalar, and a scalar's
+        // value is its own raw form (rubash#2608).
+        let raw_value_owned;
+        let raw_value = match self.shell_state.env_vars.get(ref_name) {
+            Some(value) => value,
+            None => {
+                raw_value_owned = self.indirect_holder_target_name(ref_name)?;
+                &raw_value_owned
+            }
+        };
         // GNU subst.c:7883-7945 parameter_brace_expand_indir: t is the
         // dollar_at join of the source's ELEMENT VALUES (a scalar base
         // contributes its value as the sole element), and the transform

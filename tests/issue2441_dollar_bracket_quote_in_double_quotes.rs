@@ -114,8 +114,7 @@ fn script_continues_after_discarded_command() {
 #[test]
 fn heredoc_failure_names_whole_body() {
     let scratch = Scratch::new("heredoc");
-    let (stdout, stderr, code) =
-        scratch.run("cat <<EOF\nx=$[1\ny=$[2]\nEOF\necho after\n");
+    let (stdout, stderr, code) = scratch.run("cat <<EOF\nx=$[1\ny=$[2]\nEOF\necho after\n");
     assert_eq!(code, 0, "heredoc: exit code (stderr: {stderr})");
     assert_eq!(stdout, "after\n", "heredoc: stdout (stderr: {stderr})");
     assert!(

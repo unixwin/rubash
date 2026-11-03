@@ -1392,20 +1392,7 @@ impl FdTable {
 
     pub(crate) fn consume_all_text(&mut self, fd: u32) -> Option<usize> {
         let endpoint = self.entries.get(&fd)?.read.clone()?;
-        if let FdReadEndpoint::File(file) = endpoint {
-            let _ = crate::fd::seek_end(file.handle);
-            return None;
-        }
-        if let FdReadEndpoint::CoprocStdout { .. } = endpoint {
-            return None;
-        }
-        let input = match endpoint {
-            FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => input,
-            _ => return None,
-        };
-        let mut input = input.borrow_mut();
-        input.offset = input.data.len();
-        Some(input.offset)
+        endpoint.consume_deferred()
     }
 
     /// Current read offset of a materialized (Text /
@@ -1676,6 +1663,31 @@ impl PartialEq for FdWriteEndpoint {
 }
 
 impl FdReadEndpoint {
+    /// rubash#2602: perform the per-endpoint effect of
+    /// [`FdTable::consume_all_text`] on this endpoint directly: a File
+    /// endpoint's handle seeks to end, a buffered (Text /
+    /// ProcessSubstitution) endpoint's shared cursor advances to its
+    /// end. The deferred operand finish (DevOperandMaterialization's
+    /// Drop) holds endpoint clones, not table access, so it settles
+    /// through this; the endpoints are Rc-shared with the table's
+    /// entries, so the effect is the same object the table would have
+    /// advanced. Returns the buffered cursor for the Text arms, like
+    /// consume_all_text.
+    pub(crate) fn consume_deferred(&self) -> Option<usize> {
+        match self {
+            FdReadEndpoint::File(file) => {
+                let _ = crate::fd::seek_end(file.handle);
+                None
+            }
+            FdReadEndpoint::Text(input) | FdReadEndpoint::ProcessSubstitution(input) => {
+                let mut input = input.borrow_mut();
+                input.offset = input.data.len();
+                Some(input.offset)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn bytes(input: Vec<u8>) -> Self {
         Self::Text(Rc::new(RefCell::new(TextInput {
             data: input,

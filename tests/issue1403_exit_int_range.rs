@@ -34,8 +34,7 @@ fn exit_rejects_out_of_range_int() {
 
 #[test]
 fn return_rejects_out_of_range_int() {
-    let (_, stderr, code) =
-        rubash("f() { return 9999999999999999999999; }; f");
+    let (_, stderr, code) = rubash("f() { return 9999999999999999999999; }; f");
     assert!(stderr.contains("numeric argument required"));
     assert_eq!(code, Some(2));
 }

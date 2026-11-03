@@ -536,6 +536,9 @@ impl Executor {
             self.write_buffered_builtin_output(cmd, &[], &[])?;
             return Ok(interrupt);
         }
+        // rubash#2579: `wait -f` (JWAIT_FORCE, wait.def:134-136) threads
+        // through every wait form below.
+        let wait_force = wait_force_requested(&cmd.words[1..]);
         if let Some(request) = wait_any_request(&cmd.words[1..]) {
             // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
             // `wait -n` returns the first unnotified dead job in slot order,
@@ -637,7 +640,10 @@ impl Executor {
             }
         }
 
-        if cmd.words.len() == 1
+        if (cmd.words.len() == 1
+            || (wait_force
+                && wait_background_operands(&cmd.words[1..])
+                    .is_some_and(|operands| operands.is_empty())))
             && self
                 .shell_state
                 .job_table
@@ -658,7 +664,7 @@ impl Executor {
                 // wait.def:238-245 wait_for_any_job + :328-331: a trapped
                 // signal interrupts the no-operand wait too, returning
                 // 128+sig.
-                match self.wait_for_background_pid(pid, false)? {
+                match self.wait_for_background_pid(pid, false, wait_force)? {
                     WaitPidOutcome::Interrupted(interrupt) => {
                         self.write_buffered_builtin_output(cmd, &[], &wait_stderr)?;
                         return Ok(interrupt);
@@ -727,44 +733,50 @@ impl Executor {
                 let wait_var = wait_assign_var(&cmd.words[1..])
                     .map(|(name, _index)| (name, self.wait_var_arrayref()));
 
-                let status =
-                    self.wait_for_background_operands(&operands, cmd, wait_var.as_ref())?;
+                let status = self.wait_for_background_operands(
+                    &operands,
+                    cmd,
+                    wait_var.as_ref(),
+                    wait_force,
+                )?;
                 return Ok(status);
             }
         }
 
         if cmd.words.len() == 2 {
             match self.resolve_background_job_operand(&cmd.words[1]) {
-                JobOperandResolution::Pid(pid) => match self.wait_for_background_pid(pid, true)? {
-                    WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
-                        self.write_buffered_builtin_output(cmd, &[], &[])?;
-                        return Ok(status);
-                    }
-                    WaitPidOutcome::Stopped {
-                        job_id,
-                        stop_signal,
-                    } => {
-                        // GNU's stopped report rides only the jobspec
-                        // path: builtins/wait.def:316 sends `%...`
-                        // operands to wait_for_job (jobs.c:3409-3410
-                        // warns when the job is stopped), while a
-                        // numeric pid goes to wait_for_single_pid
-                        // (wait.def:277; jobs.c:2729), which returns
-                        // the stop status silently (rubash#2488).
-                        let mut stderr = Vec::new();
-                        if cmd.words[1].starts_with('%') {
-                            writeln!(
-                                stderr,
-                                "{}warning: wait_for_job: job {} is stopped",
-                                self.diagnostic_prefix(),
-                                job_id
-                            )?;
+                JobOperandResolution::Pid(pid) => {
+                    match self.wait_for_background_pid(pid, true, wait_force)? {
+                        WaitPidOutcome::Status(status) | WaitPidOutcome::Interrupted(status) => {
+                            self.write_buffered_builtin_output(cmd, &[], &[])?;
+                            return Ok(status);
                         }
-                        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                        return Ok(128 + stop_signal);
+                        WaitPidOutcome::Stopped {
+                            job_id,
+                            stop_signal,
+                        } => {
+                            // GNU's stopped report rides only the jobspec
+                            // path: builtins/wait.def:316 sends `%...`
+                            // operands to wait_for_job (jobs.c:3409-3410
+                            // warns when the job is stopped), while a
+                            // numeric pid goes to wait_for_single_pid
+                            // (wait.def:277; jobs.c:2729), which returns
+                            // the stop status silently (rubash#2488).
+                            let mut stderr = Vec::new();
+                            if cmd.words[1].starts_with('%') {
+                                writeln!(
+                                    stderr,
+                                    "{}warning: wait_for_job: job {} is stopped",
+                                    self.diagnostic_prefix(),
+                                    job_id
+                                )?;
+                            }
+                            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                            return Ok(128 + stop_signal);
+                        }
+                        WaitPidOutcome::NotFound => {}
                     }
-                    WaitPidOutcome::NotFound => {}
-                },
+                }
                 JobOperandResolution::Ambiguous => {
                     // GNU wait.def:300-311: a DUP_JOB jobspec is
                     // INVALID_JOB — the get_job_by_name diagnostic is the
@@ -781,7 +793,7 @@ impl Executor {
                 }
                 JobOperandResolution::NoMatch => {
                     if let Ok(pid) = cmd.words[1].parse::<u32>() {
-                        match self.wait_for_background_pid(pid, true)? {
+                        match self.wait_for_background_pid(pid, true, wait_force)? {
                             WaitPidOutcome::Status(status)
                             | WaitPidOutcome::Interrupted(status) => {
                                 self.write_buffered_builtin_output(cmd, &[], &[])?;
@@ -957,6 +969,7 @@ impl Executor {
         operands: &[String],
         cmd: &CommandNode,
         wait_var: Option<&(String, bool)>,
+        force: bool,
     ) -> Result<i32, ExecuteError> {
         let resolved = operands
             .iter()
@@ -999,7 +1012,7 @@ impl Executor {
                     continue;
                 }
             };
-            match self.wait_for_background_pid(pid, true)? {
+            match self.wait_for_background_pid(pid, true, force)? {
                 WaitPidOutcome::Interrupted(interrupt_status) => {
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     return Ok(interrupt_status);
@@ -1230,7 +1243,7 @@ impl Executor {
             // procsub_waitpid returns the recorded status at once.
             return Ok(None);
         }
-        match self.wait_for_background_pid(procsub_pid, false)? {
+        match self.wait_for_background_pid(procsub_pid, false, false)? {
             WaitPidOutcome::Interrupted(status) => Ok(Some(status)),
             _ => Ok(None),
         }
@@ -2008,6 +2021,7 @@ impl Executor {
         &mut self,
         pid: u32,
         retain_for_explicit_wait: bool,
+        force: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
         // GNU trap.c:604-611: a trapped signal arriving while the wait
         // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
@@ -2027,19 +2041,27 @@ impl Executor {
         // verified GNU 5.3.20: bare wait warns and returns 0, an
         // explicit wait warns and returns 128+stopsig). The caller
         // renders the form-specific warning.
-        if let Some((job_id, stop_signal)) = self
-            .shell_state
-            .job_table
-            .pid_to_job
-            .get(&pid)
-            .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
-            .filter(|job| job.state == crate::jobs::ProcessState::Stopped)
-            .map(|job| (job.id, job.stop_signal.unwrap_or(19)))
-        {
-            return Ok(WaitPidOutcome::Stopped {
-                job_id,
-                stop_signal,
-            });
+        // rubash#2579: with JWAIT_FORCE (wait -f; jobs.c:3423
+        // wait_for_job / jobs.c:2764 wait_for_single_pid) the recorded
+        // stop is NOT a return point — the wait loops until the job is
+        // JDEAD, so skip the stopped short-circuit and let the poll loop
+        // below block on the child handle until it actually terminates
+        // (a stopped child's try_wait simply keeps returning None).
+        if !force {
+            if let Some((job_id, stop_signal)) = self
+                .shell_state
+                .job_table
+                .pid_to_job
+                .get(&pid)
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
+                .filter(|job| job.state == crate::jobs::ProcessState::Stopped)
+                .map(|job| (job.id, job.stop_signal.unwrap_or(19)))
+            {
+                return Ok(WaitPidOutcome::Stopped {
+                    job_id,
+                    stop_signal,
+                });
+            }
         }
         if let Some(status) = self
             .shell_state
@@ -2164,7 +2186,7 @@ impl Executor {
             // No live handle (a recorded completion, a procsub
             // placeholder, ...): the poll-based wait owns those
             // shapes exactly as before.
-            return self.wait_for_background_pid(pid, false);
+            return self.wait_for_background_pid(pid, false, false);
         };
         self.procsub_stream_children.remove(&pid);
         let raw = loop {
@@ -3089,8 +3111,10 @@ impl Executor {
         // when the wait ends (jobs.c:3253) — the reclaim below runs on
         // every wait outcome. Only with the job-control channel live;
         // otherwise fg keeps the shared-group delivery model.
+        #[cfg(not(unix))]
+        let fg_pgrp: Option<i32> = None;
         #[cfg(unix)]
-        let fg_tty = if self.job_control_channel_active() {
+        let (fg_tty, fg_pgrp) = if self.job_control_channel_active() {
             let pgrp = self
                 .shell_state
                 .job_table
@@ -3102,17 +3126,16 @@ impl Executor {
             if let Some(tty) = &tty {
                 super::job_control_wait::give_terminal_to(tty, pgrp);
             }
-            tty
+            (tty, Some(pgrp))
         } else {
-            None
+            (None, None)
         };
-        // SIGCONT follows the target numbering (18 Linux / 19 Darwin) via
-        // kill::SIGCONT_NUMBER — jobs.c:3928 `killpg (..., SIGCONT)` uses
-        // the platform's own number, not a Linux literal.
-        for member in &pids {
-            let _ =
-                crate::builtins::kill::send_signal(*member, crate::builtins::kill::SIGCONT_NUMBER);
-        }
+        // rubash#2622: the resume SIGCONT rides the same channel
+        // decision as the terminal handoff — group-addressed killpg to
+        // the job's pgrp when the channel is live (jobs.c:3926-3928
+        // continue_job), per-pid only in the shared-group fallback
+        // model (see job_control_wait::deliver_job_sigcont).
+        super::job_control_wait::deliver_job_sigcont(fg_pgrp, &pids);
         self.shell_state.job_table.mark_running(pid);
         if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
             entry.foreground = true;
@@ -3141,10 +3164,10 @@ impl Executor {
         let wait_result = if fg_tty.is_some() {
             self.wait_for_fg_job_control(pid)
         } else {
-            self.wait_for_background_pid(pid, false)
+            self.wait_for_background_pid(pid, false, false)
         };
         #[cfg(not(unix))]
-        let wait_result = self.wait_for_background_pid(pid, false);
+        let wait_result = self.wait_for_background_pid(pid, false, false);
         // jobs.c:3253: the shell takes its terminal back on every way
         // out of the wait.
         #[cfg(unix)]
@@ -3268,15 +3291,28 @@ impl Executor {
                         .map(|entry| (entry.command.clone(), entry.pids.clone()))
                         .unwrap_or_default();
                     writeln!(stdout, "[{job_id}]{marker}{command} &")?;
-                    // SIGCONT follows the target numbering (18 Linux / 19
-                    // Darwin) via kill::SIGCONT_NUMBER — see the fg twin above
-                    // (jobs.c:3928).
-                    for member in &pids {
-                        let _ = crate::builtins::kill::send_signal(
-                            *member,
-                            crate::builtins::kill::SIGCONT_NUMBER,
-                        );
-                    }
+                    // rubash#2622: the resume SIGCONT is group-addressed
+                    // killpg to the job's pgrp when the job-control
+                    // channel is live (jobs.c:3926-3928 continue_job),
+                    // per-pid only in the shared-group fallback model —
+                    // see the fg twin above and
+                    // job_control_wait::deliver_job_sigcont.
+                    #[cfg(not(unix))]
+                    let bg_pgrp: Option<i32> = None;
+                    #[cfg(unix)]
+                    let bg_pgrp = if self.job_control_channel_active() {
+                        Some(
+                            self.shell_state
+                                .job_table
+                                .jobs
+                                .get(&job_id)
+                                .map(|entry| entry.pgrp as i32)
+                                .unwrap_or(pid as i32),
+                        )
+                    } else {
+                        None
+                    };
+                    super::job_control_wait::deliver_job_sigcont(bg_pgrp, &pids);
                     self.shell_state.job_table.mark_running(pid);
                     if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
                         entry.background = true;
@@ -4365,11 +4401,13 @@ impl Executor {
                     }
                 } else {
                     // complete.def:876-884: set the -o bits, clear the +o
-                    // bits on the copy. pcomp_set_readline_variables'
-                    // rl_* side effects (nospace/filenames insert
-                    // behavior) are host-editor contract, not engine
-                    // state — the candidate stream carries no insert
-                    // policy today.
+                    // bits on the copy. The mutated copy is NOT thrown
+                    // away: completion_dynamic_for_line reads its options
+                    // back into CompgenDynamic::options_override before
+                    // restoring the saved spec (GNU *foundp |= cs->options
+                    // after generation, pcomplete.c gen_progcomp_
+                    // completions), so the fallback decisions and the
+                    // insert policy see the mutated bits (rubash#2572).
                     if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
@@ -4427,19 +4465,23 @@ impl Executor {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // GNU job completion names a job by its command name only (the
         // first word — `%sleep`, pcomplete.c it_jobs / jobs.c job names),
-        // not the full command line (rubash#1052).
-        let job_names: Vec<String> = self
+        // not the full command line (rubash#1052). The process state
+        // rides along so the running/stopped action arms can filter
+        // (rubash#2584).
+        let job_names: Vec<crate::builtins::complete::JobCandidate> = self
             .shell_state
             .job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .map(|job| {
-                job.command
+            .map(|job| crate::builtins::complete::JobCandidate {
+                name: job
+                    .command
                     .split_whitespace()
                     .next()
                     .unwrap_or_default()
-                    .to_string()
+                    .to_string(),
+                state: job.state,
             })
             .collect();
         // compgen's dynamic inputs — complete.def:669 compgen_builtin drives
@@ -4454,6 +4496,10 @@ impl Executor {
         // shell engine, so resolve them here before the builtin generates
         // candidates from the static actions.
         let mut dynamic: Option<crate::builtins::complete::CompgenDynamic> = None;
+        // rubash#2587: a -W wordlist expansion failure aborts the whole
+        // compgen (GNU gen_wordlist_matches jumps out of the generation);
+        // recorded here and honored just before the execute call.
+        let mut wordlist_error: Option<String> = None;
         // rubash#1798: the fd table saved while the compgen command's
         // own stdio redirects are bound as the resolution frame (see
         // the will_run branch below); restored after the final output.
@@ -4562,15 +4608,24 @@ impl Executor {
                             self.run_compgen_completion_command(command, "compgen", &word);
                     }
                     if parsed.words.is_some() {
-                        resolved.expanded_wordlist = Some(
-                            self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")),
-                        );
+                        match self.expand_compgen_wordlist(parsed.words.as_deref().unwrap_or("")) {
+                            Ok(expanded) => resolved.expanded_wordlist = Some(expanded),
+                            Err(error) => wordlist_error = Some(error),
+                        }
                     }
                     dynamic = Some(resolved);
                 }
             }
         }
-        let status = match if matches!(
+        if let Some(error) = &wordlist_error {
+            // The diagnostic travels through the builtin's own stderr
+            // (its redirects apply); no candidates are produced and the
+            // builtin fails, like the aborted GNU generation.
+            let _ = writeln!(stderr, "{diagnostic_prefix}compgen: {error}");
+        }
+        let status = match if wordlist_error.is_some() {
+            Ok(1)
+        } else if matches!(
             builtin,
             crate::builtins::complete::CompletionBuiltin::Compgen
         ) {
@@ -4779,12 +4834,17 @@ impl Executor {
         line: &str,
         cursor: usize,
     ) -> Option<crate::builtins::complete::CompgenDynamic> {
-        let (words, cur_idx, cur_word) =
-            crate::builtins::complete::split_for_completion(line, cursor);
+        let (words, cur_idx, cur_word) = crate::builtins::complete::split_for_completion(
+            line,
+            cursor,
+            &crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars),
+        );
         let spec = crate::builtins::complete::resolve_compspec(
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
+            &self.shell_state.aliases,
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
         )
         .cloned()?;
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
@@ -4846,7 +4906,31 @@ impl Executor {
             );
         }
         if let Some(wordlist) = spec.words.as_deref() {
-            dynamic.expanded_wordlist = Some(self.expand_compgen_wordlist(wordlist));
+            match self.expand_compgen_wordlist(wordlist) {
+                Ok(expanded) => dynamic.expanded_wordlist = Some(expanded),
+                Err(_) => {
+                    // rubash#2587: GNU aborts this spec's whole
+                    // generation when the wordlist expansion fails
+                    // (gen_wordlist_matches jumps out) — the -F/-C
+                    // results gathered above are discarded with it.
+                    // The host channel carries no diagnostic; the
+                    // failure surfaces as no candidates from this
+                    // spec. Some(vec![]) (not None): None would fall
+                    // back to literal splitting and leak the unexpanded
+                    // wordlist text as candidates.
+                    dynamic.expanded_wordlist = Some(Vec::new());
+                    dynamic.function_candidates = Vec::new();
+                    dynamic.command_candidates = Vec::new();
+                }
+            }
+        }
+        // rubash#2572: read the (possibly compopt-mutated) governing
+        // copy's options back into the dynamic result BEFORE the
+        // restore discards it — GNU's `*foundp |= cs->options` fold.
+        // The registry spec itself is never mutated by a live
+        // completion (the mutation lives on the per-attempt copy).
+        if let Some(current) = &self.shell_state.pcomp_curcs {
+            dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
         self.shell_state.pcomp_curcs = saved_curcs;
@@ -4938,9 +5022,16 @@ impl Executor {
     /// and are retained in the pieces), then expand each word with the
     /// shellexp rules: a quoted word keeps one field per array element
     /// and never glob-splits; an unquoted word goes through the
-    /// for-list expander (parameter expansion, field splitting, pathname
-    /// expansion).
-    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Vec<String> {
+    /// shellexp expander (brace/tilde/parameter expansion and field
+    /// splitting — WEXP_SHELLEXP has no WEXP_PATHEXP, subst.c:12575,
+    /// so pathname expansion NEVER runs on wordlist elements; the
+    /// for-list expander this used to call globbed them and, under
+    /// failglob, failed the element into an `Err` that
+    /// `unwrap_or_default` silently swallowed — rubash#2587). An
+    /// expansion failure aborts the whole wordlist generation, like
+    /// the jump out of gen_wordlist_matches in GNU, instead of
+    /// dropping one element and returning a truncated success.
+    fn expand_compgen_wordlist(&mut self, wordlist: &str) -> Result<Vec<String>, String> {
         // subst.c:2630: with delims == NULL the splitter reads
         // ifs_value — the shell's current IFS (this command's tempenv
         // frame included), or the default " \t\n" while IFS is unset.
@@ -4963,13 +5054,10 @@ impl Executor {
                     values.push(self.expand_word(&word));
                 }
             } else {
-                values.extend(
-                    self.expand_for_word_values_result(&word, None, None)
-                        .unwrap_or_default(),
-                );
+                values.extend(self.expand_shellexp_word_values_result(&word)?);
             }
         }
-        values
+        Ok(values)
     }
 
     /// rubash#1799: the PIPESTATUS cell facts for the -A variable /
@@ -5088,11 +5176,13 @@ struct WaitAnyRequest {
     operands: Vec<String>,
     assign_var: Option<String>,
     assign_var_index: Option<usize>,
+    force: bool,
 }
 
 fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
     let mut index = 0;
     let mut wait_any = false;
+    let mut force = false;
     let mut assign_var = None;
     let mut assign_var_index = None;
     while let Some(word) = words.get(index) {
@@ -5107,7 +5197,7 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
         for (offset, option) in word[1..].char_indices() {
             match option {
                 'n' => wait_any = true,
-                'f' => {}
+                'f' => force = true,
                 'p' => {
                     let value_start = 1 + offset + option.len_utf8();
                     let (name, name_index) = if value_start < word.len() {
@@ -5143,7 +5233,37 @@ fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
         operands: words[index..].to_vec(),
         assign_var,
         assign_var_index,
+        force,
     })
+}
+
+/// Whether the wait command carries `-f` (GNU builtins/wait.def:134-136:
+/// `case 'f': wflags |= JWAIT_FORCE`). Same internal_getopt "fnp:" walk
+/// as the sibling scanners: `-p` consumes its argument, scanning stops
+/// at the first operand or `--`.
+fn wait_force_requested(words: &[String]) -> bool {
+    let mut index = 0;
+    let mut force = false;
+    while let Some(word) = words.get(index) {
+        if word == "--" || !word.starts_with('-') || word == "-" {
+            break;
+        }
+        for (offset, option) in word[1..].char_indices() {
+            match option {
+                'f' => force = true,
+                'n' => {}
+                'p' => {
+                    if offset + 2 >= word.len() {
+                        index += 1;
+                    }
+                    break;
+                }
+                _ => return false,
+            }
+        }
+        index += 1;
+    }
+    force
 }
 
 fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {

@@ -56,42 +56,37 @@ fn rubash_c(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn history_surplus_skips_rest_of_line_only() {
-    let (stdout, _stderr, code) =
-        rubash_file("history 1 2; echo \"ran=$?\"\necho next\n");
+    let (stdout, _stderr, code) = rubash_file("history 1 2; echo \"ran=$?\"\necho next\n");
     assert_eq!(stdout, "next\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn history_surplus_on_own_line_leaves_next_line_running() {
-    let (stdout, _stderr, code) =
-        rubash_file("history 1 2\necho \"ran=$?\"\n");
+    let (stdout, _stderr, code) = rubash_file("history 1 2\necho \"ran=$?\"\n");
     assert_eq!(stdout, "ran=2\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn history_surplus_abandons_function_body_with_status_2() {
-    let (stdout, _stderr, code) = rubash_file(
-        "f() { history 1 2; echo \"inner=$?\"; }\nf\necho \"after=$?\"\n",
-    );
+    let (stdout, _stderr, code) =
+        rubash_file("f() { history 1 2; echo \"inner=$?\"; }\nf\necho \"after=$?\"\n");
     assert_eq!(stdout, "after=2\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn history_surplus_abandons_multiline_function_body() {
-    let (stdout, _stderr, code) = rubash_file(
-        "f() {\n  history 1 2\n  echo inner\n}\nf\necho \"after=$?\"\n",
-    );
+    let (stdout, _stderr, code) =
+        rubash_file("f() {\n  history 1 2\n  echo inner\n}\nf\necho \"after=$?\"\n");
     assert_eq!(stdout, "after=2\n");
     assert_eq!(code, Some(0));
 }
 
 #[test]
 fn history_nonnumeric_does_not_discard() {
-    let (stdout, _stderr, code) =
-        rubash_file("history x; echo continues\n");
+    let (stdout, _stderr, code) = rubash_file("history x; echo continues\n");
     assert_eq!(stdout, "continues\n");
     assert_eq!(code, Some(0));
 }

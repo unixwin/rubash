@@ -399,6 +399,16 @@ impl<'a> Lexer<'a> {
         let mut extglob_operator = false;
         let array_assignment = self.looks_like_array_element_assignment();
         let mut array_subscript_depth = 0usize;
+        // Set when the subscript span was opened by GNU's position arm
+        // rather than by the assignment-shape lookahead: read_token_word's
+        // `[` arm (parse.y:5636) fires on `assignment_acceptable &&
+        // token_is_ident(word so far)` ALONE — no `=` tail is required —
+        // so a bare command-position word like `a[64|3]` is one word in
+        // GNU ("a[64|3]: command not found"), not a pipeline. The flag
+        // remembers that THIS word's depth count answers to that arm, so
+        // the `]` arm and the paren exemption treat the span as matched
+        // pair data exactly like the lookahead-armed span.
+        let mut position_span = false;
         let mut array_value_paren_depth = 0usize;
         // GNU parse.y read_token_word tracks the whole token: a `name=(...)`
         // compound assignment is one atomic word regardless of the name's
@@ -467,8 +477,20 @@ impl<'a> Lexer<'a> {
                 // form stays one word at any position through the
                 // compound_assignment_start arm below, which is where
                 // the PST_ASSIGNOK admission lives in this lexer.
+                // The span's data class is the WHOLE shellbreak set, not
+                // just whitespace: parse_matched_pair (parse.y:3906-
+                // 4210) consumes characters until the balancing `]`,
+                // counting nested `[` and recursing quotes, backslash
+                // pairs and $-constructs as units — `|`, `&`, `;`, `<`,
+                // `>` and newlines inside the span are ordinary data
+                // (rubash#2605: `a[63|4]=1` reached the parser as the
+                // two commands `a[63` and `4]=1`). This clause is the
+                // whitespace arm's own gate (depth + assignment
+                // position) extended to that full class; outside the
+                // span, or with the position gate closed, every one of
+                // these characters still breaks the word.
                 && !(array_subscript_depth > 0
-                    && c.is_ascii_whitespace()
+                    && (c.is_ascii_whitespace() || matches!(c, '|' | '&' | ';' | '<' | '>'))
                     && self.assignment_word_position())
                 && !(in_array_value && c.is_ascii_whitespace())
                 && !(in_array_value && matches!(c, '(' | ')'))
@@ -477,8 +499,13 @@ impl<'a> Lexer<'a> {
                 // parens inside a subscript are ordinary word text --
                 // `A[x\$(echo uname)]=v` stays ONE assignment word and the
                 // escaped `\$` never opens a substitution (census-array2.sh
-                // V2 previously broke at the paren: syntax error).
-                && !(array_assignment && array_subscript_depth > 0 && matches!(c, '(' | ')'))
+                // V2 previously broke at the paren: syntax error). The
+                // same holds for a position-armed span (`a[(64|3)]` as a
+                // bare command word): parse_matched_pair knows no
+                // distinction once the `[` arm has fired.
+                && !((array_assignment || position_span)
+                    && array_subscript_depth > 0
+                    && matches!(c, '(' | ')'))
                 // GNU read_token_word: inside a name=(...) compound
                 // assignment value every metacharacter -- whitespace, |, &,
                 // ;, <, >, the parens themselves -- is part of the word
@@ -591,7 +618,24 @@ impl<'a> Lexer<'a> {
                     extglob_operator = false;
                     compound_element_start = false;
                 }
-                '[' if array_assignment => {
+                '[' if array_assignment
+                    || (array_subscript_depth > 0 && position_span)
+                    || (array_subscript_depth == 0
+                        && self.subscript_span_position_start(word_start)) =>
+                {
+                    // GNU parse.y:5636: the `[` arm also fires with NO
+                    // assignment tail in view — token_is_ident over the
+                    // word so far plus assignment position is the whole
+                    // condition (subscript_span_position_start) — which
+                    // is what keeps a bare `a[64|3]` one command word.
+                    // A nested `[` inside an already-open span only
+                    // counts depth (parse_matched_pair's count++ on the
+                    // open char); it does not re-test the prefix, which
+                    // by then contains the first bracket and is no
+                    // longer an identifier.
+                    if array_subscript_depth == 0 && !array_assignment {
+                        position_span = true;
+                    }
                     self.advance();
                     array_subscript_depth += 1;
                     extglob_operator = false;
@@ -623,7 +667,7 @@ impl<'a> Lexer<'a> {
                     extglob_operator = false;
                     compound_element_start = false;
                 }
-                ']' if array_assignment && array_subscript_depth > 0 => {
+                ']' if (array_assignment || position_span) && array_subscript_depth > 0 => {
                     self.advance();
                     array_subscript_depth -= 1;
                     extglob_operator = false;
@@ -903,6 +947,31 @@ impl<'a> Lexer<'a> {
         // the word an assignment.
         self.array_element_assignment_tail()
             .is_some_and(|tail| tail.starts_with('=') || tail.starts_with("+="))
+    }
+
+    // GNU parse.y:5636 read_token_word, the `[` subscript arm's own
+    // condition, evaluated at the bracket: `token_index > 0 &&
+    // assignment_acceptable (last_read_token) && token_is_ident (token,
+    // token_index)` — token_is_ident (parse.y:5291) is valid_identifier
+    // over the word assembled SO FAR. Unlike
+    // looks_like_array_element_assignment this needs no `=`/`+=` tail:
+    // GNU fires the arm for a bare command word too (`a[64|3]` is one
+    // word, a failed command name, never a pipeline). The position half
+    // is the same parse.y:3163 port the span break exemptions use, so
+    // argument words, declaration-builtin operands, case patterns and
+    // ordinary redirect targets — where GNU does not fire the arm —
+    // stay split.
+    fn subscript_span_position_start(&self, word_start: usize) -> bool {
+        let prefix = &self.input[word_start..self.position];
+        let mut chars = prefix.chars();
+        match chars.next() {
+            Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+            _ => return false,
+        }
+        if !chars.all(|c| c == '_' || c.is_ascii_alphanumeric()) {
+            return false;
+        }
+        self.assignment_word_position()
     }
 
     fn word_so_far_ends_extglob_operator(&self, start: usize) -> bool {

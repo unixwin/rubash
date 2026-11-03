@@ -62,10 +62,7 @@ fn assert_stdout(script: &str, expected: &[u8]) {
 }
 
 fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "rubash-2184-{tag}-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rubash-2184-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("scratch dir");
     dir
@@ -228,16 +225,19 @@ fn issue2184_no_literal_procsub_file_created() {
     // The pre-fix routing walk wrote the payload into a literal file
     // named after the raw `>(...)` text in the cwd.
     let dir = scratch("literal");
-    let (stdout, stderr, code) = rubash_deadline(
-        &dir,
-        "echo hi | cat > >(wc -c)",
-        Duration::from_secs(30),
-    );
+    let (stdout, stderr, code) =
+        rubash_deadline(&dir, "echo hi | cat > >(wc -c)", Duration::from_secs(30));
     assert_eq!(code, Some(0), "stderr: {stderr}");
     assert_eq!(stdout, "3\n");
     let entries: Vec<String> = std::fs::read_dir(&dir)
         .expect("read scratch dir")
-        .map(|entry| entry.expect("dir entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(

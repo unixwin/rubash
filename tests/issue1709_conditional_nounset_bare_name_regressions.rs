@@ -57,8 +57,7 @@ fn issue1709_bare_name_sibling_operators_and_side() {
         ("quoted", "[[ 'u' -eq 0 ]]; echo SHOULD_NOT_PRINT"),
         ("or-context", "[[ u -eq 0 ]] || echo SHOULD_NOT_PRINT"),
     ] {
-        let (stdout, stderr, code) =
-            run_script(tag, &format!("set -u\n{line}\necho after\n"));
+        let (stdout, stderr, code) = run_script(tag, &format!("set -u\n{line}\necho after\n"));
         assert_eq!(stdout, "", "{tag}");
         assert!(
             stderr.contains("u: unbound variable"),

@@ -74,10 +74,7 @@ fn run(tag: &str, args: &[&str], stdin_text: Option<&str>) -> Run {
             }
         }
         None => {
-            let output = cmd
-                .stdin(Stdio::null())
-                .output()
-                .expect("run shell");
+            let output = cmd.stdin(Stdio::null()).output().expect("run shell");
             Run {
                 stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

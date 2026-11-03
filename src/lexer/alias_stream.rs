@@ -249,10 +249,10 @@ pub(crate) fn expand_aliases_in_source(
     let mut expect_in_cmd = Tok::Start; // expecting_in_command
     let mut cond = 0usize; // inside [[ ]]
     let mut open_brace = 0usize; // open_brace_count for `}` recognition
-    // Heredoc state: `<<`/<<- record their delimiter word; after the next
-    // newline the body lines are raw data — GNU reads them with
-    // here_document_to_fd, outside the token stream, so no alias expansion
-    // ever applies inside a heredoc body.
+                                 // Heredoc state: `<<`/<<- record their delimiter word; after the next
+                                 // newline the body lines are raw data — GNU reads them with
+                                 // here_document_to_fd, outside the token stream, so no alias expansion
+                                 // ever applies inside a heredoc body.
     let mut expect_heredoc: Option<bool> = None; // strip_tabs for <<-
     let mut pending_heredocs: Vec<(String, bool)> = Vec::new();
     // >0 while scanning the element words of a compound array assignment

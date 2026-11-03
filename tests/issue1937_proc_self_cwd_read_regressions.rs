@@ -76,7 +76,8 @@ fn issue1937_exec_bind_of_directory_succeeds_read_fails_eisdir() {
     assert!(
         run.stdout.contains("bound-ok"),
         "the bind itself must succeed: stdout={} stderr={}",
-        run.stdout, run.stderr
+        run.stdout,
+        run.stderr
     );
     assert!(
         run.stderr.contains("read: 3: read error: Is a directory"),

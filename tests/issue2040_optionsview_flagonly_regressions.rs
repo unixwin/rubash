@@ -125,13 +125,11 @@ fn disarming_an_unarmed_flag_option_is_a_successful_noop() {
 fn restricted_stays_out_of_the_option_listing() {
     let mut session = Session::builder().build().expect("session builds");
     assert!(session.options().set("restricted", true));
-    assert!(
-        !session
-            .options()
-            .list()
-            .iter()
-            .any(|option| option.name == "restricted")
-    );
+    assert!(!session
+        .options()
+        .list()
+        .iter()
+        .any(|option| option.name == "restricted"));
     // SHELLOPTS is rendered from the same two tables; GNU never lists
     // restricted there either.
     let shelopts = session

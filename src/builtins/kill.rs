@@ -866,11 +866,38 @@ pub fn process_exists(pid: u32) -> bool {
     pid == std::process::id() || signal_process(pid, 0).is_ok_or_permission_denied()
 }
 
-/// jobs.c:3926-3928 continue_job: fg/bg resume a stopped job by signalling
-/// SIGCONT to the process group; per-pid delivery is the rubash equivalent
-/// of killpg over the job's process list.
+/// Plain kill(2) to one recorded pid: the delivery primitive for the
+/// kill builtin's pid operands and for fg/bg's shared-group fallback.
+/// It is NOT the resume model for a job-control job: GNU continue_job
+/// (jobs.c:3926-3928) addresses the resume SIGCONT to the job's process
+/// GROUP with killpg, because the group also holds processes the leader
+/// forked after spawn — which no pid list the shell keeps can name — so
+/// per-pid delivery over the job's recorded pids is not a killpg
+/// equivalent there (rubash#2622). fg/bg use
+/// [`send_signal_to_process_group`] whenever the job-control channel is
+/// active; this per-pid path remains for the fallback model, where the
+/// job's members all live in the shell's own process group and every
+/// member is a recorded pid.
 pub fn send_signal(pid: u32, signal: i32) -> Result<(), &'static str> {
     signal_process(pid, signal)
+}
+
+/// killpg(2) to a job's process group — GNU continue_job's resume
+/// delivery (jobs.c:3926-3928 `killpg (jobs[job]->pgrp, SIGCONT)`;
+/// start_job is jobs.c:3826). Group addressing reaches every member of
+/// the group, including children the job's leader forked after spawn
+/// that the shell never recorded as job pids (rubash#2622).
+#[cfg(unix)]
+pub fn send_signal_to_process_group(pgrp: i32, signal: i32) -> Result<(), &'static str> {
+    let result = unsafe { libc::killpg(pgrp as libc::pid_t, signal) };
+    if result == 0 {
+        return Ok(());
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ESRCH) => Err("No such process"),
+        Some(libc::EPERM) => Err("Permission denied"),
+        _ => Err("Failed to signal process"),
+    }
 }
 
 /// Record a console `CTRL_C_EVENT` into this process's self-signal queue.
@@ -3965,6 +3992,14 @@ pub(crate) fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
         BACKGROUND_WRAPPER_ROLE.store(true, std::sync::atomic::Ordering::Release);
         BACKGROUND_WRAPPER_EXPECTED_PARENT
             .store(std::process::id(), std::sync::atomic::Ordering::Release);
+        // rubash#2626: a wrapper-role process proxies individually
+        // addressed signals to its foreground pipeline (see
+        // WRAPPER_RELAY_SIGNALS). Installed here, at role-arming
+        // time, because this is the one moment the process is
+        // still single-threaded with its entry dispositions
+        // untouched — the saved-disposition table the relay falls
+        // back to is only meaningful if captured now.
+        wrapper_relay_install_once();
     }
 }
 
@@ -3972,6 +4007,297 @@ pub(crate) fn consume_background_wrapper_handshake(args: &mut Vec<String>) {
 #[cfg(unix)]
 pub fn background_wrapper_role_armed() -> bool {
     BACKGROUND_WRAPPER_ROLE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// ------------------------------------------------------------------
+/// rubash#2626: the background-wrapper signal relay (unix).
+///
+/// GNU runs a background pipeline's stages as the shell's direct
+/// children and `$!` names the LAST stage (execute_cmd.c
+/// execute_pipeline; verified against bash 5.3.20: `sleep 51 |
+/// sleep 52 &` then `kill -TERM $!` leaves `sleep 51` running).
+/// rubash's async spawn interposes a wrapper process (the
+/// `--internal-bg-wrapper` respawn above) that forks the stages, so
+/// `$!` names the wrapper — and a plain-pid signal addressed to `$!`
+/// used to land on the wrapper alone: the wrapper died and the
+/// stages were taken down with it by the rubash#737 PDEATHSIG arm,
+/// the exact opposite of the GNU fate (the addressed stage dies,
+/// its siblings run on).
+///
+/// The relay makes the wrapper transparent for individually
+/// addressed signals while it supervises a foreground pipeline:
+/// the executor publishes the pipeline's last stage pid as the
+/// relay target for the duration of its wait (see
+/// `WrapperRelayTargetGuard`), and a delivery to the wrapper is
+/// forwarded to that pid instead of acting on the wrapper. The
+/// wrapper then outlives the addressed stage and keeps supervising
+/// the survivors, exiting when the whole pipeline has finished —
+/// the parent shell's job therefore persists and reports exactly
+/// as GNU's does.
+///
+/// Mechanics, mirroring the fatal set's model in kernel_signals:
+/// at role-arming time (once, from
+/// `consume_background_wrapper_handshake`, before any other thread
+/// exists) the pre-existing disposition of each relay signal is
+/// saved and a minimal recording handler is installed; the handler
+/// only writes the signal number to a self-pipe (async-signal-safe),
+/// and a dedicated thread performs the delivery decision:
+///   * the installed disposition is no longer the relay handler
+///     (a trap reconcile replaced it, or a reset restored the
+///     default): re-raise once — the live owner (engine handler,
+///     SIG_DFL, SIG_IGN) disposes of the delivery;
+///   * a relay target is published: forward the signal to it;
+///   * otherwise restore the saved disposition and re-raise, so
+///     an untrapped delivery still kills the wrapper BY the
+///     signal and an entry-ignored one is still swallowed.
+/// A trap installed by the wrapper's own body therefore keeps
+/// priority over the proxy (the reconcile replaces the relay
+/// handler), and signals the relay cannot catch (SIGKILL/SIGSTOP)
+/// keep the standing rubash#737 contract — PDEATHSIG still arms
+/// for wrapper-spawned children, so an uncatchable wrapper death
+/// behaves exactly as it did before this relay existed.
+///
+/// The set is the asynchronous, externally addressable kill
+/// family. Deliberately excluded: SIGKILL/SIGSTOP (uncatchable),
+/// SIGCONT (resume semantics are the kernel's, not a proxy's),
+/// SIGCHLD (the engine's own reaping notices), SIGPIPE (the
+/// wrapper's own output writes depend on its process-wide
+/// disposition), SIGTRAP and the synchronous fault family
+/// (SIGILL/SIGBUS/SIGFPE/SIGSEGV — the fatal set's territory),
+/// SIGWINCH (terminal-size tracking).
+#[cfg(unix)]
+const WRAPPER_RELAY_SIGNALS: &[libc::c_int] = &[
+    libc::SIGHUP,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGABRT,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+    libc::SIGALRM,
+    libc::SIGTERM,
+    libc::SIGXCPU,
+    libc::SIGXFSZ,
+    libc::SIGVTALRM,
+    libc::SIGPROF,
+    #[cfg(target_os = "linux")]
+    libc::SIGSTKFLT,
+];
+
+/// The currently proxied pid (the last stage of the foreground
+/// pipeline the wrapper is waiting on); 0 = no target published.
+#[cfg(unix)]
+static WRAPPER_RELAY_TARGET: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Saved pre-relay dispositions, indexed by signal number (every
+/// relay signal is < 32). Written once by the install, before the
+/// relay thread spawns; that spawn's happens-before edge covers
+/// the relay thread's reads (the FATAL_PREV_HANDLER model).
+#[cfg(unix)]
+static WRAPPER_RELAY_PREV: [std::sync::atomic::AtomicU64; 32] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 32];
+#[cfg(unix)]
+static WRAPPER_RELAY_PREV_FLAGS: [std::sync::atomic::AtomicU64; 32] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 32];
+
+/// Write end of the relay self-pipe; -1 until installed. The fd is
+/// O_CLOEXEC, so no spawned child inherits it across exec.
+#[cfg(unix)]
+static WRAPPER_RELAY_PIPE_WR: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// RAII publication of the relay target: the executor's pipeline
+/// wait holds one of these for exactly the span in which the
+/// wrapper supervises that pipeline. Inert outside wrapper-role
+/// processes (and off unix).
+pub struct WrapperRelayTargetGuard {
+    #[cfg(unix)]
+    pid: u32,
+}
+
+impl WrapperRelayTargetGuard {
+    pub fn publish(pid: u32) -> Self {
+        #[cfg(unix)]
+        {
+            if pid != 0 && background_wrapper_role_armed() {
+                WRAPPER_RELAY_TARGET.store(pid, std::sync::atomic::Ordering::Release);
+                return Self { pid };
+            }
+            Self { pid: 0 }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            Self {}
+        }
+    }
+}
+
+impl Drop for WrapperRelayTargetGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.pid != 0 {
+            // Clear only our own publication; a nested wait that
+            // published a different target keeps its span.
+            let _ = WRAPPER_RELAY_TARGET.compare_exchange(
+                self.pid,
+                0,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        }
+    }
+}
+
+/// The recording handler: async-signal-safe by construction — one
+/// non-blocking write of the signal number to the relay pipe.
+#[cfg(unix)]
+extern "C" fn wrapper_relay_handler(sig: libc::c_int) {
+    let fd = WRAPPER_RELAY_PIPE_WR.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = sig as u8;
+        unsafe {
+            libc::write(fd, &byte as *const u8 as *const libc::c_void, 1);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wrapper_relay_install() {
+    use std::sync::atomic::Ordering;
+    let mut fds: [libc::c_int; 2] = [0; 2];
+    // libc::pipe2 is glibc/musl-only; Darwin exposes pipe + fcntl
+    // instead (same pattern as fd/unix.rs create_capture_pipe).
+    #[cfg(target_os = "linux")]
+    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
+    #[cfg(not(target_os = "linux"))]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags >= 0 {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+        }
+    }
+    let (read_end, write_end) = (fds[0], fds[1]);
+    // The handler's write must never block on a full pipe.
+    unsafe {
+        let flags = libc::fcntl(write_end, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(write_end, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    WRAPPER_RELAY_PIPE_WR.store(write_end, Ordering::Release);
+    for &sig in WRAPPER_RELAY_SIGNALS {
+        let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+        unsafe { libc::sigaction(sig, std::ptr::null_mut(), &mut current) };
+        WRAPPER_RELAY_PREV[sig as usize].store(current.sa_sigaction as u64, Ordering::Relaxed);
+        WRAPPER_RELAY_PREV_FLAGS[sig as usize]
+            .store(current.sa_flags as i64 as u64, Ordering::Relaxed);
+        let action = libc::sigaction {
+            sa_sigaction: wrapper_relay_handler as *const () as usize,
+            // SA_RESTART: the wrapper's own blocking waits (its
+            // pipeline reap loop) must resume after a delivery the
+            // relay thread will dispose of.
+            sa_flags: libc::SA_RESTART,
+            sa_mask: unsafe { std::mem::zeroed() },
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            sa_restorer: None,
+        };
+        unsafe { libc::sigaction(sig, &action, std::ptr::null_mut()) };
+    }
+    std::thread::spawn(move || wrapper_relay_loop(read_end));
+}
+
+/// Once-only install, called when the wrapper role arms. Never in
+/// the lib's own unit-test process (cfg!(test)): arming a role
+/// there is a bookkeeping exercise, and a test process must not
+/// grow live handlers or a relay thread.
+#[cfg(unix)]
+fn wrapper_relay_install_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    if cfg!(test) {
+        return;
+    }
+    ONCE.call_once(wrapper_relay_install);
+}
+
+#[cfg(unix)]
+fn wrapper_relay_loop(read_end: libc::c_int) {
+    let mut buffer = [0u8; 128];
+    loop {
+        let count = unsafe {
+            libc::read(
+                read_end,
+                buffer.as_mut_ptr() as *mut libc::c_void,
+                buffer.len(),
+            )
+        };
+        if count <= 0 {
+            // The write end lives in a static for the process
+            // lifetime, so EOF is not expected; treat any failure
+            // as transient and keep the relay alive.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            continue;
+        }
+        for &byte in &buffer[..count as usize] {
+            wrapper_relay_deliver(byte as libc::c_int);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wrapper_relay_deliver(sig: libc::c_int) {
+    use std::sync::atomic::Ordering;
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    unsafe { libc::sigaction(sig, std::ptr::null_mut(), &mut current) };
+    if current.sa_sigaction != wrapper_relay_handler as *const () as usize {
+        // The disposition moved after this delivery was recorded.
+        // The byte exists at all only because our handler ran, and
+        // when the engine's registry trampoline owns the signal it
+        // CHAINS to the previously installed handler — us — after
+        // recording the delivery itself. Re-raising here would
+        // re-enter the trampoline, record the same delivery again,
+        // chain to us again, and loop without bound (measured: one
+        // `kill -TERM $!` against a trapping wrapper body echoed
+        // its trap action ~200 times). The live owner has already
+        // recorded this delivery through its own path, so the
+        // relay's copy is a duplicate: drop it. The residual race —
+        // a delivery that reached our handler in the instant before
+        // a flip and is dropped here instead of handed over — is
+        // confined to the reconcile window itself, where GNU's own
+        // answer depends on the same coin flip (the signal raced
+        // the trap's installation).
+        return;
+    }
+    let target = WRAPPER_RELAY_TARGET.load(Ordering::Acquire);
+    if target != 0 {
+        unsafe { libc::kill(target as libc::pid_t, sig) };
+        return;
+    }
+    // No pipeline to proxy for: restore the disposition saved at
+    // install time and re-raise, reproducing it exactly (the
+    // fatal set's die-on-delivery model, generalized to whatever
+    // was there — default, ignore, or a foreign handler, which
+    // the re-raise then invokes with the real delivery info).
+    let prev = WRAPPER_RELAY_PREV[sig as usize].load(Ordering::Relaxed) as usize;
+    let prev_flags = WRAPPER_RELAY_PREV_FLAGS[sig as usize].load(Ordering::Relaxed) as i32;
+    let action = libc::sigaction {
+        sa_sigaction: prev,
+        sa_flags: prev_flags,
+        sa_mask: unsafe { std::mem::zeroed() },
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        sa_restorer: None,
+    };
+    unsafe {
+        libc::sigaction(sig, &action, std::ptr::null_mut());
+        libc::raise(sig);
+    }
+    // If the restored disposition swallowed the delivery (SIG_IGN
+    // or a handler that returned), the relay handler is gone for
+    // this signal and the relay has disengaged for it — the same
+    // end state a plain disposition flip would have produced.
 }
 
 /// rubash#1035: environment key marking a `rubash -c` respawn as an

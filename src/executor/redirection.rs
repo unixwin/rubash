@@ -1669,7 +1669,33 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        self.command_output_redirect_fails_impl(cmd, true)
+        // rubash#2613: judge this walk in the descriptor space the
+        // dynamic-fd applier binds — a stage list may reference the
+        // descriptor a `{var}` entry allocated by number later in the
+        // same list, and the applier's bindings are the only place
+        // that slot exists (see the routing walk's bracket in
+        // route_pipeline_stage_streams). The stage executors run
+        // their own applier pass when they execute, so this preflight
+        // applies, judges, and undoes — the same order the plain
+        // funnel's gates see (applier first, gate second).
+        if !command_has_dynamic_fd_var_redirects(cmd) {
+            return self.command_output_redirect_fails_impl(cmd, true);
+        }
+        match self.apply_dynamic_fd_var_redirects(cmd, true) {
+            Ok(false) => {
+                let result = self.command_output_redirect_fails_impl(cmd, true);
+                self.undo_child_fd_var_redirects();
+                result
+            }
+            // The applier itself failed the list and already placed
+            // its diagnostic: the stage dies at do_redirections,
+            // exactly as a plain command whose applier run fails.
+            Ok(true) => {
+                self.undo_child_fd_var_redirects();
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn command_output_redirect_fails_impl(
@@ -2432,8 +2458,7 @@ impl Executor {
                         // an open read description records ReadOnly
                         // for the target; any other model leaves
                         // the fd to the output graph.
-                        let source_is_read_description =
-                            source_target == OutputTarget::Closed;
+                        let source_is_read_description = source_target == OutputTarget::Closed;
                         state.fds.insert(fd, source_target);
                         if source_is_read_description {
                             state.list_binds.insert(fd, ListBound::ReadOnly);
@@ -2538,8 +2563,7 @@ impl Executor {
                         // must not read the Closed model in `fds` as
                         // a closed descriptor. Any other model means
                         // the output graph owns the fd outright.
-                        let source_is_read_description =
-                            source_target == OutputTarget::Closed;
+                        let source_is_read_description = source_target == OutputTarget::Closed;
                         state.fds.insert(target_fd, source_target);
                         if source_is_read_description {
                             state.list_binds.insert(target_fd, ListBound::ReadOnly);
@@ -3097,6 +3121,43 @@ impl Executor {
         stderr: &mut String,
         status: &mut i32,
     ) -> Result<bool, ExecuteError> {
+        // rubash#2613: GNU runs ONE do_redirections walk per pipeline
+        // element (execute_cmd.c:2620 execute_pipeline -> redir.c:237
+        // do_redirections) and the `{var}` entries allocate their
+        // descriptor inside that same walk (redir.c:1470
+        // redir_varassign), so a later entry may reference the
+        // allocated descriptor by number (`{v}>&9 1>&10`). This
+        // routing walk replays the list AFTER the stage executor
+        // undid its own applier run, so without re-binding, the
+        // allocated slot is absent from the seeded state, the
+        // reference resolves as a bad fd, and the stage's payload is
+        // dropped with its status forced to 1. Re-run the SAME
+        // applier the plain-command funnel runs ahead of its walks,
+        // judge the walk in the bound descriptor space, then undo:
+        // one applier, one descriptor space, no stage dialect. The
+        // plain faces need no bracket — their routing-equivalent
+        // walks run while the funnel's applier bindings still stand.
+        // A failed re-apply falls back to the unbound walk (the stage
+        // was already adjudicated during execution; routing must not
+        // newly fail the pipeline).
+        if !command_has_dynamic_fd_var_redirects(cmd) {
+            return self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
+        }
+        let applied = matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
+        let result = self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
+        if applied {
+            self.undo_child_fd_var_redirects();
+        }
+        result
+    }
+
+    fn route_pipeline_stage_streams_inner(
+        &mut self,
+        cmd: &CommandNode,
+        stdout: &mut String,
+        stderr: &mut String,
+        status: &mut i32,
+    ) -> Result<bool, ExecuteError> {
         // rubash#2293: take the stage spawner's dup-carrier stash
         // up front — the first routing pass after a stage owns its
         // payloads, and a pass that declines or fails must not leak
@@ -3505,6 +3566,22 @@ fn builtin_output_write_is_unchecked(cmd: &CommandNode) -> bool {
             _ => return false,
         }
     }
+}
+
+/// Whether the command's redirect lists (plain or heredoc) carry
+/// any `{var}` entry — the entries whose descriptor binding exists
+/// only once the dynamic-fd applier has run (redir.c:1470
+/// redir_varassign). Stage auxiliary walks bracket themselves with
+/// that applier when this holds (rubash#2613); lists without `{var}`
+/// entries take the exact pre-#2613 path.
+pub(in crate::executor) fn command_has_dynamic_fd_var_redirects(cmd: &CommandNode) -> bool {
+    cmd.redirects
+        .iter()
+        .any(|redirect| redirect.fd_var.is_some())
+        || cmd
+            .heredoc_redirects
+            .iter()
+            .any(|redirect| redirect.fd_var.is_some())
 }
 
 fn redirect_fd_or_default(redirect: &Redirect, default_fd: u32) -> u32 {

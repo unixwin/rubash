@@ -54,9 +54,8 @@ fn rubash_file(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn issue1704_background_function_comsub_pipeline_survives_respawn() {
-    let (stdout, stderr, code) = rubash_file(
-        "g() { x=\"$(echo abc | awk '{print $1}')\"; echo \"x=$x\"; }\ng &\nwait\n",
-    );
+    let (stdout, stderr, code) =
+        rubash_file("g() { x=\"$(echo abc | awk '{print $1}')\"; echo \"x=$x\"; }\ng &\nwait\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
     assert_eq!(stdout, "x=abc\n");
@@ -78,9 +77,8 @@ fn issue1704_background_function_nested_comsub_pipeline_survives_respawn() {
 fn issue1704_background_function_multiline_quoted_value_survives_respawn() {
     // The nvm_nvmrc_invalid_msg shape: a multi-line single-quoted
     // assignment value must re-parse as ONE assignment in the child.
-    let (stdout, stderr, code) = rubash_file(
-        "g() { local e; e='line1\nline2'; echo \"e=[$e]\"; }\ng &\nwait\n",
-    );
+    let (stdout, stderr, code) =
+        rubash_file("g() { local e; e='line1\nline2'; echo \"e=[$e]\"; }\ng &\nwait\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
     assert_eq!(stdout, "e=[line1\nline2]\n");
@@ -116,9 +114,8 @@ fn issue1704_background_function_empty_string_case_pattern_survives_respawn() {
     // from its cooked (empty) form produced an unparseable clause
     // head in the child's prelude — the whole respawn died with a
     // syntax error near `esac`.
-    let (stdout, stderr, code) = rubash_file(
-        "g() { case \"$1\" in '') echo empty ;; *) echo other ;; esac; }\ng &\nwait\n",
-    );
+    let (stdout, stderr, code) =
+        rubash_file("g() { case \"$1\" in '') echo empty ;; *) echo other ;; esac; }\ng &\nwait\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
     assert_eq!(stdout, "empty\n");
@@ -138,9 +135,8 @@ fn issue1704_background_function_quoted_subject_and_alternation_survive_respawn(
 fn issue1704_background_function_plain_pipeline_body_control() {
     // Control: a pipeline at body level (not inside a comsub) already
     // respawned correctly — pin it against regressions of the fix.
-    let (stdout, stderr, code) = rubash_file(
-        "g() { echo abc | awk '{ print substr($0, 1, 1); }'; }\n( g & wait ) | sort\n",
-    );
+    let (stdout, stderr, code) =
+        rubash_file("g() { echo abc | awk '{ print substr($0, 1, 1); }'; }\n( g & wait ) | sort\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
     assert_eq!(stdout, "a\n");
@@ -150,8 +146,7 @@ fn issue1704_background_function_plain_pipeline_body_control() {
 fn issue1704_foreground_comsub_pipeline_control() {
     // Control: foreground execution never used the serialized text —
     // it must stay byte-identical.
-    let (stdout, _, code) =
-        rubash_file("x=\"$(echo abc | awk '{print $1}')\"\necho \"x=$x\"\n");
+    let (stdout, _, code) = rubash_file("x=\"$(echo abc | awk '{print $1}')\"\necho \"x=$x\"\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "x=abc\n");
 }

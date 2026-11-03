@@ -887,7 +887,10 @@ pub struct Executor {
     /// exactly once, and the gate restores the expansion latches so the
     /// parent-side discard never swallows the rest of the launch line
     /// (`set -- /no/such/*.zzz & echo BG_after` lost its echo, 753.11).
-    expansion_probe_active: std::cell::Cell<bool>,
+    /// Held behind an `Rc` so the RAII probe guard
+    /// (`compound_exec::ExpansionProbeGuard`, rubash#2585) can hold a
+    /// handle across the `&mut self` expansion call it brackets.
+    expansion_probe_active: std::rc::Rc<std::cell::Cell<bool>>,
     /// GNU trap.c SIG_INPROGRESS: _run_trap_internal marks a trap
     /// in-progress before executing its action, and run_error_trap refuses
     /// to re-enter while it is set — an ERR trap action that itself fails

@@ -199,6 +199,23 @@ impl Executor {
                 self.exit_code = self.execute_enable(&builtin_cmd)?;
                 Ok(())
             }
+            // rubash#2581: `env` is in BUILTIN_NAMES, has a registry row
+            // (command_registry.rs, dispatching to execute_env_command),
+            // is enable-managed, and compgen -b lists it — but this
+            // table had no arm, so `builtin env` reported "not a shell
+            // builtin". GNU has no env builtin at all (no builtins/
+            // env.def; env is coreutils), and rubash deliberately
+            // diverges there: the internal env is the only env on
+            // platforms without /usr/bin/env, and every other face
+            // already treats it as a builtin. The consistent choice is
+            // the arm, not stripping env from the faces (which would
+            // break `enable -n env`, `compgen -b` and `type env`).
+            // The generic is_disabled check above already covers
+            // `enable -n env` for this route.
+            "env" => {
+                self.execute_env_command(&builtin_cmd)?;
+                Ok(())
+            }
             "exec" => {
                 self.builtin_wrapper_depth += 1;
                 let result = self.execute_exec_command(&builtin_cmd);

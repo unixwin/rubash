@@ -10,10 +10,14 @@ pub(in crate::executor) fn validate_local_options(args: &[String]) -> Result<(),
             return Ok(());
         }
         for option in arg[1..].chars() {
-            match option {
-                'a' | 'A' | 'f' | 'F' | 'g' | 'I' | 'i' | 'l' | 'n' | 'p' | 'r' | 't' | 'u'
-                | 'x' => {}
-                other => return Err(other),
+            // rubash#2582: the letter set is the single GNU table
+            // (declare.def:145 DECLARE_OPTS) shared with
+            // scan_declare_options — this hand-copied list was missing
+            // `c` (capcase) and `G`, so `local -c x` was rejected even
+            // though GNU accepts it.
+            if super::declare_local::DECLARE_OPTION_LETTERS.contains(option) {
+            } else {
+                return Err(option);
             }
         }
     }

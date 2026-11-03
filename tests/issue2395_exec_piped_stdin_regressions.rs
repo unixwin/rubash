@@ -145,12 +145,7 @@ fn issue2395_exec_heredoc_stdin_leaves_no_carrier() {
 #[test]
 fn issue2395_exec_herestring_stdin_leaves_no_carrier() {
     let (dir, tmp) = scratch("herestring");
-    let (stdout, stderr) = rubash_script(
-        &dir,
-        &tmp,
-        "case.sh",
-        "exec bash -c 'cat' <<<hello-hs\n",
-    );
+    let (stdout, stderr) = rubash_script(&dir, &tmp, "case.sh", "exec bash -c 'cat' <<<hello-hs\n");
     assert_eq!(stdout, "hello-hs\n");
     assert_eq!(stderr, "");
     assert_no_carrier_residue(&tmp);
@@ -159,12 +154,7 @@ fn issue2395_exec_herestring_stdin_leaves_no_carrier() {
 #[test]
 fn issue2395_exec_file_stdin_still_works() {
     let (dir, tmp) = scratch("file-stdin");
-    let (stdout, stderr) = rubash_script(
-        &dir,
-        &tmp,
-        "case.sh",
-        "exec bash -c 'cat' < seed.txt\n",
-    );
+    let (stdout, stderr) = rubash_script(&dir, &tmp, "case.sh", "exec bash -c 'cat' < seed.txt\n");
     assert_eq!(stdout, "seed-line\n");
     assert_eq!(stderr, "");
     assert_no_carrier_residue(&tmp);

@@ -635,21 +635,40 @@ impl Executor {
     /// compspec's hook with the live COMP_* context bound) and merged by
     /// `complete_line_candidates_with_dynamic` (niubash#520).
     pub fn complete_line(&mut self, line: &str, cursor: usize) -> Vec<String> {
+        self.complete_line_detailed(line, cursor).0
+    }
+
+    /// [`Executor::complete_line`] plus the attempt's insertion/display
+    /// policy (rubash#2573): how the governing compspec's `-o` policy
+    /// options (nospace / noquote / filenames / fullquote / nosort,
+    /// compopt mutations included) say the host editor should treat
+    /// these candidates — pcomplete.c:1458-1477
+    /// pcomp_set_readline_variables. With no governing compspec the
+    /// policy is the default (quote filenames, sort, append).
+    pub fn complete_line_detailed(
+        &mut self,
+        line: &str,
+        cursor: usize,
+    ) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // Job completion names are the command's first word only
         // (rubash#1052; same rule as the compgen path in job_builtins).
-        let job_names: Vec<String> = self
+        // The process state rides along so the running/stopped action
+        // arms can filter (rubash#2584).
+        let job_names: Vec<crate::builtins::complete::JobCandidate> = self
             .shell_state
             .job_table
             .jobs
             .values()
             .filter(|job| job.background)
-            .map(|job| {
-                job.command
+            .map(|job| crate::builtins::complete::JobCandidate {
+                name: job
+                    .command
                     .split_whitespace()
                     .next()
                     .unwrap_or_default()
-                    .to_string()
+                    .to_string(),
+                state: job.state,
             })
             .collect();
         // rl_complete_internal sets RL_STATE_COMPLETING for the whole
@@ -663,8 +682,23 @@ impl Executor {
         // passes through here and keeps the flag down, matching
         // RL_STATE_COMPLETING's scope).
         self.shell_state.line_completion_active = true;
-        let dynamic = self.completion_dynamic_for_line(line, cursor);
-        let candidates = crate::builtins::complete::complete_line_candidates_with_dynamic(
+        // rubash#2576: bashline.c:1681 — with progcomp off the dynamic
+        // (-F/-C) hooks never run; the static pipeline falls back to
+        // command/file completion.
+        let dynamic =
+            if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp") {
+                self.completion_dynamic_for_line(line, cursor)
+            } else {
+                None
+            };
+        // rubash#2575: snapshot the bind registry's readline variables
+        // for the candidate filter (the registry is the only store
+        // `bind 'set ...'` writes; the pipeline could not see it
+        // before).
+        let rl_settings = crate::builtins::complete::ReadlineCompletionSettings::from_bind_registry(
+            &self.shell_state.bind_registry.borrow(),
+        );
+        let outcome = crate::builtins::complete::complete_line_candidates_with_dynamic_detailed(
             line,
             cursor,
             &self.shell_state.completion_specs,
@@ -673,9 +707,10 @@ impl Executor {
             &function_names,
             &job_names,
             dynamic,
+            &rl_settings,
         );
         self.shell_state.line_completion_active = false;
-        candidates
+        outcome
     }
 
     /// The canonical list of shell builtin command names (mirrors
@@ -692,9 +727,13 @@ impl Executor {
     /// `-E` empty-line compspecs govern lines whose command has no own
     /// registration (niubash#520), so their presence also opens the gate.
     pub fn has_compspec(&self, command: &str) -> bool {
+        // -I counts: it governs the command word itself, so the host
+        // gate must open when only an initial-word spec is registered
+        // (rubash#2571).
         self.shell_state.completion_specs.get(command).is_some()
             || self.shell_state.completion_specs.get("-D").is_some()
             || self.shell_state.completion_specs.get("-E").is_some()
+            || self.shell_state.completion_specs.get("-I").is_some()
     }
 
     /// The session's open fd numbers, ascending: every fd-table entry
@@ -1712,15 +1751,28 @@ impl Executor {
             // byte-identical inserts are idempotent, so skipping them
             // changes nothing observable.
             self.set_current_line_value(line);
-            // GNU's line_number is a process-internal C int; the Windows
-            // process-environment mirror only needs the OS write when the
-            // stamped value differs from the last one WE wrote — a loop
-            // body re-stamps the same line thousands of times. The gate
-            // compares against the last OS write, not the map value:
+            // GNU's line_number is a single process-global C int
+            // (execute_cmd.c:295 SET_LINE_NUMBER writes the one global;
+            // there is no per-builtin copy), so EVERY reader must see the
+            // same value. The env_vars map is the canonical store, and the
+            // process-environment mirror is its second storage for the
+            // builtins whose execute signatures carry no env map (alias,
+            // help, kill, shift, shopt, setattr read std::env directly).
+            // rubash#2580: the mirror write used to be gated by a
+            // 15-word whitelist matched on the RAW command words, so an
+            // indirectly invoked builtin (`x=shift; $x 5`, host
+            // call_function dispatch) read a stale or missing mirror and
+            // printed diagnostics with the wrong/absent line, while
+            // `echo kill` stamped the mirror for no reason. Write BOTH
+            // storages on every stamp instead (the #2564 COLUMNS
+            // both-storages shape): the OS write still only happens when
+            // the stamped value differs from the last one WE wrote — a
+            // loop body re-stamps the same line thousands of times. The
+            // gate compares against the last OS write, not the map value:
             // ambient-line restores write the map directly, so a
             // map-equality gate left the OS env stale (alias/declare
             // diagnostics reported an earlier line).
-            if command_needs_process_line_env(cmd) {
+            {
                 let rendered = line.to_string();
                 if self.line_env_os_value.borrow().as_deref() != Some(rendered.as_str()) {
                     set_process_env("__RUBASH_CURRENT_LINE", &rendered);

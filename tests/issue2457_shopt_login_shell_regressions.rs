@@ -142,7 +142,8 @@ fn issue2457_setter_rederives_from_the_effective_global() {
     // Inside a `( )` region the global is cleared, so EITHER
     // spelling snaps the report off …
     for (tag, attempt) in [("subshell-unset", "-u"), ("subshell-set", "-s")] {
-        let script = format!("( shopt {attempt} login_shell; shopt -q login_shell; echo \"rc=$?\" )");
+        let script =
+            format!("( shopt {attempt} login_shell; shopt -q login_shell; echo \"rc=$?\" )");
         let r = run(tag, &["-l", "-c", &script]);
         assert_eq!(r.stdout, "rc=1\n", "shape: {tag}");
     }

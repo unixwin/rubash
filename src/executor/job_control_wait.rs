@@ -87,6 +87,37 @@ pub(in crate::executor) fn shell_pgrp() -> i32 {
     unsafe { libc::getpgrp() }
 }
 
+/// rubash#2622: deliver a resumed job's SIGCONT the way GNU
+/// continue_job does (jobs.c:3926-3928). With the job-control channel
+/// live, the caller passes the job's pgrp and the signal is addressed
+/// to the whole process GROUP via killpg — the group also holds
+/// children the leader forked after spawn (the `sleep` under
+/// `sh -c 'sleep 3; …'`), which appear in no pid list the shell keeps,
+/// so per-pid delivery would resume the leader alone and wedge the job
+/// forever. The per-pid loop over the recorded members remains only
+/// for the shared-group fallback model (no channel, `group_pgrp` is
+/// None): there every job member lives in the shell's own group and is
+/// a recorded pid. SIGCONT follows the target numbering (18 Linux /
+/// 19 Darwin) via kill::SIGCONT_NUMBER — jobs.c:3928 uses the
+/// platform's own number, not a Linux literal.
+pub(in crate::executor) fn deliver_job_sigcont(group_pgrp: Option<i32>, pids: &[u32]) {
+    #[cfg(unix)]
+    {
+        if let Some(pgrp) = group_pgrp {
+            let _ = crate::builtins::kill::send_signal_to_process_group(
+                pgrp,
+                crate::builtins::kill::SIGCONT_NUMBER,
+            );
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = group_pgrp;
+    for member in pids {
+        let _ = crate::builtins::kill::send_signal(*member, crate::builtins::kill::SIGCONT_NUMBER);
+    }
+}
+
 impl Executor {
     /// rubash#2398: the stop-detection channel is live exactly when
     /// GNU would run waitchld with WUNTRACED — an interactive shell
@@ -110,5 +141,4 @@ impl Executor {
             false
         }
     }
-
 }

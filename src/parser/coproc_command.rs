@@ -31,9 +31,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             // and the fds bind as COPROC). A builtin-name allowlist
             // here stole the first word of the simple command as a
             // name (rubash#1153).
-            if !lookahead.value.starts_with('-')
-                && !is_keyword(tokens, i, "!")
-                && next_is_compound
+            if !lookahead.value.starts_with('-') && !is_keyword(tokens, i, "!") && next_is_compound
             {
                 name = Some((lookahead.value.clone(), lookahead.raw.clone()));
                 i += 1; // consume the name

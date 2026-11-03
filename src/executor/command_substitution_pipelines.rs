@@ -707,11 +707,7 @@ impl Executor {
             Ok(bytes)
         } else if let Some(link) = {
             let (cwd_forms, root_forms) = self.proc_link_forms();
-            crate::special_paths::synthetic_link_target(
-                path,
-                Some(&cwd_forms),
-                Some(&root_forms),
-            )
+            crate::special_paths::synthetic_link_target(path, Some(&cwd_forms), Some(&root_forms))
         } {
             fs::read(&link.native)
         } else {

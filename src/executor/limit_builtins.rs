@@ -216,10 +216,88 @@ impl Executor {
                 if let crate::jobs::table::JobspecMatch::Job(job_id) =
                     self.shell_state.job_table.resolve_jobspec(&operand)
                 {
+                    // GNU's killpg arm (rubash#2624): kill.def's jobspec
+                    // arm hands kill_pid the job's PGRP for a job-control
+                    // job (`pid = IS_JOBCONTROL (job) ? j->pgrp :
+                    // j->pipe->pid`), and kill_pid's group arm delivers
+                    // with a single killpg (jobs.c:4008-4020) — reaching
+                    // every pipeline stage and every child a member
+                    // forked after spawn, which no recorded pid names.
+                    // Collapsing the spec to one member pid (the shared
+                    // path below) half-kills the job: `kill -TERM %1`
+                    // left every stage but the last running. A stopped
+                    // job that takes SIGTERM/SIGHUP also gets SIGCONT
+                    // (jobs.c:4009-4010) so the fatal signal can act;
+                    // the per-member bookkeeping stays note_kill_delivery,
+                    // the same deferred-mark model as the walk below.
+                    // Jobs without their own pgrp keep the walk arm.
+                    #[cfg(unix)]
+                    {
+                        let group = self
+                            .shell_state
+                            .job_table
+                            .jobs
+                            .get(&job_id)
+                            .filter(|entry| entry.job_control && entry.pgrp > 0)
+                            .map(|entry| {
+                                (
+                                    entry.pgrp,
+                                    entry.pids.clone(),
+                                    entry.state == crate::jobs::ProcessState::Stopped,
+                                )
+                            });
+                        if let Some((pgrp, members, stopped)) = group {
+                            if request.check_only {
+                                // kill_pid with sig 0: the killpg result
+                                // IS the verdict (jobs.c:4008).
+                                match crate::builtins::kill::send_signal_to_process_group(
+                                    pgrp as i32,
+                                    0,
+                                ) {
+                                    Ok(()) => any_succeeded = true,
+                                    Err(message) => {
+                                        writeln!(
+                                            stderr,
+                                            "{}kill: ({pgrp}) - {message}",
+                                            self.diagnostic_prefix()
+                                        )?;
+                                        any_failed = true;
+                                    }
+                                }
+                                continue;
+                            }
+                            match crate::builtins::kill::send_signal_to_process_group(
+                                pgrp as i32,
+                                request.signal,
+                            ) {
+                                Ok(()) => {
+                                    if stopped && matches!(request.signal, 1 | 15) {
+                                        let _ = crate::builtins::kill::send_signal_to_process_group(
+                                            pgrp as i32,
+                                            crate::builtins::kill::SIGCONT_NUMBER,
+                                        );
+                                    }
+                                    for member in &members {
+                                        self.note_kill_delivery(*member, request.signal);
+                                    }
+                                    any_succeeded = true;
+                                }
+                                Err(message) => {
+                                    writeln!(
+                                        stderr,
+                                        "{}kill: ({pgrp}) - {message}",
+                                        self.diagnostic_prefix()
+                                    )?;
+                                    any_failed = true;
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     // The walk is GNU's `pgrp == shell_pgrp` arm. A
                     // job-control job (own pgrp) takes the killpg arm
-                    // in GNU (jobs.c:4010-4020), whose rubash model is
-                    // the shared path below — leave those jobs to it.
+                    // above on unix; on other targets it keeps the
+                    // shared path below.
                     let members: Vec<(u32, bool)> = self
                         .shell_state
                         .job_table

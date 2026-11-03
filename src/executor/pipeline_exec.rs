@@ -3324,6 +3324,12 @@ impl Executor {
         let stream_stdout = allow_stream_stdout
             && self.final_member_stdout_streams_to_host(commands[commands.len() - 1]);
         let mut intermediate_stderr = Vec::new();
+        // rubash#2602: the internal-stage re-entry image is
+        // loop-invariant; resolving it before the loop keeps a failure
+        // ahead of every stage's operand materialization (an in-loop
+        // `?` would strand this stage's record before its child exists,
+        // where the RAII finish must not fire).
+        let current_exe = std::env::current_exe()?;
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             // The stage's fd 0/1 are OS pipes owned by this loop, not fd
             // table endpoints — a `/dev/stdin` operand drains the incoming
@@ -3398,7 +3404,7 @@ impl Executor {
             );
             stage_proc_ops.push(proc_ops);
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
-                let mut process = std::process::Command::new(std::env::current_exe()?);
+                let mut process = std::process::Command::new(&current_exe);
                 process.arg(format!("--internal-{name}")).args(&proc_args);
                 (process, false)
             } else {
@@ -3479,19 +3485,30 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#2602: this stage's child never ran, so its
+                    // operand record must not perform the deferred
+                    // finish when it drops with the error return — the
+                    // donor advance models a child's reads, and there
+                    // are none. Earlier stages' records stay armed:
+                    // their children exist and may have consumed, so
+                    // the drop settles them.
+                    stage_dev_ops[index].disarm_finish();
+                    return Err(ExecuteError::IoError(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{}: {}",
+                            program
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("external"),
+                            crate::posix_errors::message(&error)
+                        ),
+                    )));
+                }
+            };
             adopt_orphan_console(child.id());
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
@@ -4648,8 +4665,9 @@ impl Executor {
         let mut intermediate_stderr = Vec::new();
         let mut previous_stdout: Option<std::process::ChildStdout> = None;
         let mut first_stdin: Option<std::process::ChildStdin> = None;
-        // rubash#2589: per-stage dev-fd operand records, finished once
-        // every member has been waited (below).
+        // rubash#2589: per-stage dev-fd operand records; they settle
+        // once every member has been waited, when this Vec drops at
+        // scope end (RAII finish, rubash#2602).
         let mut stage_dev_ops: Vec<crate::executor::dev_fd_operands::DevOperandMaterialization> =
             Vec::new();
 
@@ -4744,19 +4762,30 @@ impl Executor {
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
             }
-            let mut child = spawned.map_err(|error| {
-                ExecuteError::IoError(io::Error::new(
-                    error.kind(),
-                    format!(
-                        "{}: {}",
-                        program
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("external"),
-                        crate::posix_errors::message(&error)
-                    ),
-                ))
-            })?;
+            let mut child = match spawned {
+                Ok(child) => child,
+                Err(error) => {
+                    // rubash#2602: this stage's child never ran, so its
+                    // operand record must not perform the deferred
+                    // finish when it drops with the error return — the
+                    // donor advance models a child's reads, and there
+                    // are none. Earlier stages' records (already in
+                    // `stage_dev_ops`) stay armed: their children exist
+                    // and may have consumed, so the drop settles them.
+                    dev_ops.disarm_finish();
+                    return Err(ExecuteError::IoError(io::Error::new(
+                        error.kind(),
+                        format!(
+                            "{}: {}",
+                            program
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("external"),
+                            crate::posix_errors::message(&error)
+                        ),
+                    )));
+                }
+            };
             adopt_orphan_console(child.id());
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
@@ -4776,6 +4805,19 @@ impl Executor {
             stage_dev_ops.push(dev_ops);
             processes.push(child);
         }
+
+        // rubash#2626: while this process supervises the pipeline,
+        // a background wrapper must be transparent for individually
+        // addressed signals — GNU's `$!` names the last stage, ours
+        // names the wrapper, so the wrapper's relay forwards such
+        // deliveries to the last stage published here (see
+        // builtins::kill::WrapperRelayTargetGuard). The guard is
+        // inert in every non-wrapper process, and its span is
+        // exactly this wait: it drops when the function returns,
+        // after every member has been reaped.
+        let _wrapper_relay_guard = crate::builtins::kill::WrapperRelayTargetGuard::publish(
+            processes.last().map(|child| child.id()).unwrap_or(0),
+        );
 
         if let Some(mut stdin) = first_stdin {
             if let Some(base) = stage0_stdin_base {
@@ -4849,14 +4891,17 @@ impl Executor {
             ));
         }
         results.reverse();
-        // rubash#2589: every member has been waited — settle the
-        // stages' operand records (consume the donor entries the
-        // children took their serves from, close the attach
-        // handles). Finishing earlier would drop a donor entry a
-        // later stage's own operand pass still has to read.
-        for dev_ops in stage_dev_ops {
-            let _ = self.finish_dev_fd_operands(dev_ops);
-        }
+        // rubash#2589/#2602: every member has been waited — the stages'
+        // operand records settle as `stage_dev_ops` drops at scope end
+        // (DevOperandMaterialization's RAII finish consumes the donor
+        // entries the children took their serves from and closes the
+        // attach handles). The Vec is declared before the spawn loop
+        // and outlives every wait, which is exactly the ordering the
+        // settle needs: finishing earlier would drop a donor entry a
+        // later stage's own operand pass still has to read, and any
+        // `?` above (spawn, feed, waits, drains) now reaches the same
+        // settle through the drop instead of skipping it — the #2602
+        // class. No explicit finish loop remains here.
         for reader in intermediate_stderr {
             let output = reader.join().map_err(|_| {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
@@ -5677,14 +5722,67 @@ impl Executor {
         // settles superseded net output entries for this funnel.
         let settle_superseded_net_outputs =
             self.superseded_net_output_settlement_applies(command, true);
-        let stage_redirect_rejected =
-            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
-                Ok(rejected) => rejected,
+        // rubash#2613: the reject gate below validates dup sources
+        // against the shell's descriptor table plus its own overlay
+        // of the list's numbered entries — the `{var}` entries'
+        // allocated descriptors are in neither, so a stage list that
+        // references an earlier `{var}` allocation by number
+        // (`{v}>&9 1>&10`) was rejected with a bad-fd diagnostic even
+        // though the stage executor's own applier run binds the slot
+        // before delivery. GNU has no such two-space split: the
+        // element's single do_redirections walk (redir.c:237,
+        // reached from execute_cmd.c:2620 execute_pipeline) binds
+        // the varassign (redir.c:1470 redir_varassign) and validates
+        // the later dup against the result, and the plain-command
+        // funnel likewise runs its applier ahead of this same gate.
+        // Bracket the gate with the applier so the stage gate judges
+        // the bound descriptor space, then undo — the stage executor
+        // applies the list again for real when it runs. Only the
+        // gate sits inside the bracket: the word-expansion faces
+        // below must still expand `$v` against the OUTER binding (GNU
+        // expands a command's words before its do_redirections run),
+        // and every exit from the bracket restores the parent space.
+        let stage_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(command);
+        if stage_has_varfd {
+            match self.apply_dynamic_fd_var_redirects(command, true) {
+                Ok(false) => {}
+                Ok(true) => {
+                    // The applier failed the list and already placed
+                    // its diagnostic; the stage dies at
+                    // do_redirections with the captured pipe bytes
+                    // final, exactly like the preflight arms below
+                    // (and like a plain command, whose funnel returns
+                    // on the same verdict before dispatch).
+                    self.undo_child_fd_var_redirects();
+                    self.pipeline_stage_fds_pre_wired.set(true);
+                    let captured = crate::executor::shell_options::take_stdout_capture();
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Ok(Some((
+                        crate::executor::substitution_metadata::bytes_to_shell_text(&captured),
+                        String::new(),
+                        1,
+                    )));
+                }
                 Err(error) => {
                     crate::executor::shell_options::restore_stdout_capture(saved_capture);
                     return Err(error);
                 }
+            }
+        }
+        let stage_redirect_rejected =
+            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
+                Ok(rejected) => rejected,
+                Err(error) => {
+                    if stage_has_varfd {
+                        self.undo_child_fd_var_redirects();
+                    }
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
             };
+        if stage_has_varfd {
+            self.undo_child_fd_var_redirects();
+        }
         if stage_redirect_rejected.is_some() {
             // The rejected stage already placed its diagnostic on the
             // element's fd 1 (the pipe) via the capture above — GNU's

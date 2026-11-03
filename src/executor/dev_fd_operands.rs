@@ -80,11 +80,32 @@ enum DevOperandFlush {
 /// offset, so reads by the child must advance the parent's endpoint —
 /// modelled by consuming the fd after the child exits. Temp files are
 /// removed and owned handles closed either way (Drop).
+///
+/// rubash#2602: the deferred finish itself is RAII. The record is born
+/// armed; dropping it performs the finish (flush the self-contained
+/// flush arms, consume the recorded donor endpoints) unless the finish
+/// already ran through `finish_dev_fd_operands` or the record was
+/// disarmed because no child ever ran. Call sites therefore cannot
+/// skip the finish with an early `?` return — the class the manual
+/// per-site bookkeeping kept reopening (five skip windows in the
+/// concurrent pipeline loop alone).
 #[derive(Default)]
 pub(in crate::executor) struct DevOperandMaterialization {
     temps: Vec<PathBuf>,
     consume_fds: Vec<u32>,
+    /// rubash#2602: clones of the read endpoints `consume_fds` names,
+    /// recorded at the same sites. The explicit finish resolves the
+    /// donors through the live table; the Drop finish has no Executor,
+    /// so it settles through these clones — the table's entries hold
+    /// the same Rc endpoints, so advancing a clone's shared cursor /
+    /// handle is the table-visible effect (`FdReadEndpoint::
+    /// consume_deferred`, the same match `consume_all_text` runs).
+    consume_endpoints: Vec<(u32, FdReadEndpoint)>,
     flushes: Vec<(PathBuf, DevOperandFlush)>,
+    /// rubash#2602: the deferred finish has been performed (explicit
+    /// finish) or deliberately suppressed (disarm — no child ran).
+    /// Drop finishes only while this is false.
+    settled: bool,
     /// Unix: parent-held pipe read ends to pin at their `/dev/fd/N` numbers
     /// in the child between fork and exec (see materialize_dev_fd_operands).
     /// Closed when the record drops, like GNU closing the parent's pipe end
@@ -95,6 +116,13 @@ pub(in crate::executor) struct DevOperandMaterialization {
 
 impl Drop for DevOperandMaterialization {
     fn drop(&mut self) {
+        // rubash#2602: the deferred finish runs first (its flush writes
+        // land in the owned handles below before they close), then the
+        // unconditional cleanup — the same division the explicit
+        // finish + drop pair always had on the success path.
+        if !self.settled {
+            self.finish_on_drop();
+        }
         for temp in &self.temps {
             let _ = std::fs::remove_file(temp);
         }
@@ -119,6 +147,70 @@ impl DevOperandMaterialization {
         !self.flushes.is_empty()
     }
 
+    /// rubash#2602: record a donor the child will read through this
+    /// materialization. Both faces of the record are written together
+    /// so they cannot drift: the fd number the explicit finish looks
+    /// up in the live table, and the endpoint clone the Drop finish
+    /// settles through.
+    fn record_consume(&mut self, fd: u32, endpoint: &FdReadEndpoint) {
+        self.consume_fds.push(fd);
+        self.consume_endpoints.push((fd, endpoint.clone()));
+    }
+
+    /// rubash#2602: the Drop-side deferred finish — everything the
+    /// finish owes that this record owns outright. Handle and channel
+    /// flushes write their temp bytes; donor endpoints consume. Two
+    /// arms are deliberately NOT settled here: `Capture` bytes belong
+    /// to the caller's output assembly (the explicit finish returns
+    /// them; on a drop path there is no caller left to hand them to),
+    /// and the `Stdout`/`Stderr` flush destinations are the shell's
+    /// LIVE fd-1/2 dispatch — capture generations resolve at finish
+    /// time, so only `finish_dev_fd_operands` can route them. A record
+    /// reaching Drop with those arms unsettled loses exactly what the
+    /// pre-#2602 manual bookkeeping lost on the same abort paths (the
+    /// temp is still removed below); every success path finishes
+    /// explicitly and settles them.
+    fn finish_on_drop(&mut self) {
+        for (temp, target) in &self.flushes {
+            let Ok(bytes) = std::fs::read(temp) else {
+                continue;
+            };
+            if bytes.is_empty() {
+                continue;
+            }
+            match target {
+                DevOperandFlush::Handle(handle) | DevOperandFlush::OwnedHandle(handle) => {
+                    let _ = crate::fd::write_all(*handle, &bytes);
+                }
+                DevOperandFlush::Channel(channel) => channel.append(&bytes),
+                DevOperandFlush::Stdout | DevOperandFlush::Stderr | DevOperandFlush::Capture => {}
+            }
+        }
+        for (_, endpoint) in &self.consume_endpoints {
+            endpoint.consume_deferred();
+        }
+    }
+
+    /// rubash#2602: declare that this record's operands were never
+    /// consumed — the spawn produced no child, so there are no child
+    /// reads for the donor advance to model and no child writes to
+    /// flush. Drop then performs only the unconditional cleanup (temp
+    /// removal, handle closes). Spawn sites that bail before a child
+    /// exists call this on the failing stage's own record; records of
+    /// stages that DID spawn stay armed and settle on drop.
+    pub(in crate::executor) fn disarm_finish(&mut self) {
+        self.settled = true;
+    }
+
+    /// rubash#2602: re-arm the deferred finish after `disarm_finish`.
+    /// The sequential pipeline stage spawner materializes before a
+    /// long setup span (process construction and stdio wiring precede
+    /// the spawn) and disarms across it; once its child exists, the
+    /// finish is owed again and this arms it.
+    pub(in crate::executor) fn arm_finish(&mut self) {
+        self.settled = false;
+    }
+
     /// rubash#2589: drop the records for the std descriptors (0/1/2).
     /// For a caller whose std descriptors are its own OS plumbing
     /// (the Unix concurrent pipeline loop: fd 0 is the upstream pipe,
@@ -131,6 +223,7 @@ impl DevOperandMaterialization {
     /// stage's).
     pub(in crate::executor) fn exclude_std_fd_records(&mut self) {
         self.consume_fds.retain(|fd| *fd > 2);
+        self.consume_endpoints.retain(|(fd, _)| *fd > 2);
         #[cfg(unix)]
         self.unix_fd_attach.retain(|(fd, _)| *fd > 2);
     }
@@ -526,8 +619,11 @@ impl Executor {
     /// path (None when the site cannot offer one — internal pipeline
     /// stages, an unresolvable exec target): rubash#2225's gate chooses
     /// each procsub argv operand's delivery from the consumer's class.
-    /// The returned record must be finished after the child exits
-    /// via `finish_dev_fd_operands`.
+    /// The returned record carries the deferred finish (rubash#2602):
+    /// callers that need the capture bytes or an exact settle point
+    /// call `finish_dev_fd_operands` after the child exits; any other
+    /// exit path settles through the record's Drop. A spawn site whose
+    /// child never ran disarms the record instead (`disarm_finish`).
     pub(in crate::executor) fn materialize_dev_fd_operands(
         &self,
         args: &[String],
@@ -657,7 +753,9 @@ impl Executor {
                     }
                 };
                 if consume {
-                    m.consume_fds.push(fd);
+                    if let Some(endpoint) = &entry.read {
+                        m.record_consume(fd, endpoint);
+                    }
                 }
                 let Ok((read_end, write_end)) = crate::fd::create_capture_pipe() else {
                     continue;
@@ -761,7 +859,7 @@ impl Executor {
                         .input_snapshot_bytes(fd)
                         .map(|(data, offset)| data[offset..].to_vec())
                         .unwrap_or_default();
-                    m.consume_fds.push(fd);
+                    m.record_consume(fd, read);
                     dev_operand_temp(&bytes, m)
                 }
                 FdReadEndpoint::File(file) => {
@@ -812,7 +910,7 @@ impl Executor {
                                 }
                             }
                         }
-                        m.consume_fds.push(fd);
+                        m.record_consume(fd, read);
                         drain_handle_to_temp(file.handle, m)
                     } else {
                         // rubash#2256: the child opens the path itself,
@@ -824,7 +922,7 @@ impl Executor {
                         // endpoints (a named fifo's pipe handle) keep
                         // the consume record.
                         if !file.reopens_fresh() {
-                            m.consume_fds.push(fd);
+                            m.record_consume(fd, read);
                         }
                         Some(file.path.to_string_lossy().into_owned())
                     }
@@ -905,10 +1003,18 @@ impl Executor {
     /// (GNU's dup shares the file offset), and let Drop remove the temps
     /// and close dup'd writers. Bytes collected for a `Capture` fd-1
     /// context are returned for the caller to append to captured output.
+    ///
+    /// rubash#2602: this is the explicit half of the RAII pair — it
+    /// settles the record up front, so the record's Drop (at the end
+    /// of this call) performs only temp/handle cleanup and cannot
+    /// repeat the flush. Call sites that cannot use the return value
+    /// or whose settle point is a scope end may simply drop the
+    /// record instead.
     pub(in crate::executor) fn finish_dev_fd_operands(
         &mut self,
         mut m: DevOperandMaterialization,
     ) -> Vec<u8> {
+        m.settled = true;
         let mut captured = Vec::new();
         for (temp, target) in &m.flushes {
             let Ok(bytes) = std::fs::read(temp) else {
