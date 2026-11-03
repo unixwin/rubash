@@ -283,8 +283,25 @@ impl Executor {
         // Top-level `${` ordinal for the cross-pass subscript-eval memo —
         // matches the pre-scan counter (SUB_RES_XPASS).
         let mut frag_index = 0usize;
+        // rubash#2706: QUOTED_EXPANSION_SITE consumption, the &self
+        // twin of the embedded_mutations.rs walker's (see its comment):
+        // the flagged arm's result span is IFS-protected lazily at the
+        // next iteration / after the loop.
+        let mut quoted_site = false;
+        let mut quoted_span_start: Option<usize> = None;
+        let mut prev_literal_escape = false;
 
         while let Some(ch) = chars.next() {
+            if let Some(span_start) = quoted_span_start.take() {
+                let ifs = self.current_ifs();
+                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+            }
+            let was_literal_escape = prev_literal_escape;
+            prev_literal_escape = ch == crate::executor::markers::LITERAL_CHAR_ESCAPE;
+            if ch == crate::executor::markers::QUOTED_EXPANSION_SITE && !was_literal_escape {
+                quoted_site = true;
+                continue;
+            }
             if protect_ifs && in_double && matches!(ch, ' ' | '\t' | '\n') {
                 output.push(crate::executor::markers::IFS_GLUE);
                 output.push(ch);
@@ -484,6 +501,10 @@ impl Executor {
             }
 
             if ch == '`' {
+                if quoted_site {
+                    quoted_span_start = Some(output.len());
+                    quoted_site = false;
+                }
                 let mut source = String::new();
                 let mut escaped = false;
                 let mut closed = false;
@@ -555,6 +576,10 @@ impl Executor {
             }
 
             if ch != '$' {
+                // A site marker is only ever emitted immediately before
+                // an expansion introducer; a literal char here means the
+                // flag has nothing to attach to — drop it.
+                quoted_site = false;
                 // rubash#2216: a backslash that reaches this fall-through
                 // was not consumed as an escape by the arms above — it is
                 // data (a double-quoted span's literal `\X` for X outside
@@ -570,6 +595,10 @@ impl Executor {
                 continue;
             }
 
+            if quoted_site {
+                quoted_span_start = Some(output.len());
+                quoted_site = false;
+            }
             match chars.peek().copied() {
                 Some('?') => {
                     chars.next();
@@ -1176,6 +1205,14 @@ impl Executor {
                 }
                 None => output.push('$'),
             }
+        }
+
+        // rubash#2706: close out a quoted-site span that ran to the
+        // end of the word (the loop-top close only fires when another
+        // character follows the expansion).
+        if let Some(span_start) = quoted_span_start.take() {
+            let ifs = self.current_ifs();
+            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
         }
 
         // rubash#2216: DATA_BACKSLASH bytes in the output are data
