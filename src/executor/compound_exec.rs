@@ -4025,6 +4025,15 @@ impl Executor {
         // its own EXIT trap. Save/restore the latch like the fd table so a
         // subshell exec cannot disarm the parent's trap.
         let saved_exec_replaced = self.exec_replaced;
+        // The exit-trap latch is executor state, not ShellState: the
+        // body's own EXIT trap runs below (run_exit_trap sets the
+        // latch, trap_exec.rs run_exit_trap_action) and without a
+        // save/restore the parent's EXIT trap would read as already
+        // fired and never run at the real shell exit. GNU's forked
+        // child owns a private copy of the "exit trap already ran"
+        // fact (trap.c run_exit_trap runs per-process), so the latch
+        // restores with the rest of the boundary state.
+        let saved_exit_trap_ran = self.exit_trap_ran.get();
         crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
         self.shell_state.subshell_depth.set(saved_depth + 1);
         // execute_in_subshell (execute_cmd.c:1636-1637): the region is
@@ -4051,10 +4060,20 @@ impl Executor {
         // (variables.c:1418-1423 get_random_number); saved_state keeps
         // the parent's sequence for the wholesale restore.
         self.shell_state.random_state.reseed_fresh();
-        self.shell_state.loop_depth = 0;
-        // execute_in_subshell resets loop_level (execute_cmd.c:1642), so
-        // fork-inherited depth does not cross a `( )` boundary either.
-        self.shell_state.inherited_loop_depth = 0;
+        // GNU execute_cmd.c:1641-1642 (execute_in_subshell): the
+        // loop_level reset is compat-gated — `if
+        // (shell_compatibility_level > 44) loop_level = 0;`. At compat44
+        // and below the child inherits the depth as
+        // inherited_loop_depth (the command-substitution transfer), so
+        // break/continue validate against it but unwind only the
+        // child's own list (audit B4-F07).
+        if crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 44 {
+            self.shell_state.loop_depth = 0;
+            self.shell_state.inherited_loop_depth = 0;
+        } else {
+            self.shell_state.inherited_loop_depth += self.shell_state.loop_depth;
+            self.shell_state.loop_depth = 0;
+        }
 
         // RESTRICTED_SHELL (#804): the subshell's redirects apply inside
         // the child before the body (do_redirections precedes the list), so
@@ -4303,6 +4322,7 @@ impl Executor {
                 self.fd_table = saved_fd_table.clone();
                 self.command_expansion_failed.set(saved_expansion_failed);
                 self.exec_replaced = saved_exec_replaced;
+                self.exit_trap_ran.set(saved_exit_trap_ran);
                 return Err(error);
             }
         };
@@ -4316,6 +4336,7 @@ impl Executor {
                 self.fd_table = saved_fd_table.clone();
                 self.command_expansion_failed.set(saved_expansion_failed);
                 self.exec_replaced = saved_exec_replaced;
+                self.exit_trap_ran.set(saved_exit_trap_ran);
                 return Err(error);
             }
             None => status,
@@ -4328,6 +4349,7 @@ impl Executor {
         self.fd_table = saved_fd_table;
         self.command_expansion_failed.set(saved_expansion_failed);
         self.exec_replaced = saved_exec_replaced;
+        self.exit_trap_ran.set(saved_exit_trap_ran);
         // rubash#1461: this layer died by a signal (see the trap skip in
         // the body closure above) — queue the parent-side death notice
         // with the layer's fake BASHPID, like a reaped job's (jobs.c:4625

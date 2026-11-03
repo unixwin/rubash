@@ -42,7 +42,9 @@ where
             if !under_attrs.readonly {
                 continue;
             }
-            let is_array = under_attrs.array || under_value.as_deref().is_some_and(is_array_value);
+            let is_array = under_attrs.array
+                || under_attrs.assoc
+                || under_value.as_deref().is_some_and(is_array_value);
             let is_assoc = under_attrs.assoc;
             if array_filter && !is_array {
                 continue;
@@ -57,7 +59,16 @@ where
                 Some(value) if is_array => {
                     if value.is_empty() {
                         if posix_mode {
-                            writeln!(stdout, "readonly -a {name}")?;
+                            writeln!(
+                                stdout,
+                                "{}",
+                                posix_valueless_line(
+                                    "readonly",
+                                    under_attrs.array,
+                                    is_assoc,
+                                    &name
+                                )
+                            )?;
                         } else {
                             let attrs = setattr_array_attrs_for(
                                 true,
@@ -65,13 +76,19 @@ where
                                 under_attrs.integer,
                                 under_attrs.uppercase,
                                 under_attrs.lowercase,
+                                under_attrs.assoc,
                             );
                             writeln!(stdout, "declare {attrs} {name}")?;
                         }
                         continue;
                     }
                     if posix_mode {
-                        writeln!(stdout, "readonly -a {name}={}", format_array_value(value))?;
+                        writeln!(
+                            stdout,
+                            "readonly {} {name}={}",
+                            if is_assoc { "-A" } else { "-a" },
+                            format_array_for_listing(env_vars, &name, is_assoc, value)
+                        )?;
                         continue;
                     }
                     let attrs = setattr_array_attrs_for(
@@ -80,11 +97,12 @@ where
                         under_attrs.integer,
                         under_attrs.uppercase,
                         under_attrs.lowercase,
+                        under_attrs.assoc,
                     );
                     writeln!(
                         stdout,
                         "declare {attrs} {name}={}",
-                        format_array_value(value)
+                        format_array_for_listing(env_vars, &name, is_assoc, value)
                     )?;
                 }
                 Some(value) => {
@@ -106,8 +124,12 @@ where
                     )?;
                 }
                 None => {
-                    if posix_mode && is_array {
-                        writeln!(stdout, "readonly -a {name}")?;
+                    if posix_mode {
+                        writeln!(
+                            stdout,
+                            "{}",
+                            posix_valueless_line("readonly", is_array, is_assoc, &name)
+                        )?;
                     } else {
                         let attrs = setattr_scalar_attrs_for(
                             true,
@@ -126,11 +148,12 @@ where
         // only the readonly indexed/associative arrays, while 'readonly -p'
         // lists every readonly variable. The -a/-A attribute flags double as
         // listing filters.
+        let is_assoc = assocs.contains(&name);
         let is_array = arrays.contains(&name)
+            || is_assoc
             || env_vars
                 .get(&name)
                 .is_some_and(|value| is_array_value(value));
-        let is_assoc = assocs.contains(&name);
         if array_filter && !is_array {
             continue;
         }
@@ -151,7 +174,16 @@ where
                 // "readonly -a c" in posix mode (array.tests:62,101,103).
                 if value.is_empty() {
                     if posix_mode {
-                        writeln!(stdout, "readonly -a {name}")?;
+                        writeln!(
+                            stdout,
+                            "{}",
+                            posix_valueless_line(
+                                "readonly",
+                                arrays.contains(&name),
+                                is_assoc,
+                                &name
+                            )
+                        )?;
                     } else {
                         let attrs = setattr_array_attrs(
                             &name,
@@ -160,6 +192,7 @@ where
                             &integers,
                             &uppercase,
                             &lowercase,
+                            is_assoc,
                         );
                         writeln!(stdout, "declare {attrs} {name}")?;
                     }
@@ -169,7 +202,12 @@ where
                 // "readonly -a name=value" for arrays instead of the
                 // declare-format listing (array.tests readonly -a probe).
                 if posix_mode {
-                    writeln!(stdout, "readonly -a {name}={}", format_array_value(value))?;
+                    writeln!(
+                        stdout,
+                        "readonly {} {name}={}",
+                        if is_assoc { "-A" } else { "-a" },
+                        format_array_for_listing(env_vars, &name, is_assoc, value)
+                    )?;
                     continue;
                 }
                 let attrs = setattr_array_attrs(
@@ -179,11 +217,12 @@ where
                     &integers,
                     &uppercase,
                     &lowercase,
+                    is_assoc,
                 );
                 writeln!(
                     stdout,
                     "declare {attrs} {name}={}",
-                    format_array_value(value)
+                    format_array_for_listing(env_vars, &name, is_assoc, value)
                 )?;
             } else {
                 // POSIX mode (bash posix-mode notes, item 52): readonly
@@ -207,8 +246,12 @@ where
                     quote_listing_value(value)
                 )?;
             }
-        } else if posix_mode && is_array {
-            writeln!(stdout, "readonly -a {name}")?;
+        } else if posix_mode {
+            writeln!(
+                stdout,
+                "{}",
+                posix_valueless_line("readonly", is_array, is_assoc, &name)
+            )?;
         } else {
             let attrs = setattr_scalar_attrs(
                 &name,
@@ -222,6 +265,41 @@ where
         }
     }
     Ok(())
+}
+
+/// Render an array/assoc value for the export/readonly listings.
+/// Associative values must go through the assoc formatter (declare's
+/// storage renderer, ordered by bucket like GNU's print_assoc_assignment);
+/// the indexed formatter would misread the assoc mirror as element text
+/// (audit B4-F12: `declare -ax A1=([0]="[k]=v")` for a valued assoc).
+fn format_array_for_listing(
+    env_vars: &crate::shell::var_table::VarTable,
+    name: &str,
+    is_assoc: bool,
+    value: &str,
+) -> String {
+    if is_assoc {
+        let nbuckets = crate::executor::assoc_nbuckets(env_vars, name);
+        crate::builtins::declare::format_assoc_for_output(value, nbuckets)
+    } else {
+        format_array_value(value)
+    }
+}
+
+/// GNU variables.c (print_var_list in POSIX mode, via setattr.def's
+/// posix print path): a variable with NO value prints in the utility
+/// form — `export name`, `export -a name`, `export -A name`,
+/// `readonly name`, ... — never the `declare -x name` form the default
+/// listing uses (audit B4-F12; verified against the 5.3.20 oracle for
+/// scalar, indexed-array, and associative valueless names).
+fn posix_valueless_line(utility: &str, is_array: bool, is_assoc: bool, name: &str) -> String {
+    if is_assoc {
+        format!("{utility} -A {name}")
+    } else if is_array {
+        format!("{utility} -a {name}")
+    } else {
+        format!("{utility} {name}")
+    }
 }
 
 pub(super) fn print_exported<W>(
@@ -294,8 +372,44 @@ where
         if let Some(Some((under_value, under_attrs))) = underlay.get(&name) {
             match under_value {
                 Some(value) if under_attrs.array || under_attrs.assoc || is_array_value(value) => {
+                    if value.is_empty() {
+                        // Cell-less pre-frame binding (declared, never
+                        // assigned): valueless in both modes, like the
+                        // print_readonly underlay arm (audit B4-F12).
+                        if posix_mode {
+                            writeln!(
+                                stdout,
+                                "{}",
+                                posix_valueless_line(
+                                    "export",
+                                    under_attrs.array,
+                                    under_attrs.assoc,
+                                    &name
+                                )
+                            )?;
+                        } else {
+                            let attrs = setattr_array_attrs_for(
+                                under_attrs.readonly,
+                                true,
+                                under_attrs.integer,
+                                under_attrs.uppercase,
+                                under_attrs.lowercase,
+                                under_attrs.assoc,
+                            );
+                            writeln!(stdout, "declare {attrs} {name}")?;
+                        }
+                        continue;
+                    }
                     if posix_mode {
-                        writeln!(stdout, "export -a {name}={}", format_array_value(value))?;
+                        // GNU posix utility form carries the variable's
+                        // own type flag (-A for associative, -a for
+                        // indexed; audit B4-F12).
+                        let flag = if under_attrs.assoc { "-A" } else { "-a" };
+                        writeln!(
+                            stdout,
+                            "export {flag} {name}={}",
+                            format_array_for_listing(env_vars, &name, under_attrs.assoc, value)
+                        )?;
                     } else {
                         let attrs = setattr_array_attrs_for(
                             under_attrs.readonly,
@@ -303,11 +417,12 @@ where
                             under_attrs.integer,
                             under_attrs.uppercase,
                             under_attrs.lowercase,
+                            under_attrs.assoc,
                         );
                         writeln!(
                             stdout,
                             "declare {attrs} {name}={}",
-                            format_array_value(value)
+                            format_array_for_listing(env_vars, &name, under_attrs.assoc, value)
                         )?;
                     }
                 }
@@ -331,25 +446,71 @@ where
                     }
                 }
                 None => {
-                    let attrs = setattr_scalar_attrs_for(
-                        under_attrs.readonly,
-                        true,
-                        under_attrs.integer,
-                        under_attrs.uppercase,
-                        under_attrs.lowercase,
-                    );
-                    writeln!(stdout, "declare {attrs} {name}")?;
+                    if posix_mode {
+                        writeln!(
+                            stdout,
+                            "{}",
+                            posix_valueless_line(
+                                "export",
+                                under_attrs.array,
+                                under_attrs.assoc,
+                                &name
+                            )
+                        )?;
+                    } else {
+                        let attrs = setattr_scalar_attrs_for(
+                            under_attrs.readonly,
+                            true,
+                            under_attrs.integer,
+                            under_attrs.uppercase,
+                            under_attrs.lowercase,
+                        );
+                        writeln!(stdout, "declare {attrs} {name}")?;
+                    }
                 }
             }
             continue;
         }
         if let Some(value) = env_vars.get(&name) {
-            if arrays.contains(&name) || is_array_value(value) {
+            let is_assoc = assocs.contains(&name);
+            if arrays.contains(&name) || is_assoc || is_array_value(value) {
+                // GNU variables.c print_var_list: a declared array/assoc
+                // with NO cell (never assigned) is var_isset-false and
+                // prints without a value in both modes (the mirror holds
+                // "" for it, "()" for an explicitly emptied one) — the
+                // same gate print_readonly applies (audit B4-F12).
+                if value.is_empty() {
+                    if posix_mode {
+                        writeln!(
+                            stdout,
+                            "{}",
+                            posix_valueless_line("export", arrays.contains(&name), is_assoc, &name)
+                        )?;
+                    } else {
+                        let attrs = setattr_array_attrs(
+                            &name,
+                            readonly.contains(&name),
+                            true,
+                            &integers,
+                            &uppercase,
+                            &lowercase,
+                            is_assoc,
+                        );
+                        writeln!(stdout, "declare {attrs} {name}")?;
+                    }
+                    continue;
+                }
                 // POSIX mode (bash posix-mode notes, item 52): the export
                 // listing uses the posix utility format, arrays included
-                // ("export -a name=([0]="x" ...)" against GNU 5.3).
+                // ("export -a name=([0]="x" ...)" against GNU 5.3), with
+                // the variable's own type flag (-A for associative).
                 if posix_mode {
-                    writeln!(stdout, "export -a {name}={}", format_array_value(value))?;
+                    let flag = if is_assoc { "-A" } else { "-a" };
+                    writeln!(
+                        stdout,
+                        "export {flag} {name}={}",
+                        format_array_for_listing(env_vars, &name, is_assoc, value)
+                    )?;
                 } else {
                     let attrs = setattr_array_attrs(
                         &name,
@@ -358,11 +519,12 @@ where
                         &integers,
                         &uppercase,
                         &lowercase,
+                        is_assoc,
                     );
                     writeln!(
                         stdout,
                         "declare {attrs} {name}={}",
-                        format_array_value(value)
+                        format_array_for_listing(env_vars, &name, is_assoc, value)
                     )?;
                 }
             } else if posix_mode {
@@ -383,6 +545,17 @@ where
                     quote_listing_value(value)
                 )?;
             }
+        } else if posix_mode {
+            writeln!(
+                stdout,
+                "{}",
+                posix_valueless_line(
+                    "export",
+                    arrays.contains(&name),
+                    assocs.contains(&name),
+                    &name
+                )
+            )?;
         } else {
             let attrs = setattr_scalar_attrs(
                 &name,
@@ -435,8 +608,9 @@ fn setattr_array_attrs_for(
     integer: bool,
     uppercase: bool,
     lowercase: bool,
+    assoc: bool,
 ) -> String {
-    let mut attrs = String::from("-a");
+    let mut attrs = String::from(if assoc { "-A" } else { "-a" });
     attrs.push_str(
         setattr_scalar_attrs_for(readonly, exported, integer, uppercase, lowercase)
             .trim_start_matches('-'),
@@ -478,8 +652,9 @@ fn setattr_array_attrs(
     integers: &HashSet<String>,
     uppercase: &HashSet<String>,
     lowercase: &HashSet<String>,
+    assoc: bool,
 ) -> String {
-    let mut attrs = String::from("-a");
+    let mut attrs = String::from(if assoc { "-A" } else { "-a" });
     attrs.push_str(
         setattr_scalar_attrs(name, readonly, exported, integers, uppercase, lowercase)
             .trim_start_matches('-'),

@@ -977,10 +977,23 @@ impl Executor {
                 subshell_state = Some(self.shell_state.clone_for_child_save());
                 subshell_fd_table = Some(self.fd_table.clone());
                 subshell_timed_stdin = Some(self.timed_stdin.clone());
-                self.shell_state.loop_depth = 0;
-                // execute_in_subshell resets loop_level (execute_cmd.c:1642):
-                // fork-inherited depth does not cross a `( )` region either.
-                self.shell_state.inherited_loop_depth = 0;
+                // GNU execute_cmd.c:1641-1642 (execute_in_subshell): the
+                // loop_level reset is compat-gated — `if
+                // (shell_compatibility_level > 44) loop_level = 0;`. At
+                // compat44 and below the child INHERITS the loop depth:
+                // break/continue there are meaningful and end only the
+                // child's own list. In the split depth model the depth
+                // crosses as inherited_loop_depth (the command-
+                // substitution transfer), so the builtin validates
+                // against it while its unwind stops at this region's
+                // boundary (audit B4-F07).
+                if crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 44 {
+                    self.shell_state.loop_depth = 0;
+                    self.shell_state.inherited_loop_depth = 0;
+                } else {
+                    self.shell_state.inherited_loop_depth += self.shell_state.loop_depth;
+                    self.shell_state.loop_depth = 0;
+                }
                 crate::builtins::trap::reset_for_subshell_child(&mut self.shell_state.env_vars);
                 let old_depth = self.shell_state.subshell_depth.get();
                 self.shell_state.subshell_depth.set(old_depth + 1);
@@ -1439,6 +1452,20 @@ impl Executor {
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                         if self.shell_state.loop_depth == 0 =>
                     {
+                        if subshell_state.is_some()
+                            || (self.shell_state.inherited_loop_depth > 0
+                                && self.shell_state.subshell_depth.get() > 0)
+                        {
+                            // Audit B4-F07: a residual break/continue whose
+                            // remaining levels target loops inherited across
+                            // this flat `( )` region's fork boundary (compat
+                            // level <= 44 keeps loop_level across the boundary,
+                            // execute_cmd.c:1641-1642) has no live loop left
+                            // inside the region — GNU's child list ends there.
+                            // Absorb at the boundary like the Return arm
+                            // (rubash#720), keeping the builtin's status.
+                            handle_exit_code!(self.exit_code, command)
+                        }
                         self.exit_code = 0;
                     }
                     Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -1624,6 +1651,20 @@ impl Executor {
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                         if self.shell_state.loop_depth == 0 =>
                     {
+                        if subshell_state.is_some()
+                            || (self.shell_state.inherited_loop_depth > 0
+                                && self.shell_state.subshell_depth.get() > 0)
+                        {
+                            // Audit B4-F07: a residual break/continue whose
+                            // remaining levels target loops inherited across
+                            // this flat `( )` region's fork boundary (compat
+                            // level <= 44 keeps loop_level across the boundary,
+                            // execute_cmd.c:1641-1642) has no live loop left
+                            // inside the region — GNU's child list ends there.
+                            // Absorb at the boundary like the Return arm
+                            // (rubash#720), keeping the builtin's status.
+                            handle_exit_code!(self.exit_code, command)
+                        }
                         self.exit_code = 0;
                     }
                     Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -1695,6 +1736,20 @@ impl Executor {
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                         if self.shell_state.loop_depth == 0 =>
                     {
+                        if subshell_state.is_some()
+                            || (self.shell_state.inherited_loop_depth > 0
+                                && self.shell_state.subshell_depth.get() > 0)
+                        {
+                            // Audit B4-F07: a residual break/continue whose
+                            // remaining levels target loops inherited across
+                            // this flat `( )` region's fork boundary (compat
+                            // level <= 44 keeps loop_level across the boundary,
+                            // execute_cmd.c:1641-1642) has no live loop left
+                            // inside the region — GNU's child list ends there.
+                            // Absorb at the boundary like the Return arm
+                            // (rubash#720), keeping the builtin's status.
+                            handle_exit_code!(self.exit_code, command)
+                        }
                         self.exit_code = 0;
                     }
                     Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -1803,6 +1858,20 @@ impl Executor {
                     Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                         if self.shell_state.loop_depth == 0 =>
                     {
+                        if subshell_state.is_some()
+                            || (self.shell_state.inherited_loop_depth > 0
+                                && self.shell_state.subshell_depth.get() > 0)
+                        {
+                            // Audit B4-F07: a residual break/continue whose
+                            // remaining levels target loops inherited across
+                            // this flat `( )` region's fork boundary (compat
+                            // level <= 44 keeps loop_level across the boundary,
+                            // execute_cmd.c:1641-1642) has no live loop left
+                            // inside the region — GNU's child list ends there.
+                            // Absorb at the boundary like the Return arm
+                            // (rubash#720), keeping the builtin's status.
+                            handle_exit_code!(self.exit_code, command)
+                        }
                         self.exit_code = 0;
                     }
                     Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -1898,6 +1967,20 @@ impl Executor {
                 Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                     if self.shell_state.loop_depth == 0 =>
                 {
+                    if subshell_state.is_some()
+                        || (self.shell_state.inherited_loop_depth > 0
+                            && self.shell_state.subshell_depth.get() > 0)
+                    {
+                        // Audit B4-F07: a residual break/continue whose
+                        // remaining levels target loops inherited across
+                        // this flat `( )` region's fork boundary (compat
+                        // level <= 44 keeps loop_level across the boundary,
+                        // execute_cmd.c:1641-1642) has no live loop left
+                        // inside the region — GNU's child list ends there.
+                        // Absorb at the boundary like the Return arm
+                        // (rubash#720), keeping the builtin's status.
+                        handle_exit_code!(self.exit_code, command)
+                    }
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -2048,6 +2131,20 @@ impl Executor {
                 Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                     if self.shell_state.loop_depth == 0 =>
                 {
+                    if subshell_state.is_some()
+                        || (self.shell_state.inherited_loop_depth > 0
+                            && self.shell_state.subshell_depth.get() > 0)
+                    {
+                        // Audit B4-F07: a residual break/continue whose
+                        // remaining levels target loops inherited across
+                        // this flat `( )` region's fork boundary (compat
+                        // level <= 44 keeps loop_level across the boundary,
+                        // execute_cmd.c:1641-1642) has no live loop left
+                        // inside the region — GNU's child list ends there.
+                        // Absorb at the boundary like the Return arm
+                        // (rubash#720), keeping the builtin's status.
+                        handle_exit_code!(self.exit_code, command)
+                    }
                     self.exit_code = 0;
                 }
                 Err(ExecuteError::CommandNotFound(cmd)) => {
@@ -2120,6 +2217,20 @@ impl Executor {
                 Err(ExecuteError::Break(_) | ExecuteError::Continue(_))
                     if self.shell_state.loop_depth == 0 =>
                 {
+                    if subshell_state.is_some()
+                        || (self.shell_state.inherited_loop_depth > 0
+                            && self.shell_state.subshell_depth.get() > 0)
+                    {
+                        // Audit B4-F07: a residual break/continue whose
+                        // remaining levels target loops inherited across
+                        // this flat `( )` region's fork boundary (compat
+                        // level <= 44 keeps loop_level across the boundary,
+                        // execute_cmd.c:1641-1642) has no live loop left
+                        // inside the region — GNU's child list ends there.
+                        // Absorb at the boundary like the Return arm
+                        // (rubash#720), keeping the builtin's status.
+                        handle_exit_code!(self.exit_code, command)
+                    }
                     self.exit_code = 0;
                 }
                 // GNU expr.c: a fatal word-expansion error abandons the
