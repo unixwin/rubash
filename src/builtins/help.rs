@@ -328,6 +328,16 @@ where
     Ok(())
 }
 
+pub(crate) fn print_caller_help_with_io<W>(stdout: &mut W) -> io::Result<()>
+where
+    W: Write,
+{
+    if let Some(topic) = find_topic("caller") {
+        return print_topic_long(topic, stdout);
+    }
+    Ok(())
+}
+
 fn print_help_list<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,
