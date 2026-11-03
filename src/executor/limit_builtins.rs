@@ -661,9 +661,32 @@ fn kill_request(words: &[String]) -> Option<KillRequest> {
             if saw_signal {
                 break;
             }
-            // GNU strips exactly the one leading dash (sigspec = word+1);
-            // trimming every dash would misread `--15`-style operands.
-            let spec = &word[1..];
+            // GNU kill.def: the effective spec of a leading dash word is
+            // NOT always word+1 — an attached `-s<alpha...>` word carries
+            // its spec after the option letter (kill.def: `word[0] == '-'
+            // && word[1] == 's' && ISALPHA (word[2])` → sigspec = word+2),
+            // and `-n<digit...>` likewise; only any other dash word falls
+            // to the bare branch (sigspec = word+1). Judging the whole
+            // word+1 here accepted `-sigterm` as the spec "sigterm"
+            // (SIG-prefix decode → TERM) where GNU judges "igterm" and
+            // rejects it — the tracked path then delivered a signal (or a
+            // no-such-process diagnostic) the builtin would never have
+            // produced for that word (audit B3-F04). Extract the spec
+            // exactly as kill.def and builtins/kill.rs's spec_form do.
+            let spec = if let Some(attached) = word.strip_prefix("-s").filter(|rest| {
+                rest.chars()
+                    .next()
+                    .is_some_and(|ch| ch.is_ascii_alphabetic())
+            }) {
+                attached
+            } else if let Some(attached) = word
+                .strip_prefix("-n")
+                .filter(|rest| rest.chars().next().is_some_and(|ch| ch.is_ascii_digit()))
+            {
+                attached
+            } else {
+                &word[1..]
+            };
             if spec != "0" && crate::builtins::kill::translate_signal(spec).is_none() {
                 return None;
             }

@@ -335,6 +335,16 @@ impl Executor {
         std::mem::take(&mut self.parse_error_occurred)
     }
 
+    /// Non-consuming read of the parse-error mark (see
+    /// [`Executor::take_parse_error`]). The source builtin's
+    /// RETURN-trap tail must distinguish a parse-abort ExitCode
+    /// (an ordinary evalfile return in GNU) from an `exit` unwind
+    /// (a longjmp past it) without consuming the mark the caller's
+    /// own conversion still needs (audit B3-F01).
+    pub fn parse_error_pending(&self) -> bool {
+        self.parse_error_occurred
+    }
+
     /// rubash#1662: take-style read of the signal-discard mark (see
     /// Executor::signal_discard_pending).
     pub fn take_signal_discard_pending(&mut self) -> bool {
