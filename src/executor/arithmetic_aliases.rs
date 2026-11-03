@@ -739,7 +739,9 @@ impl Executor {
     /// strings and trap actions are fresh input streams — their callers
     /// use `comsub_body_alias_splice` directly.
     pub(in crate::executor) fn comsub_body_alias_splice_extracted(&self, source: &str) -> String {
-        if self.alias_streamed() {
+        // The stream-level pass splices `$(` bodies only (its walkers skip
+        // backquote units), so a backquote body is still unexpanded.
+        if self.alias_streamed() && !self.backtick_body_diagnostic.get() {
             source.to_string()
         } else {
             self.comsub_body_alias_splice(source)
