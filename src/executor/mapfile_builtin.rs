@@ -615,6 +615,16 @@ impl Executor {
                         {
                             return 1;
                         }
+                        // A3-F4: same re-lookup as the incremental
+                        // driver (mapfile.def:142-218) — a callback
+                        // that resets or unsets the target array must
+                        // survive the final wholesale render.
+                        entries = self
+                            .shell_state
+                            .env_vars
+                            .get(&name)
+                            .map(|current| indexed_array_entries(current))
+                            .unwrap_or_default();
                     }
                 }
                 entries.insert(target_index, value);
