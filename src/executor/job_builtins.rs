@@ -64,6 +64,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::times::execute_with_io(
             cmd.words[1..].iter().map(String::as_str),
+            &self.diagnostic_prefix(),
             &mut stdout,
             &mut stderr,
         )?;
@@ -576,6 +577,7 @@ impl Executor {
                     JobOperandResolution::NoMatch => {
                         write_wait_operand_error(
                             operand,
+                            true,
                             &self.diagnostic_prefix(),
                             &self.error_prefix(),
                             &mut stderr,
@@ -837,6 +839,7 @@ impl Executor {
                         JobOperandResolution::Pid(_) | JobOperandResolution::NoMatch => {
                             write_wait_operand_error(
                                 operand,
+                                false,
                                 &self.diagnostic_prefix(),
                                 &self.error_prefix(),
                                 &mut stderr,
@@ -1004,6 +1007,7 @@ impl Executor {
                 JobOperandResolution::NoMatch => {
                     status = write_wait_operand_error(
                         &operand,
+                        false,
                         &self.diagnostic_prefix(),
                         &self.error_prefix(),
                         &mut stderr,
@@ -1046,6 +1050,7 @@ impl Executor {
                 WaitPidOutcome::NotFound => {
                     status = write_wait_operand_error(
                         &operand,
+                        false,
                         &self.diagnostic_prefix(),
                         &self.error_prefix(),
                         &mut stderr,
@@ -5356,6 +5361,7 @@ fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
 
 fn write_wait_operand_error<E>(
     operand: &str,
+    wait_any: bool,
     diagnostic_prefix: &str,
     error_prefix: &str,
     stderr: &mut E,
@@ -5369,6 +5375,17 @@ where
     }
 
     if !operand.is_empty() && operand.chars().all(|ch| ch.is_ascii_digit()) {
+        if wait_any {
+            // GNU builtins/wait.def set_waitlist: under `-n' operands are
+            // validated against the JOB TABLE, so a pid that is not a
+            // current job takes sh_badpid (builtins/common.c:234),
+            // not the wait_for_single_pid report (deep-audit B6-F4).
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}wait: `{operand}': not a pid or valid job spec"
+            )?;
+            return Ok(127);
+        }
         // GNU jobs.c:2753-2754 wait_for_single_pid JWAIT_PERROR: the
         // pid-not-a-child report is internal_error (error_prolog family),
         // so it honors gnu_errfmt while the sibling builtin_error lines

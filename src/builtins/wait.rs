@@ -84,12 +84,25 @@ where
             writeln!(stderr, "{diagnostic_prefix}wait: {operand}: no such job")?;
             status = EXECUTION_NOTFOUND;
         } else if !operand.is_empty() && operand.chars().all(|ch| ch.is_ascii_digit()) {
-            // GNU jobs.c:2753-2754 wait_for_single_pid JWAIT_PERROR:
-            // internal_error (error_prolog family) honors gnu_errfmt.
-            writeln!(
-                stderr,
-                "{error_prefix}wait: pid {operand} is not a child of this shell"
-            )?;
+            if wait_any {
+                // GNU builtins/wait.def set_waitlist: under `-n' operands
+                // are validated against the JOB TABLE (get_job_by_pid /
+                // get_job_spec), so a pid that is not a current job takes
+                // sh_badpid (builtins/common.c:234) — never the
+                // wait_for_single_pid "not a child" report (deep-audit
+                // B6-F4).
+                writeln!(
+                    stderr,
+                    "{diagnostic_prefix}wait: `{operand}': not a pid or valid job spec"
+                )?;
+            } else {
+                // GNU jobs.c:2753-2754 wait_for_single_pid JWAIT_PERROR:
+                // internal_error (error_prolog family) honors gnu_errfmt.
+                writeln!(
+                    stderr,
+                    "{error_prefix}wait: pid {operand} is not a child of this shell"
+                )?;
+            }
             status = EXECUTION_NOTFOUND;
         } else {
             writeln!(

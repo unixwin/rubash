@@ -1089,6 +1089,14 @@ fn diagnostic_from_error_node(
             format!("syntax error near unexpected token `{token}'"),
             line,
         )
+    } else if node.get_assignment("__RUBASH_PARSE_ERROR_EOF__").is_some() {
+        // Plain end-of-input error (dangling `|`/`&&`/`||`): GNU parse.y
+        // yyerror "syntax error: unexpected end of file" at the line after
+        // the node's line (deep-audit B6-F1).
+        (
+            "syntax error: unexpected end of file".to_string(),
+            node.line.map(|line| line + 1).or(node.line),
+        )
     } else if let Some(spec) = node.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
         let mut fields = spec.split(sep);
         let name = fields.next().unwrap_or("(");
