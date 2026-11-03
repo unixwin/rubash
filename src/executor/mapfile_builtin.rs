@@ -572,14 +572,56 @@ impl Executor {
             }
         }
 
-        if let Some(input) = self.mapfile_input_for_command(cmd, read_fd) {
-            let mut values = split_mapfile_input(&input, delimiter, trim_newline)
-                .into_iter()
-                .skip(skip)
-                .collect::<Vec<_>>();
-            if let Some(count) = count.filter(|count| *count > 0) {
-                values.truncate(count);
-            }
+        // GNU builtins/mapfile.def read_array pulls records one at a
+        // time (zgetline) and stops after the -n limit: the unread
+        // tail stays in the shared input for the next reader of the
+        // same fd. The whole-input slurp below cannot honor that — it
+        // drains the fd and truncates in memory, starving a later
+        // `cat` on the same stdin/-u fd. When a positive count bounds
+        // the read and there is no callback, pull exactly the kept
+        // records through the same incremental source the callback
+        // path uses; its sync_offset leaves a seekable source at the
+        // consumed boundary and byte-wise sources never over-read.
+        let bounded_values = if callback.is_none() {
+            count.filter(|count| *count > 0).and_then(|limit| {
+                let mut source =
+                    self.mapfile_record_source(cmd, read_fd, delimiter, trim_newline)?;
+                let mut values = Vec::new();
+                let mut skipped = 0usize;
+                while values.len() < limit {
+                    let Some(record) = source.next_record(delimiter.unwrap_or(b'\n'), trim_newline)
+                    else {
+                        break;
+                    };
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
+                    values.push(record);
+                }
+                source.sync_offset();
+                Some(values)
+            })
+        } else {
+            None
+        };
+
+        let slurp_values = if bounded_values.is_none() {
+            self.mapfile_input_for_command(cmd, read_fd).map(|input| {
+                let mut values = split_mapfile_input(&input, delimiter, trim_newline)
+                    .into_iter()
+                    .skip(skip)
+                    .collect::<Vec<_>>();
+                if let Some(count) = count.filter(|count| *count > 0) {
+                    values.truncate(count);
+                }
+                values
+            })
+        } else {
+            None
+        };
+
+        if let Some(values) = bounded_values.or(slurp_values) {
             let start = origin.unwrap_or(0);
             if callback.is_none() && origin.is_none() {
                 // GNU mapfile.def:177-209 zgetline loop + bind_array_element:
