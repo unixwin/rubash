@@ -4051,10 +4051,20 @@ impl Executor {
         // (variables.c:1418-1423 get_random_number); saved_state keeps
         // the parent's sequence for the wholesale restore.
         self.shell_state.random_state.reseed_fresh();
-        self.shell_state.loop_depth = 0;
-        // execute_in_subshell resets loop_level (execute_cmd.c:1642), so
-        // fork-inherited depth does not cross a `( )` boundary either.
-        self.shell_state.inherited_loop_depth = 0;
+        // GNU execute_cmd.c:1641-1642 (execute_in_subshell): the
+        // loop_level reset is compat-gated — `if
+        // (shell_compatibility_level > 44) loop_level = 0;`. At compat44
+        // and below the child inherits the depth as
+        // inherited_loop_depth (the command-substitution transfer), so
+        // break/continue validate against it but unwind only the
+        // child's own list (audit B4-F07).
+        if crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 44 {
+            self.shell_state.loop_depth = 0;
+            self.shell_state.inherited_loop_depth = 0;
+        } else {
+            self.shell_state.inherited_loop_depth += self.shell_state.loop_depth;
+            self.shell_state.loop_depth = 0;
+        }
 
         // RESTRICTED_SHELL (#804): the subshell's redirects apply inside
         // the child before the body (do_redirections precedes the list), so
