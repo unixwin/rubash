@@ -1768,6 +1768,22 @@ impl Executor {
             let bytes = std::fs::read(path).ok()?;
             return Some(bytes_to_shell_text(&bytes));
         }
+        // rubash#1952: a streamed input process substitution is a live
+        // pipe read end (a File endpoint named `<(...)`), which has no
+        // snapshot; _evalfile reads the descriptor to EOF.
+        if let Some(FdReadEndpoint::File(file)) = self.fd_table.read_endpoint(fd) {
+            if file.path.to_string_lossy().starts_with("<(") {
+                let mut bytes = Vec::new();
+                loop {
+                    let chunk = crate::fd::read_some(file.handle, 8192).ok()?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                return Some(bytes_to_shell_text(&bytes));
+            }
+        }
         let (data, offset) = self.fd_table.input_snapshot_bytes(fd)?;
         let content = data.get(offset..)?.to_vec();
         Some(bytes_to_shell_text(&content))
