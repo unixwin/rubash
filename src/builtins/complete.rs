@@ -967,25 +967,355 @@ pub(crate) fn comp_wordbreaks(env_vars: &HashMap<String, String>) -> String {
     }
 }
 
-/// Split `line[..cursor]` into words for completion purposes, returning the
-/// word list, the index of the word currently being completed, and that word's
-/// partial text. A trailing separator means a fresh (empty) word is being
-/// completed; an interior cursor completes the partial last word.
+/// The outcome of splitting a line for completion: the word list of
+/// the command segment containing the cursor (the COMP_WORDS shape a
+/// governing spec's hook is bound with), the index of the word being
+/// completed, that word's text up to the cursor, and the segment text
+/// with the cursor's byte offset inside it — the COMP_LINE /
+/// COMP_POINT pair of pcomplete.c bind_compfunc_variables (pcomplete.c
+/// :931, fed the substring of pcomplete.c:1323).
+pub(crate) struct CompletionSplit {
+    pub words: Vec<String>,
+    pub cur_idx: usize,
+    pub cur_word: String,
+    pub segment_line: String,
+    pub segment_point: usize,
+}
+
+/// One open substitution frame while scanning a line for command
+/// separators, mirroring the delimiter handling of GNU's skip_to_delim
+/// (subst.c:2199): separators inside a frame do not split commands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompletionFrame {
+    DollarParen,
+    Paren,
+    DollarBrace,
+    Backquote,
+}
+
+/// bashline.c:1465 find_cmd_start / find_cmd_end over
+/// COMMAND_SEPARATORS (bashline.c:1420 `;|&{(` and quote): the byte
+/// range of the command segment containing `cursor`. Quoted spans and
+/// closed command/parameter substitutions are skipped as units
+/// (skip_to_delim with SD_COMPLETE, subst.c:2199) — an unterminated
+/// `$(` therefore does NOT open a new segment (probed on GNU bash
+/// 5.3.20: `echo $(mycmd …` completes under `echo`; no inner compspec
+/// governs), while a bare `(` is a separator character of its own and
+/// does. `{` splits only in reserved-word position (command position,
+/// followed by a shell break character) — find_cmd_start's special
+/// case. A `|` immediately after `>` is not a separator
+/// (find_cmd_start's `>|` guard). Newlines separate: the engine's
+/// completion surface takes whole buffers, where GNU's parser would
+/// terminate the command at the newline the same way.
+fn completion_segment_bounds(line: &str, cursor: usize) -> (usize, usize) {
+    let mut seg_start = 0usize;
+    let mut seg_end = line.len();
+    let mut stack: Vec<CompletionFrame> = Vec::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut only_ws_since_boundary = true;
+    let mut prev_char = '\0';
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let (i, c) = chars[idx];
+        idx += 1;
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            prev_char = c;
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            prev_char = c;
+            continue;
+        }
+        if stack.last() == Some(&CompletionFrame::Backquote) {
+            match c {
+                '\\' => escaped = true,
+                '`' => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+            prev_char = c;
+            continue;
+        }
+        let top_level = stack.is_empty() && !in_double;
+        match c {
+            '\\' => {
+                escaped = true;
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '\'' if !in_double => {
+                in_single = true;
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '"' => {
+                in_double = !in_double;
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '`' => {
+                stack.push(CompletionFrame::Backquote);
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '$' => {
+                match chars.get(idx) {
+                    Some(&(_, '(')) => {
+                        stack.push(CompletionFrame::DollarParen);
+                        idx += 1;
+                        prev_char = '(';
+                    }
+                    Some(&(_, '{')) => {
+                        stack.push(CompletionFrame::DollarBrace);
+                        idx += 1;
+                        prev_char = '{';
+                    }
+                    _ => {}
+                }
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '(' if !in_double => {
+                if stack.is_empty() {
+                    // A bare `(` is a COMMAND_SEPARATORS character: the
+                    // segment ends here and the next begins after it.
+                    if i < cursor {
+                        seg_start = i + 1;
+                        only_ws_since_boundary = true;
+                    } else {
+                        seg_end = i;
+                        break;
+                    }
+                } else {
+                    stack.push(CompletionFrame::Paren);
+                }
+            }
+            ')' if !in_double => {
+                if matches!(
+                    stack.last(),
+                    Some(&CompletionFrame::DollarParen) | Some(&CompletionFrame::Paren)
+                ) {
+                    stack.pop();
+                }
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            '}' if !in_double => {
+                if stack.last() == Some(&CompletionFrame::DollarBrace) {
+                    stack.pop();
+                }
+                if top_level {
+                    only_ws_since_boundary = false;
+                }
+            }
+            ';' | '|' | '&' | '\n' if top_level => {
+                if c == '|' && prev_char == '>' {
+                    // find_cmd_start: `>|` is a redirection, not a pipe.
+                    only_ws_since_boundary = false;
+                } else if i < cursor {
+                    seg_start = i + 1;
+                    only_ws_since_boundary = true;
+                } else {
+                    seg_end = i;
+                    break;
+                }
+            }
+            '{' if top_level && only_ws_since_boundary => {
+                let next = chars.get(idx).map(|&(_, c)| c);
+                if matches!(next, None | Some(' ' | '\t' | ';' | '\n')) {
+                    if i < cursor {
+                        seg_start = i + 1;
+                        only_ws_since_boundary = true;
+                    } else {
+                        seg_end = i;
+                        break;
+                    }
+                } else {
+                    only_ws_since_boundary = false;
+                }
+            }
+            _ => {
+                if top_level && !c.is_whitespace() {
+                    only_ws_since_boundary = false;
+                }
+            }
+        }
+        prev_char = c;
+    }
+    (seg_start, seg_end)
+}
+
+/// bashline.c:1522 find_cmd_name plus the assignment-skipping loop of
+/// attempt_shell_completion (bashline.c:1718-1726): the byte offset
+/// where the segment's command name begins. Leading whitespace and
+/// assignment words ending at or before the cursor are skipped — the
+/// word list GNU hands a hook starts at the name (pcomplete.c:1323's
+/// substring starts at the name index s1; probed on GNU bash 5.3.20:
+/// `X=1 mycmd sp` binds COMP_WORDS [mycmd sp]).
+fn completion_name_start(line: &str, seg_start: usize, seg_end: usize, cursor: usize) -> usize {
+    let seg = &line[seg_start..seg_end];
+    let bytes = seg.as_bytes();
+    let mut pos = 0usize;
+    loop {
+        while pos < seg.len() && matches!(bytes[pos], b' ' | b'\t') {
+            pos += 1;
+        }
+        if pos >= seg.len() {
+            return seg_end;
+        }
+        let tok_end = completion_word_end(seg, pos);
+        if seg_start + tok_end <= cursor && is_assignment_word(&seg[pos..tok_end]) {
+            pos = tok_end;
+            continue;
+        }
+        return seg_start + pos;
+    }
+}
+
+/// Scan one word the way find_cmd_name does — until a shell break
+/// character (shellbreak(): `()<>;&|` plus whitespace), with quotes
+/// grouping (a quoted blank does not end the word).
+fn completion_word_end(seg: &str, start: usize) -> usize {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (off, c) in seg[start..].char_indices() {
+        let i = start + off;
+        if in_single {
+            if c == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => escaped = true,
+            '\'' if !in_double => in_single = true,
+            '"' => in_double = !in_double,
+            _ if !in_double && (c.is_whitespace() || "()<>;&|".contains(c)) => return i,
+            _ => {}
+        }
+    }
+    seg.len()
+}
+
+/// variables.c assignment(): a word is an assignment statement when a
+/// valid name, optionally carrying a [subscript], is followed by `=`.
+/// Only the word's head is examined; the value may contain anything.
+fn is_assignment_word(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    if bytes.is_empty() || !(bytes[0].is_ascii_alphabetic() || bytes[0] == b'_') {
+        return false;
+    }
+    let mut i = 1;
+    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+        i += 1;
+    }
+    if i < bytes.len() && bytes[i] == b'[' {
+        let mut j = i + 1;
+        while j < bytes.len() && bytes[j] != b']' {
+            j += 1;
+        }
+        if j >= bytes.len() {
+            return false;
+        }
+        i = j + 1;
+    }
+    i < bytes.len() && bytes[i] == b'='
+}
+
+/// Tokenize one command segment for completion, keeping each token's
+/// byte span within the segment. rubash#2578: word boundaries are the
+/// COMP_WORDBREAKS characters (bashline.c:313 — readline splits the
+/// completion word at rl_completer_word_break_characters, and
+/// pcomplete.c bind_compfunc_variables exposes exactly this split as
+/// COMP_WORDS / COMP_CWORD to -F functions). Whitespace only
+/// separates; a maximal run of non-whitespace break characters is a
+/// word of its own.
+fn tokenize_completion_region(region: &str, wordbreaks: &str) -> Vec<(usize, usize, String)> {
+    let is_break = |c: char| wordbreaks.contains(c);
+    let mut tokens: Vec<(usize, usize, String)> = Vec::new();
+    let mut current = String::new();
+    let mut current_start = 0usize;
+    let mut current_is_break_run = false;
+    let mut in_token = false;
+    for (off, c) in region.char_indices() {
+        if c.is_whitespace() {
+            if in_token {
+                tokens.push((current_start, off, std::mem::take(&mut current)));
+                in_token = false;
+            }
+            current_is_break_run = false;
+        } else if is_break(c) {
+            if in_token && !current_is_break_run {
+                tokens.push((current_start, off, std::mem::take(&mut current)));
+                in_token = false;
+            }
+            if !in_token {
+                current_start = off;
+                in_token = true;
+            }
+            current.push(c);
+            current_is_break_run = true;
+        } else {
+            if in_token && current_is_break_run {
+                tokens.push((current_start, off, std::mem::take(&mut current)));
+                in_token = false;
+            }
+            if !in_token {
+                current_start = off;
+                in_token = true;
+            }
+            current.push(c);
+            current_is_break_run = false;
+        }
+    }
+    if in_token {
+        tokens.push((current_start, region.len(), current));
+    }
+    tokens
+}
+
+/// Split the command segment containing the cursor into words for
+/// completion purposes.
 ///
-/// rubash#2578: word boundaries are the `COMP_WORDBREAKS` characters
-/// (bashline.c:313 — readline splits the completion word at
-/// rl_completer_word_break_characters, and pcomplete.c
-/// bind_compfunc_variables exposes exactly this split as COMP_WORDS /
-/// COMP_CWORD to -F functions). Whitespace only separates; a maximal run
-/// of non-whitespace break characters is a word of its own. Probed
-/// against the GNU bash 5.3.20 oracle: `foo a=b` -> [foo a = b] cur `b`,
-/// `foo a==b` -> [foo a == b], `foo a=` -> [foo a =] cur `=`,
-/// `foo a ` -> [foo a ""] cur ``.
-pub(crate) fn split_for_completion(
-    line: &str,
-    cursor: usize,
-    wordbreaks: &str,
-) -> (Vec<String>, usize, String) {
+/// rubash#2724 (deep-audit B5-10): resolution used to anchor on the
+/// line's FIRST word — the split ran over the whole line prefix, so a
+/// compspec never governed a command after `;`, `|`, `&&`, a newline,
+/// `(` or an assignment prefix, and the first command's spec governed
+/// later segments. GNU finds the command containing the point
+/// (bashline.c find_cmd_start, assignment statements skipped per
+/// bashline.c:1718-1726) and builds the hook's word list from that
+/// command alone.
+///
+/// rubash#2726 (deep-audit B5-12): the word list is built from the
+/// FULL segment (pcomplete.c command_line_to_word_list over the
+/// substring to the command's end, subst.c:2616 split_at_delims), not
+/// truncated at the cursor: words after the cursor are present, the
+/// empty word after trailing whitespace is present, and a cursor in a
+/// whitespace gap completes an empty word inserted at the gap.
+/// rubash#2578's token shapes are preserved (`foo a=b` -> [foo a = b]
+/// cur `b`, `foo a==b` -> [foo a == b], `foo a=` -> [foo a =] cur `=`,
+/// `foo a ` -> [foo a ""] cur `` — all still holding, now computed
+/// over the segment).
+pub(crate) fn split_for_completion(line: &str, cursor: usize, wordbreaks: &str) -> CompletionSplit {
     // The cursor is a host-supplied byte offset (the rl_point equivalent);
     // a host may legitimately hand over an offset that falls inside a
     // multi-byte character (boundary-transient editor states), and GNU
@@ -993,49 +1323,75 @@ pub(crate) fn split_for_completion(
     // down to the nearest boundary instead of panicking on the slice
     // (rubash#2583).
     let cursor = line.floor_char_boundary(cursor.min(line.len()));
-    let prefix = &line[..cursor];
-    let is_break = |c: char| wordbreaks.contains(c);
-    let mut words: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_is_break_run = false;
-    for c in prefix.chars() {
-        if c.is_whitespace() {
-            if !current.is_empty() {
-                words.push(std::mem::take(&mut current));
-            }
-            current_is_break_run = false;
-        } else if is_break(c) {
-            if !current.is_empty() && !current_is_break_run {
-                words.push(std::mem::take(&mut current));
-            }
-            current.push(c);
-            current_is_break_run = true;
-        } else {
-            if current_is_break_run {
-                words.push(std::mem::take(&mut current));
-                current_is_break_run = false;
-            }
-            current.push(c);
-        }
-    }
-    let ends_with_ws = prefix
-        .chars()
-        .last()
-        .map(|c| c.is_whitespace())
-        .unwrap_or(true);
-    if ends_with_ws {
-        if !current.is_empty() {
-            words.push(current);
-        }
-        let n = words.len();
-        (words, n, String::new())
+    let (seg_start, seg_end) = completion_segment_bounds(line, cursor);
+    let name_start = completion_name_start(line, seg_start, seg_end, cursor);
+    // The word list starts at the command name (pcomplete.c:1323);
+    // when the cursor sits before the name — inside the assignment
+    // prefix — the list keeps the segment start, so the attempt
+    // degrades to a segment-anchored lookup instead of inventing a
+    // name the cursor is not inside.
+    let list_start = if cursor >= name_start {
+        name_start
     } else {
-        if !current.is_empty() {
-            words.push(current);
-        }
-        let idx = words.len().saturating_sub(1);
-        let cur = words.last().cloned().unwrap_or_default();
-        (words, idx, cur)
+        seg_start
+    };
+    let region = &line[list_start..seg_end];
+    let sentinel = cursor - list_start;
+    let segment_line = region.to_string();
+    let tokens = tokenize_completion_region(region, wordbreaks);
+    if tokens.is_empty() {
+        // No word in the segment's name region. A blank line is the
+        // empty-line completion (-E/-D arm of resolve_compspec); a
+        // fresh command position after a separator or an
+        // assignment-only prefix is one empty word (command
+        // completion / the -I arm).
+        let words = if line.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![String::new()]
+        };
+        return CompletionSplit {
+            words,
+            cur_idx: 0,
+            cur_word: String::new(),
+            segment_line,
+            segment_point: sentinel,
+        };
+    }
+    // The token containing the sentinel (subst.c:2616: a token whose
+    // [start, end] span holds the sentinel is the current word; on an
+    // abutting boundary the earlier token wins, matching the
+    // prefix-split behavior this replaces).
+    if let Some((idx, (ts, _, text))) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, (ts, te, _))| *ts <= sentinel && sentinel <= *te)
+    {
+        let cur_word = text[..sentinel - ts].to_string();
+        let words = tokens.into_iter().map(|(_, _, text)| text).collect();
+        return CompletionSplit {
+            words,
+            cur_idx: idx,
+            cur_word,
+            segment_line,
+            segment_point: sentinel,
+        };
+    }
+    // The sentinel sits in a whitespace gap or past the last token:
+    // split_at_delims inserts an empty word there and completes it
+    // (subst.c:2616 — the gap rule and the end-of-string special case).
+    let insert_at = tokens
+        .iter()
+        .take_while(|(_, te, _)| *te <= sentinel)
+        .count();
+    let mut words: Vec<String> = tokens.into_iter().map(|(_, _, text)| text).collect();
+    words.insert(insert_at, String::new());
+    CompletionSplit {
+        words,
+        cur_idx: insert_at,
+        cur_word: String::new(),
+        segment_line,
+        segment_point: sentinel,
     }
 }
 
@@ -1233,7 +1589,8 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
     if settings.disable_completion {
         return (Vec::new(), completion_policy(0));
     }
-    let (words, cur_idx, cur_word) = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
+    let split = split_for_completion(line, cursor, &comp_wordbreaks(env_vars));
+    let (words, cur_idx, cur_word) = (split.words, split.cur_idx, split.cur_word);
     // rubash#2576: GNU bashline.c:1681 — programmable completion is
     // attempted only when prog_completion_enabled (the progcomp
     // shopt); `shopt -u progcomp` leaves plain command/file completion.
@@ -1657,6 +2014,51 @@ where
             env_vars,
             &ReadlineCompletionSettings::default(),
         ));
+    }
+
+    // builtins/complete.def compgen_builtin (rubash#2727; deep-audit
+    // B5-13): with the generators — and the dirnames/plusdirs step —
+    // still empty, COPT_BASHDEFAULT runs bash_default_completion and
+    // then, if that produced nothing, COPT_DEFAULT runs readline's
+    // filename completion. Bashdefault first: a non-empty bashdefault
+    // set suppresses the filename set (probed on GNU bash 5.3.20:
+    // `compgen -o bashdefault -W zzz -- '$HO'` prints variables and
+    // never reaches filenames; `compgen -o default -W zzz -- fi`
+    // prints the filename matches). The compgen word is an argument
+    // word, never command position, so bash_default_candidates runs
+    // with a non-zero word index — GNU's compgen context completes no
+    // command names there (`compgen -o bashdefault -- gi` is empty).
+    // The fallback sets print bare: GNU writes them without the
+    // -P/-S wrapping write_compgen_matches applies to the generated
+    // set (probed: `-o default -P PRE:` prints the bare names).
+    if selected.is_empty() && parsed.options & (COPT_BASHDEFAULT | COPT_DEFAULT) != 0 {
+        let mut fallback: Vec<String> = Vec::new();
+        if parsed.options & COPT_BASHDEFAULT != 0 {
+            fallback.extend(bash_default_candidates(
+                word,
+                1,
+                env_vars,
+                aliases,
+                function_names,
+                dynamic
+                    .as_ref()
+                    .map(|dynamic| dynamic.pipestatus)
+                    .unwrap_or_default(),
+            ));
+        }
+        if fallback.is_empty() && parsed.options & COPT_DEFAULT != 0 {
+            fallback = filename_candidates_matching(
+                word,
+                env_vars,
+                &ReadlineCompletionSettings::default(),
+            );
+        }
+        if !fallback.is_empty() {
+            for candidate in &fallback {
+                writeln!(stdout, "{candidate}")?;
+            }
+            return Ok(EXECUTION_SUCCESS);
+        }
     }
 
     write_compgen_matches(selected.iter().map(String::as_str), &parsed, stdout)

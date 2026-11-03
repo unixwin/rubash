@@ -1539,6 +1539,97 @@ impl Executor {
         Ok(())
     }
 
+    /// The effective command word of a simple command, for
+    /// heredoc-expansion context classification: leading assignment
+    /// words are skipped (GNU general.c:480 assignment() — the parser
+    /// deliberately leaves array-element assignment words in `words`),
+    /// then `command` prefixes are peeled exactly the way
+    /// execute_cmd.c's execute_simple_command loop peels them through
+    /// check_command_builtin (execute_cmd.c:4704-4740): `command [-p]
+    /// [--] name` continues at `name` (which may itself be `command`);
+    /// any other option word (-v/-V included) or a missing name stops
+    /// the peel, leaving `command` itself as the effective word — the
+    /// builtin is what runs, with the command's redirections.
+    fn effective_command_word(words: &[String]) -> Option<&str> {
+        let mut rest = words;
+        while let Some((first, tail)) = rest.split_first() {
+            // The executor's own assignment() ports (general.c:480):
+            // the scalar form and the array-element form.
+            let is_assignment = split_assignment_word(first).is_some()
+                || super::arrays::is_array_element_assignment_word(first);
+            if !is_assignment {
+                break;
+            }
+            rest = tail;
+        }
+        loop {
+            let (first, _) = rest.split_first()?;
+            if first != "command" {
+                return Some(first);
+            }
+            let mut next = &rest[1..];
+            if next.first().map(String::as_str) == Some("-p") {
+                next = &next[1..];
+            }
+            match next.first() {
+                Some(word) if word == "--" => next = &next[1..],
+                Some(word) if word.starts_with('-') => return Some(first),
+                _ => {}
+            }
+            if next.is_empty() {
+                return Some(first);
+            }
+            rest = next;
+        }
+    }
+
+    /// Whether an effective command word executes in the current shell
+    /// — a shell function or an ENABLED builtin — so its redirections
+    /// (and their heredoc expansion) run in the shell
+    /// (execute_cmd.c:5606 execute_builtin_or_function), versus a disk
+    /// command, whose redirections run after the fork in the child
+    /// (execute_cmd.c:5522 execute_disk_command). A disabled builtin
+    /// dispatches to disk in GNU, so it classifies as a child context
+    /// here too.
+    fn command_word_runs_in_current_shell(&self, name: &str) -> bool {
+        if self.function_name_for_command_word(name).is_some() {
+            return true;
+        }
+        // `env` is rubash's one extension builtin (docs/builtins.md
+        // section 2): GNU has no env builtin — it is an external
+        // program, and rubash's in-process implementation likewise
+        // hands its command operand to a spawned program
+        // (execute_env_command) — so for heredoc expansion the context
+        // follows GNU's dispatch class (the forked child,
+        // execute_cmd.c:5522), not the implementation technique. The
+        // builtin registration itself (resolution, `type env`) is
+        // untouched; this predicate only places the expansion.
+        name != "env"
+            && self.routes_as_builtin(name)
+            && !crate::builtins::enable::is_disabled(&self.shell_state.env_vars, name)
+    }
+
+    /// Whether a null command's (no effective word) redirections force
+    /// the fork in GNU's execute_null_command (execute_cmd.c): any
+    /// redirect targeting fd 0 — every unnumbered heredoc / here-string
+    /// / input redirect — or binding a `{fd}` varassign makes the null
+    /// command run its do_redirections in a subshell; otherwise they
+    /// apply in the current shell (rubash#535's `> $nope` shape: an
+    /// fd-1-only null command stays in the shell).
+    fn null_command_redirects_force_fork(cmd: &CommandNode) -> bool {
+        cmd.heredoc.is_some()
+            || cmd.here_string.is_some()
+            || cmd.redirects.iter().any(|redirect| {
+                redirect.fd_var.is_some()
+                    || (matches!(
+                        redirect.kind,
+                        crate::parser::RedirectKind::HereDoc
+                            | crate::parser::RedirectKind::HereString
+                            | crate::parser::RedirectKind::Input
+                    ) && matches!(redirect.fd, None | Some(0)))
+            })
+    }
+
     /// True when the command carrying a failing heredoc would dispatch to
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
@@ -1546,9 +1637,11 @@ impl Executor {
         // A NULL command (`> $nope`, no words) applies its redirections in
         // the main shell (execute_cmd.c execute_null_command runs
         // do_redirections directly) — the fatal jump is not contained
-        // (rubash#535: GNU `set -u; > $nope` ends the script).
+        // (rubash#535: GNU `set -u; > $nope` ends the script) — unless a
+        // redirect forces the null command's fork (fd-0 target or a
+        // {fd} varassign; see null_command_redirects_force_fork).
         let Some(first) = cmd.words.first() else {
-            return true;
+            return !Self::null_command_redirects_force_fork(cmd);
         };
         // Expansion of the first word can run substitutions with side
         // effects; only classify the literal-word forms where expansion is
@@ -1556,12 +1649,25 @@ impl Executor {
         if first.contains('$') || first.contains('`') {
             return false;
         }
-        let expanded = self.expand_word(first);
+        // rubash#2681: classification follows the EFFECTIVE command
+        // word — `command cat` forks (its heredoc error is contained,
+        // the script continues) while `command :` and `command -v cat`
+        // run the `command` builtin itself in the shell. Only the
+        // effective word is expanded, and only when it is inert, for
+        // the same reason as the first word above.
+        let Some(effective) = Self::effective_command_word(&cmd.words) else {
+            return !Self::null_command_redirects_force_fork(cmd);
+        };
+        if effective.contains('$') || effective.contains('`') {
+            return false;
+        }
+        let expanded = self.expand_word(effective);
         // routes_as_builtin already covers the pure builtin table on both
         // platforms (lookup_paths.rs) — testing is_shell_builtin_name
-        // separately is a subsumed disjunct (#813 item 4).
-        self.routes_as_builtin(&expanded)
-            || self.function_name_for_command_word(&expanded).is_some()
+        // separately is a subsumed disjunct (#813 item 4). The shared
+        // resolver additionally honors `enable -n` (a disabled builtin
+        // dispatches to disk, so its failure is contained).
+        self.command_word_runs_in_current_shell(&expanded)
     }
 
     /// Latched expansion-error flags, checked after word expansion and
@@ -1639,6 +1745,11 @@ impl Executor {
         // exits with last_command_exit_value (EXECUTION_FAILURE=1). A
         // subshell child contains the jump at execute_cmd.c:1811 and exits
         // 1 (niubash#163), so expansion_fatal_status owns the mapping.
+        // subst.c:10285-10286 gates the fatal arm on the compat level:
+        // `if (shell_compatibility_level <= 43) return
+        // &expand_wdesc_error;` — at compat31..43 a POSIX-mode bad
+        // substitution is the plain error class (command fails with 1,
+        // the script continues) even in POSIX mode (audit B4-F08).
         // rubash#1109: the extract_dollar_brace_string no-closing-brace
         // verdict is DISCARD in every mode (see no_closing_brace_verdict).
         if self.no_closing_brace_failure.replace(false) {
@@ -1647,7 +1758,10 @@ impl Executor {
             return Err(ExecuteError::ExpansionFailure(1));
         }
         if self.shell_state.parameter_bad_substitution.replace(false) {
-            if self.posix_mode_enabled() && !self.invocation_interactive() {
+            if self.posix_mode_enabled()
+                && !self.invocation_interactive()
+                && crate::builtins::shopt::compatibility_level(&self.shell_state.env_vars) > 43
+            {
                 let code = self.expansion_fatal_status();
                 self.exit_code = code;
                 return Err(ExecuteError::ExitCode(code));
@@ -1711,28 +1825,129 @@ impl Executor {
     /// verbatim instead of expanding — and re-running embedded substitutions — a
     /// second time. Quoted-delimiter bodies and `\x1d` ANSI-C bodies are
     /// left untouched: they take their own verbatim/decode paths.
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
-        // The parser stores an unnumbered `<<EOF` body in BOTH `heredoc` and
-        // `heredoc_redirects` (fd == None); it is one redirection, so expand
-        // it once and share the marked result between the two fields —
-        // otherwise embedded substitutions like `${ incr; }` would run
-        // twice (comsub23.sub `after here-doc: 1`).
-        let shared_raw = cmd.heredoc.clone();
-        if let Some(body) = cmd.heredoc.take() {
-            let carrier = if Self::stdin_body_needs_expansion(&body) {
-                let expanded = self.expand_heredoc_body_mut(&body);
-                crate::parser::StdinBody::Preexpanded(expanded)
-            } else {
-                crate::parser::StdinBody::NeedsExpansion(body)
-            };
-            cmd.heredoc = Some(carrier.to_string());
-            cmd.heredoc_body = Some(carrier);
+    /// rubash#2681: whether this command's heredoc / here-string bodies
+    /// expand in a forked child context in GNU. redir.c:348
+    /// heredoc_expand runs inside do_redirections, and where
+    /// do_redirections runs is decided by the command's dispatch:
+    /// execute_disk_command forks first and the CHILD applies the
+    /// redirects (execute_cmd.c:5522), while
+    /// execute_builtin_or_function applies them in the current shell
+    /// (execute_cmd.c:5606). A null command follows
+    /// execute_null_command's force-fork rule instead. The bodies'
+    /// expansion effects (assignments, arithmetic, function calls via
+    /// substitutions) therefore persist exactly for builtin / function
+    /// targets and are discarded for external ones.
+    fn heredoc_bodies_expand_in_fork_context(&self, cmd: &CommandNode) -> bool {
+        if let Some(effective) = Self::effective_command_word(&cmd.words) {
+            return !self.command_word_runs_in_current_shell(effective);
         }
+        Self::null_command_redirects_force_fork(cmd)
+    }
+
+    /// rubash#2681: run `f` — a heredoc / here-string body expansion
+    /// for a command GNU would fork — against a throwaway clone of the
+    /// shell state: the in-process shape of the fork that precedes
+    /// do_redirections in execute_disk_command (execute_cmd.c:5522).
+    /// The child inherits the full shell state, expands the bodies
+    /// there, and its mutations die with it; the boundary is the same
+    /// restore_flat_subshell the `( )` regions and command-substitution
+    /// children use (execute_cmd.c:1576 execute_in_subshell), so
+    /// variables, functions, aliases, traps, cwd, PIPESTATUS and the
+    /// process-env projection all revert together — this is a fork
+    /// emulation, not a variable snapshot.
+    ///
+    /// Two things cross the boundary back, because the parent observes
+    /// them from the child: the child's substitution/status bookkeeping
+    /// is discarded with it (saved and restored here), but expansion
+    /// FAILURE is how the parent learns the child's do_redirections
+    /// failed — the arithmetic error latches live in ShellState and
+    /// would be wiped by the restore, so they are captured before it
+    /// and re-applied after it (abort_on_expansion_errors, immediately
+    /// after the pre-expansion, reads them). The
+    /// parameter_assignment_failure latch lives on the Executor, not in
+    /// ShellState, and already survives the swap untouched.
+    pub(in crate::executor) fn with_forked_heredoc_expansion<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let saved_state = self.shell_state.clone();
+        let saved_exit_code = self.exit_code;
+        let saved_substitution_status = self.last_command_substitution_status.get();
+        let saved_substitution_parse_error = self.last_command_substitution_parse_error.get();
+        let saved_substitution_parse_error_backtick =
+            self.last_command_substitution_parse_error_backtick.get();
+        let result = f(self);
+        let arithmetic_error = self.shell_state.arithmetic_expansion_error.get();
+        let arithmetic_fatal = self.shell_state.arithmetic_fatal_error.get();
+        let arithmetic_nounset = self.shell_state.arithmetic_nounset_error.get();
+        self.restore_flat_subshell(saved_state);
+        self.shell_state
+            .arithmetic_expansion_error
+            .set(arithmetic_error);
+        self.shell_state
+            .arithmetic_fatal_error
+            .set(arithmetic_fatal);
+        self.shell_state
+            .arithmetic_nounset_error
+            .set(arithmetic_nounset);
+        self.exit_code = saved_exit_code;
+        self.last_command_substitution_status
+            .set(saved_substitution_status);
+        self.last_command_substitution_parse_error
+            .set(saved_substitution_parse_error);
+        self.last_command_substitution_parse_error_backtick
+            .set(saved_substitution_parse_error_backtick);
+        result
+    }
+
+    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+        // rubash#2681: for a command GNU forks, the bodies expand in
+        // the child — run the whole pre-expansion (every body of the
+        // command, in redirect order, so later bodies still see
+        // earlier bodies' effects exactly as the child's single
+        // do_redirections pass produces them) inside the fork boundary.
+        let has_bodies =
+            cmd.heredoc.is_some() || !cmd.heredoc_redirects.is_empty() || cmd.here_string.is_some();
+        if has_bodies && self.heredoc_bodies_expand_in_fork_context(cmd) {
+            self.with_forked_heredoc_expansion(|executor| {
+                executor.preexpand_command_stdin_bodies(cmd)
+            });
+            return;
+        }
+        self.preexpand_command_stdin_bodies(cmd);
+    }
+
+    fn preexpand_command_stdin_bodies(&mut self, cmd: &mut CommandNode) {
+        // GNU do_redirections walks the redirect list in document
+        // order, expanding each heredoc body as it is reached — an
+        // earlier (even overridden) body's expansion effects are
+        // visible to the bodies after it. The parser stores an
+        // unnumbered `<<EOF` body in BOTH `heredoc` and
+        // `heredoc_redirects` (fd == None); it is one redirection, so
+        // expand it once, at its redirect-list position, and share the
+        // marked result between the two fields — otherwise embedded
+        // substitutions like `${ incr; }` would run twice
+        // (comsub23.sub `after here-doc: 1`), and expanding the legacy
+        // field ahead of the list would invert the bodies' order
+        // (rubash#2681: in `cat <<C <<D`, C's `${a:=fromD}` must be
+        // visible when D's body expands).
+        let shared_raw = cmd.heredoc.clone();
+        let mut shared_carrier: Option<crate::parser::StdinBody> = None;
         for redirect in &mut cmd.heredoc_redirects {
             if let Some(body) = redirect.body.take() {
                 if redirect.fd.is_none() && shared_raw.as_deref() == Some(body.as_str()) {
-                    redirect.body = cmd.heredoc.clone();
-                    redirect.body_carrier = cmd.heredoc_body.clone();
+                    let carrier = match &shared_carrier {
+                        Some(carrier) => carrier.clone(),
+                        None if Self::stdin_body_needs_expansion(&body) => {
+                            crate::parser::StdinBody::Preexpanded(
+                                self.expand_heredoc_body_mut(&body),
+                            )
+                        }
+                        None => crate::parser::StdinBody::NeedsExpansion(body),
+                    };
+                    redirect.body = Some(carrier.to_string());
+                    redirect.body_carrier = Some(carrier.clone());
+                    shared_carrier = Some(carrier);
                     continue;
                 }
                 let carrier = if Self::stdin_body_needs_expansion(&body) {
@@ -1748,6 +1963,17 @@ impl Executor {
                 redirect.body = Some(carrier.to_string());
                 redirect.body_carrier = Some(carrier);
             }
+        }
+        if let Some(body) = cmd.heredoc.take() {
+            let carrier = match shared_carrier {
+                Some(carrier) => carrier,
+                None if Self::stdin_body_needs_expansion(&body) => {
+                    crate::parser::StdinBody::Preexpanded(self.expand_heredoc_body_mut(&body))
+                }
+                None => crate::parser::StdinBody::NeedsExpansion(body),
+            };
+            cmd.heredoc = Some(carrier.to_string());
+            cmd.heredoc_body = Some(carrier);
         }
         if let Some(word) = cmd.here_string.take() {
             let carrier = crate::parser::StdinBody::Preexpanded(self.expand_here_string_mut(&word));

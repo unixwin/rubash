@@ -630,6 +630,18 @@ impl Executor {
                 // same fd must see exactly the unconsumed bytes.
                 source.sync_offset();
                 self.execute_mapfile_callback(callback, target, &record, cmd)?;
+                // A3-F4: GNU mapfile.def:142-218 re-looks-up the array
+                // after run_callback ("Bad things can happen if the
+                // callback modifies ENTRY... so we look it up again
+                // every time"), so a callback that resets or unsets
+                // the target array is observed, not clobbered by the
+                // driver's local entry map at the final render.
+                entries = self
+                    .shell_state
+                    .env_vars
+                    .get(name)
+                    .map(|current| indexed_array_entries(current))
+                    .unwrap_or_default();
             }
             let previous_max = entries.keys().next_back().copied();
             entries.insert(target, record.clone());

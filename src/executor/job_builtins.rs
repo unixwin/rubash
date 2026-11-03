@@ -4839,11 +4839,13 @@ impl Executor {
         line: &str,
         cursor: usize,
     ) -> Option<crate::builtins::complete::CompgenDynamic> {
-        let (words, cur_idx, cur_word) = crate::builtins::complete::split_for_completion(
+        let split = crate::builtins::complete::split_for_completion(
             line,
             cursor,
             &crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars),
         );
+        let (words, cur_idx, cur_word) =
+            (split.words.clone(), split.cur_idx, split.cur_word.clone());
         let spec = crate::builtins::complete::resolve_compspec(
             &self.shell_state.completion_specs,
             &words,
@@ -4889,8 +4891,8 @@ impl Executor {
         if let Some(funcname) = spec.funcname.as_deref() {
             dynamic.function_candidates = self.run_completion_function_live(
                 funcname,
-                line,
-                cursor,
+                &split.segment_line,
+                split.segment_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -4901,8 +4903,8 @@ impl Executor {
         if let Some(command) = spec.command.as_deref() {
             dynamic.command_candidates = self.run_completion_command_live(
                 command,
-                line,
-                cursor,
+                &split.segment_line,
+                split.segment_point,
                 &bind_words,
                 cword,
                 &cmd_name,
