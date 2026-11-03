@@ -2,6 +2,25 @@ use super::*;
 
 impl Executor {
     pub(in crate::executor) fn parameter_assignment_transform(&self, name: &str) -> String {
+        if matches!(name, "@" | "*") {
+            // GNU subst.c:8724 pos_params_assignment (the VT_POSPARAMS
+            // case of parameter_brace_transform, subst.c:8930): the @A
+            // transform of the positional parameters renders `set -- `
+            // followed by the list_transform('Q') rendering of the list
+            // — each parameter shell-quoted, the copies joined per the
+            // positional_transform_separator rule. An empty list renders
+            // empty, not a bare `set -- `.
+            let params = self.shell_state.positional_window();
+            if params.is_empty() {
+                return String::new();
+            }
+            let rendered = params
+                .iter()
+                .map(|value| shell_reusable_quote(value))
+                .collect::<Vec<_>>()
+                .join(&self.positional_transform_separator(name));
+            return format!("set -- {rendered}");
+        }
         if let Some(array_name) = name
             .strip_suffix("[*]")
             .or_else(|| name.strip_suffix("[@]"))
@@ -218,7 +237,38 @@ impl Executor {
         flags
     }
 
+    /// Join rule for the string form of a positional-parameter list
+    /// transform (GNU subst.c string_list_pos_params, subst.c:3030, as
+    /// consumed by parameter_brace_transform's VT_POSPARAMS case): `$*`
+    /// joins with the first character of IFS in every string context;
+    /// `$@` joins with a space in quoted string contexts but with IFS[0]
+    /// in assignment values, where GNU stringifies the whole list with
+    /// the dollar-star rule (verified against GNU 5.3.20: `x=${@@K}`
+    /// with IFS=: renders `'a b':'c'`, while the same expansion inside
+    /// double quotes renders `'a b' 'c'`).
+    pub(in crate::executor) fn positional_transform_separator(&self, name: &str) -> String {
+        if name == "*" || self.inside_assignment_rhs.get() {
+            self.ifs_first_char_separator()
+        } else {
+            " ".to_string()
+        }
+    }
+
     pub(in crate::executor) fn parameter_attribute_transform(&self, name: &str) -> String {
+        if matches!(name, "@" | "*") {
+            // GNU subst.c parameter_brace_transform VT_POSPARAMS with
+            // 'a': list_transform maps the attribute string over the
+            // positional list; positional parameters carry no
+            // attributes, so the string form is N empty copies joined
+            // per positional_transform_separator (N=2, IFS=: renders
+            // ":" for $* and for $@ in an assignment value, " " for $@
+            // inside double quotes).
+            let count = self.shell_state.positional_window().len();
+            if count == 0 {
+                return String::new();
+            }
+            return vec![String::new(); count].join(&self.positional_transform_separator(name));
+        }
         // GNU array_transform -> list_transform (subst.c:8856+): `arr[@]@a`
         // maps the attribute string over the ELEMENT list — an allocated
         // array with N elements yields N copies (dollar_at space-joins
@@ -339,6 +389,22 @@ impl Executor {
         name: &str,
         quoted: bool,
     ) -> String {
+        if matches!(name, "@" | "*") {
+            // GNU subst.c parameter_brace_transform VT_POSPARAMS with
+            // 'K'/'k': list_transform applies sh_quote_reusable to EACH
+            // positional parameter separately; the string form joins
+            // the copies per positional_transform_separator. (The
+            // fall-through below resolves "@" as a variable name and
+            // quotes the JOINED positional string once — 'a b c'
+            // instead of 'a b' 'c'.)
+            return self
+                .shell_state
+                .positional_window()
+                .iter()
+                .map(|value| shell_reusable_quote(value))
+                .collect::<Vec<_>>()
+                .join(&self.positional_transform_separator(name));
+        }
         let array_name = name
             .strip_suffix("[@]")
             .or_else(|| name.strip_suffix("[*]"));
