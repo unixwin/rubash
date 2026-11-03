@@ -1766,6 +1766,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let mut semicolons = 0u32;
             let mut depth = 0i32;
             let mut close = open;
+            let mut close_span = 0usize;
             let mut header_closed = false;
             for j in open..tokens.len() {
                 let t = &tokens[j];
@@ -1780,10 +1781,32 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 } else if op("))") || (op(")") && next_op(")")) {
                     if depth == 0 {
                         close = j;
+                        close_span = if op("))") { 1 } else { 2 };
                         header_closed = true;
                         break;
                     }
                     depth -= 1;
+                } else if op(")") && depth == 0 && semicolons >= 2 {
+                    // A lone `)' at header depth, after the header's
+                    // three sections are complete: the pair scan HAS run
+                    // into a close paren, just not the closing pair —
+                    // the header is malformed, not unterminated. GNU's
+                    // parse_dparen stops inside the header on this shape
+                    // (and yyerror names a header token); the EOF form
+                    // below is only for a header no `)' ever reaches (or
+                    // one whose sections never completed, e.g.
+                    // `for ((i=0;)'). Treating it as closed routes the
+                    // shape to the continuation + header validation,
+                    // which report it as the syntax error it is (captain
+                    // fix at PR #2778 verification: the EOF form regressed
+                    // master's behaviour and broke cli_tests'
+                    // malformed_pipeline_and_if_are_syntax_errors;
+                    // exact GNU token attribution for single-`)'
+                    // headers is tracked in #2781).
+                    close = j;
+                    close_span = 1;
+                    header_closed = true;
+                    break;
                 } else if depth == 0 && t.kind == TokenKind::Semicolon {
                     semicolons += 1;
                 }
@@ -1823,11 +1846,7 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             // DONE is the compound-EOF report; only a construct that
             // completes through DONE earns the header-validation error
             // below.
-            let after_header = if tokens[close].value == "))" {
-                close + 1
-            } else {
-                close + 2
-            };
+            let after_header = close + close_span;
             match arith_for_continuation(tokens, after_header) {
                 ArithForContinuation::Offender(index) => {
                     push_unexpected_token_error(state, tokens, index);

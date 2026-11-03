@@ -211,6 +211,23 @@ fn issue2749_good_header_unclosed_body_is_compound_eof() {
 }
 
 #[test]
+fn issue2749_single_paren_header_with_body_is_a_syntax_error() {
+    // Captain regression pin (PR #2778 verification): a lone `)'
+    // closing a three-section header is malformed, not unterminated —
+    // it must reach header validation (a syntax error), never the
+    // matched-pair EOF form. GNU names `;' here; exact attribution
+    // for single-`)' headers is tracked in #2781.
+    let run = run_c("for (( i=0; i<1; i++ ); do :; done");
+    assert_run(
+        "single-paren",
+        &run,
+        "",
+        "bash: -c: line 1: syntax error: `;' unexpected\nbash: -c: line 1: syntax error: `(( i=0; i<1; i++ );'\n",
+        2,
+    );
+}
+
+#[test]
 fn issue2749_wellformed_arith_for_control() {
     let run = run_c("for ((i=0;i<3;i++)); do echo $i; done");
     assert_run("ctrl", &run, "0\n1\n2\n", "", 0);
