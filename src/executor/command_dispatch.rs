@@ -357,7 +357,22 @@ impl Executor {
         };
         if !keep_temporary_assignments {
             self.restore_temporary_assignments(temporary_assignments);
-        } else if Self::attribute_builtin_absorbs_named_tempenv(cmd) {
+        } else if Self::attribute_builtin_absorbs_named_tempenv(cmd)
+            && !(self.posix_mode_enabled()
+                && cmd
+                    .words
+                    .first()
+                    .is_some_and(|name| super::support_names::is_posix_special_builtin(name)))
+        {
+            // The absorption arm is skipped for a POSIX-mode SPECIAL
+            // builtin (export/readonly are both): GNU's setattr.def
+            // absorption is the non-posix mechanism, while in POSIX mode
+            // the prefix assignments of a special builtin bind in the
+            // current context and persist (variables.c
+            // push_posix_temp_var / merge_temporary_env; POSIX 2.9.1 —
+            // `v=zz readonly` leaves v=zz). Those commands fall through
+            // to the posix merge arms below, which keep the bindings and
+            // handle function-frame propagation (audit B4-F10).
             // GNU setattr.def:590-614 set_var_attribute ("only called by
             // readonly/export") + declare.def:1105: an attribute builtin
             // absorbs from the temporary environment ONLY the variables its
