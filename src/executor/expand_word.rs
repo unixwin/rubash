@@ -153,6 +153,19 @@ impl Executor {
     }
 
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
+        // A heredoc delimiter word is NEVER word-expanded (rubash#2686):
+        // GNU make_cmd.c make_here_document stores `here_doc_eof =
+        // string_quote_removal(word)` when the redirect is built, and
+        // the executor consumes that dequoted string — the delimiter is
+        // not a redirection_expand operand (redir.c:298 covers file
+        // operands only), so a `$(...)` or backquote in the delimiter
+        // word must not execute. The dequoted delimiter is the operand
+        // value every consumer of this function means for a heredoc
+        // entry (the parser computes the same value into
+        // `command.heredoc_delimiter` for the fd-less case).
+        if redirect.kind == crate::parser::RedirectKind::HereDoc {
+            return crate::parser::heredoc_delimiter_text(&redirect.target);
+        }
         // GNU redir.c:298 redirection_expand → expand_words_no_vars →
         // subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): a
         // redirect word that IS a process substitution expands to the
