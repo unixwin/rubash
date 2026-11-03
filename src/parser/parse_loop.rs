@@ -233,8 +233,23 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
                 && super::is_unquoted_operator(&tokens[i], ")")
                 && !state.in_subshell)
         {
-            push_unexpected_token_error(state, tokens, i);
-            break;
+            // An already-failed command owns the report (GNU yyerror
+            // fired at the FIRST offending token): a stray terminator
+            // after an errored compound — `[[ a == ]];;' — must not
+            // replace the compound's diagnostic with its own
+            // (rubash#2750).
+            if state
+                .ast
+                .commands
+                .last()
+                .is_some_and(|command| command.has_parse_error_marker())
+            {
+                // Fall through to normal token handling; the error
+                // node suppresses the whole unit at execution.
+            } else {
+                push_unexpected_token_error(state, tokens, i);
+                break;
+            }
         }
 
         // GNU parse.y:1264-1290 (list grammar): every `;' (and `&')
@@ -279,7 +294,7 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
                 .ast
                 .commands
                 .last()
-                .is_some_and(|command| command.has_assignment("__RUBASH_PARSE_ERROR__"));
+                .is_some_and(|command| command.has_parse_error_marker());
             // rubash#305: a redirection OPERATOR the compound's own
             // trailing-redirect collector stopped at is not "the next
             // command" — in GNU it starts another redirection of the
@@ -529,7 +544,16 @@ fn section_stop_hit(tokens: &[Token], index: usize, state: &ParseState) -> bool 
     let token = &tokens[index];
     match state.section_stop {
         SectionStop::None => false,
-        SectionStop::IfCondition => is_keyword(tokens, index, "then"),
+        // A `then' only closes the condition when the condition list is
+        // complete: while a `&&'/`||'/`|' still awaits its right-hand
+        // command, `then' sits at a command position and is the token
+        // yyerror names (parse.y:6727) — the token loop's reserved-word
+        // arm reports it there. Treating it as the closer let the
+        // fold's dangling-list EOF node win the report instead
+        // (rubash#2741 face: `if a && then ...').
+        SectionStop::IfCondition => {
+            is_keyword(tokens, index, "then") && !section_list_dangles(state)
+        }
         SectionStop::IfBody => {
             matches!(token.value.as_str(), "fi" | "done" | "esac")
                 || is_keyword(tokens, index, "elif")
@@ -537,6 +561,19 @@ fn section_stop_hit(tokens: &[Token], index: usize, state: &ParseState) -> bool 
                 || is_keyword(tokens, index, "then")
         }
     }
+}
+
+/// Whether the section's command list is mid-connector: the last
+/// completed command (or the in-progress one) carries a `&&'/`||'/`|'
+/// linkage whose right-hand command has not arrived.
+fn section_list_dangles(state: &ParseState) -> bool {
+    state.current_cmd.and_or.is_some()
+        || state.current_cmd.pipe.is_some()
+        || state
+            .ast
+            .commands
+            .last()
+            .is_some_and(|command| command.and_or.is_some() || command.pipe.is_some())
 }
 
 /// How an inline section ended.
@@ -661,7 +698,7 @@ pub(super) fn run_inline_section(
     SectionOutcome::Errored { body }
 }
 
-fn compound_body_parse_error(cmd: &CommandNode) -> Option<&CommandNode> {
+pub(super) fn compound_body_parse_error(cmd: &CommandNode) -> Option<&CommandNode> {
     if cmd.has_assignment("__RUBASH_PARSE_ERROR__")
         || cmd.has_assignment("__RUBASH_PARSE_ERROR_NEAR__")
     {
@@ -881,7 +918,7 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
                 // report sites render the EOF form (deep-audit B6-F1).
                 let mut command = list_commands
                     .into_iter()
-                    .next()
+                    .last()
                     .expect("and-or list has a command");
                 command
                     .insert_assignment("__RUBASH_PARSE_ERROR_EOF__".to_string(), "1".to_string());
@@ -953,14 +990,23 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
             || looks_like_case_pattern_alternate(&stages)
         {
             if stages.len() == 1 || stages.last().is_some_and(|command| command.pipe.is_some()) {
+                // GNU parse.y yyerror: a `|`/`|&` with no right-hand stage
+                // because input ended reports "syntax error: unexpected
+                // end of file" — not `near unexpected token `|'' (that
+                // wording belongs to `|` mid-list). The EOF renderer
+                // reports the carrier's line + 1 as the end-of-input
+                // line, so the carrier must carry the LAST stage's line:
+                // anchoring on the first stage under-reported every
+                // multi-line pipeline by its span (rubash#2754:
+                // `echo a |'/`echo b |' reported line 2, GNU line 3).
+                let last_line = stages.last().and_then(|stage| stage.line);
                 let mut command = stages
                     .into_iter()
                     .next()
                     .expect("pipeline has a first stage");
-                // GNU parse.y yyerror: a `|`/`|&` with no right-hand stage
-                // because input ended reports "syntax error: unexpected
-                // end of file" — not `near unexpected token `|'' (that
-                // wording belongs to `|` mid-list).
+                if let Some(line) = last_line {
+                    command.line = Some(line);
+                }
                 command
                     .insert_assignment("__RUBASH_PARSE_ERROR_EOF__".to_string(), "1".to_string());
                 folded.push(command);
@@ -1720,6 +1766,8 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
             let mut semicolons = 0u32;
             let mut depth = 0i32;
             let mut close = open;
+            let mut close_span = 0usize;
+            let mut header_closed = false;
             for j in open..tokens.len() {
                 let t = &tokens[j];
                 let op = |v: &str| super::is_unquoted_operator(t, v);
@@ -1733,12 +1781,87 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
                 } else if op("))") || (op(")") && next_op(")")) {
                     if depth == 0 {
                         close = j;
+                        close_span = if op("))") { 1 } else { 2 };
+                        header_closed = true;
                         break;
                     }
                     depth -= 1;
+                } else if op(")") && depth == 0 && semicolons >= 2 {
+                    // A lone `)' at header depth, after the header's
+                    // three sections are complete: the pair scan HAS run
+                    // into a close paren, just not the closing pair —
+                    // the header is malformed, not unterminated. GNU's
+                    // parse_dparen stops inside the header on this shape
+                    // (and yyerror names a header token); the EOF form
+                    // below is only for a header no `)' ever reaches (or
+                    // one whose sections never completed, e.g.
+                    // `for ((i=0;)'). Treating it as closed routes the
+                    // shape to the continuation + header validation,
+                    // which report it as the syntax error it is (captain
+                    // fix at PR #2778 verification: the EOF form regressed
+                    // master's behaviour and broke cli_tests'
+                    // malformed_pipeline_and_if_are_syntax_errors;
+                    // exact GNU token attribution for single-`)'
+                    // headers is tracked in #2781).
+                    close = j;
+                    close_span = 1;
+                    header_closed = true;
+                    break;
                 } else if depth == 0 && t.kind == TokenKind::Semicolon {
                     semicolons += 1;
                 }
+            }
+            if !header_closed {
+                // GNU parse_matched_pair (parse.y:3877) scans the header
+                // for its closing `)' and hits end of input: the report
+                // is "unexpected EOF while looking for matching `)'" at
+                // the line the scan started (parse.y:3908-3915,
+                // start_lineno) — never the header-validation error the
+                // old fallback manufactured here (rubash#2749 face a:
+                // `for ((i=0;i<3;i++' named the header's own text).
+                let opener_start = if open >= 2 && tokens[open - 2].value == "(" {
+                    open - 2
+                } else {
+                    open - 1
+                };
+                state.current_cmd.line = tokens.get(opener_start).map(|token| token.position);
+                state.current_cmd.logical_line =
+                    tokens.get(opener_start).map(|token| token.logical_line);
+                state.current_cmd.insert_assignment(
+                    "__RUBASH_PARSE_ERROR__".to_string(),
+                    "unexpected EOF while looking for matching `)'".to_string(),
+                );
+                state
+                    .ast
+                    .commands
+                    .push(std::mem::take(&mut state.current_cmd));
+                return Some(tokens.len());
+            }
+            // The header closed. GNU validates the header text only when
+            // the for_command REDUCES (at DONE), so what follows the
+            // header decides the report (rubash#2749 faces b/c): a token
+            // that cannot continue the construct is the yyerror token
+            // even when the header itself is malformed (`for
+            // ((i=0;i<3)) extra' names `extra'); end of input before
+            // DONE is the compound-EOF report; only a construct that
+            // completes through DONE earns the header-validation error
+            // below.
+            let after_header = close + close_span;
+            match arith_for_continuation(tokens, after_header) {
+                ArithForContinuation::Offender(index) => {
+                    push_unexpected_token_error(state, tokens, index);
+                    return Some(index + 1);
+                }
+                ArithForContinuation::EndOfInput => {
+                    let command = unclosed_keyword_eof_node(tokens, i, "for");
+                    state.current_cmd = command;
+                    state
+                        .ast
+                        .commands
+                        .push(std::mem::take(&mut state.current_cmd));
+                    return Some(tokens.len());
+                }
+                ArithForContinuation::Complete => {}
             }
             // GNU parse.y report_syntax_error echoes the offending text
             // VERBATIM (`((i=0; i<3))', arith_for_command error path) — no
@@ -2653,6 +2776,55 @@ fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
     last_line + 1 + usize::from(continuation)
 }
 
+/// How the input continues after a closed arithmetic-`for` header —
+/// the discrimination GNU's reduction order imposes on the arith-for
+/// fallback's report (rubash#2749): the header text is validated only
+/// when the for_command reduces at DONE, so a token that cannot
+/// continue the construct is the yyerror token, and end of input
+/// before DONE is the compound-EOF report.
+enum ArithForContinuation {
+    /// Index of the token that cannot continue the construct.
+    Offender(usize),
+    /// The stream ended before the construct completed.
+    EndOfInput,
+    /// `do ... done` completes the construct.
+    Complete,
+}
+
+fn arith_for_continuation(tokens: &[Token], mut index: usize) -> ArithForContinuation {
+    // Between the header and DO the grammar admits a newline_list
+    // (separators only); the first real token must be DO itself (which
+    // may also directly abut the header: `for ((...)) do ...').
+    while tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::Semicolon)
+    {
+        index += 1;
+    }
+    let Some(_) = tokens.get(index) else {
+        return ArithForContinuation::EndOfInput;
+    };
+    if !(command_boundary_keyword_allowed(tokens, index) && is_keyword(tokens, index, "do")) {
+        return ArithForContinuation::Offender(index);
+    }
+    // DO found: the construct completes only at its matching DONE —
+    // nested compounds ride the boundary stack, exactly as the loop
+    // body scanner walks them.
+    let mut stack = Vec::new();
+    let mut scan = index + 1;
+    while scan < tokens.len() {
+        if stack.is_empty()
+            && command_boundary_keyword_allowed(tokens, scan)
+            && is_keyword(tokens, scan, "done")
+        {
+            return ArithForContinuation::Complete;
+        }
+        super::update_compound_boundary_stack(tokens, scan, &mut stack);
+        scan += 1;
+    }
+    ArithForContinuation::EndOfInput
+}
+
 /// `if`/`while`/`until`/`for`/`select`/`case` opener whose closer never
 /// arrives before end of input. GNU parse.y (yyerror EOF path,
 /// parse.y:6890-6901) reports the innermost open compound via
@@ -2779,6 +2951,40 @@ fn loop_head_offender(
     opener_index: usize,
     opener: &'static str,
 ) -> Option<usize> {
+    // GNU parse.y:867-877: the condition is a compound_list, and a list
+    // cannot BEGIN with a reserved word that starts no command — in
+    // `while do done' the loop's own DO cannot double as the
+    // condition's first token, and yyerror names `do' itself, where
+    // the scans below would name the later `done' (rubash#2742).
+    // Leading separators and `!'/`time' prefixes leave the head
+    // position open; the first real token decides. (A first token
+    // that starts a command — a word, a nested opener, a redirect —
+    // ends the check: later `done's are the scans' business.)
+    let mut head = opener_index + 1;
+    loop {
+        match tokens.get(head) {
+            None => break,
+            Some(token) if token.kind == TokenKind::Semicolon => head += 1,
+            Some(token)
+                if token.kind == TokenKind::Keyword
+                    && matches!(token.value.as_str(), "!" | "time") =>
+            {
+                head += 1;
+            }
+            Some(token) => {
+                if token.kind == TokenKind::Keyword
+                    && command_boundary_keyword_allowed(tokens, head)
+                    && matches!(
+                        token.value.trim_end(),
+                        "do" | "done" | "then" | "elif" | "else" | "fi" | "esac" | "}"
+                    )
+                {
+                    return Some(head);
+                }
+                break;
+            }
+        }
+    }
     let mismatched = first_mismatched_closer(&tokens[opener_index + 1..], opener)
         .map(|rel| opener_index + 1 + rel);
     let mut stack = Vec::new();
@@ -2952,9 +3158,15 @@ fn if_frame_offender(region: &[Token]) -> Option<usize> {
                     return Some(index);
                 }
             } else {
-                // Mid-command: any keyword is out of place (`if x then` →
-                // GNU reports `then`).
-                return Some(index);
+                // Argument position: a reserved word carries force only
+                // where a command is expected (GNU parse.y
+                // CHECK_FOR_RESERVED_WORD, parse.y:3168) — after a
+                // command word it is an ordinary argument, so the
+                // condition of `if true then echo hi; fi' is the single
+                // command `true then echo hi' and the failure surfaces
+                // at the `fi' that arrived where THEN was expected
+                // (rubash#2741). The phase state does not change.
+                continue;
             }
             match value {
                 "then" => in_condition = false,

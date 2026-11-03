@@ -11,20 +11,30 @@ pub(super) fn parse_case_command(
     // redirections on the compound command. This covers the common
     // `case word in pattern) list terminator` shape.
     let (word, raw_word, mut i) = collect_case_word(tokens, start + 1)?;
-    // GNU parse.y case_clause: after the subject WORD only a newline_list
-    // may intervene before IN. Any other token there — a second word
-    // (`case a b in ...`), a stray `esac` (`case a esac in ...`), `do` /
-    // `then` (`case in do do) ...`) — is a syntax error at that token.
-    // The old skip loop walked past everything except do/then, silently
-    // accepting those malformed headers (audit A1 F03).
-    while i < tokens.len()
-        && tokens[i].kind == TokenKind::Semicolon
-        && tokens[i].line_break
-    {
+    // GNU parse.y case_command (grammar: CASE WORD newline_list IN):
+    // after the subject word the grammar admits only a newline_list
+    // before IN, and yyerror (parse.y:6727 -> report_syntax_error,
+    // parse.y:6833) names the token that actually arrived where IN was
+    // expected. The old walk skipped arbitrary tokens hunting for a
+    // later `in', so the failure surfaced at the resync `esac' with no
+    // source echo (rubash#2740, #2679 c24): `case in esac' names
+    // `esac', `case abc abc)' names the second `abc', `case x; in'
+    // names `;'. End of input in this state is the yyerror EOF path
+    // (parse.y:6890-6901): "unexpected end of file from `case'
+    // command on line N".
+    while i < tokens.len() && tokens[i].kind == TokenKind::Semicolon && tokens[i].line_break {
         i += 1;
     }
     if !is_keyword(tokens, i, "in") {
-        return None;
+        match tokens.get(i) {
+            None => {
+                let command = super::parse_loop::unclosed_keyword_eof_node(tokens, start, "case");
+                return Some((command, tokens.len()));
+            }
+            Some(_) => {
+                return Some(case_near_error_node(tokens, start, i));
+            }
+        }
     }
     let in_keyword = tokens[i].value.clone();
     let in_keyword_metadata = build_keyword_metadata(&tokens[i]);
@@ -127,13 +137,13 @@ pub(super) fn parse_case_command(
             // Check if this is a ) that ends the case pattern (not inside extglob)
             if is_keyword(tokens, i, ")") && in_extglob == 0 {
                 if !current_pattern_has_token {
-                    // rubash#2744: a `)' with no pattern word before it —
-                    // the empty clause `case x in ) ...' or the dangling
-                    // separator `a|)' — is a syntax error at the `)'
-                    // itself (GNU parse.y:1225-1236 pattern_list: every
-                    // alternative is a WORD). Returning None degraded
-                    // the case to the word path, which blamed `esac'.
-                    return Some(case_pattern_error_node(tokens, start, i, ")"));
+                    // GNU parse.y:1225-1236 pattern_list: a pattern holds
+                    // at least one word — a `)' where a pattern word was
+                    // expected (the empty alternative in `a|)', or a
+                    // clause opening with `)') is named by yyerror like
+                    // any other unexpected token (rubash#2743, #2679 c25:
+                    // `case in in)' names `)').
+                    return Some(case_near_error_node(tokens, start, i));
                 }
                 // Bash does not perform quote removal on case patterns
                 // (execute_cmd.c), so raw `\]` / `\"` / `\\` escapes survive.
@@ -170,30 +180,37 @@ pub(super) fn parse_case_command(
                 );
                 return Some(finish_compound_command(command, tokens, tokens.len()));
             }
-            // rubash#2678: a GNU pattern alternative is ONE word
-            // (parse.y:1225-1236 pattern_list). Rubash's lexer splits a
-            // word into adjacent segment tokens (quote runs, expansions,
-            // extglob groups) which the arms below reassemble — but a
-            // segment beginning after whitespace starts a SECOND word,
-            // and a second word in pattern position is a syntax error
-            // at that token (`case ab in a b)' names `b'; the F04 seed
-            // `... ;& case y in y) ...' names `y'). Inside an extglob
-            // group whitespace is pattern text, not a word boundary.
-            if in_extglob == 0
-                && current_pattern_has_token
-                && !tokens[i].leading_ws.is_empty()
-                && matches!(
-                    tokens[i].kind,
-                    TokenKind::Word
-                        | TokenKind::Assignment
-                        | TokenKind::CommandSubst
-                        | TokenKind::BraceExpand
-                        | TokenKind::Variable
-                        | TokenKind::Keyword
-                )
-            {
-                let blame = tokens[i].value.clone();
-                return Some(case_pattern_error_node(tokens, start, i, &blame));
+            // GNU parse.y:1225-1236 pattern_list: a pattern is ONE word —
+            // glued fragments of it arrive as consecutive tokens with no
+            // intervening whitespace — followed by `|' or `)'. Anything
+            // else in pattern state is the token yyerror names
+            // (rubash#2743, #2679 c23): a whitespace-separated second word
+            // (`a echo' names `echo'), a clause-terminator token (`a;;'
+            // names `;;' — an operator token even when glued), or a list
+            // operator (the `&' after a clause's `;;' is re-met in this
+            // same pattern state and names `&').
+            if in_extglob == 0 {
+                let token = &tokens[i];
+                let clause_terminator_word = token.kind == TokenKind::Word
+                    && matches!(token.raw.as_str(), ";;" | ";&" | ";;&");
+                let list_operator = matches!(
+                    token.kind,
+                    TokenKind::And | TokenKind::Or | TokenKind::PipeErr | TokenKind::Background
+                );
+                let second_word = current_pattern_has_token
+                    && !token.leading_ws.is_empty()
+                    && matches!(
+                        token.kind,
+                        TokenKind::Word
+                            | TokenKind::Variable
+                            | TokenKind::Assignment
+                            | TokenKind::CommandSubst
+                            | TokenKind::BraceExpand
+                            | TokenKind::Keyword
+                    );
+                if clause_terminator_word || list_operator || second_word {
+                    return Some(case_near_error_node(tokens, start, i));
+                }
             }
             if tokens[i].kind != TokenKind::Pipe {
                 current_pattern_has_token = true;
@@ -379,6 +396,22 @@ pub(super) fn parse_case_command(
             }
             i += 1;
         }
+        if i >= tokens.len() {
+            // The pattern state ran into end of input (`case x in (a',
+            // `case x in a'): GNU's reader presents EOF in this state as
+            // its `newline' token (the EOF token's report name for a
+            // string/file input), at the last input line — the resync
+            // fallback used to let the main loop reinterpret the `(a'
+            // opener as a subshell and name `(' (rubash#2743).
+            let last = tokens.len().saturating_sub(1);
+            return Some(case_near_error_node_text(
+                tokens,
+                start,
+                "newline",
+                tokens.get(last).map_or(1, |token| token.position),
+                last,
+            ));
+        }
         if !is_keyword(tokens, i, ")") {
             return None;
         }
@@ -531,6 +564,13 @@ pub(super) fn parse_case_command(
     }
 
     if !is_keyword(tokens, i, "esac") {
+        // A token that arrived where ESAC was expected is the offender
+        // (the same mismatched-closer rule parse_if_command applies to
+        // `done' for `fi'); end of input keeps the caller's EOF path
+        // (the compound-EOF report for an unterminated case).
+        if i < tokens.len() {
+            return Some(case_near_error_node(tokens, start, i));
+        }
         return None;
     }
 
@@ -647,6 +687,74 @@ fn pattern_error_line_text(tokens: &[Token], index: usize) -> String {
         prev_end = Some(token.column + token.raw.len());
     }
     text
+}
+
+/// The name GNU's report_syntax_error (parse.y:6833) gives the token
+/// that arrived where the case grammar expected something else: a
+/// line-break separator reports as `newline', a hard `;' as `;', a word
+/// in its source form (quotes intact — error_token_from_token returns
+/// the WORD's read text), anything else by its token value.
+fn case_offender_text(token: &Token) -> String {
+    match token.kind {
+        TokenKind::Semicolon => {
+            if token.line_break {
+                "newline".to_string()
+            } else {
+                ";".to_string()
+            }
+        }
+        TokenKind::Word
+        | TokenKind::Variable
+        | TokenKind::Assignment
+        | TokenKind::CommandSubst
+        | TokenKind::BraceExpand => token.raw.clone(),
+        _ => token.value.clone(),
+    }
+}
+
+/// A `syntax error near unexpected token' node in this module's
+/// established pattern-position encoding (NEAR spec + the physical
+/// offending line), consuming the rest of the input like the sibling
+/// pattern errors (`;' inside a pattern, rubash#1641's second `)').
+fn case_near_error_node(
+    tokens: &[Token],
+    start: usize,
+    offender_index: usize,
+) -> (CommandNode, usize) {
+    let token = &tokens[offender_index];
+    case_near_error_node_text(
+        tokens,
+        start,
+        &case_offender_text(token),
+        token.position,
+        offender_index,
+    )
+}
+
+fn case_near_error_node_text(
+    tokens: &[Token],
+    start: usize,
+    token_text: &str,
+    line: usize,
+    source_index: usize,
+) -> (CommandNode, usize) {
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            token_text,
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            line
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        pattern_error_line_text(tokens, source_index),
+    );
+    finish_compound_command(command, tokens, tokens.len())
 }
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {

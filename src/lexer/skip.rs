@@ -2871,7 +2871,7 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     // token-error class.
     if let Some(&(root_idx, _, root_kind)) = stack.first() {
         if root_kind == OpenerKind::Plain
-            && opens_in_command_position(&chars, root_idx)
+            && (opens_in_command_position(&chars, root_idx) || arith_for_pair_at(&chars, root_idx))
             && chars.get(root_idx + 1) == Some(&'(')
         {
             return None;
@@ -2884,6 +2884,15 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             kind == OpenerKind::Plain
                 && !opens_in_command_position(&chars, idx)
                 && !arith_internal_frame(&stack, pos, &chars)
+                // The arithmetic-`for' header pair (`for ((...`) is a
+                // grammar opener, not a word-paren: neither of its two
+                // frames is the #516 token error (rubash#2749 —
+                // `for ((i=0;i<3;i++' at EOF is the matched-pair EOF
+                // report, not `syntax error near unexpected token `('').
+                && !arith_for_pair_at(&chars, idx)
+                && !(idx > 0
+                    && chars.get(idx - 1) == Some(&'(')
+                    && arith_for_pair_at(&chars, idx - 1))
         })
         .map(|(_, &(idx, line, _))| (idx, line));
     if let Some((idx, line)) = invalid {
@@ -2985,6 +2994,28 @@ enum OpenerKind {
     Compassign,
     /// any other `(`
     Plain,
+}
+
+/// Is the `(` at `idx` the first paren of an arithmetic-`for' opener?
+/// GNU's arith_for_command (parse.y:945) reads FOR `((` as the header's
+/// opening: the reserved word `for` at command position plus the glued
+/// `((` pair is one grammar opener — not a subshell and not the #516
+/// word-paren (which needs a command NAME before the paren). An
+/// argument-position `for` (`echo for ((`) does not qualify: the word
+/// itself must open in command position.
+fn arith_for_pair_at(chars: &[char], idx: usize) -> bool {
+    if chars.get(idx) != Some(&'(') || chars.get(idx + 1) != Some(&'(') {
+        return false;
+    }
+    let mut end = idx;
+    while end > 0 && matches!(chars[end - 1], ' ' | '\t' | '\r') {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+        start -= 1;
+    }
+    chars[start..end] == ['f', 'o', 'r'] && opens_in_command_position(chars, start)
 }
 
 /// Does the `(` at `idx` open in command position? Scanning backwards over
@@ -3710,11 +3741,22 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
     // `[[`/`]]` delimiter only counts at a token start, and a `(`
     // only opens a subshell there.
     let mut in_word = false;
+    // The tracked word's span and whether it began in command
+    // position, for the `for' test in the `(' arm: GNU's
+    // arith_for_command (parse.y:945) opens its header at the `((`
+    // following the reserved word FOR, so that pair is a dparen group
+    // even though a word precedes it (rubash#2749). Words consumed
+    // through the quote / $-unit / escape arms are untracked.
+    let mut word_start = 0usize;
+    let mut word_tracked = false;
+    let mut word_at_command_position = false;
+    let mut after_for_keyword = false;
     while index < len {
         let ch = chars[index];
         if ch == '\n' {
             line += 1;
             in_word = false;
+            after_for_keyword = false;
             if !in_cond {
                 command_position = true;
             }
@@ -3727,6 +3769,8 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                     line += 1;
                 }
                 in_word = true;
+                word_tracked = false;
+                after_for_keyword = false;
                 command_position = false;
                 index += 2;
             }
@@ -3745,6 +3789,8 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                     .filter(|c| **c == '\n')
                     .count();
                 in_word = true;
+                word_tracked = false;
+                after_for_keyword = false;
                 command_position = false;
             }
             '$' if matches!(chars.get(index + 1), Some('(' | '{' | '[')) => {
@@ -3763,6 +3809,8 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                     None => return None,
                 }
                 in_word = true;
+                word_tracked = false;
+                after_for_keyword = false;
                 command_position = false;
                 continue;
             }
@@ -3796,7 +3844,10 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                 continue;
             }
             '(' => {
-                if !in_cond && command_position && chars.get(index + 1) == Some(&'(') {
+                if !in_cond
+                    && (command_position || after_for_keyword)
+                    && chars.get(index + 1) == Some(&'(')
+                {
                     if line == open_line {
                         return Some(index);
                     }
@@ -3811,6 +3862,7 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                         }
                     }
                     command_position = false;
+                    after_for_keyword = false;
                     in_word = false;
                     continue;
                 }
@@ -3821,24 +3873,40 @@ fn dparen_open_index(chars: &[char], open_line: usize) -> Option<usize> {
                 } else {
                     command_position = false;
                 }
+                after_for_keyword = false;
                 in_word = false;
                 index += 1;
                 continue;
             }
             ')' => {
                 in_word = false;
+                after_for_keyword = false;
                 command_position = false;
             }
             ';' | '&' | '|' => {
                 in_word = false;
+                after_for_keyword = false;
                 if !in_cond {
                     command_position = true;
                 }
             }
             ' ' | '\t' => {
+                if in_word
+                    && word_tracked
+                    && word_at_command_position
+                    && chars[word_start..index] == ['f', 'o', 'r']
+                {
+                    after_for_keyword = true;
+                }
                 in_word = false;
             }
             _ => {
+                if !in_word {
+                    word_start = index;
+                    word_tracked = true;
+                    word_at_command_position = command_position;
+                }
+                after_for_keyword = false;
                 in_word = true;
                 command_position = false;
             }

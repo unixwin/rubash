@@ -976,14 +976,15 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             if command_is_open_conditional(&state.current_cmd) {
                 push_command_word(&mut state.current_cmd, token);
             } else if command_is_empty(&state.current_cmd) {
-                state.current_cmd.insert_assignment(
-                    "__RUBASH_PARSE_ERROR__".to_string(),
-                    format!("unexpected token `{}`", token.value),
-                );
-                state
-                    .ast
-                    .commands
-                    .push(std::mem::take(&mut state.current_cmd));
+                // A list cannot BEGIN with a connector: GNU yyerror
+                // names the connector at its own line and echoes that
+                // line (parse.y:6727 -> report_syntax_error,
+                // parse.y:6833). The shared unexpected-token producer
+                // carries both (and discards the in-progress list the
+                // error aborts); the hand-rolled node here stamped no
+                // line and no source, so a line-leading `&&' blamed
+                // the previous line and dropped the echo (rubash#2739).
+                super::parse_loop::push_unexpected_token_error(state, tokens, *i);
             } else {
                 // TODO(parse.y/execute_cmd.c): This preserves the AND-OR
                 // list connector on simple commands. Full Bash grammar needs

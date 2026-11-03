@@ -1503,6 +1503,19 @@ pub struct Executor {
     /// after word expansion so the enclosing context unwinds.
     current_shell_substitution_exit: Cell<Option<i32>>,
     last_command_substitution_parse_error: Cell<bool>,
+    /// The latched comsub parse error's diagnostic has already been
+    /// printed (by the body site that re-parsed it, in GNU's
+    /// read-time shape — rubash#2751): the command_execute escalation
+    /// must not add its own `syntax error in command substitution'
+    /// line on top. GNU prints exactly one diagnostic for a `$(`-body
+    /// syntax error, however deeply the substitution nests.
+    last_command_substitution_error_reported: Cell<bool>,
+    /// Sticky copy of the reported bit for the parent executor: a
+    /// substitution child whose inner failure was already diagnosed
+    /// sets this before its own checkpoint consumes the Cell, so the
+    /// site that ran the child can propagate "already reported" up
+    /// one level (rubash#2751 nesting face).
+    comsub_error_reported_out: Cell<bool>,
     /// The comsub body whose parse error is currently latched was an
     /// old-style backtick substitution. GNU parses a backtick body at
     /// execution time inside the substituted child (subst.c string_locale ->
