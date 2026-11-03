@@ -65,6 +65,30 @@ impl Executor {
                 .expand_quoted_parameter_word_mut(word, SubstitutionQuoteContext::DoubleQuoted);
         }
 
+        // GNU subst.c:11497-11512 (expand_word_internal, case '~'):
+        // the tilde pass inside the word walk — the resolved prefix
+        // joins as a quoted string and the walk continues with the
+        // remainder through this entry's general continuation (the
+        // embedded walk below; a remainder starts at the `/` that
+        // ended the prefix, so it is never an assignment word or a
+        // whole-word form). The &self entry
+        // (expand_word::expand_tilde_prefix_word) runs the same pass.
+        // Quoted words never reach here: the QUOTED_WORD_PREFIX and
+        // STORAGE_WORD_PREFIX strips above own them, and a
+        // DoubleQuoted context never tilde-expands.
+        if matches!(context, SubstitutionQuoteContext::Unquoted) && word.starts_with('~') {
+            if let Some((prefix, remainder)) =
+                tilde_expand::tilde_prefix_split(word, &self.shell_state.env_vars)
+            {
+                if !remainder.is_empty() {
+                    let protected = tilde_expand::protect_tilde_prefix(&prefix, self.current_ifs());
+                    let walked =
+                        self.expand_embedded_parameters_mut_with_context(remainder, context);
+                    return format!("{protected}{walked}");
+                }
+            }
+        }
+
         // GNU general.c:480 assignment(): whether a word is an assignment is
         // decided on the raw token — legal_variable_starter, then
         // legal_variable_chars, then an optional bracketed subscript. A `$`

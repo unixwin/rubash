@@ -14,7 +14,7 @@ use crate::lexer::{Token, TokenKind};
 /// ANSI_C_IFS_GUARD field-split transport is stripped. Stripping CTLESC
 /// alone leaked the \023 name terminator into the warning text
 /// (rubash#1151, the same marker-leak family as #1029/#1060).
-pub(super) fn heredoc_delimiter_text(value: &str) -> String {
+pub(crate) fn heredoc_delimiter_text(value: &str) -> String {
     let decoded = crate::executor::markers::decode_word_position_carriers(value);
     let decoded = crate::executor::markers::dequote_ctlesc_pairs(&decoded);
     let decoded = decoded.replace(crate::executor::markers::PARAM_NAME_END_MARKER, "");
@@ -691,6 +691,8 @@ pub(super) fn take_redirect_fd_prefix(cmd: &mut CommandNode) -> Option<u32> {
 pub(super) fn assign_heredoc_body(
     current_cmd: &mut CommandNode,
     ast: &mut Ast,
+    caller_frames: &mut [Vec<CommandNode>],
+    frames: &mut [Vec<CommandNode>],
     body: String,
     gather_line: usize,
     end_line: Option<usize>,
@@ -700,10 +702,102 @@ pub(super) fn assign_heredoc_body(
             return;
         }
     }
+    // rubash#2682: heredoc bodies pair with the earliest still-pending
+    // `<<` in stream order (GNU gathers them in read order at the
+    // newline, parse.y:3648-3654). Two pools can hold owners that are
+    // invisible in the active state: caller state parked by
+    // run_inline_section (commands read before the running section's
+    // compound — earliest) and command lists held by enclosing
+    // compound frames (an if/elif condition while its body section is
+    // parsed inline). Both precede the in-progress command.
+    for frame in caller_frames.iter_mut() {
+        if fill_pending_heredoc_body_in_commands(frame, &body, gather_line, end_line) {
+            return;
+        }
+    }
+    for frame in frames.iter_mut() {
+        if fill_pending_heredoc_body_in_commands(frame, &body, gather_line, end_line) {
+            return;
+        }
+    }
     if fill_pending_heredoc_body_recursive(current_cmd, &body, gather_line, end_line) {
         return;
     }
     current_cmd.heredoc = Some(encode_stdin_body_enq(&body));
+}
+
+/// Number of heredoc redirect entries in `commands` still waiting for a
+/// body (`body.is_none()`), counted over the same subtree traversal
+/// `fill_pending_heredoc_body_recursive` claims through.
+pub(super) fn count_pending_heredoc_slots(commands: &[CommandNode]) -> usize {
+    commands
+        .iter()
+        .map(count_pending_heredoc_slots_recursive)
+        .sum()
+}
+
+fn count_pending_heredoc_slots_recursive(cmd: &CommandNode) -> usize {
+    let mut count = cmd
+        .heredoc_redirects
+        .iter()
+        .filter(|redirect| redirect.body.is_none())
+        .count();
+    if let Some(pipeline) = &cmd.pipeline_command {
+        count += count_pending_heredoc_slots(&pipeline.stages);
+    }
+    if let Some(list) = &cmd.and_or_list {
+        count += count_pending_heredoc_slots(&list.commands);
+    }
+    if let Some(time) = &cmd.time_command {
+        count += count_pending_heredoc_slots_recursive(&time.command);
+    }
+    if let Some(background) = &cmd.background_command {
+        count += count_pending_heredoc_slots_recursive(&background.command);
+    }
+    if let Some(inverted) = &cmd.inverted_command {
+        count += count_pending_heredoc_slots_recursive(&inverted.command);
+    }
+    if let Some(for_command) = &cmd.for_command {
+        count += count_pending_heredoc_slots(&for_command.body);
+    }
+    if let Some(if_command) = &cmd.if_command {
+        count += count_pending_heredoc_slots(&if_command.condition);
+        count += count_pending_heredoc_slots(&if_command.then_body);
+        for branch in &if_command.elif_branches {
+            count += count_pending_heredoc_slots(&branch.condition);
+            count += count_pending_heredoc_slots(&branch.body);
+        }
+        if let Some(else_body) = &if_command.else_body {
+            count += count_pending_heredoc_slots(else_body);
+        }
+    }
+    if let Some(loop_command) = &cmd.loop_command {
+        count += count_pending_heredoc_slots(&loop_command.condition);
+        count += count_pending_heredoc_slots(&loop_command.body);
+    }
+    if let Some(subshell) = &cmd.subshell_command {
+        count += count_pending_heredoc_slots(&subshell.body);
+    }
+    if let Some(case_command) = &cmd.case_command {
+        for clause in &case_command.clauses {
+            count += count_pending_heredoc_slots(&clause.body);
+        }
+    }
+    if let Some(select_command) = &cmd.select_command {
+        count += count_pending_heredoc_slots(&select_command.body);
+    }
+    if let Some(function) = &cmd.function_command {
+        count += count_pending_heredoc_slots(&function.body);
+    }
+    if let Some(brace_group) = &cmd.brace_group {
+        count += count_pending_heredoc_slots(&brace_group.body);
+    }
+    if let Some(coproc) = &cmd.coproc_command {
+        if let Some(body) = &coproc.body {
+            count += count_pending_heredoc_slots(body);
+        }
+    }
+    count
 }
 
 fn fill_pending_heredoc_body_recursive(
@@ -846,7 +940,7 @@ fn fill_pending_heredoc_body_recursive(
     fill_pending_heredoc_body(cmd, body, gather_line, end_line)
 }
 
-fn fill_pending_heredoc_body_in_commands(
+pub(super) fn fill_pending_heredoc_body_in_commands(
     commands: &mut [CommandNode],
     body: &str,
     gather_line: usize,
