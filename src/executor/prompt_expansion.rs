@@ -449,7 +449,26 @@ impl Executor {
                     }
                 }
                 Some(octal @ '0'..='7') => {
-                    push_ansi_c_codepoint(&mut output, read_prompt_octal(octal, &mut chars))
+                    match read_prompt_octal(octal, &mut chars) {
+                        PromptOctal::Value(value) => {
+                            // GNU parse.y:6332-6337: NUL is emitted as a
+                            // CTLESC/CTLNUL pair and contributes no byte to
+                            // the decoded string (following text survives);
+                            // every other value is the single decoded byte.
+                            if value != 0 {
+                                push_ansi_c_codepoint(&mut output, Some(value));
+                            }
+                        }
+                        // GNU parse.y:6326-6329 with builtins/common.c:562
+                        // read_octal: when the three-byte window is not all
+                        // octal digits the escape is not decoded at all —
+                        // the backslash and the first digit pass through
+                        // literally and scanning resumes after the digit.
+                        PromptOctal::Literal => {
+                            output.push('\\');
+                            output.push(octal);
+                        }
+                    }
                 }
                 Some(other) => {
                     output.push('\\');
@@ -1266,22 +1285,42 @@ fn prompt_dollar(env_vars: &HashMap<String, String>) -> char {
     }
 }
 
-fn read_prompt_octal<I>(first: char, chars: &mut std::iter::Peekable<I>) -> Option<u32>
+/// Outcome of a prompt `\nnn` escape, mirroring GNU decode_prompt_string:
+/// either the escape decoded to a byte value, or the three-byte window was
+/// not a valid octal number and the escape stays literal.
+enum PromptOctal {
+    Value(u32),
+    Literal,
+}
+
+/// GNU parse.y:6326-6329 copies a three-byte window starting at the first
+/// octal digit (NUL-padded when the string ends inside the window) and
+/// passes it to read_octal (builtins/common.c:562), which returns -1
+/// unless the window's digit run reaches the end of the window. So `\101`
+/// decodes and `\7` at end of string decodes, but `\07 `, `\18` and `\70x`
+/// stay literal with no digits consumed. Mirror that contract: inspect
+/// the window without consuming, and commit the extra digits only when
+/// the whole window is octal digits.
+fn read_prompt_octal<I>(first: char, chars: &mut std::iter::Peekable<I>) -> PromptOctal
 where
-    I: Iterator<Item = char>,
+    I: Iterator<Item = char> + Clone,
 {
-    let mut value = first.to_string();
-    while value.len() < 3 {
-        let Some(next) = chars.peek().copied() else {
-            break;
-        };
-        if next.to_digit(8).is_none() {
-            break;
+    let mut lookahead = chars.clone();
+    let mut window = vec![first];
+    while window.len() < 3 {
+        match lookahead.next() {
+            Some(next) => window.push(next),
+            None => break,
         }
-        value.push(next);
+    }
+    if !window.iter().all(|ch| ch.to_digit(8).is_some()) {
+        return PromptOctal::Literal;
+    }
+    for _ in 1..window.len() {
         chars.next();
     }
-    u32::from_str_radix(&value, 8).ok()
+    let text: String = window.iter().collect();
+    PromptOctal::Value(u32::from_str_radix(&text, 8).unwrap_or(0))
 }
 
 /// readline display.c:437-463 (expand_prompt): the `\[`/`\]` prompt-ignore
