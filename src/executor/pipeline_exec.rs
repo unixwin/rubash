@@ -5722,14 +5722,67 @@ impl Executor {
         // settles superseded net output entries for this funnel.
         let settle_superseded_net_outputs =
             self.superseded_net_output_settlement_applies(command, true);
-        let stage_redirect_rejected =
-            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
-                Ok(rejected) => rejected,
+        // rubash#2613: the reject gate below validates dup sources
+        // against the shell's descriptor table plus its own overlay
+        // of the list's numbered entries — the `{var}` entries'
+        // allocated descriptors are in neither, so a stage list that
+        // references an earlier `{var}` allocation by number
+        // (`{v}>&9 1>&10`) was rejected with a bad-fd diagnostic even
+        // though the stage executor's own applier run binds the slot
+        // before delivery. GNU has no such two-space split: the
+        // element's single do_redirections walk (redir.c:237,
+        // reached from execute_cmd.c:2620 execute_pipeline) binds
+        // the varassign (redir.c:1470 redir_varassign) and validates
+        // the later dup against the result, and the plain-command
+        // funnel likewise runs its applier ahead of this same gate.
+        // Bracket the gate with the applier so the stage gate judges
+        // the bound descriptor space, then undo — the stage executor
+        // applies the list again for real when it runs. Only the
+        // gate sits inside the bracket: the word-expansion faces
+        // below must still expand `$v` against the OUTER binding (GNU
+        // expands a command's words before its do_redirections run),
+        // and every exit from the bracket restores the parent space.
+        let stage_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(command);
+        if stage_has_varfd {
+            match self.apply_dynamic_fd_var_redirects(command, true) {
+                Ok(false) => {}
+                Ok(true) => {
+                    // The applier failed the list and already placed
+                    // its diagnostic; the stage dies at
+                    // do_redirections with the captured pipe bytes
+                    // final, exactly like the preflight arms below
+                    // (and like a plain command, whose funnel returns
+                    // on the same verdict before dispatch).
+                    self.undo_child_fd_var_redirects();
+                    self.pipeline_stage_fds_pre_wired.set(true);
+                    let captured = crate::executor::shell_options::take_stdout_capture();
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Ok(Some((
+                        crate::executor::substitution_metadata::bytes_to_shell_text(&captured),
+                        String::new(),
+                        1,
+                    )));
+                }
                 Err(error) => {
                     crate::executor::shell_options::restore_stdout_capture(saved_capture);
                     return Err(error);
                 }
+            }
+        }
+        let stage_redirect_rejected =
+            match self.reject_invalid_redirects(command, settle_superseded_net_outputs) {
+                Ok(rejected) => rejected,
+                Err(error) => {
+                    if stage_has_varfd {
+                        self.undo_child_fd_var_redirects();
+                    }
+                    crate::executor::shell_options::restore_stdout_capture(saved_capture);
+                    return Err(error);
+                }
             };
+        if stage_has_varfd {
+            self.undo_child_fd_var_redirects();
+        }
         if stage_redirect_rejected.is_some() {
             // The rejected stage already placed its diagnostic on the
             // element's fd 1 (the pipe) via the capture above — GNU's
