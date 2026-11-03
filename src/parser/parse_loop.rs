@@ -57,6 +57,24 @@ pub(super) struct ParseState {
     /// top-level token; while this is > 0 a `)` is consumed as that
     /// closer instead of being reported as a stray.
     pub(super) pending_comsub: usize,
+    /// Parsed command lists held by enclosing compound frames that are
+    /// not yet reachable from `ast`/`current_cmd` — an if/elif condition
+    /// list while the following body section is parsed inline. GNU
+    /// gathers heredoc bodies at the newline into redirect nodes the
+    /// single yyparse run already built (parse.y:3648-3654
+    /// gather_here_documents; make_cmd.c make_here_document); rubash's
+    /// body token is emitted after the header line's last token — past
+    /// `then` — so the HereDocBody token action must be able to claim
+    /// pending slots in these frames too, in push (stream) order
+    /// (rubash#2682).
+    pub(super) heredoc_frames: Vec<Vec<CommandNode>>,
+    /// Caller command state parked by `run_inline_section` while a
+    /// section runs (rubash#2682): commands read BEFORE the compound
+    /// whose section is executing — e.g. a command sharing the header
+    /// line, whose heredoc bodies are gathered inside the section.
+    /// Searched before `heredoc_frames`: a parked caller's `<<`
+    /// operators precede the section compound's own in stream order.
+    pub(super) heredoc_caller_frames: Vec<Vec<CommandNode>>,
     /// Original input text (options.diagnostic_text falling back to
     /// source_text) so a `syntax error near unexpected token 'X'` node can
     /// echo the physical offending line the way parse.y y.error does —
@@ -92,6 +110,8 @@ pub fn parse_with_options(tokens: &[Token], options: ParseLoopOptions) -> Ast {
         section_stack: Vec::new(),
         section_token_start: 0,
         pending_comsub: 0,
+        heredoc_frames: Vec::new(),
+        heredoc_caller_frames: Vec::new(),
         diagnostic_text: options
             .diagnostic_text
             .clone()
@@ -569,6 +589,17 @@ pub(super) fn run_inline_section(
     state.stray_close_is_error = false;
     state.section_stop = stop;
 
+    // rubash#2682: park the caller's completed/in-progress commands as
+    // heredoc frames for the section's duration. Heredoc bodies are
+    // gathered at a logical line's end, so a body token inside this
+    // section can pair with a `<<` read BEFORE the section on the same
+    // line (a command sharing the compound's header line) — those
+    // owners live in the swapped-out caller state and would otherwise
+    // be invisible to the section's HereDocBody actions. The frames are
+    // popped back into place at restore below, fills included.
+    state.heredoc_caller_frames.push(saved_commands);
+    state.heredoc_caller_frames.push(vec![saved_current]);
+
     let i = run_command_loop(tokens, state, start);
 
     // Classify with the SECTION state still armed (the restored caller
@@ -606,8 +637,11 @@ pub(super) fn run_inline_section(
     mark_parse_time_extglob_errors(&mut body_ast, body_tokens);
     let body = body_ast.commands;
 
-    state.ast.commands = saved_commands;
-    state.current_cmd = saved_current;
+    // Unpark the caller's commands (with any heredoc fills the section
+    // claimed into them) and restore the caller's state.
+    let mut parked_current = state.heredoc_caller_frames.pop().unwrap_or_default();
+    state.current_cmd = parked_current.pop().unwrap_or_default();
+    state.ast.commands = state.heredoc_caller_frames.pop().unwrap_or_default();
     state.pending_comsub = saved_pending_comsub;
     state.in_subshell = saved_in_subshell;
     state.stray_close_is_error = saved_stray;
@@ -1562,12 +1596,28 @@ fn try_parse_compound_start(tokens: &[Token], i: usize, state: &mut ParseState) 
         && matches!(token.value.as_str(), "while" | "until")
         && command_allows_compound_start(&state.current_cmd)
     {
-        if let Some((loop_cmd, next_i)) = parse_loop_command(
+        if let Some((loop_cmd, next_i, unclaimed)) = parse_loop_command(
             tokens,
             i,
             state.diagnostic_text.as_ref(),
             state.source_line_offset,
         ) {
+            // rubash#2682: heredoc bodies the loop handed back pair with
+            // commands read before the loop on the same logical line —
+            // claim them against the live state before the loop node is
+            // installed (GNU gathered them at the header line's newline,
+            // parse.y:3648-3654).
+            for body in unclaimed {
+                assign_heredoc_body(
+                    &mut state.current_cmd,
+                    &mut state.ast,
+                    &mut state.heredoc_caller_frames,
+                    &mut state.heredoc_frames,
+                    body.body,
+                    body.gather_line,
+                    body.end_line,
+                );
+            }
             push_compound_command(state, loop_cmd);
             return Some(next_i);
         }
@@ -3185,7 +3235,7 @@ pub(super) fn parse_time_prefixed_compound_command(
         .get(i)
         .is_some_and(|token| matches!(token.value.as_str(), "while" | "until"))
     {
-        parse_loop_command(tokens, i, None, 0)?
+        parse_loop_command(tokens, i, None, 0).map(|(command, next, _unclaimed)| (command, next))?
     } else if is_keyword(tokens, i, "case") {
         parse_case_command(tokens, i, None, 0)?
     } else if is_keyword(tokens, i, "select") {

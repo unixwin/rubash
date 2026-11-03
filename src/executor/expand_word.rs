@@ -153,6 +153,19 @@ impl Executor {
     }
 
     pub(crate) fn expand_redirect_target(&self, redirect: &crate::parser::Redirect) -> String {
+        // A heredoc delimiter word is NEVER word-expanded (rubash#2686):
+        // GNU make_cmd.c make_here_document stores `here_doc_eof =
+        // string_quote_removal(word)` when the redirect is built, and
+        // the executor consumes that dequoted string — the delimiter is
+        // not a redirection_expand operand (redir.c:298 covers file
+        // operands only), so a `$(...)` or backquote in the delimiter
+        // word must not execute. The dequoted delimiter is the operand
+        // value every consumer of this function means for a heredoc
+        // entry (the parser computes the same value into
+        // `command.heredoc_delimiter` for the fd-less case).
+        if redirect.kind == crate::parser::RedirectKind::HereDoc {
+            return crate::parser::heredoc_delimiter_text(&redirect.target);
+        }
         // GNU redir.c:298 redirection_expand → expand_words_no_vars →
         // subst.c:11349-11378 (`expand_word_internal`, cases '<'/'>'): a
         // redirect word that IS a process substitution expands to the
@@ -685,8 +698,50 @@ impl Executor {
             ),
             "$#" => Some(self.shell_state.positional_window().len().to_string()),
             "$-" => Some(self.shell_option_flags()),
-            _ => tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars),
+            _ => {
+                if let Some(expanded) = self.expand_tilde_prefix_word(word) {
+                    return Some(expanded);
+                }
+                tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
+            }
         }
+    }
+
+    /// GNU subst.c:11497-11512 (expand_word_internal, case '~'): the
+    /// tilde pass inside the word walk. The resolved prefix joins the
+    /// word as a quoted string (add_quoted_string, subst.c:11862 —
+    /// [`tilde_expand::protect_tilde_prefix`]) and the walk CONTINUES
+    /// with the remainder: expansions in the remainder run, split and
+    /// quote exactly as if the prefix were literal text in front of
+    /// them. The recursion into expand_word is the continuation — the
+    /// remainder always starts at the `/` that ended the prefix, so it
+    /// re-enters every stage below this one and can never re-trigger
+    /// the tilde pass itself.
+    ///
+    /// Falls back (None) when there is nothing to continue with: a
+    /// word that is exactly a tilde prefix, or a prefix that does not
+    /// resolve — the historical whole-word
+    /// [`tilde_expand::expand_word_prefix`] owns those shapes verbatim
+    /// (including its `:`-glued user tails).
+    fn expand_tilde_prefix_word(&self, word: &str) -> Option<String> {
+        let (prefix, remainder) =
+            tilde_expand::tilde_prefix_split(word, &self.shell_state.env_vars)?;
+        if remainder.is_empty() {
+            return None;
+        }
+        let protected = tilde_expand::protect_tilde_prefix(&prefix, self.current_ifs());
+        Some(format!("{protected}{}", self.expand_word(remainder)))
+    }
+
+    /// The IFS value field splitting will use for a word expanded
+    /// right now: the live variable, or the default whitespace when
+    /// unset (field_split_values_with_ifs's contract in arrays.rs).
+    pub(in crate::executor) fn current_ifs(&self) -> &str {
+        self.shell_state
+            .env_vars
+            .get("IFS")
+            .map(String::as_str)
+            .unwrap_or(" \t\n")
     }
 
     fn expand_assignment_word(&self, word: &str) -> Option<String> {

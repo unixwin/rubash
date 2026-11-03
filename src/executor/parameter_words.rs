@@ -1518,6 +1518,46 @@ impl Executor {
         }
     }
 
+    /// rubash#2676: apply ONE top-level `${...}` fragment's assignment
+    /// operators at the moment an in-order walk reaches the fragment —
+    /// the same per-fragment sequence the whole-word pre-scan above
+    /// performs (the fragment's eager secondary texts first, then its
+    /// own operator), but scheduled by document position instead of
+    /// hoisted ahead of the whole word.
+    ///
+    /// GNU anchor: redir.c:374 heredoc_expand expands a heredoc body
+    /// through subst.c's expand_string_internal — the same single
+    /// left-to-right pass as ordinary words — so in
+    /// `${a:-X} ${a:=1} ${a:-Y}` the `:-` fragments render against the
+    /// environment as it stands when the pass reaches them (`X 1 1`),
+    /// and only the fragments after the `:=` see the binding. The
+    /// pre-scan's hoisting made every fragment see the final value
+    /// (`1 1 1`). The caller (the ordered pass's `${` arm) has already
+    /// installed this fragment's SubSiteGuard, so the applied-value
+    /// memo the render arm consults (assign_applied_lookup) keys
+    /// exactly as it did for the pre-scan's application.
+    ///
+    /// `frag_start` is the fragment's `$` offset in `word`; the quote
+    /// state is derived from the word prefix with the same scanner the
+    /// pre-scan uses, so the application sees identical inputs.
+    pub(in crate::executor) fn apply_fragment_assignment_in_order(
+        &mut self,
+        inner: &str,
+        word: &str,
+        frag_start: usize,
+    ) {
+        let quoted_word = word.starts_with(STORAGE_WORD_PREFIX);
+        let (in_double, inside_cs) = scan_word_prefix_quote_state(&word[..frag_start], quoted_word);
+        if inside_cs {
+            // The fragment sits inside a command substitution span of
+            // the walked word; the inner expansion applies it (the
+            // pre-scan skips these for the same reason).
+            return;
+        }
+        self.apply_secondary_assignment_expansions(inner, in_double);
+        self.apply_parameter_assignment_expansion_with_context(inner, in_double);
+    }
+
     /// Latch a failed `${var:=word}`/`${var=word}` bind (subst.c
     /// parameter_brace_expand_rhs: bind_variable fails, then EX_BADUSAGE
     /// is written and bash_variable_assignment_error jumps DISCARD).

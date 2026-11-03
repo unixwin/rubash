@@ -86,6 +86,8 @@ pub(super) fn parse_if_command_standalone(
         section_stack: Vec::new(),
         section_token_start: 0,
         pending_comsub: 0,
+        heredoc_frames: Vec::new(),
+        heredoc_caller_frames: Vec::new(),
         diagnostic_text: source.cloned(),
         source_line_offset: line_offset,
     };
@@ -97,7 +99,7 @@ fn parse_if_command_after_condition(
     tokens: &[Token],
     start: usize,
     state: &mut ParseState,
-    condition: Vec<CommandNode>,
+    mut condition: Vec<CommandNode>,
     keyword_metadata: Box<WordMetadata>,
     then_index: usize,
     then_keyword: String,
@@ -110,7 +112,19 @@ fn parse_if_command_after_condition(
     let condition_terminator_metadata = condition_terminator_metadata_before(tokens, then_index);
     let mut index = then_index + 1;
 
-    let (then_body, boundary) = parse_if_section_inline(tokens, index, state)?;
+    // rubash#2682: heredoc bodies for the condition's `<<` operators are
+    // emitted right after `then` — they lead the body section's token
+    // range. GNU gathered them into the condition's redirect nodes at
+    // the header line's newline (parse.y:3648-3654), before the body
+    // list was read at all. Park the condition as a heredoc frame so
+    // the section's HereDocBody actions can claim its pending slots
+    // instead of dumping the bodies on the body's first command (which
+    // left the condition's heredocs to be read from the process stdin
+    // at execution time — a hang on a live stdin).
+    state.heredoc_frames.push(std::mem::take(&mut condition));
+    let section = parse_if_section_inline(tokens, index, state);
+    condition = state.heredoc_frames.pop().unwrap_or_default();
+    let (then_body, boundary) = section?;
     // GNU parse.y: `then`/`elif`/`else` bodies are non-empty command lists.
     if then_body.is_empty() {
         return None;
@@ -131,14 +145,19 @@ fn parse_if_command_after_condition(
                     .map(|elif_then| (non_empty_body(body), elif_then)),
                 SectionOutcome::Eof { .. } | SectionOutcome::AbortedThen { .. } => None,
             };
-        let Some((condition, elif_then)) = elif_condition else {
+        let Some((mut condition, elif_then)) = elif_condition else {
             return None;
         };
         let elif_then_keyword = tokens[elif_then].value.clone();
         let elif_then_keyword_metadata = build_keyword_metadata(&tokens[elif_then]);
         let condition_terminator = condition_terminator_before(tokens, elif_then);
         let condition_terminator_metadata = condition_terminator_metadata_before(tokens, elif_then);
-        let (body, next_boundary) = parse_if_section_inline(tokens, elif_then + 1, state)?;
+        // rubash#2682: same heredoc-frame parking as the main condition
+        // — an elif condition's heredoc bodies lead its body section.
+        state.heredoc_frames.push(std::mem::take(&mut condition));
+        let section = parse_if_section_inline(tokens, elif_then + 1, state);
+        condition = state.heredoc_frames.pop().unwrap_or_default();
+        let (body, next_boundary) = section?;
         if body.is_empty() {
             return None;
         }

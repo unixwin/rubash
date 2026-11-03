@@ -425,6 +425,28 @@ pub(crate) const COMPOUND_ASSIGNMENT_MARKER: &str = "\u{E31A}";
 /// `char` companion of COMPOUND_ASSIGNMENT_MARKER.
 pub(crate) const COMPOUND_ASSIGNMENT_MARKER_CHAR: char = '\u{E31A}';
 
+/// Quoted-expansion-site marker: precedes a `$`/backtick expansion
+/// introducer whose site lay inside a quoted segment of the raw word
+/// (producer: command_prepare.rs `mark_quoted_ifs_from_raw`, the
+/// pre-expansion marking pass). GNU subst.c:11229
+/// expand_word_internal tracks every expansion site's quoting in the
+/// walk itself and adds a quoted site's result through
+/// add_quoted_string (subst.c:11862), so word_list_split never splits
+/// inside it (subst.c:11552: the result "will be split, but this
+/// portion should not be"). Rubash's cooked words have already lost
+/// the quote characters, so the marking pass — the one place that
+/// still simulates the raw word — carries the verdict in-band, and
+/// the expansion walkers (embedded_parameters.rs /
+/// embedded_mutations.rs) consume the marker on sight and
+/// IFS-protect that one expansion's result span. The marker never
+/// survives a walker, so it has no decode boundary. A bare U+E31B in
+/// transport is always protocol: a typed `$'\uE31B'` arrives
+/// E400-escaped at entry (push_literal_char), hence
+/// user_reachable == false.
+pub(crate) const QUOTED_EXPANSION_SITE: char = '\u{E31B}';
+/// `&str` companion of QUOTED_EXPANSION_SITE.
+pub(crate) const QUOTED_EXPANSION_SITE_STR: &str = "\u{E31B}";
+
 /// Injected tag marking a group-command redirect that the executor added
 /// (support_names.rs) — `\x1e`-prefixed so it sorts into the carrier family.
 pub(crate) const GROUP_REDIRECT_INJECTED_MARK: &str = "\u{1e}group-redirect";
@@ -864,6 +886,12 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
         user_reachable: true,
     },
     MarkerInfo {
+        name: "QUOTED_EXPANSION_SITE",
+        code: QUOTED_EXPANSION_SITE as u32,
+        boundaries: &[],
+        user_reachable: false,
+    },
+    MarkerInfo {
         name: "GROUP_REDIRECT_INJECTED_MARK",
         code: 0x1E,
         boundaries: &[],
@@ -921,6 +949,49 @@ pub(crate) fn encode_raw_byte_marker(byte: u8) -> String {
 pub(crate) fn push_ctlesc_escaped(output: &mut String, data: char) {
     output.push(CTLESC);
     output.push(data);
+}
+
+/// IFS-protect `text`, the field-splitting half of GNU's quote_string
+/// (subst.c:4773): every character that belongs to the CURRENT IFS is
+/// preceded by IFS_GLUE, the splitter's protection carrier, so the
+/// text can be spliced into a word that will be field-split without
+/// its IFS characters acting as delimiters. A character already
+/// preceded by IFS_GLUE keeps exactly one glue — a doubled glue would
+/// spend the first on the second and release the character itself
+/// (the rubash#868 double-mark failure). Used for text GNU adds
+/// through add_quoted_string (subst.c:11862): tilde prefixes and
+/// quoted expansion results.
+pub(crate) fn protect_ifs_chars(text: &str, ifs: &str) -> String {
+    if !text.chars().any(|ch| ifs.contains(ch)) {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len() + 4);
+    let mut prev_glued = false;
+    for ch in text.chars() {
+        if ch == IFS_GLUE {
+            prev_glued = true;
+            output.push(ch);
+            continue;
+        }
+        if ifs.contains(ch) && !prev_glued {
+            output.push(IFS_GLUE);
+        }
+        prev_glued = false;
+        output.push(ch);
+    }
+    output
+}
+
+/// [`protect_ifs_chars`] over the tail span of an assembled word
+/// (`output[start..]`): one expansion arm's result span, protected
+/// after the arm spliced it.
+pub(crate) fn protect_ifs_chars_in_span(output: &mut String, start: usize, ifs: &str) {
+    if start >= output.len() {
+        return;
+    }
+    let span = output.split_off(start);
+    let protected = protect_ifs_chars(&span, ifs);
+    output.push_str(&protected);
 }
 
 /// Remove CTLESC (\x11) sentinels the lexer inserts before quoted glob

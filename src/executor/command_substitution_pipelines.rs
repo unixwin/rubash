@@ -647,8 +647,20 @@ impl Executor {
     fn heredoc_comsub_typed_output(&mut self, source: &str) -> Option<String> {
         let plan = self.heredoc_comsub_plan(source, true);
         let result = match &plan {
-            Some(plan) => heredoc_comsub_produce(plan, &mut |command| {
-                self.stdin_string_for_command_mut(command)
+            // rubash#2681: this shortcut produces a command
+            // substitution's captured output without running the real
+            // executor, but the substitution is still GNU's forked
+            // child (subst.c:7143 command_substitute ->
+            // execute_in_subshell) and the admitted commands are
+            // external `cat`s — the bodies' expansions (which the
+            // typed fetch performs with side effects) belong to that
+            // child, so they run inside the fork boundary. Real side
+            // effects of substitutions inside the bodies (file writes)
+            // are process-level and persist, exactly as in the child.
+            Some(plan) => self.with_forked_heredoc_expansion(|executor| {
+                heredoc_comsub_produce(plan, &mut |command| {
+                    executor.stdin_string_for_command_mut(command)
+                })
             }),
             None => None,
         };
