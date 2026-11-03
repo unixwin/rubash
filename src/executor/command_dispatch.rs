@@ -408,6 +408,9 @@ impl Executor {
             // surviving attribute word is saved | tempvar's — merge
             // the shadow back (rubash#1567).
             self.merge_converted_tempenv_bindings(&absorbed, &tempenv_saved);
+            // rubash#2720: an absorbed dynamic name converts to the
+            // real dynamic bind (the hook runs on the kept value).
+            self.convert_kept_tempenv_dynamic_binds(&absorbed);
             // rubash#1110 item 2: at compat <= 44 the absorbed tempvar is
             // converted in the GLOBAL context even inside a function (the
             // pre-4.4 set_var_attribute behavior bash 4.4 gated behind
@@ -486,6 +489,9 @@ impl Executor {
                 .map(|(name, _)| assignment_name_and_append(name).0.to_string())
                 .collect();
             self.merge_converted_tempenv_bindings(&merge_names, &tempenv_saved);
+            // rubash#2720: a kept dynamic name converts to the real
+            // dynamic bind (the hook runs on the kept value).
+            self.convert_kept_tempenv_dynamic_binds(&merge_names);
         }
         // rubash#1525: the tempenv completion write above is this
         // command's one PIPESTATUS write; tell the ast_exec loop

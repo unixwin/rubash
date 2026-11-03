@@ -17,6 +17,24 @@ pub(in crate::builtins) mod storage;
 pub(crate) use output::{print_declaration, DeclarationAttrs};
 pub(crate) use print::{declaration_line, declaration_names_to_print};
 
+/// A dynamic variable's declaration rendering, supplied by the executor
+/// for a name whose value lives outside the variable table
+/// (rubash#1363). `integer`/`array` carry the attribute class the
+/// listing filters adjudicate — in GNU the INIT_DYNAMIC_VAR cell's own
+/// attributes (variables.c:1844 initialize_dynamic_variables), which
+/// the mark sets cannot express for provider-owned names: the integer
+/// dynamics (RANDOM/SRANDOM/SECONDS/BASHPID/HISTCMD) carry no
+/// INTEGER_VARS mark and the array dynamics no ARRAY_VARS mark, so a
+/// mark-driven listing silently dropped them from `declare -i` /
+/// `declare -a` (rubash#2700).
+#[derive(Debug, Clone)]
+pub(crate) struct DynamicDeclarationView {
+    pub name: String,
+    pub text: String,
+    pub integer: bool,
+    pub array: bool,
+}
+
 use crate::shell::VariableStore;
 use assign::assign_declare_names;
 use attrs::{apply_declare_attrs, DeclareOptions};
@@ -501,6 +519,7 @@ where
         false,
         &[],
         &[],
+        &[],
         &crate::shell::var_table::TempenvListingUnderlay::new(),
         oob_word,
         &mut WrittenOperandHints::default(),
@@ -520,7 +539,8 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
     stderr: &mut E,
     in_function: bool,
     frame_locals: &[String],
-    dynamic_views: &[(String, String)],
+    dynamic_views: &[DynamicDeclarationView],
+    dynamic_set_views: &[crate::builtins::set::DynamicSetView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     oob_word: &mut Option<String>,
     written_hints: &mut WrittenOperandHints,
@@ -1331,7 +1351,12 @@ where
         || trace;
     let plain = names.is_empty() && !had_name_args && !print && !flags_on;
     if plain {
-        crate::builtins::set::print_shell_variables(variables, underlay, stdout)?;
+        crate::builtins::set::print_shell_variables(
+            variables,
+            underlay,
+            dynamic_set_views,
+            stdout,
+        )?;
         return Ok(attr_status);
     }
     if names.is_empty() && !had_name_args {

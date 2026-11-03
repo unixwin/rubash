@@ -1455,8 +1455,10 @@ impl Executor {
                 // bind reseeds the generator exactly like a plain
                 // `RANDOM=<n>` assignment (rubash#541's declare -p getter
                 // read exposed the missing seed as a shifted exp.tests
-                // ${#RANDOM} sequence).
-                self.apply_declare_random_seeds(&args);
+                // ${#RANDOM} sequence). rubash#2720: the dynamic hooks
+                // run only when this declare targets the global cell —
+                // at function depth a declare without -g binds a local.
+                self.apply_declare_dynamic_hooks(&args, self.shell_state.function_depth == 0);
                 // The views are consumed only by -p's dynamic render; a
                 // non-print declare must not draw (RANDOM's getter advances
                 // the generator on every read — GNU declare -p draws once,
@@ -1465,52 +1467,110 @@ impl Executor {
                 // rubash#1569: listing forms render the bindings
                 // underneath this command's own tempenv frame.
                 let underlay = self.tempenv_listing_underlay();
-                let dynamic_views: Vec<(String, String)> = if print_requested {
-                    let mut views: Vec<(String, String)> = args
-                        .iter()
-                        .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-                        .filter_map(|arg| {
-                            let name = arg.split('=').next().unwrap_or(arg);
-                            self.dynamic_declaration_view(name)
-                                .map(|text| (name.to_string(), text))
-                        })
-                        .collect();
-                    // Listing mode (no operands): GNU's full `declare -p`
-                    // includes a materialized PIPESTATUS array even though
-                    // its value lives outside the variable table
-                    // (rubash#1363) — pass its view so print_declare_names
-                    // can merge the name into the listing.
-                    let listing = args
-                        .iter()
-                        .all(|arg| arg.starts_with('-') || arg.starts_with('+'));
+                let listing = args
+                    .iter()
+                    .all(|arg| arg.starts_with('-') || arg.starts_with('+'));
+                let dynamic_views: Vec<crate::builtins::declare::DynamicDeclarationView> = {
+                    let mut views: Vec<crate::builtins::declare::DynamicDeclarationView> =
+                        Vec::new();
+                    if print_requested {
+                        views.extend(
+                            args.iter()
+                                .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                                .filter_map(|arg| {
+                                    let name = arg.split('=').next().unwrap_or(arg);
+                                    self.dynamic_view(name)
+                                }),
+                        );
+                    }
+                    // Listing mode (no operands): GNU's listings
+                    // enumerate the dynamic registry alongside the table
+                    // (rubash#1363 for PIPESTATUS, rubash#2700 for the
+                    // rest). The VISIBLE class (GROUPS and the stack
+                    // arrays) appears in every listing form, bare
+                    // `declare` included; the INVISIBLE provider scalars
+                    // appear only in print/filtered forms, matching
+                    // GNU's att_invisible handling in print_var_list.
+                    // A listing prints, so building a view draws exactly
+                    // what GNU's listing draws — but a name an active
+                    // filter excludes outright is never built, so a
+                    // filtered listing does not draw for a name it
+                    // cannot print.
                     if listing {
-                        // rubash#1569: a PIPESTATUS bound by this very
-                        // command's prefix renders from the underlay
-                        // snapshot (its pre-frame storage), not the
-                        // live dynamic view.
-                        if !underlay.contains_key("PIPESTATUS") {
-                            if let Some(text) = self.dynamic_declaration_view("PIPESTATUS") {
-                                views.push(("PIPESTATUS".to_string(), text));
+                        let filtered = ['a', 'A', 'i', 'l', 'n', 'r', 'u', 'x']
+                            .iter()
+                            .any(|&option| declare_args_contain_option(&args, option, true));
+                        let could_pass = |name: &str, integer: bool, array: bool| {
+                            let env_vars = &self.shell_state.env_vars;
+                            (!declare_args_contain_option(&args, 'x', true)
+                                || is_marked_var(env_vars, EXPORTED_VARS, name))
+                                && (!declare_args_contain_option(&args, 'r', true)
+                                    || is_marked_var(env_vars, READONLY_VARS, name))
+                                && (!declare_args_contain_option(&args, 'a', true) || array)
+                                && !declare_args_contain_option(&args, 'A', true)
+                                && (!declare_args_contain_option(&args, 'i', true) || integer)
+                                && (!declare_args_contain_option(&args, 'u', true)
+                                    || is_marked_var(env_vars, UPPERCASE_VARS, name))
+                                && (!declare_args_contain_option(&args, 'l', true)
+                                    || is_marked_var(env_vars, LOWERCASE_VARS, name))
+                                && (!declare_args_contain_option(&args, 'n', true)
+                                    || is_marked_var(env_vars, NAMEREF_VARS, name))
+                        };
+                        let mut push_registry = |name: &str| {
+                            // rubash#1569: a name bound by this very
+                            // command's prefix renders from the underlay
+                            // snapshot (its pre-frame storage), not the
+                            // live dynamic view.
+                            if underlay.contains_key(name)
+                                || views.iter().any(|view| view.name == name)
+                            {
+                                return;
                             }
-                        }
+                            let (integer, array) = Self::dynamic_declaration_class(name);
+                            if could_pass(name, integer, array) {
+                                if let Some(view) = self.dynamic_view(name) {
+                                    views.push(view);
+                                }
+                            }
+                        };
                         // rubash#1872: GNU's listing includes the
                         // BASH_SOURCE/BASH_LINENO arrays with their LIVE
                         // contents; the env cells for these two only
                         // refresh at source-frame push/pop and would
                         // list a returned function's frozen frame.
-                        for name in ["BASH_SOURCE", "BASH_LINENO"] {
-                            if !underlay.contains_key(name) {
-                                if let Some(text) = self.dynamic_declaration_view(name) {
-                                    views.push((name.to_string(), text));
-                                }
+                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
+                            push_registry(name);
+                        }
+                        if print_requested {
+                            // rubash#1363: GNU's full `declare -p`
+                            // listing includes a materialized PIPESTATUS
+                            // array even though its value lives outside
+                            // the variable table.
+                            push_registry("PIPESTATUS");
+                        }
+                        if print_requested || filtered {
+                            for name in [
+                                "BASHPID",
+                                "HISTCMD",
+                                "RANDOM",
+                                "SRANDOM",
+                                "SECONDS",
+                                "EPOCHSECONDS",
+                                "EPOCHREALTIME",
+                                "BASH_MONOSECONDS",
+                                "LINENO",
+                                "BASH_SUBSHELL",
+                                "BASH_ARGV0",
+                                "BASH_COMMAND",
+                            ] {
+                                push_registry(name);
                             }
                         }
                     }
                     views
-                } else {
-                    Vec::new()
                 };
                 let mut oob_word = None;
+                let dynamic_set_views = self.dynamic_set_views();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -1520,6 +1580,7 @@ impl Executor {
                     self.shell_state.function_depth > 0,
                     &frame_locals,
                     &dynamic_views,
+                    &dynamic_set_views,
                     &underlay,
                     &mut oob_word,
                     &mut written_hints,
@@ -2010,28 +2071,30 @@ impl Executor {
                 // bind reseeds the generator exactly like a plain
                 // `RANDOM=<n>` assignment (rubash#541's declare -p getter
                 // read exposed the missing seed as a shifted exp.tests
-                // ${#RANDOM} sequence).
-                self.apply_declare_random_seeds(&args);
+                // ${#RANDOM} sequence). rubash#2720: a `local` bind is a
+                // plain cell — the dynamic hooks run only for -g.
+                self.apply_declare_dynamic_hooks(&args, false);
                 // The views are consumed only by -p's dynamic render; a
                 // non-print declare must not draw (RANDOM's getter advances
                 // the generator on every read — GNU declare -p draws once,
                 // a plain declare draws never).
                 let print_requested = declare_args_request_print(&args);
-                let dynamic_views: Vec<(String, String)> = if print_requested {
-                    args.iter()
-                        .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-                        .filter_map(|arg| {
-                            let name = arg.split('=').next().unwrap_or(arg);
-                            self.dynamic_declaration_view(name)
-                                .map(|text| (name.to_string(), text))
-                        })
-                        .collect()
-                } else {
-                    Vec::new()
-                };
+                let dynamic_views: Vec<crate::builtins::declare::DynamicDeclarationView> =
+                    if print_requested {
+                        args.iter()
+                            .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
+                            .filter_map(|arg| {
+                                let name = arg.split('=').next().unwrap_or(arg);
+                                self.dynamic_view(name)
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 let mut oob_word = None;
                 // rubash#1569: same listing underlay as declare.
                 let underlay = self.tempenv_listing_underlay();
+                let dynamic_set_views = self.dynamic_set_views();
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
@@ -2041,6 +2104,7 @@ impl Executor {
                     true,
                     &frame_locals,
                     &dynamic_views,
+                    &dynamic_set_views,
                     &underlay,
                     &mut oob_word,
                     &mut written_hints,

@@ -19,25 +19,34 @@ pub(super) fn record_array_element_assignment_for_word(
     // skipsubscript on the unexpanded word — quoting still present — so when
     // the raw subscript de-quotes to something different from the cooked
     // parse's subscript, the raw spelling owns the boundaries.
-    let assignment = match (cooked_parse, array_element_assignment_from_word(raw, raw)) {
+    // The cooked parse can also FAIL outright at those boundaries: in
+    // `m['a]b']='v'` the de-quoted text `m[a]b]=v` has no `=` after its
+    // first `]`, so no cooked node exists at all — but the raw spelling
+    // parses cleanly and owns the boundaries exactly as in the mismatch
+    // case (rubash#2703). Both raw-owns cases take the same field fix-up:
+    // the raw node carries raw subscript/value text, while downstream
+    // expansion paths expect the cooked (quote-carrier) form for `value`
+    // and `subscript` — `a['x]=y']="def"` must expand the RHS `"def"` to
+    // `def`, not store the literal quotes.
+    let raw_parse = array_element_assignment_from_word(raw, raw);
+    let raw_with_cooked_fields = |mut assignment: ArrayElementAssignment| {
+        assignment.value = crate::lexer::remove_shell_quotes(assignment.raw_value.as_str());
+        assignment.subscript =
+            crate::lexer::remove_shell_quotes(assignment.subscript_metadata.raw.as_str());
+        assignment
+    };
+    let assignment = match (cooked_parse, raw_parse) {
         (Some(cooked), Some(raw_parse)) => {
             let cooked_subscript = cooked.subscript.as_str();
             let raw_subscript = raw_parse.subscript_metadata.raw.as_str();
             if crate::lexer::remove_shell_quotes(raw_subscript) != cooked_subscript {
-                // The raw node carries raw subscript/value text; downstream
-                // expansion paths expect the cooked (quote-carrier) form for
-                // `value` and `subscript` — `a['x]=y']="def"` must expand the
-                // RHS `"def"` to `def`, not store the literal quotes.
-                let mut assignment = raw_parse;
-                assignment.value = crate::lexer::remove_shell_quotes(assignment.raw_value.as_str());
-                assignment.subscript =
-                    crate::lexer::remove_shell_quotes(assignment.subscript_metadata.raw.as_str());
-                Some(assignment)
+                Some(raw_with_cooked_fields(raw_parse))
             } else {
                 Some(cooked)
             }
         }
-        (cooked, raw_parse) => cooked.or(raw_parse),
+        (None, Some(raw_parse)) => Some(raw_with_cooked_fields(raw_parse)),
+        (cooked, _) => cooked,
     };
     if let Some(mut assignment) = assignment {
         assignment.word_index = Some(word_index);

@@ -162,7 +162,7 @@ where
     W: Write,
     E: Write,
 {
-    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, None)
+    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, &[], None)
 }
 
 /// [`set_with_io`] plus a sink for the `-o` option WRITES (name,
@@ -181,6 +181,7 @@ pub(crate) fn set_with_io_and_o_writes<'a, I, W, E>(
     stdout: &mut W,
     stderr: &mut E,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    dynamic: &[DynamicSetView],
     o_writes: &mut Vec<(String, bool)>,
 ) -> io::Result<i32>
 where
@@ -188,7 +189,15 @@ where
     W: Write,
     E: Write,
 {
-    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, Some(o_writes))
+    set_with_io_tracked(
+        args,
+        env_vars,
+        stdout,
+        stderr,
+        underlay,
+        dynamic,
+        Some(o_writes),
+    )
 }
 
 fn set_with_io_tracked<'a, I, W, E>(
@@ -197,6 +206,7 @@ fn set_with_io_tracked<'a, I, W, E>(
     stdout: &mut W,
     stderr: &mut E,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    dynamic: &[DynamicSetView],
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
@@ -207,7 +217,7 @@ where
     let args: Vec<&str> = args.into_iter().collect();
 
     if args.is_empty() {
-        print_shell_variables(env_vars, underlay, stdout)?;
+        print_shell_variables(env_vars, underlay, dynamic, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -426,6 +436,20 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
+/// One dynamic variable's assignment-form listing entry: the name and
+/// its storage in the table's serialized array form. GNU's dynamic
+/// variables are ordinary cells in the variable table
+/// (variables.c:1844 initialize_dynamic_variables), so print_var_list
+/// enumerates them with live getter values; rubash composes the stack
+/// and group arrays outside the table, and the executor supplies their
+/// current storage here so the assignment-form listings (`set`, bare
+/// `declare`) render the live composition instead of a stale mirror
+/// cell — or nothing, for cell-less GROUPS (rubash#2700).
+pub(crate) struct DynamicSetView {
+    pub name: String,
+    pub storage: String,
+}
+
 /// GNU `set` with no arguments: print_var_list (variables.c) — assignment
 /// form with print_var_value quoting. `declare` with no operands and no
 /// minus-form attribute options dispatches here too (declare.def:373-380
@@ -433,12 +457,25 @@ where
 pub(crate) fn print_shell_variables<W>(
     env_vars: &crate::shell::var_table::VarTable,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    dynamic: &[DynamicSetView],
     stdout: &mut W,
 ) -> io::Result<()>
 where
     W: Write,
 {
-    let mut vars: Vec<(&String, &String)> = env_vars.iter().collect();
+    let entry_storage: std::collections::HashMap<&str, &str> = dynamic
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.storage.as_str()))
+        .collect();
+    let mut vars: Vec<(&str, Option<&str>)> = env_vars
+        .iter()
+        .map(|(name, value)| (name.as_str(), Some(value.as_str())))
+        .collect();
+    for entry in dynamic {
+        if !vars.iter().any(|(name, _)| *name == entry.name.as_str()) {
+            vars.push((entry.name.as_str(), None));
+        }
+    }
     vars.sort_by(|left, right| left.0.cmp(right.0));
 
     for (name, value) in vars {
@@ -501,6 +538,22 @@ where
             writeln!(stdout, "{}={}", name, shell_quote(value))?;
             continue;
         }
+        // A dynamic registry entry supersedes the mirror cell: the
+        // composition is the live value (rubash#2700). The visible
+        // registry class is array-valued, so it renders through the
+        // same array_to_assign form as an array cell.
+        if let Some(storage) = entry_storage.get(name) {
+            writeln!(
+                stdout,
+                "{}={}",
+                name,
+                crate::builtins::declare::format_array_for_output(storage)
+            )?;
+            continue;
+        }
+        let Some(value) = value else {
+            continue;
+        };
         // GNU variables.c:1096-1104 print_assignment: array and assoc cells
         // print through array_to_assign/assoc_to_assign (hash-bucket order,
         // per-element quoting, unquoted parens), not the scalar

@@ -124,12 +124,14 @@ impl Executor {
         let history_prior =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
         let mut o_writes: Vec<(String, bool)> = Vec::new();
+        let dynamic_set_views = self.dynamic_set_views();
         let status = crate::builtins::set::set_with_io_and_o_writes(
             cmd.words[1..].iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             &mut stdout,
             &mut stderr,
             &underlay,
+            &dynamic_set_views,
             &mut o_writes,
         )?;
         if !history_prior
