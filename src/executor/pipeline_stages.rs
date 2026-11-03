@@ -361,6 +361,29 @@ impl Executor {
         // element's own completion from a nested `( )` command's
         // (which sits deeper and keeps its fire).
         if command.subshell_command.is_some() {
+            // rubash#2722: paren absorb, the pipeline twin of the
+            // background path's background_paren_absorbable coalesce.
+            // GNU forks ONE child per pipeline element
+            // (execute_cmd.c:2620 execute_pipeline): when the element
+            // IS a `( )`, that fork is the subshell — the child runs
+            // execute_in_subshell's level increment as its element
+            // dispatch, so the body observes exactly one level. The
+            // stage clone has already paid the element level
+            // (command_substitution_executor's +1) and the subshell
+            // node would bump a second time in
+            // execute_subshell_command_with_redirects, reporting
+            // $BASH_SUBSHELL one too deep (`( echo $BASH_SUBSHELL ) |
+            // cat` printed 2). Hand the paid level back before
+            // dispatch: the node's own bump lands on the stage level,
+            // a nested `( )` in the body still bumps from there, and
+            // the BASHPID fabrication (pid + depth - origin) stays
+            // distinct from the parent's. The root-depth marker below
+            // records the post-absorb dispatch depth, which is what
+            // the execute_command tail compares against.
+            subshell
+                .shell_state
+                .subshell_depth
+                .set(subshell.shell_state.subshell_depth.get().saturating_sub(1));
             subshell
                 .subshell_element_root_depth
                 .set(Some(subshell.shell_state.subshell_depth.get()));
@@ -1060,6 +1083,32 @@ impl Executor {
         }
 
         subshell.stderr_capture = Some(Vec::new());
+        // rubash#2689: GNU applies a pipeline element's redirections
+        // ONCE, in the element's fork (execute_cmd.c:2620
+        // execute_pipeline -> redir.c do_redirections), and the
+        // command the element runs inherits those descriptors. The
+        // strip above removed the stdio entries from the clone's node
+        // so the driver's routing walk could apply them to the
+        // captured streams — but a `command <external>` redispatch
+        // plans its stdio from this clone's fd table, and with the
+        // entries nowhere bound, the spawn inherited the ambient
+        // stderr/stdout while the route created the target file
+        // empty. Function stages never hit the hole: execute_function
+        // applies the call's redirects onto the clone's fd table and
+        // the stage claims the pre-wired latch so no route re-applies
+        // them. Mirror that composition here: bind the element's
+        // output redirects into the clone (in list order, dup targets
+        // resolving at their position, exactly do_redirections), so
+        // in-process writes and respawned children alike land on the
+        // opened targets, and claim the latch when the bind stands.
+        // A failed bind falls back to the stripped dispatch — the
+        // preflight above already adjudicated the list, and the
+        // driver's route keeps its current failure behavior.
+        if command_has_output_redirects(command)
+            && subshell.open_compound_output_redirects(command).is_ok()
+        {
+            self.pipeline_stage_fds_pre_wired.set(true);
+        }
         // rubash#1342: the pipeline driver already emitted this stage's
         // xtrace line; mark the clone so its dispatch re-trace is
         // suppressed once (nested commands still trace normally).

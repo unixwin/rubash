@@ -419,22 +419,16 @@ impl Executor {
         if command_has_no_effect(cmd) {
             return Ok(());
         }
-        // GNU applies a null command's redirections too (execute_cmd.c
-        // execute_null_command -> do_redirections), so `> $nope` under set
-        // -u reports the unbound redirect word and ends the script — the
-        // same fatal redirect-word class as a commanded target (rubash#535;
-        // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
-        // has reported the diagnostic and set the status.
-        let settle_superseded_net_outputs =
-            self.superseded_net_output_settlement_applies(cmd, false);
-        if let Some(rejection) =
-            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
-        {
-            if rejection == super::redirection::RedirectRejection::FatalNounset {
-                self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
-            }
-            return Ok(());
-        }
+        // rubash#2718: the reject gate used to run HERE, before the
+        // assignments below are expanded and bound — but GNU binds a
+        // null command's assignments during word expansion
+        // (execute_simple_command -> expand_words), and only then does
+        // execute_null_command run do_redirections over the redirect
+        // list (execute_cmd.c:4626-4635 + :4268-4286). The gate's open
+        // probes and the redirect-target memo it seeds therefore ran
+        // against the PRE-binding values (`a=newname > ${a}.txt`
+        // created oldname.txt). The gate now sits below the assignment
+        // loop, beside the redirect application it protects.
         if let Some((name, message)) = self.parameter_assignment_error(cmd) {
             // rubash#2369: an empty message is the silent att_noassign
             // class — subst.c:8153's ASSIGN_DISALLOWED branch prints
@@ -806,6 +800,25 @@ impl Executor {
                 self.shell_state.arithmetic_expansion_error.set(false);
                 status = 1;
             }
+        }
+        // GNU applies a null command's redirections too (execute_cmd.c
+        // execute_null_command -> do_redirections), so `> $nope` under set
+        // -u reports the unbound redirect word and ends the script — the
+        // same fatal redirect-word class as a commanded target (rubash#535;
+        // GNU probe: `set -u; > $nope` exits 1, no next line). The walker
+        // has reported the diagnostic and set the status.
+        // rubash#2718: this gate runs only now — after the assignment
+        // loop above has bound the null command's assignments — so its
+        // probes open the targets the post-binding expansion names.
+        let settle_superseded_net_outputs =
+            self.superseded_net_output_settlement_applies(cmd, false);
+        if let Some(rejection) =
+            self.reject_invalid_redirects(cmd, settle_superseded_net_outputs)?
+        {
+            if rejection == super::redirection::RedirectRejection::FatalNounset {
+                self.finish_heredoc_expansion_error(cmd, Self::FATAL_PARAMETER_EXPANSION_STATUS)?;
+            }
+            return Ok(());
         }
         // GNU execute_cmd.c execute_null_command (4203-4278): a wordless
         // command carrying a REDIR_VARASSIGN redirect force-forks — the fd

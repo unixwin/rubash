@@ -91,7 +91,15 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        if let Some(error) = self.redirect_setup_open_error(cmd)? {
+        self.apply_redirect_setup_side_effects_tracked(cmd, None)
+    }
+
+    fn apply_redirect_setup_side_effects_tracked(
+        &mut self,
+        cmd: &CommandNode,
+        created: Option<&mut Vec<std::path::PathBuf>>,
+    ) -> Result<bool, ExecuteError> {
+        if let Some(error) = self.redirect_setup_open_error(cmd, created)? {
             let mut line = Vec::new();
             let _ = writeln!(
                 &mut line,
@@ -106,6 +114,40 @@ impl Executor {
         Ok(false)
     }
 
+    /// rubash#2692: the dispatch funnel's pregate form of the setup
+    /// walk. The funnel runs the walk purely as a GATE — the
+    /// dispatch's own machinery applies the redirects again when the
+    /// builtin runs — so a file the probe CREATED must not survive a
+    /// successful check: the second application would observe state
+    /// GNU's single do_redirections never produces (concretely,
+    /// `set -C > fresh.txt` — the probe created fresh.txt, `set`
+    /// then armed noclobber, and the dispatch's walk refused to
+    /// overwrite the probe's own file; rubash#1020's pin caught it).
+    /// Candidates are the plain-file targets that did not exist
+    /// before the walk; on success each still-empty regular file is
+    /// removed again. On failure nothing is removed: GNU's ordered
+    /// opens leave their creations/truncations behind when a later
+    /// entry fails, and the gate's failure path is exactly that
+    /// state. Truncation of a pre-existing file is likewise left
+    /// standing, as GNU leaves it.
+    pub(in crate::executor) fn pregate_redirect_open_check(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        let mut created = Vec::new();
+        let failed = self.apply_redirect_setup_side_effects_tracked(cmd, Some(&mut created))?;
+        if !failed {
+            for path in created {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if meta.is_file() && meta.len() == 0 {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+        Ok(failed)
+    }
+
     /// The open walk behind apply_redirect_setup_side_effects, minus the
     /// diagnostic: returns the first failed open's error (already in the
     /// `<target>: <strerror>` path_error shape the printing caller
@@ -117,6 +159,7 @@ impl Executor {
     fn redirect_setup_open_error(
         &mut self,
         cmd: &CommandNode,
+        mut created: Option<&mut Vec<std::path::PathBuf>>,
     ) -> Result<Option<io::Error>, ExecuteError> {
         use crate::parser::RedirectKind;
         for redirect in &cmd.redirects {
@@ -151,6 +194,35 @@ impl Executor {
                 && !is_null_device(&target)
                 && !target.starts_with("<(")
                 && !target.starts_with(">(");
+            // rubash#2692 pregate tracking: a creation-kind probe on
+            // a plain file target that does not exist yet will create
+            // it; record the resolved path so the pregate caller can
+            // undo the creation after a successful check (the
+            // application walks for read/no-output builtins pass no
+            // tracker and keep the side effect, which for them IS
+            // the application). Net targets never create (their probe
+            // is resolution-only, rubash#1967).
+            if let Some(tracked) = created.as_deref_mut() {
+                if plain_file_target
+                    && matches!(
+                        redirect.kind,
+                        RedirectKind::Output
+                            | RedirectKind::ClobberOutput
+                            | RedirectKind::CombinedOutput
+                            | RedirectKind::Append
+                            | RedirectKind::CombinedAppend
+                    )
+                    && !crate::special_paths::is_net_redirect_target(&target)
+                {
+                    let path = self.session_path(crate::executor::path::shell_path_to_windows(
+                        &self.redirect_output_path_target(&target),
+                        &self.shell_state.env_vars,
+                    ));
+                    if !path.exists() {
+                        tracked.push(path);
+                    }
+                }
+            }
             let opened: Result<(), io::Error> = match redirect.kind {
                 RedirectKind::Output
                 | RedirectKind::ClobberOutput
@@ -507,7 +579,7 @@ impl Executor {
         // already path_error-shaped, so it joins the IoError channel the
         // mirror failures use and every caller renders and marks it
         // exactly like an fd 0/1/2 failure.
-        if let Some(error) = self.redirect_setup_open_error(cmd)? {
+        if let Some(error) = self.redirect_setup_open_error(cmd, None)? {
             return Err(ExecuteError::IoError(error));
         }
         let redirect_failed = false;

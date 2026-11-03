@@ -4715,6 +4715,78 @@ impl Executor {
                             }
                         }
                     }
+                    // rubash#2690: an fd-alias PATH spelling is
+                    // serviced by an OPEN, not a dup (the split
+                    // execution_misc::redirect_target_is_dup_spelling
+                    // documents, rubash#1963): GNU's open of the magic
+                    // link over a regular-file description is a FRESH
+                    // open of the underlying file (redir.c:725
+                    // redir_open; the RF_DEVFD dup special case at
+                    // redir.c:603-608 compiles only without
+                    // HAVE_DEV_FD), so `exec >/dev/stdout` with fd 1
+                    // bound to a file truncates it and takes its own
+                    // offset instead of sharing fd 1's description.
+                    // The dup arm below classifies the spelling by
+                    // its fd number and would copy the endpoint —
+                    // divert here, through the alias layer's reopen
+                    // resolution, and bind the fresh open the way the
+                    // plain-file arm binds: noclobber gate first
+                    // (redir.c:676 noclobber_open rides the plain
+                    // open), then the FileFd bind and ledger.
+                    if !super::execution_misc::redirect_target_is_dup_spelling(&target) {
+                        if let Some(source_fd) =
+                            super::execution_misc::dev_stdio_redirect_fd(&target)
+                        {
+                            if let Some(path) = self.fd_alias_reopen_path(source_fd) {
+                                let append = matches!(
+                                    redirect.kind,
+                                    crate::parser::RedirectKind::Append
+                                        | crate::parser::RedirectKind::CombinedAppend
+                                );
+                                if !append
+                                    && !redirect.clobber
+                                    && crate::builtins::set::shell_option_enabled(
+                                        &self.shell_state.env_vars,
+                                        "noclobber",
+                                    )
+                                {
+                                    return Err(ExecuteError::from(
+                                        crate::posix_errors::path_error(
+                                            &target,
+                                            std::io::Error::new(
+                                                std::io::ErrorKind::AlreadyExists,
+                                                "cannot overwrite existing file",
+                                            ),
+                                        ),
+                                    ));
+                                }
+                                self.flush_persistent_output_process_substitution(fd)?;
+                                let file_fd = FileFd::open_write(path, append, false)
+                                    .map_err(|e| crate::posix_errors::path_error(&target, e))?;
+                                self.fd_table.open_output(
+                                    fd,
+                                    FdWriteEndpoint::File(file_fd),
+                                    fd >= 10,
+                                );
+                                self.shell_state.env_vars.remove(&fd_closed_key(fd));
+                                self.shell_state
+                                    .env_vars
+                                    .remove(&fd_output_process_substitution_key(fd));
+                                self.shell_state
+                                    .env_vars
+                                    .insert(fd_output_key(fd), target.clone());
+                                if matches!(
+                                    redirect.kind,
+                                    crate::parser::RedirectKind::CombinedOutput
+                                        | crate::parser::RedirectKind::CombinedAppend
+                                ) {
+                                    self.flush_persistent_output_process_substitution(2)?;
+                                    self.share_fd_output_file(fd, 2, &target, fd >= 10);
+                                }
+                                continue;
+                            }
+                        }
+                    }
                     if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
                         // GNU redir.c: the dup/move apply is guarded by
                         // `redir_fd != redirector` — a self-dup/self-move
