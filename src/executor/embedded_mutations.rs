@@ -193,6 +193,10 @@ impl Executor {
         if let Some(pre) = preexpanded_stdin_body(word) {
             return crate::executor::execution_misc::decode_stdin_body_enq(pre);
         }
+        // rubash#2676: same word-expansion frame as the heredoc body
+        // entry — the here-string word is one word, expanded once.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new_if_absent();
         let expanded = self.expand_here_string_segments(word);
         // GNU redir.c:373-374 (heredoc_expand): the expanded here-string
         // word is final data — heredoc_write emits it verbatim, and a

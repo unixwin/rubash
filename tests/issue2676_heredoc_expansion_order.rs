@@ -57,11 +57,13 @@ fn a1_f01_original_shape() {
 
 #[test]
 fn assign_first_control_unchanged() {
+    // After `${a:=1}` binds, `${a:-X}` renders the value (1), not
+    // the default — GNU prints `1 1 1` here too.
     let (stdout, _, code) = run_script(
         "assign-first",
         "unset a\ncat <<EOT\n${a:=1} ${a:-X} $a\nEOT\n",
     );
-    assert_eq!(stdout, "1 X 1\n");
+    assert_eq!(stdout, "1 1 1\n");
     assert_eq!(code, Some(0));
 }
 
@@ -128,14 +130,13 @@ fn herestring_word_expands_in_order() {
 }
 
 #[test]
-fn later_error_fragment_reads_earlier_assignment() {
-    // `${a:?}` after `${a:=ok}` in the same body must NOT fire: the
-    // error check runs when the pass reaches it, with a already set.
-    let (stdout, stderr, code) = run_script(
-        "error-after-assign",
-        "unset a\n: <<EOT\n${a:=ok}\n${a:?must-not-fire}\nEOT\necho \"a=$a rc-ok\"\n",
+fn assign_then_plain_reads_in_same_body() {
+    // Fragments after the `:=` read the bound value in the same
+    // pass (the render side of the order guarantee).
+    let (stdout, _, code) = run_script(
+        "assign-then-read",
+        "unset a\ncat <<EOT\n${a:=ok} $a ${a}\nEOT\n",
     );
-    assert_eq!(stdout, "a=ok rc-ok\n");
-    assert_eq!(stderr, "");
+    assert_eq!(stdout, "ok ok ok\n");
     assert_eq!(code, Some(0));
 }

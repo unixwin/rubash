@@ -233,11 +233,13 @@ fn comsub_wrapped_external_discards() {
 
 #[test]
 fn background_command_discards() {
+    // The background cat still prints the expanded body (`v`); the
+    // binding itself dies with the async subshell.
     let (stdout, _, code) = run_script(
         "background",
         "unset p\ncat <<EOT &\n${p:=v}\nEOT\nwait\necho \"background: ${p-unset}\"\n",
     );
-    assert_eq!(stdout, "background: unset\n");
+    assert_eq!(stdout, "v\nbackground: unset\n");
     assert_eq!(code, Some(0));
 }
 
@@ -286,12 +288,19 @@ fn command_cat_error_is_contained() {
 }
 
 #[test]
-fn prefix_assignment_is_visible_in_body_but_not_kept() {
+fn prefix_assignment_not_visible_in_body_and_not_kept() {
+    // GNU probe (5.3.20): a temporary prefix assignment is NOT
+    // visible to the command's own heredoc body — the child's
+    // do_redirections expansion consults the ordinary variable
+    // table, and the prefix assignments are merged into the exec
+    // environment only afterwards (execute_cmd.c
+    // maybe_make_export_env, just before execve). Nor do they
+    // persist after the command.
     let (stdout, _, code) = run_script(
         "prefix-assignment",
         "y2=inner cat <<EOT\nprefix sees $y2\nEOT\necho \"after: y2=${y2-unset}\"\n",
     );
-    assert_eq!(stdout, "prefix sees inner\nafter: y2=unset\n");
+    assert_eq!(stdout, "prefix sees \nafter: y2=unset\n");
     assert_eq!(code, Some(0));
 }
 
