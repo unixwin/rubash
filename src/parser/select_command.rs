@@ -43,8 +43,13 @@ pub(super) fn parse_select_command(
     } else {
         variable_token.raw.clone()
     };
+    // rubash#2745: the name slot admits a variable literally named
+    // `in' — GNU's grammar takes the WORD after SELECT as the name
+    // (parse.y:979 `SELECT WORD ... IN word_list'), so `select in; do'
+    // and `select in in a b; do' both work; only `do'/`done' in the
+    // name slot are impossible (they are the body's own keywords).
     if tokens.get(start + 1)?.kind == TokenKind::Keyword
-        && matches!(tokens.get(start + 1)?.value.as_str(), "do" | "done" | "in")
+        && matches!(tokens.get(start + 1)?.value.as_str(), "do" | "done")
     {
         return None;
     }

@@ -965,6 +965,8 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             assign_heredoc_body(
                 &mut state.current_cmd,
                 &mut state.ast,
+                &mut state.heredoc_caller_frames,
+                &mut state.heredoc_frames,
                 token.value.clone(),
                 token.position,
                 token.heredoc_end_line,
