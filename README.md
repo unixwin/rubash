@@ -22,7 +22,7 @@ Rubash itself is not a shell product. It ships a reference CLI used by the compa
 
 ### Get it
 
-Prebuilt tarballs for Linux (x86_64) and macOS (aarch64) are attached to each [release](https://github.com/unixwin/rubash/releases) (latest: v1.4.3, as of 2026-10-30). On Windows, the engine ships inside [niubash](https://github.com/unixwin/niubash) — that is the binary to install; this repo ships no Windows binary of its own.
+Prebuilt tarballs for Linux (x86_64) and macOS (aarch64) are attached to each [release](https://github.com/unixwin/rubash/releases) (latest: v1.5.0, 2026-11-03). On Windows, the engine ships inside [niubash](https://github.com/unixwin/niubash) — that is the binary to install; this repo ships no Windows binary of its own.
 
 ### Build from source
 
@@ -60,7 +60,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 - **Our own differential suite** — 246 original cases byte-compared against a locally built GNU Bash 5.3.20 (stdout, stderr, exit status): **244/246 identical**, up from 222/246 at the first audit (2026-10-22). The 2 residuals are documented platform differences.
 - **GNU's own corpus** — the 83-suite upstream test corpus as the consistency yardstick; the full ledger is below.
-- **The real ecosystem** — nvm, bats-core, bash-it, oh-my-bash, bash-completion, modernish, run for real. Every divergence becomes a public issue and a pinned regression test: as of 2026-10-30, rubash has 1,440 issues filed and 1,408 closed.
+- **The real ecosystem** — nvm, bats-core, bash-it, oh-my-bash, bash-completion, modernish, run for real. Every divergence becomes a public issue and a pinned regression test: as of 2026-11-03, rubash has 1,680 issues filed and 1,654 closed.
 
 **Why native matters.** Git for Windows describes its own shell, verbatim, as "a BASH emulation used to run Git from the command line" — an emulation built to run Git. Its bash is a port riding on a POSIX emulation layer (`msys-2.0.dll`), and the emulation leaks: fork emulation, argument rewriting, device quirks in every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
@@ -70,7 +70,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 **Subshells without fork.** `( list )` and `$( )` run **in-process** — no process creation, no fork emulation — while everything a script can observe (exit codes, fd inheritance, shared file offsets, signal dispositions) behaves like GNU Bash. The three-layer design is detailed under [Architecture](#architecture).
 
-**Embeddable by design.** Rubash is a Rust library with a reference CLI, not just an executable: niubash links it in-process for all shell semantics today, and the 1.5.0 line (see [Roadmap](#roadmap)) formalizes that surface into a stable, versioned engine API.
+**Embeddable by design.** Rubash is a Rust library with a reference CLI, not just an executable: niubash links it in-process for all shell semantics today, and the 1.5.0 release (see [Roadmap](#roadmap)) formalized that surface into a stable, versioned engine API.
 
 **Platform status — cross-platform, Windows-first.** Windows is the primary target and the platform with the full stack: one self-contained binary solving the classic Windows bash pain points (no POSIX emulation layer, no path-conversion heuristics, no `MSYS_NO_PATHCONV`, native Win32 paths as the currency, MSYS2-compatible identity for the bash ecosystem). Linux builds and runs natively (`x86_64-unknown-linux-gnu`) with real getrlimit/chmod/faccessat/uname(2) semantics and signal delivery — CI runs the engine's test lanes on Ubuntu (library tests, compatibility `cli_tests`, marker goldens) and replays the GNU upstream corpus on every push (the `Bash upstream test progress` job, `scripts/run-bash-upstream-tests.sh`); an earlier manual pass of the same corpus on the Linux binary scored 17/24 suites byte-identical (2026-09-27, ledger archived in #477/#581), and the remaining gap is tracked in the issue tracker. macOS runs the library test suite in CI (`macos-latest`) alongside the cross-target check. The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same ledger travels.
 
@@ -100,7 +100,7 @@ The shells that call themselves bash replacements deserve the same measurement. 
 - Exit codes and diagnostics are home-grown end to end (rc 99, ANSI color codes inside pipes) — programs and agents that decide from exit status and stderr get silently misled.
 - Its headline platform is missing: Windows support is self-described "Preview", and the v0.4.0 release ships no Windows binary at all.
 
-Lightweight is no excuse for missing limbs. Rubash's 292,309 net lines (tests excluded — the docs/code-size.md caliber; GNU Bash's tree nets 162,815) — 345,093 together with niubash's 52,784 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
+Lightweight is no excuse for missing limbs. Rubash's 312,965 net lines (tests excluded — the docs/code-size.md caliber; GNU Bash's tree nets 162,815) — 373,267 together with niubash's 60,302 — are the finished price of two giant jobs: complete bash semantics re-implemented path by path without fork, and cross-platform itself. An implementation claiming the same thing at roughly a fifth of the engine mass, which then fails these foundation mechanisms, can be neither a bash replacement nor a reliable login shell.
 
 ## Compatibility at a Glance
 
@@ -157,7 +157,7 @@ The same true-baseline method (script files, byte-level diff vs GNU 5.3.x) appli
 | **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
 | **GNU 83-suite on Linux native binary** | 17/24 byte-identical (2026-09-27 wt4/linuxrun lane, ledger archived in #477/#581); the corpus is now replayed in CI on every push (`Bash upstream test progress`, Ubuntu) |
 
-Everything above is pinned as regression fixtures under `tests/` (906 integration test files as of 2026-10-30, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
+Everything above is pinned as regression fixtures under `tests/` (1,115 integration test files as of 2026-11-03, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
 
 ## Performance
 
@@ -171,9 +171,9 @@ Measured, not claimed — under one protocol, published whether it flatters us o
 
 ## Roadmap
 
-Both items below were designed in the open — scoped, anchored to the code, and finalized in design docs — and land in **1.5.0**.
+Both items below were designed in the open — scoped, anchored to the code, and finalized in design docs — and shipped in **1.5.0** (2026-11-03).
 
-- **Embeddable engine API** ([#595](https://github.com/unixwin/rubash/issues/595)): a stable, semver'd Session-level public contract — input injection, output streams, lifecycle, event callbacks, rc policy — with niubash fully migrated onto it as the reference host. Finalized design: [`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md); RFC draft v1: [`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md).
+- **Embeddable engine API** ([#595](https://github.com/unixwin/rubash/issues/595)): a stable, semver'd Session-level public contract — input injection, output streams, lifecycle, event callbacks, rc policy — with niubash migrating onto it as the reference host (tracked as niubash#863; the state-face migration landed first, the remaining seams follow the contract gaps it specified). Finalized design: [`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md); RFC draft v1: [`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md).
 - **Native script debugger** ([#497](https://github.com/unixwin/rubash/issues/497)): `rubash --debug` (an interactive, gdb-grammar front end intended to replace the bashdb workflow) and `rubash --dap` (the same debug session over the Debug Adapter Protocol, for editors) as two views over one engine-owned event stream — the API's second real consumer. Finalized design: [`docs/design/debugger-full-design.md`](docs/design/debugger-full-design.md); M0 design: [`docs/design/debugger-m0.md`](docs/design/debugger-m0.md).
 
 ## Milestones
@@ -239,7 +239,7 @@ The engine presents a **selectable platform identity** instead of outsourcing it
 ## Testing
 
 ```bash
-# Unit + integration tests (906 integration test files under tests/, as of 2026-10-30)
+# Unit + integration tests (1,115 integration test files under tests/, as of 2026-11-03)
 cargo test --lib
 cargo test --test cli_tests
 
@@ -300,4 +300,4 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ---
 
-*Last updated: 2026-10-30*
+*Last updated: 2026-11-03*

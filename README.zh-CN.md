@@ -21,7 +21,7 @@ Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harn
 
 ### 获取
 
-每个 [release](https://github.com/unixwin/rubash/releases) 附 Linux（x86_64）与 macOS（aarch64）预编译 tarball（最新：v1.4.3，截至 2026-10-30）。Windows 上引擎随 [niubash](https://github.com/unixwin/niubash) 分发——要装的是那个二进制；本仓不单独发 Windows 二进制。
+每个 [release](https://github.com/unixwin/rubash/releases) 附 Linux（x86_64）与 macOS（aarch64）预编译 tarball（最新：v1.5.0，2026-11-03）。Windows 上引擎随 [niubash](https://github.com/unixwin/niubash) 分发——要装的是那个二进制；本仓不单独发 Windows 二进制。
 
 ### 从源码构建
 
@@ -59,7 +59,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 - **自研差分套件**——246 例原创用例对本地自编译的 GNU Bash 5.3.20 逐字节比对（stdout、stderr、退出码）：**244/246 一致**，较首次审计（2026-10-22）的 222/246 上行。剩余 2 例是已记录的平台性差异。
 - **GNU 官方语料**——以 GNU 自家 83 套上游测试集为一致性标尺；完整台账见下。
-- **真实生态**——nvm、bats-core、bash-it、oh-my-bash、bash-completion、modernish 逐项真跑。每处分歧立公开 issue 并固化成回归测试：截至 2026-10-30，rubash 累计 1,440 个 issue、已关 1,408。
+- **真实生态**——nvm、bats-core、bash-it、oh-my-bash、bash-completion、modernish 逐项真跑。每处分歧立公开 issue 并固化成回归测试：截至 2026-11-03，rubash 累计 1,680 个 issue、已关 1,654。
 
 **原生的意义。** Git for Windows 对自己 shell 的定性原话是「a BASH emulation used to run Git from the command line」——为跑 Git 而设的模拟。它的 bash 是移植版，骑在 POSIX 模拟层（`msys-2.0.dll`）上：fork 模拟、参数改写、设备怪癖，全都渗进每一个脚本。Rubash 没有这层：一个自包含二进制，直接对话 Win32。
 
@@ -69,7 +69,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 **无 fork 的子壳。** `( list )` 与 `$( )` 在**进程内**运行——零进程创建、零 fork 模拟——而脚本可观测的一切（退出码、fd 继承、共享文件偏移、信号处置）都与 GNU Bash 一致。三层设计见[架构](#架构)。
 
-**为可嵌入而设计。** Rubash 是带参考 CLI 的 Rust 库，不只是一个可执行文件：niubash 今天就把它进程内链接承担全部 shell 语义，1.5.0 线（见[路线图](#路线图)）把这面正式化为稳定、带版本号的引擎 API。
+**为可嵌入而设计。** Rubash 是带参考 CLI 的 Rust 库，不只是一个可执行文件：niubash 今天就把它进程内链接承担全部 shell 语义，1.5.0（见[路线图](#路线图)）已把这面正式化为稳定、带版本号的引擎 API。
 
 **平台状态——跨平台、Windows 优先。** Windows 是主战场，拥有完整技术栈：单一自包含二进制直面 Windows 的 bash 痛点（无 POSIX 模拟层、无路径转换猜测、无需 MSYS_NO_PATHCONV、原生 Win32 路径为通货、为 bash 生态提供 MSYS2 兼容身份）。Linux 原生构建并运行（x86_64-unknown-linux-gnu）——真 getrlimit/chmod/faccessat/uname(2) 语义与信号投递——CI 在 Ubuntu 上跑引擎测试车道（库测试、兼容性 `cli_tests`、marker goldens），并且每次推送都回放 GNU 上游语料（`Bash upstream test progress` job，`scripts/run-bash-upstream-tests.sh`）；更早在 Linux 二进制上人工跑同一语料的成绩为 17/24 套字节一致（2026-09-27，台账存档于 #477/#581），剩余差距在 issue tracker 跟踪。macOS 在 CI 跑库测试套件（`macos-latest`），另有 cross-target check。引擎语义模型刻意平台中立，账本随行。
 
@@ -99,7 +99,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 - 退出码与诊断文案全线自家格式（rc 99、管道里带 ANSI 颜色码）——按退出码与 stderr 做决策的程序和 agent 会被静默误导；
 - 它主打的平台缺席：Windows 支持自述为「Preview」，v0.4.0 发行包根本没有 Windows 二进制。
 
-轻量不是残疾的遮羞布。rubash 的 292,309 净行（不含测试——docs/code-size.md 口径；GNU Bash 树净行 162,815）——连同 niubash 的 52,784 净行共 345,093 行——是两件巨量工程的完工价：不用 fork 逐路径复刻完整 bash 语义，与跨平台落地本身。以约五分之一的引擎体量宣称同一件事、又过不了这些基础机制的实现，既无法成为 bash 的替代产物，也无法成为可靠的登录态 shell。
+轻量不是残疾的遮羞布。rubash 的 312,965 净行（不含测试——docs/code-size.md 口径；GNU Bash 树净行 162,815）——连同 niubash 的 60,302 净行共 373,267 行——是两件巨量工程的完工价：不用 fork 逐路径复刻完整 bash 语义，与跨平台落地本身。以约五分之一的引擎体量宣称同一件事、又过不了这些基础机制的实现，既无法成为 bash 的替代产物，也无法成为可靠的登录态 shell。
 
 ## 兼容性一览
 
@@ -153,7 +153,7 @@ GNU Bash 5.3.x 测试套件 — 83 个文件，true-baseline 实测
 | **git 自家测试框架**（t/test-lib.sh） | 在引擎下端到端运行 |
 | **GNU 83 套件 · Linux 原生二进制** | 17/24 套字节一致（2026-09-27 wt4/linuxrun 车道，台账存档于 #477/#581）；该语料现由 CI 每次推送回放（`Bash upstream test progress`，Ubuntu） |
 
-以上全部钉为回归夹具（`tests/` 下 906 个集成测试文件，截至 2026-10-30，含 `tests/regression.rs`——GNU golden 矩阵、套件切片快照、perf 金丝雀），CI 每次推送都跑——外加一道 C 源码逐行审计（`docs/SOURCE-AUDIT.md`，已盘点 336 个行为），总在套件踩到之前把缺口找到并关掉。
+以上全部钉为回归夹具（`tests/` 下 1,115 个集成测试文件，截至 2026-11-03，含 `tests/regression.rs`——GNU golden 矩阵、套件切片快照、perf 金丝雀），CI 每次推送都跑——外加一道 C 源码逐行审计（`docs/SOURCE-AUDIT.md`，已盘点 336 个行为），总在套件踩到之前把缺口找到并关掉。
 
 ## 性能
 
@@ -167,9 +167,9 @@ GNU Bash 5.3.x 测试套件 — 83 个文件，true-baseline 实测
 
 ## 路线图
 
-以下两项均在公开 issue 与设计文档中定版，随 **1.5.0** 落地。
+以下两项均在公开 issue 与设计文档中定版，已随 **1.5.0**（2026-11-03）落地。
 
-- **可嵌入引擎 API**（[#595](https://github.com/unixwin/rubash/issues/595)）：稳定的、带 semver 的 Session 级公开契约——输入注入、输出流、生命周期、事件回调、rc 策略——niubash 已全量迁移其上、为参考宿主。定版设计：[`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md)；RFC 草案 v1：[`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md)。
+- **可嵌入引擎 API**（[#595](https://github.com/unixwin/rubash/issues/595)）：稳定的、带 semver 的 Session 级公开契约——输入注入、输出流、生命周期、事件回调、rc 策略——niubash 正迁移其上、为参考宿主（niubash#863 跟踪：状态面已迁，余项按其逼出的契约缺口逐项跟进）。定版设计：[`docs/design/1.5.0-session-api.md`](docs/design/1.5.0-session-api.md)；RFC 草案 v1：[`docs/design/1.5.0-workspace-and-engine-api.md`](docs/design/1.5.0-workspace-and-engine-api.md)。
 - **原生脚本调试器**（[#497](https://github.com/unixwin/rubash/issues/497)）：`rubash --debug`（交互式、gdb 文法前端，目标是替代 bashdb 工作流）与 `rubash --dap`（同一调试会话走 Debug Adapter Protocol，供编辑器）是同一引擎事件流的两个视图——引擎 API 的第二个真实消费者。定版设计：[`docs/design/debugger-full-design.md`](docs/design/debugger-full-design.md)；M0 设计：[`docs/design/debugger-m0.md`](docs/design/debugger-m0.md)。
 
 ## 里程碑
@@ -235,7 +235,7 @@ POSIX `fork()` 没有 Win32 等价物。仿真层（MSYS2、Cygwin）在系统�
 ## 测试
 
 ```bash
-# 单元 + 集成测试（tests/ 下 906 个集成测试文件，截至 2026-10-30）
+# 单元 + 集成测试（tests/ 下 1,115 个集成测试文件，截至 2026-11-03）
 cargo test --lib
 cargo test --test cli_tests
 
@@ -296,4 +296,4 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 
 ---
 
-*最后更新：2026-10-30*
+*最后更新：2026-11-03*
