@@ -25,6 +25,16 @@
 //! -o dirnames on word `a` -> the two dirs only, and it beats
 //! -o default when both are set; -o plusdirs appends the dirs to a
 //! non-empty function result and fills an empty one; no -o -> [].
+//!
+//! Marking contract (rubash#2621, captain-amended): when filename
+//! semantics apply to an attempt — `-o filenames`, or a
+//! filename-sourced fallback (dirnames / plusdirs / default) fired —
+//! directory candidates in the returned list carry a trailing `/`.
+//! GNU readline performs this mark at insert time from
+//! `rl_filename_completion_desired` (pcomplete.c:1461-1462); this
+//! engine's candidate list is final for the host, so the engine
+//! materializes the mark itself and the host only consumes the list.
+//! Without filename semantics the candidates stay bare.
 
 use rubash::executor::Executor;
 use rubash::lexer::tokenize;
@@ -84,7 +94,7 @@ fn fixture(tag: &str) -> Fixture {
     run_script(
         &mut executor,
         &format!(
-            "cd {}\n_empty() {{ COMPREPLY=(); }}\n_two() {{ COMPREPLY=(zebra_one zebra_two); }}\nexport ZEBRA_VAR=1",
+            "cd {}\n_empty() {{ COMPREPLY=(); }}\n_two() {{ COMPREPLY=(zebra_one zebra_two); }}\n_dirs() {{ COMPREPLY=(appledir zebra_one); }}\nexport ZEBRA_VAR=1",
             dir.display()
         ),
     );
@@ -96,11 +106,12 @@ fn fixture(tag: &str) -> Fixture {
     }
 }
 
-// Candidate strings are bare names: the engine's path generators
-// never append a trailing slash (the host renders directory matches
-// with one), on this path exactly as on the no-compspec path.
-const FILENAMES: [&str; 4] = ["alpha.txt", "alpine.log", "appledir", "applydir"];
-const DIRS: [&str; 2] = ["appledir", "applydir"];
+// Candidate strings under filename semantics: files stay bare,
+// directories carry the trailing `/` mark (rubash#2621 — see the
+// header's marking contract). Every use of these two consts is a
+// filename-sourced fallback shape, so both are the marked forms.
+const FILENAMES: [&str; 4] = ["alpha.txt", "alpine.log", "appledir/", "applydir/"];
+const DIRS: [&str; 2] = ["appledir/", "applydir/"];
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
@@ -157,7 +168,7 @@ fn plusdirs_appends_directories_to_function_results() {
     let got = fx.complete("complete -o plusdirs -F _two mycmd", "mycmd ");
     assert_eq!(
         got,
-        strings(&["appledir", "applydir", "zebra_one", "zebra_two"]),
+        strings(&["appledir/", "applydir/", "zebra_one", "zebra_two"]),
         "plusdirs must append directories to non-empty results"
     );
     // The appended directories are word-filtered like the CA_DIRECTORY
@@ -241,7 +252,28 @@ fn default_option_respects_results_and_prefix() {
     let got = fx.complete("complete -o default -F _empty mycmd", "mycmd ap");
     assert_eq!(
         got,
-        strings(&["appledir", "applydir"]),
+        strings(&["appledir/", "applydir/"]),
         "-o default filenames must be prefix-filtered"
+    );
+}
+
+/// rubash#2621: `-o filenames` marks directory candidates returned
+/// by a generator (not just fallback-sourced ones); without the
+/// option the same generator output stays bare — the mark is gated
+/// on filename semantics, not unconditional.
+#[test]
+fn filenames_option_marks_generator_directory_candidates() {
+    let mut fx = fixture("filenames-opt");
+    let got = fx.complete("complete -o filenames -F _dirs mycmd", "mycmd ");
+    assert_eq!(
+        got,
+        strings(&["appledir/", "zebra_one"]),
+        "-o filenames must mark the directory candidate and only it"
+    );
+    let got = fx.complete("complete -F _dirs mycmd", "mycmd ");
+    assert_eq!(
+        got,
+        strings(&["appledir", "zebra_one"]),
+        "without -o filenames the candidates stay bare"
     );
 }
