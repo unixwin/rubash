@@ -553,6 +553,33 @@ impl Executor {
                 .unwrap_or_else(|_| word.to_string());
             &materialized
         };
+        // rubash#2706: the same pre-expansion marking the command-word
+        // path applies (expand_command_word): quoted segments' IFS
+        // chars and quoted expansion sites are marked from the raw
+        // word, so the walker's results split exactly where GNU's
+        // single walk would split them. The marking pass hands its
+        // input back unchanged when its quote-removal simulation does
+        // not reproduce the cooked word, so a procsub-materialized
+        // expand_input simply goes unmarked.
+        let marked;
+        let expand_input = match raw {
+            Some(raw) if for_word_has_unquoted_expansion(word, Some(raw)) => {
+                let ifs = self
+                    .shell_state
+                    .env_vars
+                    .get("IFS")
+                    .map(String::as_str)
+                    .unwrap_or("");
+                marked = super::command_prepare::mark_quoted_ifs_from_raw(
+                    raw,
+                    &super::command_prepare::mark_literal_ifs_chars(expand_input, ifs),
+                    ifs,
+                    self.posix_mode_enabled(),
+                );
+                &marked
+            }
+            _ => expand_input,
+        };
         let expanded = self.expand_word(expand_input);
         if for_word_has_unquoted_expansion(word, raw) {
             // Field splitting follows $IFS (builtins/eval.def word_list /
