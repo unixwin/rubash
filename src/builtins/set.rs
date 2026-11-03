@@ -438,6 +438,10 @@ pub(crate) fn print_shell_variables<W>(
 where
     W: Write,
 {
+    // GNU variables.c:1126-1142 print_var_value: the ansic ($'...')
+    // branch is taken only when posixly_correct == 0; POSIX mode falls
+    // to sh_single_quote with the raw bytes (audit B4-F11).
+    let posix_mode = shell_option_enabled(env_vars, "posix");
     let mut vars: Vec<(&String, &String)> = env_vars.iter().collect();
     vars.sort_by(|left, right| left.0.cmp(right.0));
 
@@ -498,7 +502,7 @@ where
                 )?;
                 continue;
             }
-            writeln!(stdout, "{}={}", name, shell_quote(value))?;
+            writeln!(stdout, "{}={}", name, shell_quote(value, posix_mode))?;
             continue;
         }
         // GNU variables.c:1096-1104 print_assignment: array and assoc cells
@@ -533,20 +537,22 @@ where
             )?;
             continue;
         }
-        writeln!(stdout, "{}={}", name, shell_quote(value))?;
+        writeln!(stdout, "{}={}", name, shell_quote(value, posix_mode))?;
     }
 
     Ok(())
 }
 
-fn shell_quote(value: &str) -> String {
+fn shell_quote(value: &str, posix_mode: bool) -> String {
     // GNU variables.c print_var_value: dollar-quote for values containing
     // non-printing characters (ansic_shouldquote), sh_single_quote for
     // values containing shell metacharacters (sh_contains_shell_metas),
     // bare otherwise. sh_single_quote special-cases a value that is
     // exactly one quote and prints it as backslash-quote (posix2.tests
-    // variable quoting 1/3).
-    if ansic_shouldquote(value) {
+    // variable quoting 1/3). The dollar-quote branch is gated on
+    // posixly_correct == 0 (variables.c:1131): POSIX mode single-quotes
+    // the raw value instead (audit B4-F11).
+    if !posix_mode && ansic_shouldquote(value) {
         return ansic_quote_value(value);
     }
     if !contains_shell_metas(value) {
