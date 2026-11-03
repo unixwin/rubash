@@ -88,7 +88,11 @@ pub(in crate::builtins) fn append_array_value(
         // re-encoded into the glob engine's escape model before globbing
         // (`declare -a x=("dir"/*.txt)` stores the matches); field-split
         // products carry quotes as DATA and skip the re-encoding.
-        if from_field_split || !token_is_subscript_assignment(&unquoted_token) {
+        // Scalar appends (`name+=word`, no parens) skip the glob branch
+        // and both [subscript] operator arms below: GNU binds the word to
+        // element 0 verbatim (see the executor-side append_array_value;
+        // assign_compound_array_list runs only for parenthesized values).
+        if !scalar_append && (from_field_split || !token_is_subscript_assignment(&unquoted_token)) {
             let glob_word = if from_field_split {
                 // A field-split product's quote characters are storage
                 // serialization DATA, so the glob gate must run on the
@@ -120,7 +124,7 @@ pub(in crate::builtins) fn append_array_value(
                 PathnameExpansion::Fail(pattern) => return Err(pattern),
             }
         }
-        if !from_field_split {
+        if !scalar_append && !from_field_split {
             if let Some((left, rhs)) = unquoted_token.split_once("+=") {
                 match array_assignment_index(left, &entries) {
                     ArrayAssignmentIndex::NegativeOutOfRange => {
@@ -301,6 +305,12 @@ pub(in crate::builtins) fn format_indexed_array_storage(
 /// (BTreeMap last-wins, same as every other reader); re-render only when
 /// the segment count exceeds the distinct count, so canonical mirrors keep
 /// printing byte-identical bytes to before.
+/// A3-F1: the same verbatim path also prints sparse out-of-order mirrors
+/// in insertion order (`a[5]=x; a[2]=y` -> `([5]="x" [2]="y")`), where
+/// GNU array.c:948 array_to_assign walks the element list in ascending
+/// index order. Re-render through the sorted BTreeMap exactly when the
+/// verbatim segment order is not ascending, so in-order mirrors still
+/// print byte-identical bytes.
 pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &str) -> String {
     let entries = indexed_array_entries(value);
     let inner = rendered
@@ -310,7 +320,37 @@ pub(in crate::builtins) fn fold_indexed_storage_dupes(value: &str, rendered: &st
     if inner.is_empty() {
         return rendered.to_string();
     }
-    if split_storage_words(inner).count() > entries.len() {
+    let mut next_implicit = 0usize;
+    let mut prev: Option<usize> = None;
+    let mut ascending = true;
+    for part in split_storage_words(inner) {
+        let index = match part.split_once('=') {
+            Some((left, _))
+                if left
+                    .strip_prefix('[')
+                    .and_then(|head| head.strip_suffix(']'))
+                    .and_then(|head| head.parse::<usize>().ok())
+                    .is_some() =>
+            {
+                let index = left[1..left.len() - 1].parse::<usize>().unwrap_or(0);
+                next_implicit = index + 1;
+                index
+            }
+            _ => {
+                let index = next_implicit;
+                next_implicit += 1;
+                index
+            }
+        };
+        if let Some(prev_index) = prev {
+            if index <= prev_index {
+                ascending = false;
+                break;
+            }
+        }
+        prev = Some(index);
+    }
+    if split_storage_words(inner).count() > entries.len() || !ascending {
         // The re-render carries the storage prefix for store-shape
         // consistency, but print output never shows it (the verbatim path
         // above strips it) — GNU prints `([i]="v" ...)`.

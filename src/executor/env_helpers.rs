@@ -49,15 +49,12 @@ pub(in crate::executor) fn exact_case_env_var(name: &str) -> Option<String> {
 /// environment entry as an exported shell variable, whatever the
 /// name's case — a lowercase `expected`/`http_proxy` set by the
 /// parent reaches the shell's children exactly like an uppercase
-/// one. The uppercase-first heuristic in is_initial_export_candidate
-/// exists only for executors constructed INSIDE a shared process
-/// (unit tests, embedded sessions), where the process environment
-/// accumulates other executors' shell-local mirror writes; a real
-/// shell process has one session and no such leak surface, so only
-/// rubash's internal transport names and bash-managed names stay
-/// unmarked there.
+/// one. Since rubash#2723 the embedded path
+/// (is_initial_export_candidate) applies the same rule, so both
+/// predicates are one: only rubash's internal transport names and
+/// bash-managed names stay unmarked.
 pub(in crate::executor) fn is_process_startup_export_candidate(name: &str) -> bool {
-    !(name.starts_with("__RUBASH_") || name.len() <= 1 || is_bash_managed_shell_var(name))
+    is_initial_export_candidate(name)
 }
 
 pub(in crate::executor) fn mark_initial_exported_vars(
@@ -92,18 +89,28 @@ pub(in crate::executor) fn initialize_shell_level(env_vars: &mut VarTable) {
 }
 
 pub(in crate::executor) fn is_initial_export_candidate(name: &str) -> bool {
-    // Test runs share one process environment; ignore shell-local names that
-    // previous Executor instances may have written there.
-    if name.starts_with("__RUBASH_") || name.len() <= 1 || is_bash_managed_shell_var(name) {
-        return false;
-    }
-    // GNU variables.c:3307 bind_invalid_envvar: an environment entry whose
-    // name is not a valid identifier never becomes a shell variable but
-    // stays in the export environment — `env 'v[0]=help' sh -c ...`
-    // propagates `v[0]` to the child (varenv13.sub). The uppercase-first
-    // heuristic for valid identifiers keeps shell-local names from
-    // leaking; invalid names could only have arrived via environ.
-    !is_shell_name(name) || name.as_bytes().first().is_some_and(u8::is_ascii_uppercase)
+    // GNU variables.c:368 initialize_shell_variables: EVERY environment
+    // entry that becomes a shell variable is bound with
+    // att_exported|att_imported (the ordinary-variable branch,
+    // variables.c:513-516), whatever the name's case or length — the
+    // environment's exported-ness is imported as-is. An earlier
+    // uppercase-first heuristic (plus a length<=1 exclusion) de-exported
+    // every lowercase-first name for executors constructed inside a
+    // shared process, on the theory that a sibling executor's shell-local
+    // mirror writes could accumulate in the process environment; that
+    // surface no longer exists — set_process_env mirrors only a fixed
+    // uppercase/internal whitelist (shell_assignment_needs_process_env),
+    // so no lowercase name in the environment can be a mirror write
+    // (rubash#2723: `http_proxy`, `my_var`, `x=1` reached GNU's children
+    // but not an embedded session's). What stays excluded is only what
+    // never came from the caller's environment at all: rubash's internal
+    // transport names and the bash-managed names the shell re-derives.
+    // GNU variables.c:3307 bind_invalid_envvar covers the invalid-name
+    // arm of the same rule: an entry whose name is not a valid
+    // identifier never becomes a shell variable but stays in the export
+    // environment — `env 'v[0]=help' sh -c ...` propagates `v[0]` to the
+    // child (varenv13.sub).
+    !(name.starts_with("__RUBASH_") || is_bash_managed_shell_var(name))
 }
 
 pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
@@ -249,4 +256,54 @@ pub(in crate::executor) fn write_local_export_env_values(
             .collect::<Vec<_>>()
             .join(DATA_DOLLAR_STR),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_with(names: &[&str]) -> VarTable {
+        let mut table = VarTable::default();
+        for name in names {
+            table.insert((*name).to_string(), "v".to_string());
+        }
+        table
+    }
+
+    /// rubash#2723: GNU initialize_shell_variables imports the
+    /// environment's exported-ness as-is (variables.c:513-516) — on the
+    /// EMBEDDED path (process_startup=false) as much as on the
+    /// standalone one. Lowercase-first, underscore-first and
+    /// single-character names are export candidates exactly like
+    /// uppercase ones; only rubash-internal transport names and
+    /// bash-managed names stay unmarked.
+    #[test]
+    fn initial_export_candidates_follow_gnu_import() {
+        for process_startup in [false, true] {
+            let mut table = table_with(&[
+                "http_proxy",
+                "my_var",
+                "_myvar",
+                "foo",
+                "x",
+                "PATH",
+                "__RUBASH_SESSION_SCOPE",
+                "SECONDS",
+                "PWD",
+            ]);
+            mark_initial_exported_vars(&mut table, process_startup);
+            for expected in ["http_proxy", "my_var", "_myvar", "foo", "x", "PATH"] {
+                assert!(
+                    table.is_marked(EXPORTED_VARS, expected),
+                    "{expected} must be marked exported (process_startup={process_startup})"
+                );
+            }
+            for excluded in ["__RUBASH_SESSION_SCOPE", "SECONDS"] {
+                assert!(
+                    !table.is_marked(EXPORTED_VARS, excluded),
+                    "{excluded} must stay unmarked (process_startup={process_startup})"
+                );
+            }
+        }
+    }
 }

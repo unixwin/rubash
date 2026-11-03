@@ -64,6 +64,7 @@ impl Executor {
         let mut stderr = Vec::new();
         let status = crate::builtins::times::execute_with_io(
             cmd.words[1..].iter().map(String::as_str),
+            &self.diagnostic_prefix(),
             &mut stdout,
             &mut stderr,
         )?;
@@ -370,7 +371,14 @@ impl Executor {
             queue.drain(mark..).collect()
         };
         if !drained.is_empty() {
-            let text = self.format_signal_notices(drained);
+            let (text, printed_pids) = self.format_signal_notices(drained);
+            // rubash#2698: a notice printed through the wait's own
+            // fd 2 is still a notification (jobs.c:4625) — mark the
+            // jobs it named (the waited job is also marked by the
+            // wait's own bookkeeping; the mark is idempotent).
+            for pid in printed_pids {
+                self.shell_state.job_table.mark_job_notified_by_pid(pid);
+            }
             if !text.is_empty() {
                 if result.is_ok() {
                     self.write_buffered_builtin_output(cmd, &[], text.as_bytes())?;
@@ -576,6 +584,7 @@ impl Executor {
                     JobOperandResolution::NoMatch => {
                         write_wait_operand_error(
                             operand,
+                            true,
                             &self.diagnostic_prefix(),
                             &self.error_prefix(),
                             &mut stderr,
@@ -837,6 +846,7 @@ impl Executor {
                         JobOperandResolution::Pid(_) | JobOperandResolution::NoMatch => {
                             write_wait_operand_error(
                                 operand,
+                                false,
                                 &self.diagnostic_prefix(),
                                 &self.error_prefix(),
                                 &mut stderr,
@@ -1004,6 +1014,7 @@ impl Executor {
                 JobOperandResolution::NoMatch => {
                     status = write_wait_operand_error(
                         &operand,
+                        false,
                         &self.diagnostic_prefix(),
                         &self.error_prefix(),
                         &mut stderr,
@@ -1046,6 +1057,7 @@ impl Executor {
                 WaitPidOutcome::NotFound => {
                     status = write_wait_operand_error(
                         &operand,
+                        false,
                         &self.diagnostic_prefix(),
                         &self.error_prefix(),
                         &mut stderr,
@@ -1316,7 +1328,26 @@ impl Executor {
     /// - background TERM/INT/PIPE or trapped deaths: silent.
     pub(crate) fn report_pending_signal_notices(&mut self) -> Result<(), ExecuteError> {
         let notices = std::mem::take(&mut *self.pending_signal_notices.borrow_mut());
-        let out = self.format_signal_notices(notices);
+        let (out, printed_pids) = self.format_signal_notices(notices);
+        // rubash#2698: record the notification on the job table —
+        // notify_of_job_status marks J_NOTIFIED as it prints, and
+        // cleanup_dead_jobs (including the pass inside a following
+        // `jobs` listing) retires a dead+notified entry. Without the
+        // mark the entry survived its own notice and `jobs` listed
+        // the death a second time.
+        for pid in printed_pids {
+            self.shell_state.job_table.mark_job_notified_by_pid(pid);
+        }
+        // rubash#2698 (second face): GNU's boundary step is
+        // notify_and_cleanup (jobs.c) — it deletes a notified dead job
+        // in the same pass that prints its notice, so a following
+        // `wait %1` resolves the jobspec against the live table and
+        // fails with "no such job" (127), while `wait <pid>` still
+        // finds the status through bgpids (completed_statuses, which
+        // cleanup_dead_jobs preserves). Marking without retiring left
+        // the jobspec resolvable and the late `wait %1` returned the
+        // death status a second time.
+        self.shell_state.job_table.cleanup_dead_jobs();
         if !out.is_empty() {
             crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
         }
@@ -1384,14 +1415,21 @@ impl Executor {
     /// report_pending_signal_notices prints them at the command
     /// boundary. Split out so execute_wait can route the notices ITS
     /// reap produced through the wait command's own fd-2 binding
-    /// (rubash#1303).
-    fn format_signal_notices(&self, notices: Vec<(u32, i32, String, bool)>) -> String {
+    /// (rubash#1303). Also returns the pids whose notice was actually
+    /// printed: printing a job's death notice IS its notification
+    /// (jobs.c:4625-4652 notify_of_job_status marks J_NOTIFIED as it
+    /// prints), and the callers record that mark so the next
+    /// cleanup_dead_jobs retires the entry (rubash#2698 — a killed
+    /// job whose notice had printed was still listed by `jobs`,
+    /// because the queue's print never reached the job table).
+    fn format_signal_notices(&self, notices: Vec<(u32, i32, String, bool)>) -> (String, Vec<u32>) {
         // Signal numbers are the invariant Linux/MSVC values (libc is a
         // unix-only dependency, and job_builtins.rs compiles on both).
         const SIGINT: i32 = 2;
         const SIGPIPE: i32 = 13;
         const SIGTERM: i32 = 15;
         let mut out = String::new();
+        let mut printed_pids = Vec::new();
         for (pid, signal, command, foreground) in notices {
             // jobs.c:4628-4638: INT is never reported; PIPE via
             // DONT_REPORT_SIGPIPE (config-top.h:46).
@@ -1414,16 +1452,20 @@ impl Executor {
                 out.push_str(&" ".repeat(padding));
                 out.push_str(&command);
                 out.push('\n');
+                printed_pids.push(pid);
             } else if foreground {
                 // Branch 2 (jobs.c:4640-4651): bare description + command.
                 out.push_str(&description);
                 out.push_str(&" ".repeat(padding));
                 out.push_str(&command);
                 out.push('\n');
+                printed_pids.push(pid);
             }
-            // Background TERM/trapped deaths print nothing.
+            // Background TERM/trapped deaths print nothing — and are
+            // NOT notified: their job stays listed until a listing or
+            // a wait reports it, exactly as in GNU.
         }
-        out
+        (out, printed_pids)
     }
 
     /// Per-command boundary reap of background children (GNU's
@@ -4834,11 +4876,13 @@ impl Executor {
         line: &str,
         cursor: usize,
     ) -> Option<crate::builtins::complete::CompgenDynamic> {
-        let (words, cur_idx, cur_word) = crate::builtins::complete::split_for_completion(
+        let split = crate::builtins::complete::split_for_completion(
             line,
             cursor,
             &crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars),
         );
+        let (words, cur_idx, cur_word) =
+            (split.words.clone(), split.cur_idx, split.cur_word.clone());
         let spec = crate::builtins::complete::resolve_compspec(
             &self.shell_state.completion_specs,
             &words,
@@ -4884,8 +4928,8 @@ impl Executor {
         if let Some(funcname) = spec.funcname.as_deref() {
             dynamic.function_candidates = self.run_completion_function_live(
                 funcname,
-                line,
-                cursor,
+                &split.segment_line,
+                split.segment_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -4896,8 +4940,8 @@ impl Executor {
         if let Some(command) = spec.command.as_deref() {
             dynamic.command_candidates = self.run_completion_command_live(
                 command,
-                line,
-                cursor,
+                &split.segment_line,
+                split.segment_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5354,6 +5398,7 @@ fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
 
 fn write_wait_operand_error<E>(
     operand: &str,
+    wait_any: bool,
     diagnostic_prefix: &str,
     error_prefix: &str,
     stderr: &mut E,
@@ -5367,6 +5412,17 @@ where
     }
 
     if !operand.is_empty() && operand.chars().all(|ch| ch.is_ascii_digit()) {
+        if wait_any {
+            // GNU builtins/wait.def set_waitlist: under `-n' operands are
+            // validated against the JOB TABLE, so a pid that is not a
+            // current job takes sh_badpid (builtins/common.c:234),
+            // not the wait_for_single_pid report (deep-audit B6-F4).
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}wait: `{operand}': not a pid or valid job spec"
+            )?;
+            return Ok(127);
+        }
         // GNU jobs.c:2753-2754 wait_for_single_pid JWAIT_PERROR: the
         // pid-not-a-child report is internal_error (error_prolog family),
         // so it honors gnu_errfmt while the sibling builtin_error lines

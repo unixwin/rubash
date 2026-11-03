@@ -332,6 +332,14 @@ pub(super) fn parse_case_command(
                 TokenKind::Pipe => {
                     // Pipe separates case patterns (not inside extglob)
                     if in_extglob == 0 {
+                        // rubash#2744: a `|' with no pattern word before
+                        // it — leading (`|a)') or doubled (`a||b)') —
+                        // starts no alternative: GNU's pattern_list
+                        // (parse.y:1225-1236) admits `|' only BETWEEN
+                        // words, and reports it as the unexpected token.
+                        if !current_pattern_has_token {
+                            return Some(case_pattern_error_node(tokens, start, i, "|"));
+                        }
                         patterns.push(current_pattern.clone());
                         raw_patterns.push(current_raw_pattern.clone());
                         pattern_separator_metadata.push(build_word_metadata(
@@ -347,6 +355,42 @@ pub(super) fn parse_case_command(
                         current_pattern.push('|');
                         current_raw_pattern.push_str(&tokens[i].raw);
                     }
+                }
+                // rubash#2744: `||' (and `&&') in pattern position is
+                // the shell operator token, not pattern text — GNU
+                // reports it (`case a in a||b)' names `||').
+                TokenKind::Or | TokenKind::And if in_extglob == 0 => {
+                    let blame = tokens[i].value.clone();
+                    return Some(case_pattern_error_node(tokens, start, i, &blame));
+                }
+                // rubash#2687: an unquoted `<`/`>' in pattern position
+                // is a redirection operator to GNU, not a literal —
+                // `case "a<" in a<*)' is a syntax error at the `<'. The
+                // token used to fall into the catch-all and be silently
+                // dropped, so the pattern quietly lost the character
+                // and matched as `a*'. A `<(`/`>(' pair is the one
+                // exception: a process substitution is a WORD in
+                // pattern position and is collected verbatim above the
+                // error (it expands like any other pattern word).
+                TokenKind::RedirectIn | TokenKind::RedirectOut if in_extglob == 0 => {
+                    if let Some((text, end)) = collect_pattern_procsub(tokens, i) {
+                        current_pattern.push_str(&text);
+                        current_raw_pattern.push_str(&text);
+                        i = end;
+                    } else {
+                        let blame = tokens[i].value.clone();
+                        return Some(case_pattern_error_node(tokens, start, i, &blame));
+                    }
+                }
+                TokenKind::Append
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::HereDoc
+                | TokenKind::HereString
+                    if in_extglob == 0 =>
+                {
+                    let blame = tokens[i].value.clone();
+                    return Some(case_pattern_error_node(tokens, start, i, &blame));
                 }
                 _ => {}
             }
@@ -501,6 +545,8 @@ pub(super) fn parse_case_command(
                         super::redirections::assign_heredoc_body(
                             &mut CommandNode::new(),
                             &mut ast,
+                            &mut [],
+                            &mut [],
                             body,
                             gather_line,
                             end_line,
@@ -614,6 +660,14 @@ fn pattern_error_line_text(tokens: &[Token], index: usize) -> String {
         if token.kind == TokenKind::Semicolon && token.line_break {
             continue;
         }
+        // HereDocBody tokens carry no source text of this physical
+        // line either: a real body lives on the following lines, and
+        // the synthetic end-of-input body is a lone marker byte
+        // (rubash#2687: blaming a `<<' in pattern position echoed a
+        // trailing \x1f from that token).
+        if token.kind == TokenKind::HereDocBody {
+            continue;
+        }
         // GNU y.error echoes the physical line verbatim (parse.y
         // report_syntax_error -> the saved shell_input_line), so keep the
         // original inter-token whitespace captured in `leading_ws` instead
@@ -705,6 +759,70 @@ fn case_near_error_node_text(
 
 fn build_keyword_metadata(token: &Token) -> Box<WordMetadata> {
     Box::new(build_word_metadata(0, &token.value, &token.raw))
+}
+
+/// The pattern-position syntax-error node (GNU parse.y pattern_list,
+/// parse.y:1225-1236): blame `blame_text` at `blame_index`, echo the
+/// offending line, and consume only through this case's `esac` so
+/// commands after the case stay separate units. Same channel as the
+/// extglob `(' and stray-`)' arms above (rubash#1641).
+fn case_pattern_error_node(
+    tokens: &[Token],
+    start: usize,
+    blame_index: usize,
+    blame_text: &str,
+) -> (CommandNode, usize) {
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|token| token.position);
+    command.logical_line = tokens.get(start).map(|token| token.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "{}{}{}",
+            blame_text,
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            tokens[blame_index].position
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        pattern_error_line_text(tokens, blame_index),
+    );
+    finish_compound_command(command, tokens, case_command_end_index(tokens, start))
+}
+
+/// Collect a process-substitution word starting at the redirect token
+/// `tokens[index]` (`<`/`>` directly followed by a glued `('), as
+/// verbatim pattern text. GNU reads `<(...)' as ONE word in pattern
+/// position — it is expanded like any pattern word, never a
+/// redirection (parse.y pattern_list admits WORD; the reader's
+/// process-substitution scan makes the group part of the word).
+/// Returns the verbatim text and the index of the closing `)' token.
+fn collect_pattern_procsub(tokens: &[Token], index: usize) -> Option<(String, usize)> {
+    let open = tokens.get(index + 1)?;
+    if !is_keyword(tokens, index + 1, "(") || !open.leading_ws.is_empty() {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut end = None;
+    for (offset, token) in tokens[index + 1..].iter().enumerate() {
+        if is_keyword(tokens, index + 1 + offset, "(") {
+            depth += 1;
+        } else if is_keyword(tokens, index + 1 + offset, ")") {
+            depth -= 1;
+            if depth == 0 {
+                end = Some(index + 1 + offset);
+                break;
+            }
+        }
+    }
+    let end = end?;
+    let mut text = tokens[index].raw.clone();
+    for token in &tokens[index + 1..=end] {
+        text.push_str(&token.leading_ws);
+        text.push_str(&token.raw);
+    }
+    Some((text, end))
 }
 
 fn collect_case_word(tokens: &[Token], index: usize) -> Option<(String, String, usize)> {

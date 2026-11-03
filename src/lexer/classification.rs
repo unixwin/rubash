@@ -416,7 +416,45 @@ pub(super) fn quoted_literal_tilde(raw: &str, value: &str) -> bool {
             // GNU parse.y keeps the escaped `~` CTLESC-protected, so no
             // tilde pass may touch it (rubash#1416: `echo \~/x` printed
             // $HOME/x because dequoting erased the only evidence).
-            || raw.starts_with("\\~"))
+            || raw.starts_with("\\~")
+            // rubash#2708: the general veto (tilde_prefix_is_quoted).
+            || tilde_prefix_is_quoted(raw))
+}
+
+/// GNU general.c:1210 bash_tilde_find_word + subst.c:11497-11512
+/// (expand_word_internal, case '~'): a tilde prefix is vetoed by ANY
+/// quote character (`\`, `'`, `"`) inside the prefix region, and a
+/// `~` that is not the raw word's first character never expands at
+/// all (the walk's '~' case requires sindex == 0). The cooked word
+/// has already lost the quote characters — `~''`, `''~` and `~` are
+/// the identical string by expansion time — so the verdict is
+/// computed here, where the raw word still exists, and carried
+/// in-band as QUOTED_WORD_PREFIX.
+fn tilde_prefix_is_quoted(raw: &str) -> bool {
+    let mut chars = raw.chars();
+    match chars.next() {
+        // The cooked leading `~` was itself quoted or escaped: it is
+        // not at the raw word's start in the sense subst.c requires
+        // (`''~`, `"~"`, `\~` — quote removal made it word-initial).
+        Some('\'') | Some('"') | Some('\\') => true,
+        Some('~') => {
+            // bash_tilde_find_word's scan, verbatim: the prefix ends
+            // at the first `/`, and a quote character before it
+            // returns *lenp == 0 (veto). The scan is deliberately
+            // naive — it does not skip $(...)/${...} units, so a
+            // quote inside a substitution in the region vetoes too
+            // (GNU bash 5.3.20: `~$(echo 'x')/y` keeps its tilde).
+            for ch in chars {
+                match ch {
+                    '/' => return false,
+                    '\\' | '\'' | '"' => return true,
+                    _ => {}
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 /// True when an assignment's raw RHS begins with a backslash-quoted tilde

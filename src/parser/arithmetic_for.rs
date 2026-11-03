@@ -148,6 +148,19 @@ pub(super) fn parse_arithmetic_for_command(
         if !is_keyword(tokens, i, "done") {
             return None;
         }
+        // GNU grammar: a loop body is a compound_list, which cannot be
+        // empty — `for ((...)); do done` is a syntax error at `done`,
+        // exactly like the while/until/for-in forms. The body filter
+        // below drops empty commands, so without this guard an all-
+        // separator body silently parsed as an empty loop (audit A1 F14).
+        let body_slice = &tokens[body_start..i];
+        if body_slice
+            .iter()
+            .all(|token| token.kind == TokenKind::Semicolon)
+            && parse_arithmetic_for_body_commands(body_slice).is_empty()
+        {
+            return None;
+        }
         let end_keyword = Some(tokens[i].value.clone());
         let end_keyword_metadata = Some(build_keyword_metadata(&tokens[i]));
 

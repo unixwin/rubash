@@ -534,7 +534,14 @@ pub(super) fn parse_function_command_with_diagnostic(
         // `while` / `for` / `case` are legal bodies). Falling through to a
         // simple command named `function' ran `function: command not
         // found' with rc=0 instead (rubash#302 family).
-        if keyword_form
+        // rubash#2748: a REDIRECTION in body position is the same
+        // rejection — function_def admits redirections only AFTER the
+        // body (function_body: shell_command [redirection_list]), so
+        // `function f > /dev/null' names the operator (an fd-led form
+        // names the fd digit, matching near_blame_text's rule). The
+        // commitment is the same for the `name ()' form without the
+        // `function' keyword: `f() > /dev/null { ...; }' names `>' too.
+        if (keyword_form || has_parentheses)
             && matches!(
                 body_token.kind,
                 TokenKind::Word
@@ -542,13 +549,34 @@ pub(super) fn parse_function_command_with_diagnostic(
                     | TokenKind::Assignment
                     | TokenKind::CommandSubst
                     | TokenKind::BraceExpand
+                    | TokenKind::RedirectIn
+                    | TokenKind::RedirectOut
+                    | TokenKind::Append
+                    | TokenKind::RedirectErr
+                    | TokenKind::RedirectErrAppend
+                    | TokenKind::HereDoc
+                    | TokenKind::HereString
             )
         {
+            let blame = if matches!(
+                body_token.kind,
+                TokenKind::RedirectIn
+                    | TokenKind::RedirectOut
+                    | TokenKind::Append
+                    | TokenKind::RedirectErr
+                    | TokenKind::RedirectErrAppend
+                    | TokenKind::HereDoc
+                    | TokenKind::HereString
+            ) {
+                near_blame_text(body_token)
+            } else {
+                body_token.value.clone()
+            };
             let mut command = CommandNode::new();
             command.line = Some(body_token.position);
             command.insert_assignment(
                 "__RUBASH_PARSE_ERROR__".to_string(),
-                format!("unexpected token `{}'", body_token.value),
+                format!("unexpected token `{blame}'"),
             );
             if let Some(text) = diagnostic_text {
                 if let Some(source) = body_token
@@ -986,7 +1014,8 @@ fn parse_function_compound_body(
         "time" => None,
         "for" => parse_for_command(tokens, start, None, 0),
         "if" => parse_if_command_standalone(tokens, start, None, 0),
-        "while" | "until" => parse_loop_command(tokens, start, None, 0),
+        "while" | "until" => parse_loop_command(tokens, start, None, 0)
+            .map(|(command, next, _unclaimed)| (command, next)),
         "case" => parse_case_command(tokens, start, None, 0),
         "select" => parse_select_command(tokens, start, None, 0),
         "coproc" => parse_coproc_command(tokens, start),

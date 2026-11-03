@@ -866,10 +866,12 @@ impl Executor {
         let cooked = self.expand_conditional_word(operand);
         let rewritten = self.rewrite_conditional_v_operand(&cooked, arrayref, raw)?;
 
-        Ok(crate::builtins::test::variable_is_set(
-            &rewritten,
-            &self.shell_state.env_vars,
-        ))
+        // rubash#2710: same frame-array plumbing as execute_test_words —
+        // a carrier operand adjudicates against the composed array.
+        let base = rewritten.split('[').next().unwrap_or(&rewritten);
+        let overlaid_env = self.env_with_frame_arrays(&[base]);
+        let env_vars = overlaid_env.as_ref().unwrap_or(&self.shell_state.env_vars);
+        Ok(crate::builtins::test::variable_is_set(&rewritten, env_vars))
     }
 
     pub(super) fn conditional_string_unary(&mut self, op: &str, operand: &str) -> bool {

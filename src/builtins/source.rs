@@ -164,8 +164,23 @@ where
     }
 
     if is_null_device(filename) {
-        executor.set_exit_code(0);
-        return Ok(());
+        // GNU treats the null device as an ordinary empty file here:
+        // source.def hands the name to source_file, evalfile.c opens and
+        // reads it (immediate EOF), and source_file STILL runs the
+        // RETURN trap on completion (builtins/evalfile.c:395
+        // run_return_trap). Returning early skipped that whole tail —
+        // no RETURN-trap fire, no source frame, no positional save for
+        // `. /dev/null args` (audit B3-F01). Route the empty text
+        // through the same machinery a real empty file takes; the
+        // spelling itself cannot be opened as a filesystem path on
+        // Windows, which is what the early return originally served.
+        return execution::execute_text_maybe_redirected(
+            executor,
+            "",
+            invocation.args,
+            redirect_cmd,
+            Some(filename),
+        );
     }
 
     if filename == "echo" {
@@ -234,6 +249,11 @@ where
                             Ok(_) => crate::script_driver::bytes_to_script_text(&buffer),
                             Err(_) => {
                                 executor.set_exit_code(1);
+                                // Audit B3-F01: a failed read of the
+                                // sourced stream is an evalfile_internal
+                                // failure return — the RETURN trap still
+                                // runs (evalfile.c:395).
+                                run_source_failure_return_trap(executor)?;
                                 return Ok(());
                             }
                         }
@@ -285,6 +305,15 @@ where
         if executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
             return Err(ExecuteError::ExitCode(1));
         }
+        // Audit B3-F01: this arm is reached with a produced filename
+        // (the word itself under GNU's cwd fallback) unless the search
+        // itself produced none — a `-p` miss is GNU's filename == 0
+        // outcome, which returns before source_file and never fires;
+        // every other miss still ends in evalfile's failed open and
+        // source_file's run_return_trap (evalfile.c:395).
+        if invocation.path.is_none() {
+            run_source_failure_return_trap(executor)?;
+        }
         return Ok(());
     };
 
@@ -323,6 +352,10 @@ where
             if executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
                 return Err(ExecuteError::ExitCode(1));
             }
+            // Audit B3-F01: a found-but-unreadable file is an
+            // evalfile_internal failure return — source_file still
+            // runs the RETURN trap (evalfile.c:395).
+            run_source_failure_return_trap(executor)?;
             return Ok(());
         }
     };
@@ -344,6 +377,10 @@ where
                 executor.diagnostic_prefix()
             )?;
             executor.set_exit_code(126);
+            // Audit B3-F01: the binary refusal is an evalfile_internal
+            // return like any other — source_file's run_return_trap
+            // still runs (evalfile.c:395).
+            run_source_failure_return_trap(executor)?;
             return Ok(());
         }
     };
@@ -359,6 +396,31 @@ where
 
 fn is_null_device(path: &str) -> bool {
     crate::executor::path::is_shell_null_device(path)
+}
+
+/// Audit B3-F01: the RETURN-trap tail for the source builtin's
+/// FAILURE completions. GNU reaches source_file whenever a filename
+/// was produced (builtins/source.def: the word itself under the cwd
+/// fallback, or a found path), and source_file runs the RETURN trap
+/// after evalfile_internal returns on ANY outcome — an open/read
+/// failure and the binary-file refusal included (builtins/evalfile.c:
+/// 395). The entry DEBUG trap is snapshotted first and restored
+/// after, exactly as on the executed path (source.def:209-217's
+/// unwind protect pops after source_file returns), so the trap
+/// action runs with the entry DEBUG trap suppressed.
+fn run_source_failure_return_trap(executor: &mut Executor) -> Result<(), ExecuteError> {
+    if !executor.return_trap_in_scope() {
+        return Ok(());
+    }
+    let functrace = crate::builtins::set::shell_option_enabled(&executor.env_vars(), "functrace");
+    let saved_entry_debug_trap = if functrace {
+        None
+    } else {
+        executor.source_entry_debug_trap_save()
+    };
+    let result = executor.run_return_trap();
+    executor.source_exit_debug_trap_restore(saved_entry_debug_trap);
+    result
 }
 
 /// GNU builtins/evalfile.c:184-212 (evalfile_internal): when the sourced

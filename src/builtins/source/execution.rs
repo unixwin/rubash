@@ -559,7 +559,21 @@ fn execute_source_with_args(
     // unwind-protect ordering. The source nesting level is still held
     // while the trap action runs; it drops right after (the early-return
     // shape keeps the decrement on every path).
-    let return_trap_result = if executor.return_trap_in_scope() {
+    //
+    // Audit B3-F01: the fire belongs to source_file's RETURN, so it is
+    // gated on the completion class — an `exit` inside the file unwinds
+    // with jump_to_top_level (EXITPROG) and never reaches evalfile.c:395,
+    // while plain completion, a top-level `return`, a DISCARD-class
+    // expansion failure (parse_and_execute's local catch returns
+    // ordinarily), and a syntax error (evalstring.c:585-606 returns
+    // EX_BADUSAGE as an ordinary value) all do.
+    let completes_as_return = match &result {
+        Ok(()) => true,
+        Err(ExecuteError::Return(_)) | Err(ExecuteError::ExpansionFailure(_)) => true,
+        Err(ExecuteError::ExitCode(_)) => executor.parse_error_pending(),
+        _ => false,
+    };
+    let return_trap_result = if completes_as_return && executor.return_trap_in_scope() {
         Some(executor.run_return_trap())
     } else {
         None

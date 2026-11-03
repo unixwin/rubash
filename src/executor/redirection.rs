@@ -2935,6 +2935,52 @@ impl Executor {
                         .fds
                         .insert(fd, OutputTarget::SharedFile(file_fd.clone()));
                 }
+                // rubash#2691: the source descriptor HAS a write
+                // endpoint, just not one the arms above re-open — a
+                // pipe, the process stdio channels, a coproc feed, the
+                // symbolic devices. GNU's spelling open is the plain
+                // open() of the magic link (redir.c:725 redir_open);
+                // for a non-regular-file description the fresh open
+                // lands on the same endpoint a dup would share (a
+                // pipe's write end, the terminal, the capture), so
+                // the open SUCCEEDS and binds the endpoint's walk-level
+                // twin — the same mapping command_output_fd_state
+                // seeds for dup sources. Only a descriptor with NO
+                // write side at all reaches the ENOENT arm below
+                // (`>&/dev/fd/1` with fd 1 a capture pipe failed
+                // ENOENT here while GNU wrote through the pipe).
+                Some(FdWriteEndpoint::Stdout) => {
+                    let bound = if fd == 1 {
+                        OutputTarget::Stdout
+                    } else if let Some(record) =
+                        self.fd_table.stdout_alias_generation.get(&source_fd)
+                    {
+                        OutputTarget::ProcessStdoutAt(*record)
+                    } else {
+                        OutputTarget::ProcessStdout
+                    };
+                    state.fds.insert(fd, bound);
+                }
+                Some(FdWriteEndpoint::Stderr) => {
+                    let bound = if fd == 2 {
+                        OutputTarget::Stderr
+                    } else {
+                        OutputTarget::ProcessStderr
+                    };
+                    state.fds.insert(fd, bound);
+                }
+                Some(FdWriteEndpoint::CoprocStdin { pid, .. }) => {
+                    state.fds.insert(fd, OutputTarget::CoprocStdin(pid));
+                }
+                Some(FdWriteEndpoint::FullDevice) => {
+                    state.fds.insert(fd, OutputTarget::FullDevice);
+                }
+                Some(FdWriteEndpoint::ProcContentWrite) => {
+                    state.fds.insert(fd, OutputTarget::ProcContentWrite);
+                }
+                Some(FdWriteEndpoint::PipeChannel(input)) => {
+                    state.fds.insert(fd, OutputTarget::PipeChannel(input));
+                }
                 _ => {
                     // rubash#1871: the diagnostic names the EXPANDED
                     // target — this arm is an open() failure on the

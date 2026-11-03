@@ -1095,6 +1095,15 @@ pub struct Executor {
     /// the new cell), not as a fresh empty local. Tracked as a stack of the
     /// bound names so nested commands restore correctly.
     tempenv_names: Vec<String>,
+    /// Raised for the duration of apply_temporary_assignments' bind
+    /// loop (rubash#2720): a tempenv bind creates a NEW plain cell in
+    /// the command's temporary environment (GNU variables.c
+    /// assign_in_env), never a bind of the global dynamic cell, so the
+    /// dynamic assignment hooks in apply_shell_assignment_inner (the
+    /// SECONDS offset, the RANDOM seed, the noassign swallows) must
+    /// stand down while it is up — the name joins tempenv_names only
+    /// after its bind lands, too late for the hooks to consult it.
+    applying_temporary_assignments: bool,
     /// Frame marks pairing apply_temporary_assignments /
     /// restore_temporary_assignments so nested commands truncate the
     /// tempenv-name stack to the boundary recorded by the outer call.

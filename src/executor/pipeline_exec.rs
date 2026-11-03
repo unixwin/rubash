@@ -5159,6 +5159,18 @@ impl Executor {
         // flags.c:257. (lastpipe's last element keeps the variable —
         // it IS the current shell.)
         let saved_job_control = self.shell_state.job_control.replace(false);
+        // rubash#2694: the same fork argument for the PROCESS umask.
+        // The element runs in place on this process, so a `umask`
+        // executed inside the element re-masks the parent shell
+        // itself; GNU's element child (execute_cmd.c:2620
+        // execute_pipeline -> execute_simple_command in the fork)
+        // takes its mask changes to its grave. Bracket the process
+        // mask like the generator above — the command-substitution
+        // boundary (InteriorSnapshot::process_umask) and the `( )`
+        // boundary (fork_saved_process_umask) already carry this
+        // half; the pipeline-stage path was the one boundary missing
+        // it, so `umask 077 | cat` leaked 0077 into the parent.
+        let saved_process_umask = crate::builtins::umask::snapshot_process_umask();
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -5456,6 +5468,10 @@ impl Executor {
             .set(saved_login_cleared);
         // rubash#2487: the element's job-control erasure dies with it.
         self.shell_state.job_control.set(saved_job_control);
+        // rubash#2694: the element's process-umask changes die with it.
+        if let Some(mask) = saved_process_umask {
+            crate::builtins::umask::apply_process_umask(mask);
+        }
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;
         self.shell_state.this_builtin_class = saved_builtin_classes.0;

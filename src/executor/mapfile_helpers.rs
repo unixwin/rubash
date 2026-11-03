@@ -630,6 +630,18 @@ impl Executor {
                 // same fd must see exactly the unconsumed bytes.
                 source.sync_offset();
                 self.execute_mapfile_callback(callback, target, &record, cmd)?;
+                // A3-F4: GNU mapfile.def:142-218 re-looks-up the array
+                // after run_callback ("Bad things can happen if the
+                // callback modifies ENTRY... so we look it up again
+                // every time"), so a callback that resets or unsets
+                // the target array is observed, not clobbered by the
+                // driver's local entry map at the final render.
+                entries = self
+                    .shell_state
+                    .env_vars
+                    .get(name)
+                    .map(|current| indexed_array_entries(current))
+                    .unwrap_or_default();
             }
             let previous_max = entries.keys().next_back().copied();
             entries.insert(target, record.clone());
@@ -712,7 +724,7 @@ impl Executor {
     /// redirects staged for another fd, command string input, text /
     /// process-substitution endpoints) are drained and pre-split, and
     /// even those fire their callbacks between records.
-    fn mapfile_record_source(
+    pub(in crate::executor) fn mapfile_record_source(
         &mut self,
         cmd: &CommandNode,
         read_fd: Option<u32>,
@@ -754,6 +766,26 @@ impl Executor {
                     // fails the same read and moves on, as the slurp
                     // path does.
                 }
+            }
+        }
+        // A command with no stdin staging of its own reads the fd-0
+        // endpoint the shell currently holds (an `exec 0<file`
+        // binding, a pipeline stage's pipe): when that endpoint is a
+        // real handle, pull from it incrementally instead of
+        // materializing it whole through the stdin-string snapshot
+        // below — the snapshot drains the shared stream, so even a
+        // bounded reader starves the next command on the same fd.
+        if cmd.redirect_in.is_none()
+            && cmd.heredoc.is_none()
+            && cmd.here_string.is_none()
+            && cmd.heredoc_redirects.is_empty()
+            && matches!(
+                self.fd_table.read_endpoint(0),
+                Some(FdReadEndpoint::File(_) | FdReadEndpoint::CoprocStdout { .. })
+            )
+        {
+            if let Some(source) = self.mapfile_endpoint_source(0, delimiter, trim_newline) {
+                return Some(source);
             }
         }
         if let Some(input) = self.stdin_string_for_command_mut(cmd) {
@@ -803,7 +835,7 @@ fn mapfile_single_quote(value: &str) -> String {
 }
 
 /// Record stream for the callback form of mapfile (rubash#1586).
-enum MapfileRecordSource {
+pub(in crate::executor) enum MapfileRecordSource {
     /// Already-materialized input, pre-split in the shell-text domain.
     Values(std::vec::IntoIter<String>),
     /// Incremental pull in the raw-byte domain.
@@ -873,14 +905,18 @@ impl MapfileRecordSource {
         }
     }
 
-    fn next_record(&mut self, delimiter: u8, trim_newline: bool) -> Option<String> {
+    pub(in crate::executor) fn next_record(
+        &mut self,
+        delimiter: u8,
+        trim_newline: bool,
+    ) -> Option<String> {
         match self {
             MapfileRecordSource::Values(values) => values.next(),
             MapfileRecordSource::Pull(puller) => puller.next_record(delimiter, trim_newline),
         }
     }
 
-    fn sync_offset(&mut self) {
+    pub(in crate::executor) fn sync_offset(&mut self) {
         if let MapfileRecordSource::Pull(puller) = self {
             puller.sync_offset();
         }
@@ -908,7 +944,7 @@ enum MapfilePullSource {
 /// offset back to the consumed boundary — over-read bytes stay
 /// valid in `buffer`, and `next_fill_offset` makes the next fill
 /// skip the overlap it re-reads.
-struct MapfileRecordPuller {
+pub(in crate::executor) struct MapfileRecordPuller {
     source: MapfilePullSource,
     buffer: Vec<u8>,
     eof: bool,
