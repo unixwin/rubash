@@ -154,6 +154,80 @@ impl InvocationShape {
     }
 }
 
+/// Which top-level unwind ended a run, as the engine's driver
+/// adjudicated it (unixwin/niubash#863 GAP-1). GNU's
+/// parse_and_execute catches both unwind classes at its own
+/// setjmp and re-raises them into the reader's top level
+/// (evalstring.c:396-403, :618-619); a host driving a live
+/// shell must honor both, but they are not the same class —
+/// [`Flow`] folds the errexit break into
+/// [`Flow::Completed`], so this decomposition is the only
+/// contract surface that separates them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RunUnwind {
+    /// A real `exit` jump (or a fatal function error's)
+    /// ended the run; [`RunOutcome::status`] is the jump's
+    /// own status. A jump riding a parse error is a reader
+    /// discard, not this class (evalstring.c:585-601).
+    ExitJump,
+    /// The errexit break ended the run: a command failed
+    /// under `set -e` outside every exemption — including a
+    /// failed parse status tripping the same predicate.
+    /// [`RunOutcome::status`] is the failing status.
+    ErrexitBreak,
+}
+
+/// How a run was classified by the engine's drivers, as
+/// values (unixwin/niubash#863 GAP-1): the classification
+/// hosts used to re-derive from the executor's pendings
+/// (`take_parse_error`, `take_exit_jump_pending`,
+/// `take_signal_discard_pending`, `last_command_inverted`)
+/// after every run. Every field is a verdict the driver
+/// itself computed for this run — the session layer reports
+/// them, it does not recompute them.
+///
+/// `#[non_exhaustive]` so the reported set can grow within a
+/// minor version, exactly as [`RunOutcome`]'s can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct RunClassification {
+    /// The run's terminal unit ended on a parse error. On
+    /// its own this is GNU's DISCARD class — the failing unit
+    /// is dropped and the session lives (evalstring.c:585-601)
+    /// — unless the errexit verdict also fired (`unwind`).
+    pub parse_error: bool,
+    /// A signal DISCARD was the run's terminal class: an
+    /// untrapped signal death whose status the run already
+    /// carries, consumed by the session at the run's end so
+    /// it cannot leak into the next run's accounting.
+    /// Populated by `run`/`run_line`; the stdin routes leave
+    /// the mark to their callers and report `false`.
+    pub signal_discard: bool,
+    /// The executor's exit-jump pending stood at the run's
+    /// terminal unit, raw: it can stand alongside
+    /// `parse_error`, in which case the jump was a reader
+    /// discard and did not count — `unwind` carries the
+    /// adjudicated form.
+    pub exit_jump: bool,
+    /// The driver's errexit verdict for the terminal unit:
+    /// nonzero status, errexit in effect, and the `!`
+    /// inversion exemption (execute_cmd.c:652-656,
+    /// CMD_IGNORE_RETURN) not applying. Populated on the
+    /// grouped route, whose driver computes the verdict; the
+    /// line-offset route's drivers compute none and report
+    /// `false`.
+    pub errexit_break: bool,
+    /// The run's last command carried the `!` inversion
+    /// (the input to the execute_cmd.c:652-656 exemption).
+    pub last_inverted: bool,
+    /// Which unwind ended the run, if one did — the grouped
+    /// driver's own decomposition of its stop bool. The
+    /// reader-batch host rule is: end the session iff
+    /// `unwind.is_some()`, with [`RunOutcome::status`].
+    pub unwind: Option<RunUnwind>,
+}
+
 /// What a run produced (§5.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -166,6 +240,10 @@ pub struct RunOutcome {
     /// publication step this is empty for `run()` — see
     /// [`Diagnostic`]'s production boundary.
     pub diagnostics: Vec<Diagnostic>,
+    /// The run's classification (GAP-1): the driver's own
+    /// verdicts, including the exit-jump vs errexit-break
+    /// decomposition [`Flow`] folds away.
+    pub classification: RunClassification,
 }
 
 /// What [`Session::close_with_report`] reports (the close
@@ -347,17 +425,18 @@ impl Session {
             || script_driver::heredoc_delimiter_unclosed_quote(source).is_some();
         let alias_live =
             self.executor.alias_expansion_enabled() && !self.executor.aliases_snapshot().is_empty();
-        let (status, flow) = if !unclosed
+        let (status, flow, mut classification) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)
                 || script_driver::script_uses_aliases(source, alias_live))
         {
-            let (status, unwound) = script_driver::run_script_with_history_at_line_offset_tracked(
-                &mut self.executor,
-                source,
-                options.line_offset,
-                None,
-            );
+            let (status, unwound, facts) =
+                script_driver::run_script_with_history_at_line_offset_classified(
+                    &mut self.executor,
+                    source,
+                    options.line_offset,
+                    None,
+                );
             // The grouped driver consumes the jump flags and
             // reports one stop bool that conflates a real exit
             // with the errexit break; separate them with the
@@ -366,7 +445,11 @@ impl Session {
             // boundary, inherited from the driver's
             // classification: a run that both requests exit
             // with a nonzero status and satisfies the errexit
-            // predicate resolves to the errexit arm.
+            // predicate resolves to the errexit arm. The
+            // outcome's `classification` (GAP-1) carries the
+            // driver's own decomposition alongside, so a host
+            // that needs the two classes apart reads it there
+            // instead of re-deriving them.
             let errexit_stop = status != 0
                 && script_driver::stdin_script_errexit_enabled(&self.executor)
                 && !self.executor.last_command_inverted();
@@ -375,7 +458,21 @@ impl Session {
             } else {
                 Flow::Completed
             };
-            (status, flow)
+            let classification = RunClassification {
+                parse_error: facts.parse_error,
+                signal_discard: false,
+                exit_jump: facts.exit_jump,
+                errexit_break: facts.errexit_stop,
+                last_inverted: facts.last_inverted,
+                unwind: match facts.stop {
+                    Some(script_driver::GroupedRunStop::ExitJump) => Some(RunUnwind::ExitJump),
+                    Some(script_driver::GroupedRunStop::ErrexitBreak) => {
+                        Some(RunUnwind::ErrexitBreak)
+                    }
+                    None => None,
+                },
+            };
+            (status, flow, classification)
         } else {
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
@@ -386,12 +483,14 @@ impl Session {
                 source_name.as_deref(),
             );
             let outcome = self.outcome_after_driver(status);
-            (outcome.status, outcome.flow)
+            (outcome.status, outcome.flow, outcome.classification)
         };
         // A signal DISCARD the run ended on is the run's own
         // bookkeeping (its status already reflects it); consume
-        // it so it cannot leak into the next run's accounting.
-        let _ = self.executor.take_signal_discard_pending();
+        // it so it cannot leak into the next run's accounting —
+        // and record it on the outcome's classification (GAP-1),
+        // the value hosts used to take from the executor by hand.
+        classification.signal_discard = self.executor.take_signal_discard_pending();
         let elapsed = started.elapsed();
 
         if let Some(events) = self.events.as_mut() {
@@ -431,6 +530,7 @@ impl Session {
             status,
             flow,
             diagnostics: Vec::new(),
+            classification,
         })
     }
 
@@ -443,6 +543,9 @@ impl Session {
                 status: self.executor.last_exit_code(),
                 flow: Flow::Completed,
                 diagnostics: Vec::new(),
+                // A history-expansion discard: nothing ran, so
+                // no run classification was adjudicated.
+                classification: RunClassification::default(),
             }),
             PreparedLine::Execute(text) => self.run(
                 &text,
@@ -555,6 +658,31 @@ impl Session {
     /// ran.
     pub fn run_prompt_command(&mut self) -> Option<i32> {
         self.executor.execute_prompt_command()
+    }
+
+    /// Drain the executor's classification pendings as one
+    /// value (unixwin/niubash#863 GAP-1), for the session
+    /// operations that return no [`RunOutcome`] — above all
+    /// [`Session::run_prompt_command`], whose text runner
+    /// re-arms the exit jump (rubash#433) for the reader to
+    /// honor, and which hosts used to poll through the
+    /// executor's `take_exit_jump_pending` by hand.
+    ///
+    /// This is the raw flag set exactly as the executor holds
+    /// it — the same takes, lifted onto the contract; nothing
+    /// is adjudicated here. `errexit_break` and `unwind` are
+    /// driver verdicts and are only populated on
+    /// [`RunOutcome::classification`]; a drain reports them
+    /// unset.
+    pub fn take_classification(&mut self) -> RunClassification {
+        RunClassification {
+            parse_error: self.executor.take_parse_error(),
+            signal_discard: self.executor.take_signal_discard_pending(),
+            exit_jump: self.executor.take_exit_jump_pending(),
+            errexit_break: false,
+            last_inverted: self.executor.last_command_inverted(),
+            unwind: None,
+        }
     }
 
     // ----------------------------------------------------------
@@ -846,6 +974,7 @@ impl Session {
                 status: self.executor.last_exit_code(),
                 flow: Flow::Completed,
                 diagnostics: Vec::new(),
+                classification: RunClassification::default(),
             });
         }
         let files = self.startup_files_for(class);
@@ -857,6 +986,20 @@ impl Session {
                     status,
                     flow: Flow::ExitRequested(status),
                     diagnostics: Vec::new(),
+                    // The chain's own adjudication, recorded as
+                    // it is made: the file's jump stood and ends
+                    // the chain (per-file parse errors were
+                    // consumed as discards inside
+                    // source_one_startup_file and are not this
+                    // outcome's terminal class).
+                    classification: RunClassification {
+                        parse_error: false,
+                        signal_discard: false,
+                        exit_jump: true,
+                        errexit_break: false,
+                        last_inverted: self.executor.last_command_inverted(),
+                        unwind: Some(RunUnwind::ExitJump),
+                    },
                 });
             }
         }
@@ -864,6 +1007,7 @@ impl Session {
             status,
             flow: Flow::Completed,
             diagnostics: Vec::new(),
+            classification: RunClassification::default(),
         })
     }
 
@@ -951,12 +1095,21 @@ impl Session {
     /// run's pending jump is the reader discard, not an exit
     /// (the startup-file rule of rubash#1158, applied to every
     /// driver route); a real exit jump becomes
-    /// [`Flow::ExitRequested`].
+    /// [`Flow::ExitRequested`]. The outcome's classification
+    /// (GAP-1) records the same two reads: the raw jump stands
+    /// in `exit_jump` even on the parse arm, while `unwind`
+    /// carries the adjudicated form (a discarded jump is no
+    /// unwind). These routes' drivers compute no errexit
+    /// verdict, so `errexit_break` reports false — the stdin
+    /// feeder's own stop rule derives its errexit arm from the
+    /// status, the options substance, and `last_inverted`,
+    /// all of which this value carries.
     fn outcome_after_driver(&mut self, status: i32) -> RunOutcome {
-        let flow = if self.executor.take_parse_error() {
-            self.executor.take_exit_jump_pending();
+        let parse_error = self.executor.take_parse_error();
+        let exit_jump = self.executor.take_exit_jump_pending();
+        let flow = if parse_error {
             Flow::Completed
-        } else if self.executor.take_exit_jump_pending() {
+        } else if exit_jump {
             Flow::ExitRequested(status)
         } else {
             Flow::Completed
@@ -965,6 +1118,18 @@ impl Session {
             status,
             flow,
             diagnostics: Vec::new(),
+            classification: RunClassification {
+                parse_error,
+                signal_discard: false,
+                exit_jump,
+                errexit_break: false,
+                last_inverted: self.executor.last_command_inverted(),
+                unwind: if !parse_error && exit_jump {
+                    Some(RunUnwind::ExitJump)
+                } else {
+                    None
+                },
+            },
         }
     }
 

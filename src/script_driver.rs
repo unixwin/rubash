@@ -229,6 +229,65 @@ pub fn run_script_with_history_at_line_offset(
     run_script_with_history_at_line_offset_tracked(executor, contents, line_offset, redirect_cmd).0
 }
 
+/// Which top-level unwind ended a grouped run, as adjudicated
+/// where the run's stop bool is computed (in
+/// `run_script_grouped_at_line_offset`). The parse-error
+/// interaction is folded in there and only there: a jump riding
+/// a parse error is a reader discard (evalstring.c:585-601),
+/// not an exit, so it never reports as [`GroupedRunStop::ExitJump`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupedRunStop {
+    /// A real `exit`/FatalFunctionError jump ended the run —
+    /// the driver's `exit_jump && !parse_error` arm, or the
+    /// DE-06 stop-loop unwind that replaces the run's pending
+    /// classification with its own exit. GNU's parse_and_execute
+    /// catches EXITPROG at its setjmp and re-raises it into the
+    /// reader's top level (evalstring.c:396-403, :618-619).
+    ExitJump,
+    /// The errexit break ended the run: the terminal group's
+    /// status was nonzero with errexit in effect and the
+    /// inversion exemption did not apply — GNU's ERREXIT unwind
+    /// (evalstring.c:387-393, :618-619), which propagates even
+    /// on a failed parse status.
+    ErrexitBreak,
+}
+
+/// The grouped driver's run classification, as values: the
+/// terminal group's flag verdicts and which unwind (if any)
+/// ended the run. Computed in
+/// `run_script_grouped_at_line_offset`, alongside the stop
+/// bool it has always returned — this is the same
+/// classification, not a second derivation of it. The Session
+/// contract (api/session.rs) surfaces it to hosts so they stop
+/// re-deriving the classification from executor pendings
+/// (unixwin/niubash#863 GAP-1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupedRunClassification {
+    /// `take_parse_error()` at the terminal group: the group
+    /// ended on a parse error (a DISCARD class on its own —
+    /// evalstring.c:585-601 records the failure and breaks
+    /// without a jump).
+    pub parse_error: bool,
+    /// `take_exit_jump_pending()` at the terminal group, raw:
+    /// it can stand alongside `parse_error`, in which case the
+    /// jump did not count (see `stop`).
+    pub exit_jump: bool,
+    /// The terminal group's errexit verdict: status != 0 with
+    /// errexit in effect and `last_command_inverted()` false —
+    /// the `! CMD` exemption of execute_cmd.c:652-656
+    /// (CMD_IGNORE_RETURN) is already applied.
+    pub errexit_stop: bool,
+    /// `last_command_inverted()` at the terminal group (or at
+    /// input exhaustion): the run's last command carried the
+    /// `!` inversion.
+    pub last_inverted: bool,
+    /// Which unwind ended the run, if one did. A host driving
+    /// a live shell stops on `stop.is_some()` with the run's
+    /// returned status — the decomposition the folded stop
+    /// bool cannot express.
+    pub stop: Option<GroupedRunStop>,
+}
+
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
 /// reporting whether the run ended in a TOP-LEVEL UNWIND a caller driving a
 /// live shell must honor — the classification documented on
@@ -247,6 +306,27 @@ pub fn run_script_with_history_at_line_offset_tracked(
     line_offset: usize,
     redirect_cmd: Option<&CommandNode>,
 ) -> (i32, bool) {
+    let (status, exit_shell, _classification) = run_script_with_history_at_line_offset_classified(
+        executor,
+        contents,
+        line_offset,
+        redirect_cmd,
+    );
+    (status, exit_shell)
+}
+
+/// Same grouped run as
+/// [`run_script_with_history_at_line_offset_tracked`], additionally
+/// reporting the driver's own run classification
+/// ([`GroupedRunClassification`]): the terminal group's flag
+/// verdicts and which unwind ended the run, from the same
+/// computation that produces the stop bool.
+pub fn run_script_with_history_at_line_offset_classified(
+    executor: &mut Executor,
+    contents: &str,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+) -> (i32, bool, GroupedRunClassification) {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
     // builtins/history.def operates on the shell's ONE history list. When
     // the host owns that list through a HistoryProvider (niubash's REPL —
@@ -305,7 +385,9 @@ pub(crate) fn run_script_with_history_in_tracked(
     session: Rc<RefCell<SessionHistory>>,
     redirect_cmd: Option<&CommandNode>,
 ) -> (i32, bool) {
-    run_script_grouped_at_line_offset(executor, contents, session, redirect_cmd, 0, true)
+    let (status, exit_shell, _classification) =
+        run_script_grouped_at_line_offset(executor, contents, session, redirect_cmd, 0, true);
+    (status, exit_shell)
 }
 
 /// Fresh-scratch tracked run for engine-internal readers that hold no
@@ -323,14 +405,15 @@ pub(crate) fn run_script_with_fresh_history_in_tracked(
 ) -> (i32, bool) {
     let session = Rc::new(RefCell::new(SessionHistory::new()));
     let install_session = !executor.has_history_provider();
-    run_script_grouped_at_line_offset(
+    let (status, exit_shell, _classification) = run_script_grouped_at_line_offset(
         executor,
         contents,
         session,
         redirect_cmd,
         0,
         install_session,
-    )
+    );
+    (status, exit_shell)
 }
 
 fn run_script_grouped_at_line_offset(
@@ -340,7 +423,7 @@ fn run_script_grouped_at_line_offset(
     redirect_cmd: Option<&CommandNode>,
     line_offset: usize,
     install_session: bool,
-) -> (i32, bool) {
+) -> (i32, bool, GroupedRunClassification) {
     if install_session {
         executor.set_session_history(Some(session.clone()));
     }
@@ -439,10 +522,29 @@ fn run_script_grouped_at_line_offset(
         let exit_jump = executor.take_exit_jump_pending();
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
-        let errexit_stop = status != 0
-            && stdin_script_errexit_enabled(executor)
-            && !executor.last_command_inverted();
+        let last_inverted = executor.last_command_inverted();
+        let errexit_stop = status != 0 && stdin_script_errexit_enabled(executor) && !last_inverted;
         if parse_error || exit_jump || errexit_stop {
+            // GAP-1 (unixwin/niubash#863): the run's classification is
+            // adjudicated HERE, from these same verdicts — the
+            // decomposition of the stop bool below, computed once.
+            // A jump that counts (not riding a parse error) is the
+            // run's stop kind even when the errexit verdict also
+            // fires: the return status is the jump's own (rubash#2535
+            // note below), so the stop is the jump.
+            let mut classification = GroupedRunClassification {
+                parse_error,
+                exit_jump,
+                errexit_stop,
+                last_inverted,
+                stop: if exit_jump && !parse_error {
+                    Some(GroupedRunStop::ExitJump)
+                } else if errexit_stop {
+                    Some(GroupedRunStop::ErrexitBreak)
+                } else {
+                    None
+                },
+            };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
             // reports the site and parks the session here, after
@@ -464,7 +566,12 @@ fn run_script_grouped_at_line_offset(
                     executor.last_exit_code(),
                     location,
                 ) {
-                    return (code, true);
+                    // The stop-loop unwind replaces the pending
+                    // classification with its own exit (see the
+                    // DE-06 note above): the run's stop kind is
+                    // that exit, not the parse discard.
+                    classification.stop = Some(GroupedRunStop::ExitJump);
+                    return (code, true, classification);
                 }
             }
             // The parse-abort classification (a reader discard, not an
@@ -491,6 +598,7 @@ fn run_script_grouped_at_line_offset(
                     executor.last_exit_code()
                 },
                 (exit_jump && !parse_error) || errexit_stop,
+                classification,
             );
         }
     }
@@ -504,7 +612,18 @@ fn run_script_grouped_at_line_offset(
             executor.debugger_note_syntax_complete(&file);
         }
     }
-    (executor.last_exit_code(), false)
+    // Input exhaustion: no group stopped the run, so no unwind was
+    // adjudicated — the per-group takes above consumed only clear
+    // flags. The one live fact left is the last command's
+    // inversion, read at the run's end.
+    (
+        executor.last_exit_code(),
+        false,
+        GroupedRunClassification {
+            last_inverted: executor.last_command_inverted(),
+            ..GroupedRunClassification::default()
+        },
+    )
 }
 
 /// Verdicts the gather reached about the group it just pulled, beyond
