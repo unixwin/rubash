@@ -1045,10 +1045,19 @@ pub(super) fn append_array_value(
         })
         .collect::<Vec<_>>();
     for token in tokens {
+        // A scalar append (`arr+=word`, no parens) is not a compound list
+        // at all: GNU binds the one expanded word to element 0 verbatim
+        // (expand_string_assignment, subst.c:4345 — no pathname expansion;
+        // the [subscript]= element grammar exists only inside
+        // assign_compound_array_list, arrayfunc.c:700, which is entered
+        // solely for parenthesized values). There is no GNU `arr+=[sub]=v`
+        // form — the bracket text is literal appendage. Scalar tokens
+        // therefore skip both the glob branch and the element-operator
+        // branch below and reach the element-0 append tail.
         // GNU ordering: quote_array_assignment_chars already marked
         // [subscript]=value words W_NOGLOB, so pathname expansion applies
         // only to ordinary element words (niubash #121).
-        if !token_is_subscript_assignment(&token) {
+        if !scalar_append && !token_is_subscript_assignment(&token) {
             // GNU expand_compound_array_assignment (arrayfunc.c:574+610)
             // re-parses the element text, so its quote characters are
             // operators: quoted spans protect their own characters while
@@ -1078,7 +1087,12 @@ pub(super) fn append_array_value(
             }
         }
 
-        if let Some((op_start, op_len)) = compound_element_operator_offset(&token) {
+        let element_operator = if scalar_append {
+            None
+        } else {
+            compound_element_operator_offset(&token)
+        };
+        if let Some((op_start, op_len)) = element_operator {
             let left = &token[..op_start];
             let rhs = &token[op_start + op_len..];
             let resolved = array_assignment_index(left, entries.max(), env_vars);

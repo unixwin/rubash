@@ -88,7 +88,11 @@ pub(in crate::builtins) fn append_array_value(
         // re-encoded into the glob engine's escape model before globbing
         // (`declare -a x=("dir"/*.txt)` stores the matches); field-split
         // products carry quotes as DATA and skip the re-encoding.
-        if from_field_split || !token_is_subscript_assignment(&unquoted_token) {
+        // Scalar appends (`name+=word`, no parens) skip the glob branch
+        // and both [subscript] operator arms below: GNU binds the word to
+        // element 0 verbatim (see the executor-side append_array_value;
+        // assign_compound_array_list runs only for parenthesized values).
+        if !scalar_append && (from_field_split || !token_is_subscript_assignment(&unquoted_token)) {
             let glob_word = if from_field_split {
                 // A field-split product's quote characters are storage
                 // serialization DATA, so the glob gate must run on the
@@ -120,7 +124,7 @@ pub(in crate::builtins) fn append_array_value(
                 PathnameExpansion::Fail(pattern) => return Err(pattern),
             }
         }
-        if !from_field_split {
+        if !scalar_append && !from_field_split {
             if let Some((left, rhs)) = unquoted_token.split_once("+=") {
                 match array_assignment_index(left, &entries) {
                     ArrayAssignmentIndex::NegativeOutOfRange => {
