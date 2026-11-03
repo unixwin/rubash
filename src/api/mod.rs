@@ -78,8 +78,8 @@ pub use capabilities::{
 pub use diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 pub use events::{CommandEvent, JobInfo, SessionEvents};
 pub use session::{
-    CloseReport, Flow, InvocationShape, ParsedUnit, PreparedLine, RespawnSource, RunOptions,
-    RunOutcome, Session, SessionBuilder,
+    CloseReport, Flow, InvocationShape, ParsedUnit, PreparedLine, RespawnSource, RunClassification,
+    RunOptions, RunOutcome, RunUnwind, Session, SessionBuilder,
 };
 pub use syntax::{FunctionSite, LineClass, SyntaxView};
 pub use views::{OptionState, OptionsView, StateViews, VariableSnapshot, VariablesView};
