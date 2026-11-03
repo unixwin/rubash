@@ -165,6 +165,27 @@ fn user_pua_chars_roundtrip_as_data() {
     );
 }
 
+/// rubash#2706: QUOTED_EXPANSION_SITE (U+E31B) is inserted into words
+/// by the pre-expansion marking pass and consumed by the expansion
+/// walkers; it must never reach output even on the mixed-quote shapes
+/// that produce it internally — and a user-typed U+E31B (E400-escaped
+/// at entry) is data and must round-trip literally.
+#[test]
+fn quoted_expansion_site_marker_never_leaks() {
+    let out = run(&[
+        "-c",
+        "a='1 2'; b='3 4'; printf '<%s>\\n' $a\"$b\" \"$a\"$b $a\"$(echo 'p q')\"; \
+         for x in $a\"$b\"; do echo \"[$x]\"; done",
+    ]);
+    assert_clean(&out, "quoted expansion sites");
+    let out = run(&["-c", "echo $'\\uE31B'"]);
+    assert_eq!(
+        out,
+        "\u{E31B}\n".as_bytes(),
+        "user U+E31B must round-trip literally"
+    );
+}
+
 /// printf %b / %q output paths.
 #[test]
 fn printf_paths_carry_no_markers() {

@@ -563,8 +563,32 @@ impl Executor {
         // Output length when the current double-quoted span opened, for the
         // quoted-null carrier below (alternate mode only).
         let mut dquote_open_len: Option<usize> = None;
+        // rubash#2706: a QUOTED_EXPANSION_SITE marker (inserted by the
+        // pre-expansion marking pass, command_prepare.rs) flags the
+        // next expansion arm — that arm's result span is IFS-protected
+        // when the arm completes, the add_quoted_string treatment
+        // (subst.c:11862) for a result whose site was quoted. The
+        // protection is applied lazily at the top of the next loop
+        // iteration (and after the loop), because arms exit through
+        // both fall-through and `continue` — by the next iteration the
+        // arm's output is complete either way. A marker byte that is
+        // the escaped half of an E400 literal-char pair is user data,
+        // not a site (prev_literal_escape).
+        let mut quoted_site = false;
+        let mut quoted_span_start: Option<usize> = None;
+        let mut prev_literal_escape = false;
 
         while let Some(ch) = chars.next() {
+            if let Some(span_start) = quoted_span_start.take() {
+                let ifs = self.current_ifs();
+                crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
+            }
+            let was_literal_escape = prev_literal_escape;
+            prev_literal_escape = ch == crate::executor::markers::LITERAL_CHAR_ESCAPE;
+            if ch == crate::executor::markers::QUOTED_EXPANSION_SITE && !was_literal_escape {
+                quoted_site = true;
+                continue;
+            }
             // Alternate rhs: whitespace inside a quoted region is quote
             // data for the field splitter even after quote removal.
             if alternate && in_double && matches!(ch, ' ' | '\t' | '\n') {
@@ -923,6 +947,10 @@ impl Executor {
             }
 
             if ch == '`' {
+                if quoted_site {
+                    quoted_span_start = Some(output.len());
+                    quoted_site = false;
+                }
                 let mut source = String::new();
                 let mut escaped = false;
                 let mut closed = false;
@@ -985,10 +1013,18 @@ impl Executor {
             }
 
             if ch != '$' {
+                // A site marker is only ever emitted immediately before
+                // an expansion introducer; a literal char here means the
+                // flag has nothing to attach to — drop it.
+                quoted_site = false;
                 output.push(ch);
                 continue;
             }
 
+            if quoted_site {
+                quoted_span_start = Some(output.len());
+                quoted_site = false;
+            }
             match chars.peek().copied() {
                 Some('?') => {
                     chars.next();
@@ -1674,6 +1710,14 @@ impl Executor {
             // through PENDING_SUBSCRIPT_WRITES; flush them here so the
             // left-to-right order holds inside this mutable walk.
             self.apply_pending_subscript_writes();
+        }
+
+        // rubash#2706: close out a quoted-site span that ran to the
+        // end of the word (the loop-top close only fires when another
+        // character follows the expansion).
+        if let Some(span_start) = quoted_span_start.take() {
+            let ifs = self.current_ifs();
+            crate::executor::markers::protect_ifs_chars_in_span(&mut output, span_start, ifs);
         }
 
         output
