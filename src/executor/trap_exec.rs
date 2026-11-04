@@ -815,9 +815,16 @@ impl Executor {
                                 // error.c:324-327: a parser_error printed
                                 // while errexit is live exits 2 before the
                                 // FORCE_EOF/DISCARD decision.
+                                // GAP-1: the exit IS the errexit
+                                // decision (error.c:324-326 exit_shell
+                                // under exit_immediately_on_error), so
+                                // the raise carries the errexit mark
+                                // like every other errexit gate — an
+                                // unmarked ExitCode read as a real
+                                // exit jump in the run classification.
                                 if self.errexit_enabled() && self.errexit_is_active() {
                                     self.exit_code = 2;
-                                    return Err(ExecuteError::ExitCode(2));
+                                    return Err(self.errexit_exit(2));
                                 }
                                 if posix_mode && !interactive {
                                     self.exit_code = 1;
@@ -834,7 +841,7 @@ impl Executor {
                             _ => {
                                 if self.errexit_enabled() && self.errexit_is_active() {
                                     self.exit_code = 2;
-                                    return Err(ExecuteError::ExitCode(2));
+                                    return Err(self.errexit_exit(2));
                                 }
                                 if posix_errexit {
                                     self.exit_code = 2;
@@ -918,7 +925,7 @@ impl Executor {
                         // function body — instead of returning eval's rc=2.
                         if self.errexit_enabled() && self.errexit_is_active() {
                             self.exit_code = 2;
-                            return Err(ExecuteError::ExitCode(2));
+                            return Err(self.errexit_exit(2));
                         }
                         // rubash#318: an unclosed `name=(` compound list is
                         // the parse_compound_assignment EOF family — eval
@@ -1246,6 +1253,17 @@ impl Executor {
                 // abort meaning for the enclosing reader.
                 if parse_error_raised_during_eval {
                     self.mark_parse_error();
+                }
+                // GAP-1: a parser_error that exit_shell(2)ed under
+                // live errexit (error.c:324-326, recorded as
+                // parser_error_errexited) propagates as the
+                // errexit-class exit it is — carry the errexit
+                // mark so the run classification names an errexit
+                // break, not an exit jump.
+                if parser_error_errexited {
+                    if let Err(ExecuteError::ExitCode(code)) = other {
+                        return Err(self.errexit_exit(code));
+                    }
                 }
                 other
             }
@@ -2362,6 +2380,13 @@ impl Executor {
                 }
                 Ok(()) => self.exit_code = saved_exit,
                 Err(error @ ExecuteError::Return(_)) => return Err(error),
+                // GAP-1: a parse error that exit_shell(2)ed under
+                // live errexit (error.c:324-326) is an errexit-class
+                // exit — propagate it with the errexit mark, like
+                // the eval containment's propagation.
+                Err(ExecuteError::ExitCode(code)) if parser_error_errexited => {
+                    return Err(self.errexit_exit(code));
+                }
                 Err(error @ ExecuteError::ExitCode(_)) => return Err(error),
                 Err(error) => return Err(error),
             }

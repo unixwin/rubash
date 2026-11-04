@@ -462,9 +462,7 @@ impl Session {
             // is no longer consulted separately.
             let flow = match facts.stop {
                 Some(script_driver::GroupedRunStop::ExitJump) => Flow::ExitRequested(status),
-                Some(script_driver::GroupedRunStop::ErrexitBreak) => {
-                    Flow::ErrexitBreak(status)
-                }
+                Some(script_driver::GroupedRunStop::ErrexitBreak) => Flow::ErrexitBreak(status),
                 None => Flow::Completed,
             };
             let classification = RunClassification {
@@ -1001,7 +999,33 @@ impl Session {
         let mut status = self.executor.last_exit_code();
         for file in &files {
             status = self.source_one_startup_file(&file.to_string_lossy())?;
-            if self.executor.take_exit_jump_pending() {
+            // GAP-1: decompose the file's raw jump with the
+            // executor's errexit-unwind record, exactly as the
+            // run routes do — a startup file whose last command
+            // fails under an errexit it armed itself ends the
+            // chain in an errexit break, not an exit jump (the
+            // raw read mislabeled that kind; Q6 arm B
+            // approximation (iv), resolved). The armed record
+            // is drained either way so it cannot leak into the
+            // next file's accounting.
+            let exit_jump_raw = self.executor.take_exit_jump_pending();
+            let errexit_unwind = self.executor.take_errexit_unwind_armed();
+            if exit_jump_raw && errexit_unwind {
+                return Ok(RunOutcome {
+                    status,
+                    flow: Flow::ErrexitBreak(status),
+                    diagnostics: Vec::new(),
+                    classification: RunClassification {
+                        parse_error: false,
+                        signal_discard: false,
+                        exit_jump: false,
+                        errexit_break: true,
+                        last_inverted: self.executor.last_command_inverted(),
+                        unwind: Some(RunUnwind::ErrexitBreak),
+                    },
+                });
+            }
+            if exit_jump_raw {
                 return Ok(RunOutcome {
                     status,
                     flow: Flow::ExitRequested(status),

@@ -488,6 +488,14 @@ fn run_script_grouped_at_line_offset(
                 // DISCARD abandons it. (The group is also not recorded;
                 // GNU records read lines before executing them, but the
                 // recording here is fused with execution.)
+                // GAP-1: a skipped group is the terminal group if
+                // the input ends inside the span, and it did not
+                // end in a signal discard — refresh the terminal
+                // discard fact like every executed group does, so
+                // an earlier group's discard is never misreported
+                // as the terminal one (Q6 arm B approximation
+                // (iii), resolved).
+                terminal_discard = false;
                 continue;
             }
             failglob_discard_until = None;

@@ -685,6 +685,19 @@ impl Executor {
                 // special-builtin death, not an errexit one — the time
                 // branch's jump is gated on posix fatality, not `set -e`.
                 self.posix_special_status_converted.set(true);
+                // GAP-1: this jump is the fatal class (the
+                // classification's ExitJump family, like
+                // FatalFunctionError), so it deliberately carries
+                // no errexit mark. Drain any standing mark
+                // defensively: the mark's lifetime invariant (one
+                // writer, `errexit_exit`; consumed by
+                // run_source_impl and the time wrapper) already
+                // guarantees none can stand here — the command
+                // completed, so no errexit unwind is in flight —
+                // and the drain keeps this jump's kind correct by
+                // construction rather than by that argument alone
+                // (Q6 arm B approximation (ii), resolved).
+                let _ = self.take_errexit_unwind_pending();
                 Err(ExecuteError::ExitCode(completed_status))
             } else {
                 // Rescued by the ERR trap: the trap already fired for
