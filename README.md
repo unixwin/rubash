@@ -27,6 +27,8 @@ Rubash itself is not a shell product. It ships a reference CLI used by the compa
 | **Embedding** | Rust library + reference CLI; stable, versioned engine API since 1.5.0 ([#595](https://github.com/unixwin/rubash/issues/595)); niubash is the reference host |
 | **License** | MIT |
 
+**[Quick Start](#quick-start) · [Why Rubash](#why-rubash) · [vs Git Bash / MSYS2](#rubash-vs-git-bash--msys2) · [Compatibility](#compatibility-at-a-glance) · [Performance](#performance) · [Architecture](#architecture) · [Identity](#identity-and-compatibility-rubash154) · [Testing](#testing) · [Roadmap](#roadmap) · [Contributing](#contributing)**
+
 ## Quick Start
 
 ### Get it
@@ -341,6 +343,6 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ---
 
-Rubash is the engine inside [niubash](https://github.com/unixwin/niubash). If you build on it, [star the repo](https://github.com/unixwin/rubash/stargazers); the most valuable contributions are compatibility reproductions — see [Documentation](#documentation).
+Rubash is the engine inside [niubash](https://github.com/unixwin/niubash). If you build on it, [star the repo](https://github.com/unixwin/rubash/stargazers); the most valuable contributions are compatibility reproductions — see [Contributing](#contributing).
 
 *Last updated: 2026-11-04*
