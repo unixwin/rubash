@@ -176,7 +176,7 @@ The same true-baseline method (script files, byte-level diff vs GNU 5.3.x) appli
 | **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
 | **GNU 83-suite on Linux native binary** | 17/24 byte-identical (2026-09-27 wt4/linuxrun lane, ledger archived in #477/#581); the corpus is now replayed in CI on every push (`Bash upstream test progress`, Ubuntu) |
 
-Everything above is pinned as regression fixtures under `tests/` (1,115 integration test files as of 2026-11-03, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
+Everything above is pinned as regression fixtures under `tests/` (1,162 integration test files as of 2026-11-04, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
 
 ## Performance
 
