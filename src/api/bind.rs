@@ -72,6 +72,29 @@ pub struct BindEntryView {
     pub dump: String,
 }
 
+/// One recorded removal, as the contract reports it: a
+/// `bind -r` / `bind -u` tombstone. GNU's keymaps are single
+/// mutable maps, so unbinding deletes the slot itself —
+/// DEFAULT bindings included (bind.def:375-388 unbind_command,
+/// bind.def:390-427 unbind_keyseq); the engine keeps its
+/// defaults in static tables, so the removal is recorded here
+/// and a mirroring host subtracts it from the default tables
+/// (rubash#2337). Registering the sequence again clears the
+/// tombstone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindRemovalView {
+    /// The written form, exactly as removed.
+    pub keyseq: String,
+    /// The canonical byte sequence ([`keyseq_bytes`] applied to
+    /// the written form).
+    pub bytes: Vec<u8>,
+    /// The keymap the removal landed in — stored resolved at
+    /// record time (an explicit `-m` map, or the map current
+    /// when the removal landed, normalized), so a later
+    /// editing-mode flip never reinterprets it (rubash#2386).
+    pub keymap: String,
+}
+
 /// One capture of the whole binding registry: the snapshot a
 /// host mirrors its keymaps from between prompts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +114,13 @@ pub struct BindView {
     pub variables: Vec<(String, String)>,
     /// Every registered entry, in registry order.
     pub entries: Vec<BindEntryView>,
+    /// Every recorded removal (`bind -r` / `bind -u`
+    /// tombstones), in registry order. The host subtracts
+    /// these from the default key tables when it mirrors them;
+    /// they ride the view so the tier-C
+    /// `Executor::bind_removed_keyseqs` read retires with the
+    /// rest of the seam.
+    pub removals: Vec<BindRemovalView>,
 }
 
 impl BindView {
@@ -128,11 +158,27 @@ impl BindView {
                 }
             })
             .collect();
+        let removals = registry
+            .removals
+            .iter()
+            .map(|(keyseq, keymap)| BindRemovalView {
+                bytes: keyseq_bytes(keyseq),
+                keyseq: keyseq.clone(),
+                // The registry's own reads resolve a keymap-less
+                // tombstone against "emacs-standard" (see
+                // `BindRegistry::register` / `is_removed`); stored
+                // tombstones are always resolved already, so this
+                // is only the faithful fallback.
+                keymap: normalize_keymap_name(keymap.as_deref().unwrap_or("emacs-standard"))
+                    .to_string(),
+            })
+            .collect();
         BindView {
             generation: registry.generation,
             editing_mode: registry.editing_mode.clone(),
             variables: registry.variables.clone(),
             entries,
+            removals,
         }
     }
 }

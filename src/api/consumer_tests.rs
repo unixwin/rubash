@@ -1882,3 +1882,43 @@ fn issue863_gap3_none_keymap_lands_under_the_current_keymap() {
     assert_eq!(keymaps, vec!["emacs-standard", "vi-insert"]);
     assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-insert");
 }
+
+#[test]
+fn issue863_gap3_removals_ride_the_view() {
+    let mut session = issue863_gap3_session();
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    let view = session.bind_view();
+    assert!(view.removals.is_empty());
+    assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
+
+    // Removing a registered entry: it leaves `entries` and its
+    // tombstone rides the view with canonical bytes + the
+    // resolved keymap, so a mirroring host needs no tier-C read.
+    // (`bind -r` takes the bare seq — bind.def:168/292 hands the
+    // raw optarg to unbind_keyseq, no inputrc quoting.)
+    issue863_gap3_run(&mut session, r"bind -r '\C-a'");
+    let view = session.bind_view();
+    assert!(view.entries.iter().all(|entry| entry.keyseq != r"\C-a"));
+    assert_eq!(view.removals.len(), 1);
+    assert_eq!(view.removals[0].keyseq, r"\C-a");
+    assert_eq!(view.removals[0].bytes, vec![0x01]);
+    assert_eq!(view.removals[0].keymap, "emacs-standard");
+
+    // Removing a sequence that only ever lived in the DEFAULT
+    // table records a tombstone too (GNU deletes the slot from
+    // the map itself, defaults included — rubash#2337).
+    issue863_gap3_run(&mut session, r"bind -r '\C-t'");
+    let view = session.bind_view();
+    assert_eq!(view.removals.len(), 2);
+    assert_eq!(view.removals[1].keyseq, r"\C-t");
+    assert_eq!(view.removals[1].bytes, vec![0x14]);
+
+    // Registering the sequence again clears its tombstone.
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    let view = session.bind_view();
+    assert!(view
+        .removals
+        .iter()
+        .all(|removal| removal.keyseq != r"\C-a"));
+    assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
+}

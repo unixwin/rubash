@@ -75,7 +75,7 @@ pub mod session;
 pub mod syntax;
 pub mod views;
 
-pub use bind::{BindEntryView, BindKindView, BindView};
+pub use bind::{BindEntryView, BindKindView, BindRemovalView, BindView};
 #[cfg(windows)]
 pub use capabilities::ElevationHandler;
 pub use capabilities::{
