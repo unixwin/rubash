@@ -35,11 +35,19 @@ cargo build
 target/debug/rubash --version
 ```
 
+`--version` prints the GNU-format banner plus a `build:` line naming the exact commit the binary was built from; on Windows it also carries the persona disclosure:
+
+```text
+note: native Windows build without an MSYS runtime; MSYS identifiers are a compatibility persona only (see README.md, Identity and Compatibility)
+```
+
 ### Run a script
 
-```bash
-target/debug/rubash path/to/script.sh
-target/debug/rubash -c 'echo hello from rubash'
+```console
+$ target/debug/rubash -c 'echo hello from rubash'
+hello from rubash
+
+$ target/debug/rubash path/to/script.sh
 ```
 
 ### Run the compatibility suites
@@ -64,7 +72,14 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 **Why native matters.** Git for Windows describes its own shell, verbatim, as "a BASH emulation used to run Git from the command line" — an emulation built to run Git. Its bash is a port riding on a POSIX emulation layer (`msys-2.0.dll`), and the emulation leaks: fork emulation, argument rewriting, device quirks in every script. Rubash has no such layer — one self-contained binary speaking Win32 directly.
 
-**Paths are first-class, one dialect per child.** The MSYS model *guesses* which arguments look like paths and rewrites them; MSYS2's own documentation concedes the conversion "isn't perfect" and rewrites arguments that are not paths at all — which is why every AI agent and script ends up setting `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model with a per-child dialect contract (the same line GNU draws: `shell_execve` hands `execve` the raw word bytes and never rewrites argv). A child that owns a POSIX layer — anything resolved out of a WinuxCmd installation, or through the `winuxcmd` dispatcher — keeps the shell's spellings and resolves `/tmp`, `/dev/*` and the shell tree itself, with one documented exception: drive-form operands (`/d/...`) are translated by the engine funnel for every child class ([#592](https://github.com/unixwin/rubash/issues/592)). A native Windows program instead receives real Win32 spellings for classified path-shaped operands — virtual roots, `/mnt/X`, and drive forms with components such as `/d/repo` — translated whether or not the target exists yet, while the documented verbatim classes cross exactly as typed: the bare `/`, drive-root forms (`/d`, `/d/`), attached values (`--opt=/d/x`), and grammar-data operands ([#748](https://github.com/unixwin/niubash/issues/748), [#779](https://github.com/unixwin/niubash/issues/779)). The contract of record is niubash's `docs/src/windows-path-contract.md`. The translation surface is deliberately narrow: quoted arguments are never rewritten, and the one device translation is the exact token `/dev/null` → `nul` ([#1506](https://github.com/unixwin/rubash/issues/1506)). Every overreach the suites ever found ([#31](https://github.com/unixwin/rubash/issues/31), [#59](https://github.com/unixwin/rubash/issues/59), [#60](https://github.com/unixwin/rubash/issues/60)) became a public issue and a regression test. For emergency rollback, the pre-Option-B translation behavior is available by exporting `__RUBASH_ARGV_DIALECT=legacy`.
+**Paths are first-class, one dialect per child.** The MSYS model *guesses* which arguments look like paths and rewrites them; MSYS2's own documentation concedes the conversion "isn't perfect" and rewrites arguments that are not paths at all — which is why every AI agent and script ends up setting `MSYS_NO_PATHCONV=1` to stop `/flags` from becoming `C:/Program Files/Git/flags`. Rubash inverts the model with a per-child dialect contract (the same line GNU draws: `shell_execve` hands `execve` the raw word bytes and never rewrites argv):
+
+- **POSIX-layer children** — anything resolved out of a WinuxCmd installation, or through the `winuxcmd` dispatcher — keep the shell's spellings and resolve `/tmp`, `/dev/*` and the shell tree itself. One documented exception crosses child classes: drive-form operands (`/d/...`) are translated by the engine funnel for every child ([#592](https://github.com/unixwin/rubash/issues/592)).
+- **Native Windows programs** receive real Win32 spellings for classified path-shaped operands — virtual roots, `/mnt/X`, and drive forms with components such as `/d/repo` — translated whether or not the target exists yet. The documented verbatim classes cross exactly as typed: the bare `/`, drive-root forms (`/d`, `/d/`), attached values (`--opt=/d/x`), and grammar-data operands ([#748](https://github.com/unixwin/niubash/issues/748), [#779](https://github.com/unixwin/niubash/issues/779)).
+- **The surface stays deliberately narrow**: quoted arguments are never rewritten, and the one device translation is the exact token `/dev/null` → `nul` ([#1506](https://github.com/unixwin/rubash/issues/1506)). Every overreach the suites ever found ([#31](https://github.com/unixwin/rubash/issues/31), [#59](https://github.com/unixwin/rubash/issues/59), [#60](https://github.com/unixwin/rubash/issues/60)) became a public issue and a regression test.
+- **Emergency rollback**: the pre-Option-B translation behavior is available by exporting `__RUBASH_ARGV_DIALECT=legacy`.
+
+The contract of record is niubash's `docs/src/windows-path-contract.md`.
 
 **Bash 5.3, not 5.2.** Git for Windows bundles a Bash 5.2-line shell. Rubash targets 5.3 semantics — including syntax that structurally does not exist in 5.2, such as no-fork command substitution `${ cmd; }` ([#195](https://github.com/unixwin/rubash/issues/195)).
 
@@ -72,7 +87,11 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 **Embeddable by design.** Rubash is a Rust library with a reference CLI, not just an executable: niubash links it in-process for all shell semantics today, and the 1.5.0 release (see [Roadmap](#roadmap)) formalized that surface into a stable, versioned engine API.
 
-**Platform status — cross-platform, Windows-first.** Windows is the primary target and the platform with the full stack: one self-contained binary solving the classic Windows bash pain points (no POSIX emulation layer, no path-conversion heuristics, no `MSYS_NO_PATHCONV`, native Win32 paths as the currency, MSYS2-compatible identity for the bash ecosystem). Linux builds and runs natively (`x86_64-unknown-linux-gnu`) with real getrlimit/chmod/faccessat/uname(2) semantics and signal delivery — CI runs the engine's test lanes on Ubuntu (library tests, compatibility `cli_tests`, marker goldens) and replays the GNU upstream corpus on every push (the `Bash upstream test progress` job, `scripts/run-bash-upstream-tests.sh`); an earlier manual pass of the same corpus on the Linux binary scored 17/24 suites byte-identical (2026-09-27, ledger archived in #477/#581), and the remaining gap is tracked in the issue tracker. macOS runs the library test suite in CI (`macos-latest`) alongside the cross-target check. The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same ledger travels.
+**Platform status — cross-platform, Windows-first.** The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same ledger travels:
+
+- **Windows** — the primary target and the platform with the full stack: one self-contained binary solving the classic Windows bash pain points (no POSIX emulation layer, no path-conversion heuristics, no `MSYS_NO_PATHCONV`, native Win32 paths as the currency, MSYS2-compatible identity for the bash ecosystem).
+- **Linux** (`x86_64-unknown-linux-gnu`) — builds and runs natively with real getrlimit/chmod/faccessat/uname(2) semantics and signal delivery. CI runs the engine's test lanes on Ubuntu (library tests, compatibility `cli_tests`, marker goldens) and replays the GNU upstream corpus on every push (the `Bash upstream test progress` job, `scripts/run-bash-upstream-tests.sh`); an earlier manual pass of the same corpus on the Linux binary scored 17/24 suites byte-identical (2026-09-27, ledger archived in #477/#581), and the remaining gap is tracked in the issue tracker.
+- **macOS** — runs the library test suite in CI (`macos-latest`) alongside the cross-target check.
 
 ## Rubash vs Git Bash / MSYS2
 
@@ -90,7 +109,7 @@ MSYS_NO_PATHCONV=1 wsl bash /path/to/rubash/scripts/true-baseline.sh array    # 
 
 ## The same ruler, pointed at the other claimants
 
-The shells that call themselves bash replacements deserve the same measurement. Of the Rust-era peers, hush is a Lua-based *language* that never claimed to be a bash replacement, and Oils/OSH bills itself as an "upgrade path from bash", not a drop-in — neither claims the thing we measure. **brush** does: "Run it as your everyday shell", and its compatibility page rates itself "Production-ready for most use cases" while conceding ~125 known failures as "mostly edge cases". Measured on our 306-case differential corpus (byte-compared against GNU Bash 5.3.20), brush's shipped v0.4.0 scores **181/306**; a source build of its latest master commit re-measures at **183/306** — the same failure profile. Rubash on the same corpus: **304/306**. The *shape* of the gap matters more than the number (minimal repros in the campaign evidence files):
+The shells that call themselves bash replacements deserve the same measurement. Of the Rust-era peers, hush is a Lua-based *language* that never claimed to be a bash replacement, and Oils/OSH bills itself as an "upgrade path from bash", not a drop-in — neither claims the thing we measure. **brush** does: "Run it as your everyday shell", and its compatibility page rates itself "Production-ready for most use cases" while conceding ~125 known failures as "mostly edge cases". Measured on our 306-case differential corpus (byte-compared against GNU Bash 5.3.20), brush's shipped v0.4.0 scores **181/306**; a source build of its latest master commit re-measures at **183/306** — the same failure profile. Rubash on the same corpus: **304/306**. The *shape* of the gap matters more than the number — each item below is a concrete, reproducible failure:
 
 - Its alias timing model is the reverse of GNU's: aliases expand in non-interactive shells without `expand_aliases`, take effect on the line that defines them, and expand at call time inside function bodies — 6 substantive divergences across 20 dedicated probes. Alias expansion is one of the simplest mechanisms in GNU semantics; a reversed timing model silently rewrites real `.bashrc` shapes.
 - `printf x y` (a conversion-free format string) loops forever and hangs the script in the release (fixed on master).
@@ -157,7 +176,7 @@ The same true-baseline method (script files, byte-level diff vs GNU 5.3.x) appli
 | **git's own test framework** (t/test-lib.sh) | runs end-to-end under the engine |
 | **GNU 83-suite on Linux native binary** | 17/24 byte-identical (2026-09-27 wt4/linuxrun lane, ledger archived in #477/#581); the corpus is now replayed in CI on every push (`Bash upstream test progress`, Ubuntu) |
 
-Everything above is pinned as regression fixtures under `tests/` (1,115 integration test files as of 2026-11-03, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
+Everything above is pinned as regression fixtures under `tests/` (1,162 integration test files as of 2026-11-04, incl. `tests/regression.rs` — GNU-golden matrices, suite-slice snapshots, and perf canaries) running in CI on every push — plus a C-source line-level audit (`docs/SOURCE-AUDIT.md`, 336 behaviors inventoried) that keeps finding and closing gaps before suites hit them.
 
 ## Performance
 
@@ -231,7 +250,20 @@ The engine presents a **selectable platform identity** instead of outsourcing it
 **Disclosure surfaces** (the persona must never be silent):
 
 - `rubash --help` prints an Identity section (current persona + how to switch);
-- `rubash --identity` prints the persona and every effective value (`uname -s/-m/-r/-o`, `arch`, `OSTYPE`, `MACHTYPE`);
+- `rubash --identity` prints the persona and every effective value (`uname -s/-m/-r/-o`, `arch`, `OSTYPE`, `MACHTYPE`), as captured on a Windows build:
+
+  ```console
+  $ rubash --identity
+  identity:    msys (default; MSYS2-compatible)
+  uname -s:    MSYS_NT-10.0-19045
+  uname -m:    x86_64
+  arch:        x86_64
+  uname -r:    10.0-19045
+  uname -o:    Msys
+  OSTYPE:      msys
+  MACHTYPE:    x86_64-pc-msys
+  switch:     export RUBASH_IDENTITY=native (native) / unset it (msys default)
+  ```
 - this README section and the repo-root `SKILL.md` disclosure section (so AI agents consuming the repo also know the persona semantics).
 
 `uname`/`arch` are *hidden* fast-path builtins (like `sleep`/`dirname`): `type`/`enable`/`compgen -b` keep reporting them as external commands, and they work even when PATH carries no `uname.exe` at all.
@@ -300,4 +332,4 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 
 ---
 
-*Last updated: 2026-11-03*
+*Last updated: 2026-11-04*
