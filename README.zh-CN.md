@@ -17,6 +17,8 @@ Rubash 是用 Rust 对 GNU Bash 语义的从零重实现——词法分析器、
 
 Rubash 本身不是 shell 产品。它自带一个参考 CLI（供兼容性 harness 和工具链使用），而交互式 shell 构建于引擎**之上**：niubash 嵌入 Rubash 承担全部 bash 语义，自己只负责行编辑、prompt 渲染与补全。
 
+**[快速开始](#快速开始) · [为什么是 Rubash](#为什么是-rubash) · [Rubash vs Git Bash / MSYS2](#rubash-vs-git-bash--msys2) · [兼容性一览](#兼容性一览) · [性能](#性能) · [架构](#架构) · [身份与兼容性（rubash#154）](#身份与兼容性rubash154) · [测试](#测试) · [路线图](#路线图) · [贡献](#贡献)**
+
 ## 快速开始
 
 ### 获取

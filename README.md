@@ -2,7 +2,7 @@
   <img src="assets/rubash-lockup.svg" alt="rubash — embeddable bash-compatible engine" width="620" />
 </p>
 
-# Rubash
+# Rubash — a Bash 5.3-compatible engine, from scratch in Rust
 
 **A GNU Bash 5.3-compatible shell engine, written from scratch in Rust.** Embeddable as a library, native on Windows with **no POSIX emulation layer** — the engine inside [niubash](https://github.com/unixwin/niubash), and a from-scratch alternative to Git Bash / MSYS2's ported bash.
 
@@ -13,10 +13,21 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.70+-blue)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Net code size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/unixwin/rubash/master/docs/code-size-badge.json)](docs/code-size.md)
+[![Stars](https://img.shields.io/github/stars/unixwin/rubash)](https://github.com/unixwin/rubash/stargazers)
 
 Rubash is a from-scratch reimplementation of GNU Bash semantics in Rust — lexer, parser, expansion engine, executor, builtins — packaged as an **embeddable, headless engine**. It targets byte-level compatibility with GNU Bash 5.3.x (the vendored upstream tree is at the Bash-5.3 patch 20 level, #957) and runs natively on Windows, Linux, and macOS.
 
 Rubash itself is not a shell product. It ships a reference CLI used by the compatibility harness and tooling; interactive shells are built *on top of* the engine: [niubash](https://github.com/unixwin/niubash) embeds Rubash for all bash semantics and owns line editing, prompt rendering, and completions itself.
+
+| | |
+| --- | --- |
+| **Bash language level** | GNU Bash 5.3 semantics — including 5.3-only syntax such as no-fork command substitution `${ cmd; }` ([#195](https://github.com/unixwin/rubash/issues/195)) |
+| **Compatibility** | 244/246 on our differential suite vs GNU Bash 5.3.20 · 83/83 GNU upstream suites on the true-baseline ledger ([Compatibility at a Glance](#compatibility-at-a-glance)) · 1,680 issues filed / 1,654 closed (2026-11-03) |
+| **Platforms** | Windows (full stack, primary target) · Linux x86_64 (native, CI lanes, upstream corpus replayed every push) · macOS (library tests in CI) |
+| **Embedding** | Rust library + reference CLI; stable, versioned engine API since 1.5.0 ([#595](https://github.com/unixwin/rubash/issues/595)); niubash is the reference host |
+| **License** | MIT |
+
+**[Quick Start](#quick-start) · [Why Rubash](#why-rubash) · [vs Git Bash / MSYS2](#rubash-vs-git-bash--msys2) · [Compatibility](#compatibility-at-a-glance) · [Performance](#performance) · [Architecture](#architecture) · [Identity](#identity-and-compatibility-rubash154) · [Testing](#testing) · [Roadmap](#roadmap) · [Contributing](#contributing)**
 
 ## Quick Start
 
@@ -85,7 +96,7 @@ The contract of record is niubash's `docs/src/windows-path-contract.md`.
 
 **Subshells without fork.** `( list )` and `$( )` run **in-process** — no process creation, no fork emulation — while everything a script can observe (exit codes, fd inheritance, shared file offsets, signal dispositions) behaves like GNU Bash. The three-layer design is detailed under [Architecture](#architecture).
 
-**Embeddable by design.** Rubash is a Rust library with a reference CLI, not just an executable: niubash links it in-process for all shell semantics today, and the 1.5.0 release (see [Roadmap](#roadmap)) formalized that surface into a stable, versioned engine API.
+**Embeddable by design.** Rubash is a Rust library that ships a reference CLI; niubash links it in-process for all shell semantics today, and the 1.5.0 release (see [Roadmap](#roadmap)) formalized that surface into a stable, versioned engine API.
 
 **Platform status — cross-platform, Windows-first.** The engine's semantic model (in-process subshells, fd-table semantics, process boundaries) is deliberately platform-neutral, so the same ledger travels:
 
@@ -331,5 +342,7 @@ Issues, compatibility reproductions, focused regression tests, and implementatio
 - Rust community — language and tooling
 
 ---
+
+Rubash is the engine inside [niubash](https://github.com/unixwin/niubash). If you build on it, [star the repo](https://github.com/unixwin/rubash/stargazers); the most valuable contributions are compatibility reproductions — see [Contributing](#contributing).
 
 *Last updated: 2026-11-04*
