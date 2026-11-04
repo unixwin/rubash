@@ -32,6 +32,14 @@
 //!   the readline variable table, and every entry with its
 //!   canonical bytes, written form, kind, resolved keymap and
 //!   GNU dump line, captured from the registry itself.
+//! - [`CompletionView`] — the completer's live state as one
+//!   owned snapshot (niubash#863 GAP-4): the session cwd, the
+//!   whole variable table in the executor snapshot's own
+//!   rendering (attribute pseudo-entries included) with a
+//!   content fingerprint, the function names, and the open
+//!   fd numbers, read through `&self`; plus
+//!   `Session::has_function`, the `&self` function probe
+//!   (GAP-4b).
 //! - The capability traits a host implements:
 //!   [`HistoryProvider`] (the design's unchanged trait),
 //!   [`ExternalCommandHandler`], [`CompletionProvider`],
@@ -69,6 +77,7 @@
 
 pub mod bind;
 pub mod capabilities;
+pub mod completion_view;
 pub mod diagnostic;
 pub mod events;
 pub mod session;
@@ -82,6 +91,7 @@ pub use capabilities::{
     Candidate, CompletionOutcome, CompletionPolicy, CompletionProvider, DiagnosticSink,
     ExternalCommandHandler, RcPolicy, StartupClass, StartupContext,
 };
+pub use completion_view::CompletionView;
 pub use diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 pub use events::{CommandEvent, JobInfo, SessionEvents};
 pub use session::{

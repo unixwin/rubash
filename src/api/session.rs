@@ -24,6 +24,7 @@ use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
     RcPolicy, StartupClass, StartupContext,
 };
+use super::completion_view::CompletionView;
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
 use super::syntax::SyntaxView;
@@ -811,6 +812,24 @@ impl Session {
         self.executor.glob_filename(pattern)
     }
 
+    /// One capture of everything a completer reads
+    /// (unixwin/niubash#863 GAP-4): the session cwd, the whole
+    /// variable table in the executor snapshot's own rendering
+    /// — attribute pseudo-entries included — with a content
+    /// fingerprint, the function names, and the open fd
+    /// numbers, as a [`CompletionView`].
+    ///
+    /// This is the tier-A form of the reads hosts used to make
+    /// through the tier-C executor seam (`env_vars_snapshot` /
+    /// `functions_snapshot` / `open_fds` / `session_cwd`) and
+    /// then mirror into a snapshot struct of their own,
+    /// re-synchronized after every line. A pure read through
+    /// `&self`: the view is captured from the executor's own
+    /// snapshot functions and taking it mutates nothing.
+    pub fn completion_view(&self) -> CompletionView {
+        CompletionView::capture(&self.executor)
+    }
+
     // ----------------------------------------------------------
     // Functions (§5.2 / §5.3)
     // ----------------------------------------------------------
@@ -988,6 +1007,17 @@ impl Session {
     /// Function names currently defined, sorted.
     pub fn functions(&self) -> Vec<String> {
         self.executor.functions_snapshot()
+    }
+
+    /// Whether a shell function is currently defined, by name
+    /// (unixwin/niubash#863 GAP-4b): the `&self` form of the
+    /// probe hosts used to make through the tier-C seam
+    /// (`executor().has_function(name)`), the only other
+    /// contract form being `StateViews::has_function` behind
+    /// `views()`'s `&mut self`. Same source either way: the
+    /// executor's own function-table lookup.
+    pub fn has_function(&self, name: &str) -> bool {
+        self.executor.has_function(name)
     }
 
     /// `$?`, named plainly.
