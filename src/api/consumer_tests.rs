@@ -1069,9 +1069,9 @@ fn issue863_gap1_errexit_break_is_classified_apart_from_flow() {
         .run("false; echo unreachable", &options)
         .expect("run");
     assert_eq!(outcome.status, 1);
-    // The published Flow fold is unchanged: the errexit break
-    // still resolves to Completed here.
-    assert_eq!(outcome.flow, Flow::Completed);
+    // Q6 arm B contract: the errexit break no longer folds
+    // into Completed — Flow carries it as its own arm.
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
     let class = outcome.classification;
     assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
     assert!(class.errexit_break);
@@ -1087,9 +1087,10 @@ fn issue863_gap1_exit_jump_under_errexit_keeps_kind_and_status() {
     let outcome = session.run("true; exit 3", &options).expect("run");
     // The jump's own status (rubash#2535), not a trap-restored $?.
     assert_eq!(outcome.status, 3);
-    // Flow keeps its known fold (a nonzero exit that satisfies
-    // the errexit predicate resolves to the errexit arm)…
-    assert_eq!(outcome.flow, Flow::Completed);
+    // Q6 arm B contract: the jump outranks the errexit verdict
+    // in Flow too (arm A's fold resolved this shape to
+    // Completed, hiding a real exit from Flow-reading hosts)…
+    assert_eq!(outcome.flow, Flow::ExitRequested(3));
     // …while the classification names the stop the driver
     // adjudicated: the jump counted, so the stop is the jump —
     // with the errexit verdict also standing, as computed.
@@ -1123,7 +1124,9 @@ fn issue863_gap1_parse_error_under_errexit_is_an_errexit_break() {
     session.run("set -e", &options).expect("run");
     let outcome = session.run("echo ok; echo )bad", &options).expect("run");
     assert_eq!(outcome.status, 2);
-    assert_eq!(outcome.flow, Flow::Completed);
+    // Q6 arm B contract: Flow carries the break, as on the
+    // plain errexit shape.
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(2));
     let class = outcome.classification;
     assert!(class.parse_error);
     assert!(class.errexit_break);

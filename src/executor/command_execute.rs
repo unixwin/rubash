@@ -181,7 +181,7 @@ impl Executor {
                         None,
                     )?;
                 }
-                return Err(ExecuteError::ExitCode(self.exit_code));
+                return Err(self.errexit_exit(self.exit_code));
             }
             return result;
         }
@@ -459,7 +459,7 @@ impl Executor {
                         None,
                     )?;
                 }
-                return Err(ExecuteError::ExitCode(self.exit_code));
+                return Err(self.errexit_exit(self.exit_code));
             }
             return Ok(());
         }
@@ -621,7 +621,7 @@ impl Executor {
                             None,
                         )?;
                     }
-                    return Err(ExecuteError::ExitCode(1));
+                    return Err(self.errexit_exit(1));
                 }
                 Ok(())
             }

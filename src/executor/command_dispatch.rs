@@ -766,6 +766,13 @@ impl Executor {
                 Ok(())
             };
             match site_result {
+                // Q6 arm B: only the genuine conversion (an Ok
+                // completion turned into the errexit unwind) is
+                // marked; an Err already in flight (the exit
+                // builtin's own unwind crossing this frame)
+                // keeps its kind, exactly as the conversion mark
+                // above already discriminates.
+                Ok(()) if result.is_ok() => Err(self.errexit_exit(self.exit_code)),
                 Ok(()) => Err(ExecuteError::ExitCode(self.exit_code)),
                 Err(error) => Err(error),
             }

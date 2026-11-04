@@ -3003,6 +3003,9 @@ impl Executor {
         // timed command's inner dispatch — clear any stale value before
         // the inner runs (the mark is taken right after it below).
         self.errexit_status_converted.set(false);
+        // Q6 arm B: the errexit-unwind mark travels with the
+        // conversion mark — same scoping discipline.
+        self.errexit_unwind_pending = false;
         // rubash#2117: the POSIX special-builtin conversion mark is
         // scoped the same way; the ast_exec time branch takes it.
         self.posix_special_status_converted.set(false);
@@ -3073,6 +3076,8 @@ impl Executor {
         // be mistaken for the inner command's).
         self.errexit_status_converted.set(false);
         self.posix_special_status_converted.set(false);
+        // Q6 arm B: same pre-dispatch clear for the unwind mark.
+        self.errexit_unwind_pending = false;
         // Snapshot the parse-error latch: a parse-diagnostic ExitCode(2)
         // out of the inner dispatch means the timed command never
         // executed (GNU reports no timing for it), unlike a genuine
@@ -3148,6 +3153,14 @@ impl Executor {
         // rubash#1611: take the errexit-conversion mark left by the
         // inner dispatch (cleared at entry above).
         let errexit_converted = self.errexit_status_converted.replace(false);
+        // Q6 arm B: a converted ExitCode was adjudicated here, so
+        // its unwind mark is consumed with it; the ast_exec time
+        // branch's own gate re-marks if it raises the break itself.
+        // A genuine unwind (mark clear / converted false) keeps its
+        // mark for run_source_impl.
+        if errexit_converted {
+            let _ = std::mem::take(&mut self.errexit_unwind_pending);
+        }
         let parse_error_during_inner = self.parse_error_occurred && !parse_error_before_inner;
         match inner_result {
             Ok(()) => {}

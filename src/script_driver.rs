@@ -268,9 +268,13 @@ pub struct GroupedRunClassification {
     /// evalstring.c:585-601 records the failure and breaks
     /// without a jump).
     pub parse_error: bool,
-    /// `take_exit_jump_pending()` at the terminal group, raw:
-    /// it can stand alongside `parse_error`, in which case the
-    /// jump did not count (see `stop`).
+    /// Q6 arm B: a REAL exit jump ended the terminal group —
+    /// `take_exit_jump_pending()` corrected by the executor's
+    /// errexit-unwind mark, so an errexit break (which also arms
+    /// the jump bookkeeping for its long-standing consumers) no
+    /// longer reads as a jump here. It can stand alongside
+    /// `parse_error`, in which case the jump did not count
+    /// (see `stop`).
     pub exit_jump: bool,
     /// The terminal group's errexit verdict: status != 0 with
     /// errexit in effect and `last_command_inverted()` false —
@@ -286,6 +290,12 @@ pub struct GroupedRunClassification {
     /// returned status — the decomposition the folded stop
     /// bool cannot express.
     pub stop: Option<GroupedRunStop>,
+    /// Q6 arm B: the terminal group ended in a signal discard
+    /// (recorded by `run_source_impl` per unit, surfaced here).
+    /// The discard abandons the rest of the line (evalstring.c
+    /// DISCARD arm); it does not by itself decide the session —
+    /// the errexit verdict on the interrupted status does.
+    pub signal_discard: bool,
 }
 
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
@@ -449,6 +459,11 @@ fn run_script_grouped_at_line_offset(
     // here: groups starting on or before it are not executed (the
     // first group starting past it clears the span and runs).
     let mut failglob_discard_until: Option<usize> = None;
+    // Q6 arm B: the most recent group's discard fact, carried to
+    // the input-exhaustion classification when no group stopped
+    // the run (a terminal discard group stops nothing, but the
+    // classification must still report it).
+    let mut terminal_discard = false;
     while index < raw_lines.len() {
         // One gather implementation for every grouped reader (the `source`
         // builtin shares it via read_next_source_group). The gather loop
@@ -519,11 +534,29 @@ fn run_script_grouped_at_line_offset(
         // A group that ended by unwinding (exit builtin, errexit, POSIX
         // special-builtin failure) stops the reader unconditionally — GNU's
         // jump_to_top_level cannot be resumed at the next command.
-        let exit_jump = executor.take_exit_jump_pending();
+        let exit_jump_raw = executor.take_exit_jump_pending();
+        // Q6 arm B: decompose the raw jump with the executor's own
+        // record of the unwind kind — an errexit break arms the
+        // jump bookkeeping (its main.rs/source consumers need the
+        // arm) but is not a jump in the classification.
+        let errexit_unwind = executor.take_errexit_unwind_armed();
+        let exit_jump = exit_jump_raw && !errexit_unwind;
+        // Q6 arm B: a group the reader discards for an untrapped
+        // signal discard is reported on the classification but
+        // does NOT preempt the errexit verdict: GNU's DISCARD
+        // abandons the rest of the line (evalstring.c), and the
+        // session's fate is the errexit verdict on the
+        // interrupted status — pty evidence (Q6 harness, GNU
+        // 5.3.20): interactive `set -e` + Ctrl+C on a foreground
+        // job EXITS the shell with 130, while the same delivery
+        // without -e discards and prompts again. The verdict
+        // below is exactly what separates the two.
+        let discarded = executor.take_unit_signal_discard();
+        terminal_discard = discarded;
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
-        let errexit_stop = status != 0 && stdin_script_errexit_enabled(executor) && !last_inverted;
+        let errexit_stop = errexit_break_verdict(executor, status);
         if parse_error || exit_jump || errexit_stop {
             // GAP-1 (unixwin/niubash#863): the run's classification is
             // adjudicated HERE, from these same verdicts — the
@@ -544,6 +577,7 @@ fn run_script_grouped_at_line_offset(
                 } else {
                     None
                 },
+                signal_discard: discarded,
             };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
@@ -621,6 +655,7 @@ fn run_script_grouped_at_line_offset(
         false,
         GroupedRunClassification {
             last_inverted: executor.last_command_inverted(),
+            signal_discard: terminal_discard,
             ..GroupedRunClassification::default()
         },
     )
@@ -2101,6 +2136,20 @@ pub fn stdin_script_errexit_enabled(executor: &Executor) -> bool {
     executor
         .get_env("SHELLOPTS")
         .is_some_and(|options| options.split(':').any(|option| option == "errexit"))
+}
+
+/// Q6 arm B: THE errexit-break verdict — the one derivation of
+/// "this terminal status is an errexit break" (nonzero status,
+/// errexit in effect, the `! CMD` CMD_IGNORE_RETURN exemption of
+/// execute_cmd.c:652-656 applied). The grouped driver loop and
+/// the Session layer's direct-route outcome mapping both read
+/// the verdict from here; arm A carried a copy at each site.
+/// The verdict is about the STATUS; whether a break actually
+/// adjudicated additionally depends on the unwind facts (a real
+/// jump or a signal discard preempts it), which the call sites
+/// combine with this verdict — in the same order everywhere.
+pub fn errexit_break_verdict(executor: &Executor, status: i32) -> bool {
+    status != 0 && stdin_script_errexit_enabled(executor) && !executor.last_command_inverted()
 }
 
 pub fn stdin_source_needs_more(source: &str) -> bool {
@@ -4189,11 +4238,25 @@ fn run_source_impl_inner(
             // prompts again with $? = code.
             if !executor.take_signal_discard_pending() {
                 executor.exit_jump_pending.set(true);
+                // Q6 arm B: record the unwind kind the gates
+                // reported, and surface the discard fact for the
+                // driver layer (the pending itself ends here).
+                if executor.take_errexit_unwind_pending() {
+                    executor.note_errexit_unwind_armed();
+                }
+            } else {
+                executor.note_unit_signal_discard();
+                // A discard preempts any errexit decision raised
+                // on the way out; drop a stale mark with its unit.
+                let _ = executor.take_errexit_unwind_pending();
             }
             code
         }
         Err(ExecuteError::FatalFunctionError(code)) => {
             executor.exit_jump_pending.set(true);
+            // Q6 arm B: a fatal-function jump is never an errexit
+            // break; drop any stale mark with its unit.
+            let _ = executor.take_errexit_unwind_pending();
             code
         }
         // ExpansionFailure is GNU's DISCARD: the command list aborted but
@@ -4220,6 +4283,9 @@ fn run_source_impl_inner(
         // and misclassify a later unit's genuine exit.
         Err(ExecuteError::SigintUnwind) => {
             let _ = executor.take_signal_discard_pending();
+            // Q6 arm B: this spelling IS the discard; record it
+            // for the driver layer like the ExitCode arm does.
+            executor.note_unit_signal_discard();
             130
         }
         // A `return` that unwinds to this unit's top ends the unit with

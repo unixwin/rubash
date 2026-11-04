@@ -555,6 +555,27 @@ pub struct Executor {
     /// $? = 128+sig), not as a jump_to_top_level exit; run_source_impl
     /// consumes the mark instead of recording an exit jump.
     signal_discard_pending: bool,
+    /// Q6 arm B (single-source classification prototype): set by the
+    /// executor's errexit gates (via `errexit_exit`) when the unwind
+    /// being raised is an errexit decision rather than a real `exit`
+    /// jump; `run_source_impl` consumes it into
+    /// `errexit_unwind_armed`. GNU raises the two through the same
+    /// jump_to_top_level mechanism (evalstring.c:387-403) but the
+    /// reader treats ERREXIT and EXITPROG as different unwinds
+    /// (evalstring.c:618-619), so the driver layer needs the fact at
+    /// the raise site, not a status re-derivation.
+    errexit_unwind_pending: bool,
+    /// Q6 arm B: `run_source_impl` records that the unit's ExitCode
+    /// unwind was an errexit break. The jump bookkeeping still arms
+    /// `exit_jump_pending` exactly as before for its long-standing
+    /// consumers (startup-file handling in main.rs, source driver);
+    /// the driver layer reads this mark to decompose the unwind kind.
+    errexit_unwind_armed: bool,
+    /// Q6 arm B: `run_source_impl` records that the unit ended in a
+    /// signal discard, so the grouped driver loop can surface the
+    /// fact per group (the pending itself is consumed inside
+    /// run_source_impl and never reached the classification).
+    unit_signal_discard: bool,
     /// rubash#2233, generalized by rubash#2346: set by the signal
     /// dispatch when an untrapped terminating signal is delivered on a
     /// path GNU settles through termsig_handler (sig.c:590): the termsig

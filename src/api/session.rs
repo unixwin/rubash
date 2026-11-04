@@ -50,6 +50,15 @@ pub enum Flow {
     /// this publication step; it is part of the contract's shape
     /// for the sourced-unit paths.
     Return(i32),
+    /// Q6 arm B: the run ended in an errexit break — GNU's
+    /// ERREXIT unwind (evalstring.c:387-393), kept apart from
+    /// both [`Flow::Completed`] (arm A folds the break there,
+    /// which is what forces hosts to re-derive it) and
+    /// [`Flow::ExitRequested`] (no `exit` was requested). A host
+    /// that adjudicates stops from `flow` alone now sees the
+    /// break; the status is the same value
+    /// [`RunOutcome::status`] carries.
+    ErrexitBreak(i32),
 }
 
 /// The options a single run carries (§5.2). Construct through
@@ -204,19 +213,25 @@ pub struct RunClassification {
     /// Populated by `run`/`run_line`; the stdin routes leave
     /// the mark to their callers and report `false`.
     pub signal_discard: bool,
-    /// The executor's exit-jump pending stood at the run's
-    /// terminal unit, raw: it can stand alongside
-    /// `parse_error`, in which case the jump was a reader
-    /// discard and did not count — `unwind` carries the
-    /// adjudicated form.
+    /// A real `exit`/FatalFunctionError jump ended the run's
+    /// terminal unit (Q6 arm B: corrected by the executor's
+    /// errexit-unwind mark — an errexit break no longer reads
+    /// as a jump; arm A reported the raw pending here, which
+    /// made a pure errexit break indistinguishable from a
+    /// real exit). It can stand alongside `parse_error`, in
+    /// which case the jump was a reader discard and did not
+    /// count — `unwind` carries the adjudicated form.
     pub exit_jump: bool,
-    /// The driver's errexit verdict for the terminal unit:
-    /// nonzero status, errexit in effect, and the `!`
-    /// inversion exemption (execute_cmd.c:652-656,
-    /// CMD_IGNORE_RETURN) not applying. Populated on the
-    /// grouped route, whose driver computes the verdict; the
-    /// line-offset route's drivers compute none and report
-    /// `false`.
+    /// The errexit verdict for the terminal unit: nonzero
+    /// status, errexit in effect, and the `!` inversion
+    /// exemption (execute_cmd.c:652-656, CMD_IGNORE_RETURN)
+    /// not applying — computed once by
+    /// `script_driver::errexit_break_verdict` and populated
+    /// on every route (Q6 arm B; arm A's line-offset route
+    /// reported `false` unconditionally). A signal discard
+    /// does not preempt the verdict: a discarded unit whose
+    /// status trips the verdict reports `true` (the discard
+    /// abandoned the line; the verdict ends the session).
     pub errexit_break: bool,
     /// The run's last command carried the `!` inversion
     /// (the input to the execute_cmd.c:652-656 exemption).
@@ -430,37 +445,31 @@ impl Session {
                 || script_driver::script_uses_history(source)
                 || script_driver::script_uses_aliases(source, alias_live))
         {
-            let (status, unwound, facts) =
+            let (status, _unwound, facts) =
                 script_driver::run_script_with_history_at_line_offset_classified(
                     &mut self.executor,
                     source,
                     options.line_offset,
                     None,
                 );
-            // The grouped driver consumes the jump flags and
-            // reports one stop bool that conflates a real exit
-            // with the errexit break; separate them with the
-            // driver's own published ingredients (its errexit
-            // predicate, re-read at the run's end). Known
-            // boundary, inherited from the driver's
-            // classification: a run that both requests exit
-            // with a nonzero status and satisfies the errexit
-            // predicate resolves to the errexit arm. The
-            // outcome's `classification` (GAP-1) carries the
-            // driver's own decomposition alongside, so a host
-            // that needs the two classes apart reads it there
-            // instead of re-deriving them.
-            let errexit_stop = status != 0
-                && script_driver::stdin_script_errexit_enabled(&self.executor)
-                && !self.executor.last_command_inverted();
-            let flow = if unwound && !errexit_stop {
-                Flow::ExitRequested(status)
-            } else {
-                Flow::Completed
+            // Q6 arm B: the flow is a pure map of the driver's
+            // adjudicated stop — no Session-layer re-derivation
+            // (arm A re-read the errexit predicate here, with a
+            // documented boundary bug: a real nonzero `exit`
+            // under armed errexit resolved to the errexit arm
+            // and folded to Completed). The driver's stop bool
+            // (`_unwound`) is the same fact as `facts.stop` and
+            // is no longer consulted separately.
+            let flow = match facts.stop {
+                Some(script_driver::GroupedRunStop::ExitJump) => Flow::ExitRequested(status),
+                Some(script_driver::GroupedRunStop::ErrexitBreak) => {
+                    Flow::ErrexitBreak(status)
+                }
+                None => Flow::Completed,
             };
             let classification = RunClassification {
                 parse_error: facts.parse_error,
-                signal_discard: false,
+                signal_discard: facts.signal_discard,
                 exit_jump: facts.exit_jump,
                 errexit_break: facts.errexit_stop,
                 last_inverted: facts.last_inverted,
@@ -490,7 +499,11 @@ impl Session {
         // it so it cannot leak into the next run's accounting —
         // and record it on the outcome's classification (GAP-1),
         // the value hosts used to take from the executor by hand.
-        classification.signal_discard = self.executor.take_signal_discard_pending();
+        // Q6 arm B: the routes now surface the discard through
+        // the classification itself; combine with (never
+        // overwrite by) any mark the Session layer still owns.
+        classification.signal_discard =
+            classification.signal_discard || self.executor.take_signal_discard_pending();
         let elapsed = started.elapsed();
 
         if let Some(events) = self.events.as_mut() {
@@ -675,10 +688,17 @@ impl Session {
     /// [`RunOutcome::classification`]; a drain reports them
     /// unset.
     pub fn take_classification(&mut self) -> RunClassification {
+        // Q6 arm B: the drained jump read gets the same
+        // correction as the outcome routes (an errexit unwind
+        // is not a jump). This drain stays a raw fact read —
+        // it adjudicates no unwind (the caller's own context
+        // owns the tail it drains), as in arm A.
+        let exit_jump_raw = self.executor.take_exit_jump_pending();
+        let errexit_unwind = self.executor.take_errexit_unwind_armed();
         RunClassification {
             parse_error: self.executor.take_parse_error(),
             signal_discard: self.executor.take_signal_discard_pending(),
-            exit_jump: self.executor.take_exit_jump_pending(),
+            exit_jump: exit_jump_raw && !errexit_unwind,
             errexit_break: false,
             last_inverted: self.executor.last_command_inverted(),
             unwind: None,
@@ -1096,23 +1116,48 @@ impl Session {
     /// (the startup-file rule of rubash#1158, applied to every
     /// driver route); a real exit jump becomes
     /// [`Flow::ExitRequested`]. The outcome's classification
-    /// (GAP-1) records the same two reads: the raw jump stands
-    /// in `exit_jump` even on the parse arm, while `unwind`
-    /// carries the adjudicated form (a discarded jump is no
-    /// unwind). These routes' drivers compute no errexit
-    /// verdict, so `errexit_break` reports false — the stdin
-    /// feeder's own stop rule derives its errexit arm from the
-    /// status, the options substance, and `last_inverted`,
-    /// all of which this value carries.
+    /// (GAP-1) records the adjudicated reads — `exit_jump` is
+    /// the corrected jump (Q6 arm B: an errexit unwind is not a
+    /// jump), and `unwind` carries the adjudicated stop kind.
+    /// Q6 arm B: this route now computes the same errexit
+    /// verdict as the grouped driver through
+    /// `script_driver::errexit_break_verdict` (arm A reported
+    /// `errexit_break: false` here unconditionally — the
+    /// line-route hole); the stdin feeder's own stop rule can
+    /// now read the adjudicated fields instead of re-deriving.
     fn outcome_after_driver(&mut self, status: i32) -> RunOutcome {
         let parse_error = self.executor.take_parse_error();
-        let exit_jump = self.executor.take_exit_jump_pending();
-        let flow = if parse_error {
-            Flow::Completed
-        } else if exit_jump {
-            Flow::ExitRequested(status)
+        // Q6 arm B: same fact reads and the same adjudication
+        // order as the grouped driver — the raw jump corrected
+        // by the executor's errexit-unwind mark, the discard
+        // record surfaced as a field, and the shared errexit
+        // verdict computed (arm A hardcoded `errexit_break:
+        // false` on this route: the line-route errexit hole).
+        // Precedence, identical to the grouped loop: a real
+        // jump that counts (not riding a parse abort) outranks
+        // the verdict; a parse abort discards the jump but an
+        // armed verdict on the parse status still adjudicates
+        // the break (GNU's interactive reader exits on a syntax
+        // error under `set -e`); a signal discard does NOT
+        // preempt the verdict (it abandons the line; the
+        // verdict on the interrupted status decides the
+        // session — Q6 pty evidence on GNU 5.3.20).
+        let exit_jump_raw = self.executor.take_exit_jump_pending();
+        let errexit_unwind = self.executor.take_errexit_unwind_armed();
+        let exit_jump = exit_jump_raw && !errexit_unwind;
+        let discarded = self.executor.take_unit_signal_discard();
+        let errexit_break = script_driver::errexit_break_verdict(&self.executor, status);
+        let unwind = if exit_jump && !parse_error {
+            Some(RunUnwind::ExitJump)
+        } else if errexit_break {
+            Some(RunUnwind::ErrexitBreak)
         } else {
-            Flow::Completed
+            None
+        };
+        let flow = match unwind {
+            Some(RunUnwind::ExitJump) => Flow::ExitRequested(status),
+            Some(RunUnwind::ErrexitBreak) => Flow::ErrexitBreak(status),
+            None => Flow::Completed,
         };
         RunOutcome {
             status,
@@ -1120,15 +1165,11 @@ impl Session {
             diagnostics: Vec::new(),
             classification: RunClassification {
                 parse_error,
-                signal_discard: false,
+                signal_discard: discarded,
                 exit_jump,
-                errexit_break: false,
+                errexit_break,
                 last_inverted: self.executor.last_command_inverted(),
-                unwind: if !parse_error && exit_jump {
-                    Some(RunUnwind::ExitJump)
-                } else {
-                    None
-                },
+                unwind,
             },
         }
     }
