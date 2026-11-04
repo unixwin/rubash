@@ -222,6 +222,20 @@ pub struct RunClassification {
     /// which case the jump was a reader discard and did not
     /// count — `unwind` carries the adjudicated form.
     pub exit_jump: bool,
+    /// The exit-jump pending exactly as the terminal unit
+    /// armed it, before the correction `exit_jump` applies
+    /// (GAP-2): either unwind class arms it — a real `exit`
+    /// and an errexit break alike (evalstring.c:396-403
+    /// re-raises both through the jump machinery) — so a
+    /// consumer whose own rule is stated over the pending
+    /// itself (the reader-batch feeder's stop rule, a
+    /// PROMPT_COMMAND tail read) takes the raw fact as a
+    /// value instead of polling the executor's pending by
+    /// hand. `exit_jump` remains the adjudicated read; this
+    /// is the carrier both reads come from. Populated on
+    /// every route that populates `exit_jump`, and by
+    /// [`Session::take_classification`]'s drain.
+    pub exit_jump_raw: bool,
     /// The errexit verdict for the terminal unit: nonzero
     /// status, errexit in effect, and the `!` inversion
     /// exemption (execute_cmd.c:652-656, CMD_IGNORE_RETURN)
@@ -251,9 +265,12 @@ pub struct RunOutcome {
     /// signal deaths.
     pub status: i32,
     pub flow: Flow,
-    /// Value-form diagnostics the run produced. In this
-    /// publication step this is empty for `run()` — see
-    /// [`Diagnostic`]'s production boundary.
+    /// Value-form diagnostics the run produced. Parse
+    /// diagnostics are produced on every run route (GAP-2):
+    /// the same values are delivered to the session's
+    /// diagnostic sink as they are collected. The remaining
+    /// kinds stay within [`Diagnostic`]'s production
+    /// boundary.
     pub diagnostics: Vec<Diagnostic>,
     /// The run's classification (GAP-1): the driver's own
     /// verdicts, including the exit-jump vs errexit-break
@@ -435,12 +452,16 @@ impl Session {
         }
         let started = Instant::now();
 
+        // GAP-2: the run's parse diagnostics are captured as
+        // values from here on; both routes below drain the
+        // capture into the outcome (and the diagnostic sink).
+        self.executor.arm_run_diagnostics();
         let posix = self.posix_mode();
         let unclosed = crate::lexer::has_unclosed_input_syntax_posix(source, posix)
             || script_driver::heredoc_delimiter_unclosed_quote(source).is_some();
         let alias_live =
             self.executor.alias_expansion_enabled() && !self.executor.aliases_snapshot().is_empty();
-        let (status, flow, mut classification) = if !unclosed
+        let (status, flow, mut classification, diagnostics) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)
                 || script_driver::script_uses_aliases(source, alias_live))
@@ -469,6 +490,7 @@ impl Session {
                 parse_error: facts.parse_error,
                 signal_discard: facts.signal_discard,
                 exit_jump: facts.exit_jump,
+                exit_jump_raw: facts.exit_jump_raw,
                 errexit_break: facts.errexit_stop,
                 last_inverted: facts.last_inverted,
                 unwind: match facts.stop {
@@ -479,7 +501,8 @@ impl Session {
                     None => None,
                 },
             };
-            (status, flow, classification)
+            let diagnostics = self.drain_run_diagnostics(source_name.as_deref());
+            (status, flow, classification, diagnostics)
         } else {
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
@@ -489,8 +512,13 @@ impl Session {
                 None,
                 source_name.as_deref(),
             );
-            let outcome = self.outcome_after_driver(status);
-            (outcome.status, outcome.flow, outcome.classification)
+            let outcome = self.outcome_after_driver(status, source_name.as_deref());
+            (
+                outcome.status,
+                outcome.flow,
+                outcome.classification,
+                outcome.diagnostics,
+            )
         };
         // A signal DISCARD the run ended on is the run's own
         // bookkeeping (its status already reflects it); consume
@@ -540,7 +568,7 @@ impl Session {
         Ok(RunOutcome {
             status,
             flow,
-            diagnostics: Vec::new(),
+            diagnostics,
             classification,
         })
     }
@@ -572,8 +600,10 @@ impl Session {
     /// Drive the session from the process's standard input
     /// (the non-interactive stdin driver both binaries use).
     pub fn run_stdin(&mut self) -> Result<RunOutcome, SessionError> {
+        self.executor.arm_run_diagnostics();
         let status = script_driver::run_stdin_script(&mut self.executor);
-        Ok(self.outcome_after_driver(status))
+        let source_name = self.argv0.clone();
+        Ok(self.outcome_after_driver(status, source_name.as_deref()))
     }
 
     /// Drive the session interactively from a piped standard
@@ -583,8 +613,10 @@ impl Session {
     pub fn run_interactive_stdin(&mut self) -> Result<RunOutcome, SessionError> {
         script_driver::prepare_interactive_history(&mut self.executor);
         self.interactive = true;
+        self.executor.arm_run_diagnostics();
         let status = script_driver::run_interactive_stdin(&mut self.executor);
-        Ok(self.outcome_after_driver(status))
+        let source_name = self.argv0.clone();
+        Ok(self.outcome_after_driver(status, source_name.as_deref()))
     }
 
     /// History-expand one interactive line before execution
@@ -697,6 +729,7 @@ impl Session {
             parse_error: self.executor.take_parse_error(),
             signal_discard: self.executor.take_signal_discard_pending(),
             exit_jump: exit_jump_raw && !errexit_unwind,
+            exit_jump_raw,
             errexit_break: false,
             last_inverted: self.executor.last_command_inverted(),
             unwind: None,
@@ -997,8 +1030,14 @@ impl Session {
         }
         let files = self.startup_files_for(class);
         let mut status = self.executor.last_exit_code();
+        // GAP-2: the chain's parse diagnostics accumulate as
+        // values across the files, each stamped with its own
+        // file's name at its per-file drain.
+        self.executor.arm_run_diagnostics();
+        let mut diagnostics: Vec<Diagnostic> = Vec::new();
         for file in &files {
             status = self.source_one_startup_file(&file.to_string_lossy())?;
+            diagnostics.extend(self.drain_run_diagnostics(Some(&file.to_string_lossy())));
             // GAP-1: decompose the file's raw jump with the
             // executor's errexit-unwind record, exactly as the
             // run routes do — a startup file whose last command
@@ -1014,11 +1053,12 @@ impl Session {
                 return Ok(RunOutcome {
                     status,
                     flow: Flow::ErrexitBreak(status),
-                    diagnostics: Vec::new(),
+                    diagnostics,
                     classification: RunClassification {
                         parse_error: false,
                         signal_discard: false,
                         exit_jump: false,
+                        exit_jump_raw,
                         errexit_break: true,
                         last_inverted: self.executor.last_command_inverted(),
                         unwind: Some(RunUnwind::ErrexitBreak),
@@ -1029,7 +1069,7 @@ impl Session {
                 return Ok(RunOutcome {
                     status,
                     flow: Flow::ExitRequested(status),
-                    diagnostics: Vec::new(),
+                    diagnostics,
                     // The chain's own adjudication, recorded as
                     // it is made: the file's jump stood and ends
                     // the chain (per-file parse errors were
@@ -1040,6 +1080,7 @@ impl Session {
                         parse_error: false,
                         signal_discard: false,
                         exit_jump: true,
+                        exit_jump_raw,
                         errexit_break: false,
                         last_inverted: self.executor.last_command_inverted(),
                         unwind: Some(RunUnwind::ExitJump),
@@ -1050,7 +1091,7 @@ impl Session {
         Ok(RunOutcome {
             status,
             flow: Flow::Completed,
-            diagnostics: Vec::new(),
+            diagnostics,
             classification: RunClassification::default(),
         })
     }
@@ -1149,7 +1190,7 @@ impl Session {
     /// `errexit_break: false` here unconditionally — the
     /// line-route hole); the stdin feeder's own stop rule can
     /// now read the adjudicated fields instead of re-deriving.
-    fn outcome_after_driver(&mut self, status: i32) -> RunOutcome {
+    fn outcome_after_driver(&mut self, status: i32, source_name: Option<&str>) -> RunOutcome {
         let parse_error = self.executor.take_parse_error();
         // Q6 arm B: same fact reads and the same adjudication
         // order as the grouped driver — the raw jump corrected
@@ -1186,16 +1227,43 @@ impl Session {
         RunOutcome {
             status,
             flow,
-            diagnostics: Vec::new(),
+            diagnostics: self.drain_run_diagnostics(source_name),
             classification: RunClassification {
                 parse_error,
                 signal_discard: discarded,
                 exit_jump,
+                exit_jump_raw,
                 errexit_break,
                 last_inverted: self.executor.last_command_inverted(),
                 unwind,
             },
         }
+    }
+
+    /// GAP-2: drain the executor's armed run-diagnostics
+    /// capture into contract values — one [`Diagnostic`] per
+    /// recorded parse diagnostic, stamped with the run's
+    /// source name, each also delivered to the session's
+    /// diagnostic sink (the delivery [`Session::parse`]
+    /// already performs for its own production). An unarmed
+    /// or silent run drains empty.
+    fn drain_run_diagnostics(&mut self, source_name: Option<&str>) -> Vec<Diagnostic> {
+        let records = self.executor.take_run_diagnostics();
+        let mut diagnostics = Vec::with_capacity(records.len());
+        for record in records {
+            let diagnostic = Diagnostic {
+                kind: DiagnosticKind::Parse,
+                message: record.message,
+                source_name: source_name.map(str::to_string),
+                line: record.line,
+                status: None,
+            };
+            if let Some(sink) = self.diagnostic_sink.as_mut() {
+                sink.diagnostic(&diagnostic);
+            }
+            diagnostics.push(diagnostic);
+        }
+        diagnostics
     }
 
     fn startup_files_for(&mut self, class: StartupClass) -> Vec<PathBuf> {

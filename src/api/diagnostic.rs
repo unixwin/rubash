@@ -24,15 +24,21 @@ pub enum DiagnosticKind {
 /// this value form exists so a host can render, index, or route a
 /// diagnostic without parsing text.
 ///
-/// Production boundary of this publication step: value-form
-/// diagnostics are produced by [`Session::parse`](super::Session)
-/// — extracted from the parser's own error nodes — and delivered
-/// to the session's [`DiagnosticSink`](super::DiagnosticSink).
-/// Diagnostics raised while a run executes are still produced
-/// inside the drivers as text, so
-/// [`RunOutcome::diagnostics`](super::RunOutcome) is empty for
-/// `run()` in this step: a value channel for runtime diagnostics
-/// needs engine instrumentation and is recorded as future work in
+/// Production boundary: value-form diagnostics are produced
+/// by [`Session::parse`](super::Session) — extracted from the
+/// parser's own error nodes — and, since GAP-2, by every run
+/// route ([`RunOutcome::diagnostics`](super::RunOutcome)): the
+/// executor records each parse diagnostic it renders during a
+/// run, and the session drains the records into values stamped
+/// with the run's source name. Both productions deliver to the
+/// session's [`DiagnosticSink`](super::DiagnosticSink). A run
+/// value's `message` is the rendered diagnostic text without
+/// its source/line prefix — for a near-token report that is the
+/// framed ``syntax error near …`` text the renderer printed,
+/// where `parse`'s extraction carries the parser's stored
+/// message (below). The remaining kinds (runtime, builtin,
+/// expansion) are still produced inside the drivers as text
+/// only; their value channel is recorded as future work in
 /// `docs/api-ledger.md`, not silently faked here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]

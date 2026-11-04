@@ -1558,6 +1558,10 @@ impl Executor {
                     self.comsub_eof_error_diagnostic(line),
                     v.close
                 );
+                self.record_run_diagnostic(
+                    format!("unexpected EOF while looking for matching `{}'", v.close),
+                    Some(line),
+                );
                 self.latch_command_substitution_parse_error();
                 self.last_command_substitution_status.set(Some(2));
                 return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
@@ -2082,6 +2086,7 @@ impl Executor {
             compound_redirect_failed: Cell::new(false),
             noclobber_prepared_targets: std::cell::RefCell::new(std::collections::HashSet::new()),
             exit_jump_pending: Cell::new(false),
+            run_diagnostics: std::cell::RefCell::new(None),
             errexit_status_converted: Cell::new(false),
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),

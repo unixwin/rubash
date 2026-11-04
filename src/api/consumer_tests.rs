@@ -1401,3 +1401,263 @@ fn issue863_gap1_line_route_parse_error_under_errexit_is_an_errexit_break() {
     assert!(class.errexit_break);
     assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
 }
+
+// ---------------------------------------------------------------------------
+// niubash#863 GAP-2: run-route diagnostics as values + the raw
+// exit-jump carrier.
+//
+// GAP-1 left two host routes on the direct driver call: the
+// stdin feeder's unclosed-quote arm needs the run's parse
+// diagnostics as values (RunOutcome::diagnostics was empty for
+// run()), and the feeder + PROMPT_COMMAND tail reads poll the
+// executor's raw exit-jump pending (either unwind class arms
+// it; classification.exit_jump is the corrected read). The
+// executor now records every parse diagnostic it renders
+// during an armed run, the session drains the records into
+// Diagnostic values (and the diagnostic sink), and
+// classification.exit_jump_raw carries the pending as armed.
+//
+// GNU anchors: read-time EOF diagnostics (parse.y:5419-5437),
+// yyerror's EOF path (parse.y:6890-6901), parser_error under
+// errexit exit_shell(2)s (error.c:324-327), and a parse error
+// alone is a DISCARD (evalstring.c:585-601).
+
+use super::capabilities::DiagnosticSink;
+use super::diagnostic::{Diagnostic, DiagnosticKind};
+
+#[test]
+fn issue863_gap2_unclosed_quote_reports_a_diagnostic_value() {
+    let mut session = Session::builder().build().expect("session builds");
+    let mut options = RunOptions::new();
+    options.source_name = Some("gap2-pin".to_string());
+    let outcome = session.run("echo 'abc", &options).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert!(outcome.classification.parse_error);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let diagnostic = &outcome.diagnostics[0];
+    assert_eq!(diagnostic.kind, DiagnosticKind::Parse);
+    assert_eq!(
+        diagnostic.message,
+        "unexpected EOF while looking for matching `''"
+    );
+    assert_eq!(diagnostic.source_name.as_deref(), Some("gap2-pin"));
+    assert_eq!(diagnostic.line, Some(1));
+    assert_eq!(diagnostic.status, None);
+}
+
+#[test]
+fn issue863_gap2_unclosed_comsub_reports_matching_paren() {
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("echo $(abc", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert!(outcome.classification.parse_error);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(
+        outcome.diagnostics[0].message,
+        "unexpected EOF while looking for matching `)'"
+    );
+    // The comsub verdict class reports the EOF line, not the
+    // opener's: GNU 5.3.20 on `echo $(abc` prints
+    // "line 2: unexpected EOF while looking for matching `)'"
+    // (captain-verified probe; the quote class below reports
+    // its opener line instead).
+    assert_eq!(outcome.diagnostics[0].line, Some(2));
+}
+
+#[test]
+fn issue863_gap2_midstream_syntax_error_reports_near_value() {
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("echo ok\n)", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert!(outcome.classification.parse_error);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(
+        outcome.diagnostics[0].message,
+        "syntax error near unexpected token `)'"
+    );
+    assert_eq!(outcome.diagnostics[0].line, Some(2));
+}
+
+#[test]
+fn issue863_gap2_heredoc_delimiter_unclosed_quote_reports() {
+    // The delimiter-word shape of issue160's text pin
+    // (`cat << "q`): the quote opens inside the heredoc
+    // delimiter word on the command line and never closes —
+    // the WORD read fails before any heredoc is gathered
+    // (parse.y:5419-5437). A quote in a heredoc BODY is
+    // literal text and reports nothing (GNU-verified).
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("cat << \"q", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert!(outcome.classification.parse_error);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(
+        outcome.diagnostics[0].message,
+        "unexpected EOF while looking for matching `\"'"
+    );
+    assert_eq!(outcome.diagnostics[0].line, Some(1));
+}
+
+#[test]
+fn issue863_gap2_clean_runs_report_no_diagnostics() {
+    // Line-offset route.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("echo hi", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(outcome.diagnostics.is_empty());
+    // Grouped route.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session.run("echo hi", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(outcome.diagnostics.is_empty());
+}
+
+#[test]
+fn issue863_gap2_grouped_route_reports_diagnostics() {
+    // Interactive options route an ordinary source through the
+    // grouped driver; its marker-node reports record the same
+    // values the line route's do.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session.run("echo ok; echo )bad", &options).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert!(outcome.classification.parse_error);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(
+        outcome.diagnostics[0].message,
+        "syntax error near unexpected token `)'"
+    );
+}
+
+#[test]
+fn issue863_gap2_parse_error_under_errexit_still_reports() {
+    let mut session = Session::builder().build().expect("session builds");
+    session.run("set -e", &RunOptions::new()).expect("run");
+    let outcome = session
+        .run("echo ok; echo )bad", &RunOptions::new())
+        .expect("run");
+    assert_eq!(outcome.status, 2);
+    let class = outcome.classification;
+    assert!(class.parse_error);
+    assert!(class.errexit_break);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(outcome.diagnostics[0].kind, DiagnosticKind::Parse);
+}
+
+#[test]
+fn issue863_gap2_exit_jump_raw_discriminates_the_unwind_classes() {
+    // A real exit arms the pending and stands as a jump on
+    // every read.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("exit 3", &RunOptions::new()).expect("run");
+    assert!(outcome.classification.exit_jump_raw);
+    assert!(outcome.classification.exit_jump);
+
+    // The discriminating cell: an errexit break arms the raw
+    // pending (evalstring.c:396-403 re-raises both classes)
+    // while the corrected read says no jump stood.
+    let mut session = Session::builder().build().expect("session builds");
+    session.run("set -e", &RunOptions::new()).expect("run");
+    let outcome = session.run("false", &RunOptions::new()).expect("run");
+    let class = outcome.classification;
+    assert!(class.exit_jump_raw);
+    assert!(!class.exit_jump);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+
+    // The grouped route reports the same pair.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("false; echo unreachable", &options)
+        .expect("run");
+    let class = outcome.classification;
+    assert!(class.exit_jump_raw);
+    assert!(!class.exit_jump);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+
+    // An ordinary run arms nothing.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("true", &RunOptions::new()).expect("run");
+    assert!(!outcome.classification.exit_jump_raw);
+    assert!(!outcome.classification.exit_jump);
+}
+
+#[test]
+fn issue863_gap2_prompt_command_errexit_break_drains_raw() {
+    // The PROMPT_COMMAND tail read niu performs after
+    // run_prompt_command: a failing prompt command under
+    // `set -e` arms the raw pending, and the PC runner's
+    // re-arm (rubash#433 — the jump is re-armed for the
+    // reader to honor) makes the corrected read stand too:
+    // on this route the raw and corrected reads agree, and
+    // both now arrive as one drained value instead of a
+    // hand-polled pending.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    session.run("PROMPT_COMMAND=false", &options).expect("run");
+    assert_eq!(session.run_prompt_command(), Some(1));
+    let class = session.take_classification();
+    assert!(class.exit_jump_raw);
+    assert!(class.exit_jump);
+    assert_eq!(class.unwind, None);
+}
+
+#[derive(Clone, Default)]
+struct Issue863Gap2Sink(Rc<RefCell<Vec<Diagnostic>>>);
+
+impl DiagnosticSink for Issue863Gap2Sink {
+    fn diagnostic(&mut self, diagnostic: &Diagnostic) {
+        self.0.borrow_mut().push(diagnostic.clone());
+    }
+}
+
+#[test]
+fn issue863_gap2_sink_receives_the_run_diagnostics() {
+    let sink = Issue863Gap2Sink::default();
+    let mut session = Session::builder()
+        .diagnostic_sink(Box::new(sink.clone()))
+        .build()
+        .expect("session builds");
+    let mut options = RunOptions::new();
+    options.source_name = Some("sink-pin".to_string());
+    let outcome = session.run("echo 'abc", &options).expect("run");
+    assert_eq!(outcome.diagnostics.len(), 1);
+    let delivered = sink.0.borrow();
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0], outcome.diagnostics[0]);
+    assert_eq!(delivered[0].source_name.as_deref(), Some("sink-pin"));
+}
+
+#[test]
+fn issue863_gap2_driver_route_produces_the_same_values() {
+    // The equivalence basis for the host migration: the values
+    // Session::run returns for an unclosed source are the
+    // records the driver route itself produces on an armed
+    // executor — same status, same message, same line.
+    let source = "echo 'abc";
+    let mut executor = Executor::new();
+    executor.arm_run_diagnostics();
+    let status = crate::script_driver::run_source_with_line_offset(
+        &mut executor,
+        source,
+        false,
+        0,
+        None,
+        Some("gap2-pin"),
+    );
+    let records = executor.take_run_diagnostics();
+    assert_eq!(records.len(), 1);
+
+    let mut session = Session::builder().build().expect("session builds");
+    let mut options = RunOptions::new();
+    options.source_name = Some("gap2-pin".to_string());
+    let outcome = session.run(source, &options).expect("run");
+    assert_eq!(outcome.status, status);
+    assert_eq!(outcome.diagnostics.len(), 1);
+    assert_eq!(outcome.diagnostics[0].message, records[0].message);
+    assert_eq!(outcome.diagnostics[0].line, records[0].line);
+}

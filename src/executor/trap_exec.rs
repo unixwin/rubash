@@ -709,23 +709,41 @@ impl Executor {
                                 let prefix = self.parser_error_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                self.record_run_diagnostic(
+                                    format!(
+                                        "syntax error near unexpected token `{token}' while looking for matching `)'"
+                                    ),
+                                    Some(report),
+                                );
                                 format!(
                                     "{prefix}syntax error near unexpected token `{token}' while looking for matching `)'\n{prefix}`{offending}'\n"
                                 )
                             }
-                            crate::lexer::UnclosedComsubShape::ComsubEof { line } => format!(
-                                "{}unexpected EOF while looking for matching `)'\n",
-                                self.parser_error_prefix_for_line(caller_line + line)
-                            ),
-                            crate::lexer::UnclosedComsubShape::ArithEof { line } => format!(
-                                // parse.y:3908-3915 parse_matched_pair:
-                                // the arithmetic scan's EOF names its
-                                // start_lineno — the `$((` open line,
-                                // mapped like the other open-line reports
-                                // (caller_line + line - 1).
-                                "{}unexpected EOF while looking for matching `)'\n",
-                                self.parser_error_prefix_for_line(caller_line + line - 1)
-                            ),
+                            crate::lexer::UnclosedComsubShape::ComsubEof { line } => {
+                                self.record_run_diagnostic(
+                                    "unexpected EOF while looking for matching `)'".to_string(),
+                                    Some(caller_line + line),
+                                );
+                                format!(
+                                    "{}unexpected EOF while looking for matching `)'\n",
+                                    self.parser_error_prefix_for_line(caller_line + line)
+                                )
+                            }
+                            crate::lexer::UnclosedComsubShape::ArithEof { line } => {
+                                self.record_run_diagnostic(
+                                    "unexpected EOF while looking for matching `)'".to_string(),
+                                    Some(caller_line + line - 1),
+                                );
+                                format!(
+                                    // parse.y:3908-3915 parse_matched_pair:
+                                    // the arithmetic scan's EOF names its
+                                    // start_lineno — the `$((` open line,
+                                    // mapped like the other open-line reports
+                                    // (caller_line + line - 1).
+                                    "{}unexpected EOF while looking for matching `)'\n",
+                                    self.parser_error_prefix_for_line(caller_line + line - 1)
+                                )
+                            }
                             crate::lexer::UnclosedComsubShape::PlainSubshellEof {
                                 line,
                                 open_line,
@@ -737,6 +755,13 @@ impl Executor {
                                 // close delimiter. Reported at one past the
                                 // last input line; the `('s line is in the
                                 // message text.
+                                self.record_run_diagnostic(
+                                    format!(
+                                        "syntax error: unexpected end of file from `(' command on line {}",
+                                        caller_line + open_line - 1
+                                    ),
+                                    Some(caller_line + line),
+                                );
                                 format!(
                                     "{}syntax error: unexpected end of file from `(' command on line {}\n",
                                     self.parser_error_prefix_for_line(caller_line + line),
@@ -755,6 +780,10 @@ impl Executor {
                                 let prefix = self.parser_error_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                self.record_run_diagnostic(
+                                    format!("syntax error near unexpected token `{token}'"),
+                                    Some(report),
+                                );
                                 format!(
                                     "{prefix}syntax error near unexpected token `{token}'\n{prefix}`{offending}'\n"
                                 )
@@ -766,6 +795,10 @@ impl Executor {
                                 let prefix = self.parser_error_prefix_for_line(report);
                                 let offending =
                                     source.lines().nth(line - 1).unwrap_or_default().to_string();
+                                self.record_run_diagnostic(
+                                    "syntax error near unexpected token `('".to_string(),
+                                    Some(report),
+                                );
                                 format!(
                                     "{prefix}syntax error near unexpected token `('\n{prefix}`{offending}'\n"
                                 )

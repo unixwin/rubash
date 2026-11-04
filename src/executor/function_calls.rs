@@ -48,6 +48,10 @@ impl Executor {
                 "{}syntax error near unexpected token `{token}'",
                 self.parser_error_prefix_for_line(line)
             );
+            self.record_run_diagnostic(
+                format!("syntax error near unexpected token `{token}'"),
+                Some(line),
+            );
             // parse.y:6865: no offending-line echo in an interactive shell.
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
