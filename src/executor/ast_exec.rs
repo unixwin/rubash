@@ -468,7 +468,7 @@ impl Executor {
                         self.exit_code,
                         None,
                     )?;
-                    return Err(ExecuteError::ExitCode(self.exit_code));
+                    return Err(self.errexit_exit(self.exit_code));
                 }
                 // Resume past the region's closing command — the subshell
                 // died at the exit, so its tail must not run.
@@ -1587,7 +1587,7 @@ impl Executor {
                         self.exit_code,
                         None,
                     )?;
-                    return Err(ExecuteError::ExitCode(self.exit_code));
+                    return Err(self.errexit_exit(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
@@ -1846,7 +1846,7 @@ impl Executor {
                         self.exit_code,
                         None,
                     )?;
-                    return Err(ExecuteError::ExitCode(self.exit_code));
+                    return Err(self.errexit_exit(self.exit_code));
                 }
                 if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                     index = next_index;
@@ -2059,7 +2059,7 @@ impl Executor {
                             self.exit_code,
                             None,
                         )?;
-                        return Err(ExecuteError::ExitCode(self.exit_code));
+                        return Err(self.errexit_exit(self.exit_code));
                     }
                     close_subshell_region_if_ended!(command);
                     index += 1;
@@ -2094,7 +2094,7 @@ impl Executor {
                             self.exit_code,
                             None,
                         )?;
-                        return Err(ExecuteError::ExitCode(self.exit_code));
+                        return Err(self.errexit_exit(self.exit_code));
                     }
                     if let Some(next_index) = self.skip_and_or_rhs(commands, index) {
                         index = next_index;
@@ -2326,7 +2326,7 @@ impl Executor {
                             self.exit_code,
                             None,
                         )?;
-                        return Err(ExecuteError::ExitCode(self.exit_code));
+                        return Err(self.errexit_exit(self.exit_code));
                     }
                     // GNU eval.c:111 (reader_loop case DISCARD): the rest of
                     // the current command LIST — the whole LOGICAL line,
@@ -2386,7 +2386,7 @@ impl Executor {
                             1,
                             None,
                         )?;
-                        return Err(ExecuteError::ExitCode(1));
+                        return Err(self.errexit_exit(1));
                     }
                 }
                 Err(ExecuteError::ExitCode(code)) => {
@@ -2454,7 +2454,7 @@ impl Executor {
                         && !command.inverted
                         && command.and_or().is_none()
                     {
-                        return Err(ExecuteError::ExitCode(self.exit_code));
+                        return Err(self.errexit_exit(self.exit_code));
                     }
                     continue;
                 }
@@ -2561,7 +2561,7 @@ impl Executor {
                     self.exit_code,
                     None,
                 )?;
-                return Err(ExecuteError::ExitCode(self.exit_code));
+                return Err(self.errexit_exit(self.exit_code));
             }
 
             if command.subshell_end {

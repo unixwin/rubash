@@ -1892,6 +1892,9 @@ impl Executor {
             exit_code: self.exit_code,
             parse_error_occurred: false,
             signal_discard_pending: false,
+            errexit_unwind_pending: false,
+            errexit_unwind_armed: false,
+            unit_signal_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout

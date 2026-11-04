@@ -685,6 +685,19 @@ impl Executor {
                 // special-builtin death, not an errexit one — the time
                 // branch's jump is gated on posix fatality, not `set -e`.
                 self.posix_special_status_converted.set(true);
+                // GAP-1: this jump is the fatal class (the
+                // classification's ExitJump family, like
+                // FatalFunctionError), so it deliberately carries
+                // no errexit mark. Drain any standing mark
+                // defensively: the mark's lifetime invariant (one
+                // writer, `errexit_exit`; consumed by
+                // run_source_impl and the time wrapper) already
+                // guarantees none can stand here — the command
+                // completed, so no errexit unwind is in flight —
+                // and the drain keeps this jump's kind correct by
+                // construction rather than by that argument alone
+                // (Q6 arm B approximation (ii), resolved).
+                let _ = self.take_errexit_unwind_pending();
                 Err(ExecuteError::ExitCode(completed_status))
             } else {
                 // Rescued by the ERR trap: the trap already fired for
@@ -766,6 +779,13 @@ impl Executor {
                 Ok(())
             };
             match site_result {
+                // Q6 arm B: only the genuine conversion (an Ok
+                // completion turned into the errexit unwind) is
+                // marked; an Err already in flight (the exit
+                // builtin's own unwind crossing this frame)
+                // keeps its kind, exactly as the conversion mark
+                // above already discriminates.
+                Ok(()) if result.is_ok() => Err(self.errexit_exit(self.exit_code)),
                 Ok(()) => Err(ExecuteError::ExitCode(self.exit_code)),
                 Err(error) => Err(error),
             }

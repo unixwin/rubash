@@ -292,7 +292,23 @@ impl Executor {
             // earns its ERR fire before the ERREXIT conversion, exactly
             // like the assignment-only tail below.
             self.maybe_run_error_trap(cmd)?;
-            return Err(ExecuteError::ExitCode(self.exit_code));
+            // DE-06 (design 9.3; PLAN row 12): the errexit
+            // decision — park a selected `set -e` filter here,
+            // before the exit path runs, as at every other
+            // conversion gate.
+            self.debugger_note_exception_site(
+                crate::debugger::ExceptionKind::Errexit,
+                self.exit_code,
+                None,
+            )?;
+            // GAP-1 (Q6 corpus L2-28): this conversion is an
+            // errexit raise and must carry the mark — the fast
+            // entry bypasses execute_materialized_command's
+            // marked tail, and its unmarked ExitCode read as a
+            // real exit jump in the run classification
+            // (`set -e; (( 0 ))` mislabeled ExitJump on both
+            // Session routes).
+            return Err(self.errexit_exit(self.exit_code));
         }
         Ok(())
     }
@@ -922,7 +938,7 @@ impl Executor {
                     None,
                 )?;
             }
-            return Err(ExecuteError::ExitCode(self.exit_code));
+            return Err(self.errexit_exit(self.exit_code));
         }
         Ok(())
     }

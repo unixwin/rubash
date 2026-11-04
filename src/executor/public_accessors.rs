@@ -773,6 +773,45 @@ impl Executor {
         std::mem::take(&mut self.signal_discard_pending)
     }
 
+    /// Q6 arm B: the single raise point for an errexit unwind. Every
+    /// errexit gate in the executor returns through here so the
+    /// unwind's kind is recorded where the decision is made (GNU
+    /// makes the same decision inside execute_command_internal,
+    /// execute_cmd.c:624, and unwinds ERREXIT apart from EXITPROG,
+    /// evalstring.c:387-403).
+    pub(crate) fn errexit_exit(&mut self, code: i32) -> ExecuteError {
+        self.errexit_unwind_pending = true;
+        ExecuteError::ExitCode(code)
+    }
+
+    /// Q6 arm B: take-style read of the errexit-unwind mark (see
+    /// Executor::errexit_unwind_pending).
+    pub fn take_errexit_unwind_pending(&mut self) -> bool {
+        std::mem::take(&mut self.errexit_unwind_pending)
+    }
+
+    /// Q6 arm B: record that the current unit's unwind was an
+    /// errexit break (see Executor::errexit_unwind_armed).
+    pub fn note_errexit_unwind_armed(&mut self) {
+        self.errexit_unwind_armed = true;
+    }
+
+    /// Q6 arm B: take-style read of the armed errexit-unwind mark.
+    pub fn take_errexit_unwind_armed(&mut self) -> bool {
+        std::mem::take(&mut self.errexit_unwind_armed)
+    }
+
+    /// Q6 arm B: record that the current unit ended in a signal
+    /// discard (see Executor::unit_signal_discard).
+    pub fn note_unit_signal_discard(&mut self) {
+        self.unit_signal_discard = true;
+    }
+
+    /// Q6 arm B: take-style read of the unit signal-discard record.
+    pub fn take_unit_signal_discard(&mut self) -> bool {
+        std::mem::take(&mut self.unit_signal_discard)
+    }
+
     /// rubash#2233: non-consuming read of the hangup-death mark — the
     /// SIGHUP view of the generalized termsig-death mark (see
     /// Executor::termsig_death_pending). The interactive reader peeks

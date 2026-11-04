@@ -952,7 +952,7 @@ impl Executor {
             // decision — park a selected `set -e` filter before
             // the exit path runs.
             self.debugger_note_exception_site(crate::debugger::ExceptionKind::Errexit, 1, None)?;
-            return Err(ExecuteError::ExitCode(1));
+            return Err(self.errexit_exit(1));
         }
         Ok(true)
     }

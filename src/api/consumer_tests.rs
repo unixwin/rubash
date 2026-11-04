@@ -1025,3 +1025,379 @@ fn issue822_winsize_bind_creates_no_record() {
         std::env::set_var("LINES", value);
     }
 }
+
+// ---- unixwin/niubash#863 GAP-1: run classification on the contract ----
+//
+// The grouped driver's stop bool conflates a real exit jump with
+// the errexit break, and Flow folds the errexit break into
+// Completed — so a REPL host could not reproduce the driver's
+// stop rule from Session::run's outcome and kept the direct
+// driver call. RunOutcome::classification now carries the
+// driver's own decomposition. These pins drive the same outcome
+// classes niubash's issue863_reader_batch_* pins lock from the
+// host side; together they define the 1:1 mapping the reader
+// batch migrates against: end the session iff
+// classification.unwind.is_some(), with outcome.status.
+//
+// GNU anchors: EXITPROG/ERREXIT are caught at parse_and_execute's
+// setjmp and re-raised to the reader's top level
+// (evalstring.c:396-403, :618-619); a parse error alone is a
+// DISCARD (evalstring.c:585-601); the `!` inversion exemption is
+// execute_cmd.c:652-656 (CMD_IGNORE_RETURN).
+
+use super::session::{Flow, RunUnwind};
+
+fn issue863_gap1_interactive_session() -> Session {
+    Session::builder()
+        .invocation_shape(InvocationShape::interactive())
+        .build()
+        .expect("session builds")
+}
+
+fn issue863_gap1_interactive_options() -> RunOptions {
+    let mut options = RunOptions::new();
+    options.interactive = true;
+    options
+}
+
+#[test]
+fn issue863_gap1_errexit_break_is_classified_apart_from_flow() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("false; echo unreachable", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    // Q6 arm B contract: the errexit break no longer folds
+    // into Completed — Flow carries it as its own arm.
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+    assert!(!class.parse_error);
+}
+
+#[test]
+fn issue863_gap1_exit_jump_under_errexit_keeps_kind_and_status() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session.run("true; exit 3", &options).expect("run");
+    // The jump's own status (rubash#2535), not a trap-restored $?.
+    assert_eq!(outcome.status, 3);
+    // Q6 arm B contract: the jump outranks the errexit verdict
+    // in Flow too (arm A's fold resolved this shape to
+    // Completed, hiding a real exit from Flow-reading hosts)…
+    assert_eq!(outcome.flow, Flow::ExitRequested(3));
+    // …while the classification names the stop the driver
+    // adjudicated: the jump counted, so the stop is the jump —
+    // with the errexit verdict also standing, as computed.
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+    assert!(class.exit_jump);
+    assert!(class.errexit_break);
+    assert!(!class.parse_error);
+}
+
+#[test]
+fn issue863_gap1_parse_error_discards_without_errexit() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session.run("echo ok; echo )bad", &options).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    assert!(class.parse_error);
+    assert!(!class.errexit_break);
+    // The DISCARD class: no unwind ends the session. (The raw
+    // exit_jump is deliberately unasserted — the parse-abort
+    // arm may stand it; the adjudicated form is `unwind`.)
+    assert_eq!(class.unwind, None);
+}
+
+#[test]
+fn issue863_gap1_parse_error_under_errexit_is_an_errexit_break() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session.run("echo ok; echo )bad", &options).expect("run");
+    assert_eq!(outcome.status, 2);
+    // Q6 arm B contract: Flow carries the break, as on the
+    // plain errexit shape.
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(2));
+    let class = outcome.classification;
+    assert!(class.parse_error);
+    assert!(class.errexit_break);
+    // GNU: the errexit break propagates even on a failed parse
+    // status — the session ends, at the parse status.
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+}
+
+#[test]
+fn issue863_gap1_inverted_last_command_is_errexit_exempt() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session.run("echo ok; ! true", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    // execute_cmd.c:652-656: the inverted command's failing
+    // status is exempt — no errexit verdict, no unwind, and
+    // the inversion itself is on the record for hosts whose
+    // stop rule reads it (the stdin feeder's shape).
+    assert!(class.last_inverted);
+    assert!(!class.errexit_break);
+    assert_eq!(class.unwind, None);
+}
+
+#[test]
+fn issue863_gap1_plain_exit_jump_and_ordinary_runs() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session.run("true; exit 3", &options).expect("run");
+    assert_eq!(outcome.status, 3);
+    assert_eq!(outcome.flow, Flow::ExitRequested(3));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+    assert!(class.exit_jump);
+    assert!(!class.errexit_break);
+    assert!(!class.parse_error);
+
+    // run_line composes the same run: same classification.
+    let mut session = issue863_gap1_interactive_session();
+    let outcome = session.run_line("exit 4").expect("run_line");
+    assert_eq!(outcome.status, 4);
+    assert_eq!(outcome.flow, Flow::ExitRequested(4));
+    assert_eq!(outcome.classification.unwind, Some(RunUnwind::ExitJump));
+
+    // Ordinary runs classify clear, pass or fail.
+    let mut session = issue863_gap1_interactive_session();
+    let outcome = session.run("false", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    assert!(!class.parse_error);
+    assert!(!class.signal_discard);
+    assert!(!class.exit_jump);
+    assert!(!class.errexit_break);
+    assert!(!class.last_inverted);
+    assert_eq!(class.unwind, None);
+    let outcome = session.run("true", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert_eq!(outcome.classification.unwind, None);
+}
+
+#[test]
+fn issue863_gap1_line_route_reports_its_own_classification() {
+    // Non-interactive, no history/alias use: the line-offset
+    // route. Its outcome mapping computes the same errexit
+    // verdict as the grouped driver (the shared
+    // `errexit_break_verdict`) and reports the route's own
+    // adjudication — the same reads Flow is folded from.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("exit 5", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 5);
+    assert_eq!(outcome.flow, Flow::ExitRequested(5));
+    let class = outcome.classification;
+    assert!(class.exit_jump);
+    assert!(!class.parse_error);
+    assert!(!class.errexit_break);
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session.run("echo )bad", &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 2);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    assert!(class.parse_error);
+    // A parse-flagged run's jump is the reader discard: the
+    // adjudicated unwind is none.
+    assert_eq!(class.unwind, None);
+}
+
+#[test]
+fn issue863_gap1_prompt_command_jump_drains_as_classification() {
+    let mut session = issue863_gap1_interactive_session();
+    // Control: no prompt command, nothing pending — the drain
+    // is clear and adjudicates nothing.
+    assert_eq!(session.run_prompt_command(), None);
+    let class = session.take_classification();
+    assert!(!class.exit_jump);
+    assert!(!class.parse_error);
+    assert!(!class.signal_discard);
+    assert_eq!(class.unwind, None);
+
+    // A PROMPT_COMMAND exit is re-armed by its runner
+    // (rubash#433; evalstring.c:618-619's re-raise) — the
+    // exact pending niu's shell.rs polls after
+    // run_prompt_command, now drained as one value.
+    let options = issue863_gap1_interactive_options();
+    session
+        .run("PROMPT_COMMAND='exit 7'", &options)
+        .expect("run");
+    assert_eq!(session.run_prompt_command(), Some(7));
+    let class = session.take_classification();
+    assert!(class.exit_jump);
+    assert_eq!(class.unwind, None);
+}
+
+#[test]
+fn issue863_gap1_arith_zero_under_errexit_is_an_errexit_break() {
+    // Q6 corpus L2-28: an arithmetic command evaluating to 0
+    // fails with status 1, and under `set -e` that failure is
+    // an errexit break — GNU executes no further command and
+    // the shell exits 1 (execute_cmd.c:624's exit_immediately
+    // decision on the arithmetic command's result). The Q6
+    // prototype mislabeled this cell ExitJump on both routes:
+    // the arithmetic raise reached the jump bookkeeping
+    // outside the marked raise sites. This pin is the
+    // enumeration-completeness witness for the arithmetic
+    // raise path.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session.run("(( 0 )); echo alive", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+    assert!(!class.parse_error);
+
+    // The line-offset route adjudicates the same cell the
+    // same way (one verdict, every route).
+    let mut session = Session::builder().build().expect("session builds");
+    session.run("set -e", &RunOptions::new()).expect("run");
+    let outcome = session
+        .run("(( 0 )); echo alive", &RunOptions::new())
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+}
+
+#[test]
+fn issue863_gap1_conditional_failure_under_errexit_is_an_errexit_break() {
+    // Q6 corpus L2-29: the `[[ ]]` sibling of the arithmetic
+    // cell — a conditional command failing at statement
+    // position under `set -e` is an errexit break (GNU
+    // execute_cmd.c:624's decision on the cm_cond result).
+    // Pinned alongside L2-28 as the enumeration witness for
+    // the conditional raise class.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("[[ 1 == 2 ]]; echo alive", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+}
+
+#[test]
+fn issue863_gap1_eval_parse_error_under_errexit_is_an_errexit_break() {
+    // GNU error.c:324-326: a parser_error printed while
+    // errexit is live exit_shell(2)s on the spot — so an
+    // `eval` whose string fails to parse, under `set -e`,
+    // ends the session as an errexit-class exit at status 2,
+    // not as an exit jump (and without live errexit the same
+    // eval merely returns 2 and the session lives). The
+    // eval raise sites carry the errexit mark like every
+    // other errexit gate.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("eval 'echo )bad'; echo alive", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 2);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(2));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+}
+
+#[test]
+fn issue863_gap1_startup_chain_decomposes_the_file_unwind() {
+    // The startup chain reads the same decomposition as the
+    // run routes: a startup file that arms errexit itself and
+    // fails its last command ends the chain in an errexit
+    // break; a file that exits ends it in an exit jump. (The
+    // raw pending read mislabeled the first shape ExitJump —
+    // Q6 arm B approximation (iv).)
+    let dir = temp_dir("issue863-gap1-startup");
+    let marker = dir.join("reached.txt");
+
+    let env_file = dir.join("env-errexit.sh");
+    std::fs::write(
+        &env_file,
+        format!("set -e\nfalse\nprintf x > '{}'", marker.display()),
+    )
+    .expect("env file");
+    let mut session = Session::builder()
+        .env("BASH_ENV", env_file.to_string_lossy().into_owned())
+        .build()
+        .expect("session builds");
+    let outcome = session
+        .source_startup_files(StartupClass::EnvFile)
+        .expect("startup chain runs");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+    assert!(class.errexit_break);
+    assert!(!class.exit_jump);
+    assert!(
+        !marker.exists(),
+        "the errexit break ends the file (and the chain)"
+    );
+
+    let env_file = dir.join("env-exit.sh");
+    std::fs::write(&env_file, "exit 7").expect("env file");
+    let mut session = Session::builder()
+        .env("BASH_ENV", env_file.to_string_lossy().into_owned())
+        .build()
+        .expect("session builds");
+    let outcome = session
+        .source_startup_files(StartupClass::EnvFile)
+        .expect("startup chain runs");
+    assert_eq!(outcome.status, 7);
+    assert_eq!(outcome.flow, Flow::ExitRequested(7));
+    let class = outcome.classification;
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+    assert!(class.exit_jump);
+    assert!(!class.errexit_break);
+}
+
+#[test]
+fn issue863_gap1_line_route_parse_error_under_errexit_is_an_errexit_break() {
+    // Q6 corpus L1-08, line-offset route: arm A's line route
+    // was totally silent on this cell (classification
+    // all-zero, Flow::Completed) while GNU exits 2 — the
+    // hole that made HB fire on the line route. The shared
+    // verdict closes it: a failed parse status under armed
+    // errexit is an errexit break on this route too.
+    let mut session = Session::builder().build().expect("session builds");
+    session.run("set -e", &RunOptions::new()).expect("run");
+    let outcome = session
+        .run("echo ok; echo )bad", &RunOptions::new())
+        .expect("run");
+    assert_eq!(outcome.status, 2);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(2));
+    let class = outcome.classification;
+    assert!(class.parse_error);
+    assert!(class.errexit_break);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+}
