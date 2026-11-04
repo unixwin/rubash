@@ -339,9 +339,15 @@ impl Executor {
                         self.parser_error_prefix()
                     );
                 }
-                self.exit_code = 2;
+                // rubash#2787: the command's exit status stays the
+                // substitution's 2 only for contained routes; the
+                // abort out of a top-level `-c` string carries the
+                // run_one_command FORCE_EOF remap to 127
+                // (shell.c:1471-1472) via comsub_parse_error_abort_status.
+                let abort_status = self.comsub_parse_error_abort_status();
+                self.exit_code = abort_status;
                 self.last_command_substitution_status.set(None);
-                return Err(ExecuteError::ExitCode(2));
+                return Err(ExecuteError::ExitCode(abort_status));
             }
         }
         let original_words_had_command_substitution = cmd
