@@ -104,8 +104,13 @@ fn run_golden_fixture(name: &str, timeout_secs: u64, corpus: &[&str]) {
         "{name}: unexpected exit code {:?}",
         out.code
     );
-    assert_bytes_eq(&out.stdout, &expected_out, "stdout", name);
-    assert_bytes_eq(&out.stderr, &expected_err, "stderr", name);
+    // #2714: the engine now prints the invocation name in diagnostics;
+    // normalize the harness exe-path token in the actual streams (the
+    // fixtures hold GNU's `bash` rendering).
+    let actual_out = normalized_invocation_text(&out.stdout);
+    let actual_err = normalized_invocation_text(&out.stderr);
+    assert_bytes_eq(actual_out.as_bytes(), &expected_out, "stdout", name);
+    assert_bytes_eq(actual_err.as_bytes(), &expected_err, "stderr", name);
 }
 
 macro_rules! golden_fixture {
@@ -746,6 +751,25 @@ fn issue2056_wait_bounded_drains_pipes_while_waiting() {
     );
 }
 
+/// #2714: diagnostics carry the invocation name — the exe path exactly
+/// as spawned — while the golden fixtures were captured from GNU bash
+/// invoked as `bash`. Normalize the harness's own exe-path token (the
+/// same three spellings cli_tests normalizes: verbatim, slash-flipped,
+/// POSIX-drive) in actual output before comparing.
+fn normalized_invocation_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let exe = env!("CARGO_BIN_EXE_rubash");
+    let slashed = exe.replace('\\', "/");
+    let mut normalized = text.replace(exe, "bash").replace(&slashed, "bash");
+    if let Some(drive) = slashed.chars().next().filter(|c| c.is_ascii_alphabetic()) {
+        if slashed.as_bytes().get(1) == Some(&b':') {
+            let posix = format!("/{}/{}", drive.to_ascii_lowercase(), &slashed[3..]);
+            normalized = normalized.replace(&posix, "bash");
+        }
+    }
+    normalized
+}
+
 fn assert_bytes_eq(actual: &[u8], expected: &[u8], label: &str, name: &str) {
     if actual == expected {
         return;
@@ -823,6 +847,23 @@ fn normalize_snapshot(bytes: &[u8], scratch: &Path) -> Vec<u8> {
         } else {
             String::new()
         }
+    };
+    // #2714: diagnostics carry the invocation name; the snapshots were
+    // recorded from GNU invoked as `bash`, so prolog-shaped occurrences
+    // of the exe path (`<exe>: -c:`, `<exe>: line `) normalize to
+    // `bash` here, before the path-as-data anonymization below maps
+    // the remaining occurrences to <SH>.
+    let text = {
+        let mut t = text.into_owned();
+        for exe in [&exe_fwd, &exe_raw, &exe_posix_prefix] {
+            if exe.is_empty() {
+                continue;
+            }
+            t = t
+                .replace(&format!("{exe}: -c:"), "bash: -c:")
+                .replace(&format!("{exe}: line "), "bash: line ");
+        }
+        t
     };
     let joined = text
         .split('\n')
@@ -4088,9 +4129,11 @@ mod errors10_posix_fatal {
     fn run(args: &[&str]) -> (String, String, Option<i32>) {
         let dir = case_scratch("errors10");
         let out = run_rubash_in(&dir, args, Duration::from_secs(30));
+        // #2714: these pins assert GNU's `bash:` prolog; the engine now
+        // prints the invocation name, so normalize the exe-path token.
         (
-            String::from_utf8_lossy(&out.stdout).into_owned(),
-            String::from_utf8_lossy(&out.stderr).into_owned(),
+            normalized_invocation_text(&out.stdout),
+            normalized_invocation_text(&out.stderr),
             out.code,
         )
     }
