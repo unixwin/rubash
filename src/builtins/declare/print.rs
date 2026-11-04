@@ -291,9 +291,24 @@ pub(crate) fn declaration_names_to_print(
     let integers = marked_vars(variables, INTEGER_VARS);
     let filter_by_attr =
         export || readonly || array || assoc || integer || uppercase || lowercase || nameref;
+    // rubash#2702 (owner decision D7): THIS_SH is not a GNU variable;
+    // the engine injects it at startup for ${THIS_SH} self-invocation
+    // (executor init), so the injected spelling (the running
+    // executable's own path) stays out of the user namespace listing.
+    // A caller-supplied value that survived init (the sh/bash-named
+    // wrapper exception) is a genuine variable and lists — the exact
+    // rule compgen's candidate walk applies (builtins/complete.rs,
+    // rubash#1799). Named `declare -p THIS_SH` lookups and ${THIS_SH}
+    // expansion are unaffected: only the listing hides it.
+    let this_sh_injected = crate::builtins::complete::auto_this_sh_spelling();
+    let this_sh_hidden = |name: &str, variables: &crate::shell::var_table::VarTable| {
+        name == "THIS_SH"
+            && variables.get("THIS_SH").map(String::as_str) == Some(this_sh_injected.as_str())
+    };
     let mut names: Vec<String> = variables
         .keys()
         .filter(|name| !name.starts_with("__RUBASH_"))
+        .filter(|name| !this_sh_hidden(name, variables))
         // GNU variables.c:511-526 (initialize_shell_variables): environment
         // entries with invalid identifier names (Windows passes names like
         // `CommonProgramFiles(x86)`) are bound into the invisible
@@ -323,6 +338,11 @@ pub(crate) fn declaration_names_to_print(
         .chain(nameref_vars.iter())
     {
         if name.starts_with("__RUBASH_") {
+            continue;
+        }
+        // rubash#2702: the mark-set chain must not resurrect the
+        // injected THIS_SH the primary walk hid.
+        if this_sh_hidden(name, variables) {
             continue;
         }
         // Same invalid_env rule as the primary listing above: an invalid

@@ -44,6 +44,32 @@ fn rubash_command() -> Command {
     command
 }
 
+/// rubash#2714 (decision D1): the diagnostic prolog follows
+/// argv[0], so a `-c` run spawned through rubash_command()
+/// reports under the harness's own exe path. This suite's
+/// expectations were measured against GNU invoked as `bash`;
+/// this helper normalizes the invocation-name token (the
+/// harness's own exe path, in each spelling the engine can
+/// produce: verbatim, slash-flipped, POSIX-drive) to `bash` in
+/// captured output — the same normalization the GNU suites
+/// apply to the baseline's path. Apply it only where the
+/// expectation carries the prolog name; output that pins
+/// $0-as-invoked-path (e.g. scripts.rs stdin tests) must NOT
+/// pass through here.
+fn cli_normalized_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes).into_owned();
+    let exe = env!("CARGO_BIN_EXE_rubash");
+    let slashed = exe.replace('\\', "/");
+    let mut normalized = text.replace(exe, "bash").replace(&slashed, "bash");
+    if let Some(drive) = slashed.chars().next().filter(|c| c.is_ascii_alphabetic()) {
+        if slashed.as_bytes().get(1) == Some(&b':') {
+            let posix = format!("/{}/{}", drive.to_ascii_lowercase(), &slashed[3..]);
+            normalized = normalized.replace(&posix, "bash");
+        }
+    }
+    normalized
+}
+
 fn assert_stderr_matches(stderr: &str, pattern: &str) {
     let regex = Regex::new(pattern).expect("valid regex");
     assert!(
@@ -692,7 +718,7 @@ fn c_command_retires_finished_coproc_endpoints_before_later_redirects() {
         "c0=<unset> pid=<unset>\nstatus=1 value=<>\n"
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: 4: Bad file descriptor\n"
     );
 }
@@ -803,7 +829,7 @@ fn c_command_echo_reports_persistent_closed_stdout() {
 
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        cli_normalized_text(&output.stdout),
         "bash: line 1: echo: write error: Bad file descriptor\n"
     );
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
@@ -1508,7 +1534,7 @@ fn function_call_stack_reports_multiline_source_and_line() {
     // GNU shell.c:1647 pushes the "main" bottom frame only in
     // shell_execscript (script FILE); `bash -c` has real function frames
     // only: FUNCNAME=(t2), BASH_SOURCE=(bash), BASH_LINENO=(2).
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "t2|bash|2\n");
+    assert_eq!(cli_normalized_text(&output.stdout), "t2|bash|2\n");
 }
 
 #[test]
@@ -1523,7 +1549,7 @@ fn function_call_stack_omits_internal_main_frame() {
 
     assert!(output.status.success());
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        cli_normalized_text(&output.stdout),
         "inner outer|bash bash|1 1\n"
     );
 }
@@ -1896,7 +1922,11 @@ fn malformed_compound_inside_command_substitution_is_a_syntax_error() {
         .arg("echo $( if x; then echo foo )")
         .output()
         .expect("run rubash");
-    assert_eq!(output.status.code(), Some(2));
+    // rubash#2787 (decision D3): a read-time comsub body failure in
+    // a `-c` string exits 127 (GNU shell.c:1471 run_one_command
+    // FORCE_EOF remap; verified vs GNU 5.3.20 for this exact
+    // shape) — the pre-decision expectation here was 2.
+    assert_eq!(output.status.code(), Some(127));
 }
 
 #[test]
@@ -2178,7 +2208,11 @@ fn invalid_case_terminator_inside_command_substitution_is_a_syntax_error() {
         .arg("echo $(case x in x) ;; x) done ;; esac)")
         .output()
         .expect("run rubash");
-    assert_eq!(output.status.code(), Some(2));
+    // rubash#2787 (decision D3): as in
+    // malformed_compound_inside_command_substitution — the `-c`
+    // comsub read-time failure exits 127 under GNU 5.3.20 for
+    // this exact shape; the pre-decision expectation was 2.
+    assert_eq!(output.status.code(), Some(127));
 }
 
 #[test]
@@ -2596,7 +2630,7 @@ fn timeformat_reports_invalid_format_character() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: TIMEFORMAT: `Z': invalid format character\n"
     );
 }
@@ -2613,7 +2647,7 @@ fn timeformat_rejects_precision_on_percent_cpu() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:0\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: TIMEFORMAT: `P': invalid format character\n"
     );
 }
@@ -2746,7 +2780,7 @@ fn c_command_echo_reports_bad_fd_after_exec_close() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "hi\nstatus:1\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: 3: Bad file descriptor\n"
     );
     assert!(!literal_fd_path.exists());
@@ -2763,7 +2797,7 @@ fn c_command_echo_reports_write_error_for_closed_stdout() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:1\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: echo: write error: Bad file descriptor\n"
     );
 }
@@ -2923,7 +2957,7 @@ fn c_command_read_closed_stdin_reports_bad_fd() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "<>:1\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: read: 0: read error: Bad file descriptor\n"
     );
 }
@@ -2946,9 +2980,7 @@ fn c_command_read_closed_stdin_redirects_bad_fd_diagnostic() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "<>:1\n");
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(
-        fs::read_to_string(&error_path)
-            .unwrap()
-            .replace("\r\n", "\n"),
+        cli_normalized_text(&fs::read(&error_path).unwrap()).replace("\r\n", "\n"),
         "bash: line 1: read: 0: read error: Bad file descriptor\n"
     );
     let _ = fs::remove_file(error_path);
@@ -3361,7 +3393,7 @@ fn c_command_mapfile_reports_bad_fd_after_exec_close() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "status:1 len:0\n");
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
+        cli_normalized_text(&output.stderr),
         "bash: line 1: mapfile: 3: invalid file descriptor: Bad file descriptor\n"
     );
 }

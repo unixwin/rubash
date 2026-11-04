@@ -630,7 +630,13 @@ impl Executor {
                     self.last_command_substitution_parse_error.set(false);
                 } else {
                     self.mark_parse_error();
-                    return Err(ExecuteError::ExitCode(2));
+                    // rubash#2787: the abort status is the driver's —
+                    // 127 for a top-level `-c` string (shell.c:1471
+                    // FORCE_EOF remap), 2 for file/stdin readers and
+                    // contained children.
+                    return Err(ExecuteError::ExitCode(
+                        self.comsub_parse_error_abort_status(),
+                    ));
                 }
             }
             // GNU expr.c evalerror -> jump_to_top_level (DISCARD): while an
@@ -2605,7 +2611,11 @@ impl Executor {
                 self.last_command_substitution_parse_error.set(false);
             } else {
                 self.mark_parse_error();
-                return Err(ExecuteError::ExitCode(2));
+                // rubash#2787: driver-remapped abort status, as at
+                // the loop-top latch check above.
+                return Err(ExecuteError::ExitCode(
+                    self.comsub_parse_error_abort_status(),
+                ));
             }
         }
         self.run_pending_signal_traps()?;

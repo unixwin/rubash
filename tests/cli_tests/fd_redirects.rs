@@ -481,7 +481,10 @@ fn write_helper_script(path: &Path, content: &str) {
 }
 
 fn stream_text(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes).replace("\r\n", "\n")
+    // rubash#2714 (decision D1): normalize the invocation-name
+    // token in diagnostic text (see cli_normalized_text in the
+    // crate root); the CRLF fold is this module's own convention.
+    crate::cli_normalized_text(bytes).replace("\r\n", "\n")
 }
 
 #[test]

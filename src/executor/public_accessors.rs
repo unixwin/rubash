@@ -161,6 +161,44 @@ impl Executor {
         }
     }
 
+    /// The exit status a latched `$(`-body read-time parse failure
+    /// aborts THIS executor with (rubash#2787). GNU treats the body
+    /// grammar error as a parse failure of the enclosing input, and
+    /// the DRIVER that owns the input picks the status: the file and
+    /// stdin readers exit 2 (the parser_error exit, error.c:300-316),
+    /// but run_one_command (shell.c:1457-1482) maps the `-c` string's
+    /// FORCE_EOF unwind to `last_command_exit_value = 127`
+    /// (shell.c:1471-1472) — so `bash -c 'echo $(a |)'` exits 127
+    /// while the same body in a script file exits 2. With errexit
+    /// armed the report exits before the remap and the status stays
+    /// 2 (`bash -e -c 'echo $(a |)'` → 2). An executor INSIDE the
+    /// failing input (a command-substitution body, a `( )` subshell)
+    /// is a contained child: it exits 2 and the latch re-aborts each
+    /// enclosing list with that list's own value, so the 127 is
+    /// produced by the top `-c` executor, never by a nested one. The
+    /// substitution's own recorded status stays 2 everywhere — only
+    /// the abort status is driver-remapped. Sibling of
+    /// expansion_fatal_status (parameter_errors.rs), which encodes
+    /// the same shell.c:1471 remap for the expansion-error family.
+    pub(in crate::executor) fn comsub_parse_error_abort_status(&self) -> i32 {
+        if self
+            .shell_state
+            .env_vars
+            .contains_key("__RUBASH_COMSUB_BODY")
+            || self.shell_state.subshell_depth.get() > 0
+        {
+            2
+        } else if self.shell_state.env_vars.contains_key("__RUBASH_IS_C") {
+            if self.errexit_enabled() {
+                2
+            } else {
+                127
+            }
+        } else {
+            2
+        }
+    }
+
     /// GNU parse.y:6865/6886 (report_syntax_error): the offending-input-line
     /// echo (`print_offending_line', parse.y:6814) is suppressed only for
     /// the interactive shell's OWN input stream — a line read from a FILE
@@ -2846,15 +2884,16 @@ impl Executor {
                 format!("{script}: line {line}: ")
             }
             (None, Some(line)) => {
-                // -c mode: "bash: line N:"
-                format!("bash: line {line}: ")
+                // -c mode: "name: line N:" — the name is $0 via
+                // get_name_for_error (error_report_name), not a
+                // hardcoded "bash" (rubash#2714).
+                format!("{}: line {line}: ", self.error_report_name())
             }
             _ => {
-                // GNU error.c:88-120 (get_name_for_error): without a script/$0
-                // context the prolog falls back to base_pathname(shell_name), i.e.
-                // the canonical shell name. Rubash reports as "bash"; the upstream
-                // suites normalize the baseline's invoked path to the same name.
-                "bash: ".to_string()
+                // GNU error.c:88-120 (get_name_for_error): without a
+                // script frame the prolog name is $0, falling back to
+                // base_pathname(shell_name) (error_report_name).
+                format!("{}: ", self.error_report_name())
             }
         }
     }
@@ -2879,6 +2918,43 @@ impl Executor {
                     .get("__RUBASH_SCRIPT_NAME")
                     .cloned()
             })
+    }
+
+    /// GNU error.c:88-120 get_name_for_error, the one name every
+    /// diagnostic prolog in this family reports under: BASH_SOURCE[0]
+    /// when the innermost frame names one, else dollar_vars[0] ($0)
+    /// VERBATIM, else base_pathname(shell_name), else "bash". The
+    /// prefix builders below used to hardcode the literal "bash" in
+    /// every arm that lacked a script name, so a shell invoked under
+    /// any other name (a renamed binary, a host embedding the engine)
+    /// still reported itself as `bash:` (rubash#2714; owner decision
+    /// D1, 2026-11-04: the prolog follows argv[0]). The $0 step reads
+    /// the raw name keys in script_name_value_from_env's order but
+    /// WITHOUT that accessor's "rubash" brand default — GNU's chain
+    /// has no brand fallback, it ends at base_pathname(shell_name)
+    /// and the literal "bash".
+    pub(in crate::executor) fn error_report_name(&self) -> String {
+        if let Some(name) = self
+            .current_error_file_name()
+            .filter(|name| !name.is_empty())
+        {
+            return name;
+        }
+        for key in [
+            "BASH_ARGV0",
+            "__RUBASH_ARGV0_AFTER_UNSET",
+            "__RUBASH_TOP_LEVEL_NAME",
+        ] {
+            if let Some(value) = self
+                .shell_state
+                .env_vars
+                .get(key)
+                .filter(|value| !value.is_empty())
+            {
+                return value.clone();
+            }
+        }
+        Self::interactive_shell_basename(&self.shell_state.env_vars)
     }
 
     /// Whether `shopt -s gnu_errfmt` is active (GNU error.c:71
@@ -2927,9 +3003,9 @@ impl Executor {
             }
             (None, Some(line)) => {
                 let line: usize = line.parse().unwrap_or(1);
-                self.gnu_error_line("bash", line)
+                self.gnu_error_line(&self.error_report_name(), line)
             }
-            _ => "bash: ".to_string(),
+            _ => format!("{}: ", self.error_report_name()),
         }
     }
 
@@ -2990,10 +3066,10 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return format!("{script}: -c: line 1: ");
             }
-            return "bash: -c: line 1: ".to_string();
+            return format!("{}: -c: line 1: ", self.error_report_name());
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     /// GNU error.c:300-316 parser_error gated twin of
@@ -3033,10 +3109,10 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return self.gnu_error_line(&format!("{script}: -c"), 1);
             }
-            return self.gnu_error_line("bash: -c", 1);
+            return self.gnu_error_line(&format!("{}: -c", self.error_report_name()), 1);
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     /// GNU parser_error (error.c:300-316) with yy_input_name() ==
@@ -3062,7 +3138,7 @@ impl Executor {
             .env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .cloned()
-            .unwrap_or_else(|| "bash".to_string());
+            .unwrap_or_else(|| self.error_report_name());
         format!("{name}: ")
     }
 
@@ -3080,7 +3156,7 @@ impl Executor {
             .env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .cloned()
-            .unwrap_or_else(|| "bash".to_string());
+            .unwrap_or_else(|| self.error_report_name());
         format!("{name}: command substitution: line {line}: ")
     }
 
@@ -3098,7 +3174,7 @@ impl Executor {
             .env_vars
             .get("__RUBASH_SCRIPT_NAME")
             .cloned()
-            .unwrap_or_else(|| "bash".to_string());
+            .unwrap_or_else(|| self.error_report_name());
         self.gnu_error_line(&format!("{name}: command substitution"), line)
     }
 
@@ -3107,7 +3183,7 @@ impl Executor {
             return format!("{script}: line {line}: ");
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     /// error_prolog-family (report_error/internal_error/internal_warning)
@@ -3117,7 +3193,7 @@ impl Executor {
             return self.gnu_error_line(script, line);
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     /// Parser/syntax-error diagnostic prefix for a specific line. Like
@@ -3134,7 +3210,7 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return format!("{script}: eval: line {line}: ");
             }
-            return format!("bash: eval: line {line}: ");
+            return format!("{}: eval: line {line}: ", self.error_report_name());
         }
         if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             // rubash#1161: sourced file input suppresses the `-c`
@@ -3155,10 +3231,10 @@ impl Executor {
             return format!("{script}: line {line}: ");
         }
         if is_c {
-            return format!("bash: -c: line {line}: ");
+            return format!("{}: -c: line {line}: ", self.error_report_name());
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     /// GNU error.c:300-316 parser_error gated twin of
@@ -3174,7 +3250,7 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return self.gnu_error_line(&format!("{script}: {context}"), line);
             }
-            return self.gnu_error_line(&format!("bash: {context}"), line);
+            return self.gnu_error_line(&format!("{}: {context}", self.error_report_name()), line);
         }
         if self
             .shell_state
@@ -3184,7 +3260,7 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 return self.gnu_error_line(&format!("{script}: eval"), line);
             }
-            return self.gnu_error_line("bash: eval", line);
+            return self.gnu_error_line(&format!("{}: eval", self.error_report_name()), line);
         }
         if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
             // rubash#1161: same yy_input_name rule as
@@ -3206,10 +3282,10 @@ impl Executor {
             return self.gnu_error_line(script, line);
         }
         if is_c {
-            return self.gnu_error_line("bash: -c", line);
+            return self.gnu_error_line(&format!("{}: -c", self.error_report_name()), line);
         }
 
-        "bash: ".to_string()
+        format!("{}: ", self.error_report_name())
     }
 
     pub(in crate::executor) fn report_unterminated_heredoc(&self, cmd: &CommandNode) {

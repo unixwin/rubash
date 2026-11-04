@@ -143,6 +143,53 @@ impl Executor {
                 .unwrap_or_else(|| format!("declare -{flags} {name}"));
         }
 
+        self.scalar_assignment_render(
+            name,
+            self.shell_state.env_vars.get(name).map(String::as_str),
+        )
+    }
+
+    /// The @A assignment rendering for a scalar variable whose value
+    /// input is supplied by the caller instead of read from the cell:
+    /// GNU parameter_brace_transform (subst.c:8923) receives the
+    /// expansion's computed word as `value` and get_var_and_type
+    /// (subst.c:8529) pairs it with the RESOLVED variable's cell for
+    /// the name and flags — the two inputs are independent. The
+    /// indirect-nameref path (indirect_parameter_transform) is the
+    /// caller: its word is the nameref cell's stored string
+    /// (rubash#2712).
+    pub(in crate::executor) fn scalar_assignment_transform_with_value(
+        &self,
+        raw_name: &str,
+        value: &str,
+    ) -> String {
+        let Some(name) = self.resolved_variable_name(raw_name) else {
+            return String::new();
+        };
+        if !is_shell_name(&name) {
+            return String::new();
+        }
+        // GNU string_var_assignment (subst.c:8652): the value body is
+        // quoted from the supplied word only when the variable is
+        // SET; a declared-but-unset target renders its attributes
+        // with no `=value` body, and a nonexistent target renders
+        // nothing at all (string_transform's 'A' case returns NULL
+        // for a missing cell) — the render core's None arm covers
+        // both once the flags are known to be the target's own.
+        let effective = self
+            .shell_state
+            .env_vars
+            .contains_key(&name)
+            .then_some(value);
+        self.scalar_assignment_render(&name, effective)
+    }
+
+    /// string_var_assignment's rendering core for a scalar cell: the
+    /// flags come from the named variable's marks, the `=value` body
+    /// from `value` (None = declared-unset: attributes survive, the
+    /// body does not — subst.c:8652 val == NULL; with no attributes
+    /// the whole expansion disappears).
+    fn scalar_assignment_render(&self, name: &str, value: Option<&str>) -> String {
         let readonly = is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name);
         let exported = is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name);
         let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name);
@@ -174,7 +221,7 @@ impl Executor {
             flags.push('u');
         }
 
-        match self.shell_state.env_vars.get(name) {
+        match value {
             Some(value) => {
                 let rendered = shell_reusable_quote(value);
                 if flags.is_empty() {
@@ -184,9 +231,6 @@ impl Executor {
                 }
             }
             None => {
-                // Declared-unset: attributes survive, the value does not
-                // (subst.c:8652 val == NULL); with no attributes the whole
-                // expansion disappears (string_transform returns NULL).
                 if flags.is_empty() {
                     String::new()
                 } else {

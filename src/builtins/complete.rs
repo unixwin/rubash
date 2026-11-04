@@ -2561,7 +2561,9 @@ fn variable_completion_candidates(
 /// A THIS_SH in the env map with any other value was supplied by the
 /// caller and kept by init (the sh/bash wrapper exception), so it is a
 /// genuine environment variable for listing purposes (rubash#1799).
-fn auto_this_sh_spelling() -> String {
+/// Shared with the declare listing (builtins/declare/print.rs), which
+/// hides the same injected spelling under the same rule (rubash#2702).
+pub(crate) fn auto_this_sh_spelling() -> String {
     std::env::current_exe()
         .map(|path| path.to_string_lossy().replace('\\', "/").to_string())
         .unwrap_or_else(|_| "rubash".to_string())
