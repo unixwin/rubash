@@ -56,16 +56,42 @@ fn run_file(tag: &str, script: &str) -> Run {
 }
 
 fn run_c(script: &str) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    command
         .arg("-c")
         .arg(script)
         .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .output()
-        .expect("run rubash");
+        .env("PATH", "/usr/bin:/bin");
+    // rubash#2714 (decision D1): the diagnostic prolog follows
+    // argv[0], so the expectations below — measured against GNU
+    // invoked as `bash` — pin the invocation name to `bash` where
+    // the platform allows it (std exposes no argv[0] override on
+    // Windows; there the harness's own exe-path token is normalized
+    // to `bash` in the captured stderr instead, the same
+    // normalization the GNU suites apply to the baseline's path).
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.arg0("bash");
+    }
+    let output = command.output().expect("run rubash");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    #[cfg(windows)]
+    let stderr = {
+        let exe = env!("CARGO_BIN_EXE_rubash");
+        let slashed = exe.replace('\\', "/");
+        let mut normalized = stderr.replace(exe, "bash").replace(&slashed, "bash");
+        if let Some(drive) = slashed.chars().next().filter(|c| c.is_ascii_alphabetic()) {
+            if slashed.as_bytes().get(1) == Some(&b':') {
+                let posix = format!("/{}/{}", drive.to_ascii_lowercase(), &slashed[3..]);
+                normalized = normalized.replace(&posix, "bash");
+            }
+        }
+        normalized
+    };
     Run {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr,
         code: output.status.code(),
     }
 }

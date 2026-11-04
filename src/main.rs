@@ -898,15 +898,28 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                         executor.set_env("BASH_ARGV0", command_name);
                         executor.set_positional_params(args[index + 2..].to_vec());
                     } else if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
-                        // GNU error.c get_name_for_error: `bash -c` without
-                        // explicit $0 reports as "bash: -c: line N:" (the
-                        // baseline sed normalizes /usr/local/bin/bash to bash).
-                        // Use the canonical shell name so `sed 's|^.*/||'`
-                        // matches the GNU baseline. Internal respawns (coproc /
-                        // async `&` children) inherit the parent's script name
-                        // through init.rs — GNU's forked subshell keeps $0, so
-                        // do not clobber it here.
-                        executor.set_env("__RUBASH_SCRIPT_NAME", "bash");
+                        // GNU error.c:88-120 get_name_for_error: a `-c`
+                        // string's BASH_SOURCE[0] is empty, so diagnostics
+                        // report dollar_vars[0] — the invocation name
+                        // verbatim (`/path/to/sh -c ...` reports under
+                        // that full spelling). Seed the reader-name
+                        // carrier with the invocation $0 face (the
+                        // BASH_ARGV0 seeded from argv[0] in main, or an
+                        // imported BASH_ARGV0), NOT the literal "bash"
+                        // this used to plant: the prolog follows argv[0]
+                        // (rubash#2714, owner decision D1 2026-11-04;
+                        // the earlier canonical-name seed existed only
+                        // so suite seds normalized both shells to the
+                        // same word). Internal respawns (coproc / async
+                        // `&` children) inherit the parent's script name
+                        // through init.rs — GNU's forked subshell keeps
+                        // $0, so do not clobber it here.
+                        let invocation_name = executor
+                            .get_env("BASH_ARGV0")
+                            .filter(|value| !value.is_empty())
+                            .unwrap_or("bash")
+                            .to_string();
+                        executor.set_env("__RUBASH_SCRIPT_NAME", &invocation_name);
                     }
                     executor.set_env("__RUBASH_IS_C", "1");
                     apply_interactive_alias_default(executor, alias_expansion_override);
