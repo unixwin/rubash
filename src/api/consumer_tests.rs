@@ -1922,3 +1922,191 @@ fn issue863_gap3_removals_ride_the_view() {
         .all(|removal| removal.keyseq != r"\C-a"));
     assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
 }
+
+// ---------------------------------------------------------------
+// niubash#863 GAP-4 (+ GAP-4b): the tier-A completion-state
+// view. A completer reads live state — session cwd, the whole
+// variable table, function names, open fds — and until GAP-4
+// the contract carried only pieces of it, so hosts mirrored
+// the rest through the tier-C executor seam into a snapshot
+// struct re-synchronized after every line. The view is one
+// capture through `&self` from the executor's own snapshot
+// functions; these pins drive state through the session's own
+// run lines and read it back through Session::completion_view
+// / Session::has_function only, checking every field against
+// the executor truth the seam used to expose. The host's /tmp
+// answer is deliberately NOT in the view (GAP-5's object).
+// ---------------------------------------------------------------
+
+use super::completion_view::CompletionView;
+
+fn issue863_gap4_session() -> Session {
+    Session::builder().build().expect("session builds")
+}
+
+fn issue863_gap4_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+/// The executor truth, in the view's presentation: the
+/// snapshot map's items, sorted by name.
+fn issue863_gap4_executor_env(session: &Session) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> =
+        session.executor().env_vars_snapshot().into_iter().collect();
+    env.sort();
+    env
+}
+
+fn issue863_gap4_env_get<'a>(view: &'a CompletionView, name: &str) -> Option<&'a str> {
+    view.env
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Every field of the view, against the executor truth the
+/// tier-C seam used to hand the host piece by piece.
+fn issue863_gap4_assert_view_matches_truth(session: &Session, view: &CompletionView) {
+    assert_eq!(view.cwd, session.executor().session_cwd());
+    assert_eq!(view.env, issue863_gap4_executor_env(session));
+    assert_eq!(view.functions, session.executor().functions_snapshot());
+    assert_eq!(view.open_fds, session.executor().open_fds());
+}
+
+#[test]
+fn issue863_gap4_shared_reference_reads_both_faces() {
+    let session = issue863_gap4_session();
+    // Both faces are `&self`: a shared reference is all a
+    // completer (or a widget probe) ever holds. That this
+    // compiles is half the pin; the reads below are the other.
+    let shared: &Session = &session;
+    let view = shared.completion_view();
+    assert!(!shared.has_function("gap4_no_such_function"));
+    assert_eq!(view.cwd, shared.cwd());
+    // The env presentation is sorted by name (names unique).
+    assert!(view.env.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    assert_eq!(view.functions, shared.functions());
+    issue863_gap4_assert_view_matches_truth(shared, &view);
+}
+
+#[test]
+fn issue863_gap4_has_function_flips_with_define_and_unset() {
+    let mut session = issue863_gap4_session();
+    assert!(!session.has_function("gap4_probe_fn"));
+    issue863_gap4_run(&mut session, "gap4_probe_fn() { return 7; }");
+    assert!(session.has_function("gap4_probe_fn"));
+    // Same answer from every face: the executor's own probe
+    // and the &mut-shaped state view delegate to it, and the
+    // tier-A face must not drift from either.
+    assert!(session.executor().has_function("gap4_probe_fn"));
+    assert!(session.views().has_function("gap4_probe_fn"));
+    assert!(session
+        .functions()
+        .iter()
+        .any(|name| name == "gap4_probe_fn"));
+    issue863_gap4_run(&mut session, "unset -f gap4_probe_fn");
+    assert!(!session.has_function("gap4_probe_fn"));
+    assert!(!session.executor().has_function("gap4_probe_fn"));
+}
+
+#[test]
+fn issue863_gap4_view_tracks_executor_truth_step_by_step() {
+    let mut session = issue863_gap4_session();
+    issue863_gap4_assert_view_matches_truth(&session, &session.completion_view());
+
+    // A plain variable lands in the table.
+    issue863_gap4_run(&mut session, "GAP4_ALPHA=one");
+    let view = session.completion_view();
+    assert_eq!(issue863_gap4_env_get(&view, "GAP4_ALPHA"), Some("one"));
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+
+    // An attribute change moves the ATTR pseudo-entry the
+    // snapshot materializes (exported names list), which the
+    // narrower Session::environment subset could never show.
+    issue863_gap4_run(&mut session, "export GAP4_BETA=two");
+    let view = session.completion_view();
+    assert_eq!(issue863_gap4_env_get(&view, "GAP4_BETA"), Some("two"));
+    let exported = issue863_gap4_env_get(&view, "__RUBASH_EXPORTED_VARS")
+        .expect("exported pseudo-entry present once a variable is exported");
+    assert!(
+        exported.contains("GAP4_BETA"),
+        "exported list {exported:?} names GAP4_BETA"
+    );
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+
+    // Readonly is another attribute class, another pseudo-entry.
+    issue863_gap4_run(&mut session, "readonly GAP4_GAMMA=three");
+    let view = session.completion_view();
+    let readonly = issue863_gap4_env_get(&view, "__RUBASH_READONLY_VARS")
+        .expect("readonly pseudo-entry present once a variable is readonly");
+    assert!(
+        readonly.contains("GAP4_GAMMA"),
+        "readonly list {readonly:?} names GAP4_GAMMA"
+    );
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+
+    // A defined function joins the names.
+    issue863_gap4_run(&mut session, "gap4_tracked_fn() { return 3; }");
+    let view = session.completion_view();
+    assert!(view.functions.iter().any(|name| name == "gap4_tracked_fn"));
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+
+    // `exec {fd}>file` opens an fd in the session's table; the
+    // number the shell assigned rides the variable, and the
+    // view's fd list is the table itself.
+    let dir = temp_dir("gap4-fd");
+    let target = dir.join("gap4-fd.txt");
+    let spelled = target.to_string_lossy().replace('\\', "/");
+    issue863_gap4_run(&mut session, &format!("exec {{gap4fd}}>{spelled}"));
+    let view = session.completion_view();
+    let assigned: u32 = issue863_gap4_env_get(&view, "gap4fd")
+        .expect("fd variable assigned")
+        .parse()
+        .expect("fd variable holds a number");
+    assert!(
+        view.open_fds.contains(&assigned),
+        "open_fds {:?} contains the exec-opened {assigned}",
+        view.open_fds
+    );
+    assert!(target.exists());
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+
+    // A cd moves the session cwd the view reports.
+    issue863_gap4_run(&mut session, "cd /");
+    let view = session.completion_view();
+    assert_eq!(view.cwd, session.cwd());
+    issue863_gap4_assert_view_matches_truth(&session, &view);
+}
+
+#[test]
+fn issue863_gap4_env_fingerprint_stability_and_sensitivity() {
+    let mut session = issue863_gap4_session();
+    // Same state, captured twice: same fingerprint (and the
+    // whole view is byte-identical — nothing re-renders
+    // differently between reads).
+    let first = session.completion_view();
+    let second = session.completion_view();
+    assert_eq!(first, second);
+    assert_eq!(first.env_fingerprint, second.env_fingerprint);
+
+    // A variable appearing changes it.
+    issue863_gap4_run(&mut session, "GAP4_FP=1");
+    let after_set = session.completion_view();
+    assert_ne!(after_set.env_fingerprint, first.env_fingerprint);
+
+    // A value change changes it.
+    issue863_gap4_run(&mut session, "GAP4_FP=2");
+    let after_change = session.completion_view();
+    assert_ne!(after_change.env_fingerprint, after_set.env_fingerprint);
+    assert_ne!(after_change.env, after_set.env);
+
+    // An attribute-only change — same name, same value, the
+    // exported rendering moves — changes it too: the
+    // fingerprint covers the rendered snapshot, attributes
+    // included, not just values.
+    issue863_gap4_run(&mut session, "export GAP4_FP");
+    let after_export = session.completion_view();
+    assert_eq!(issue863_gap4_env_get(&after_export, "GAP4_FP"), Some("2"));
+    assert_ne!(after_export.env_fingerprint, after_change.env_fingerprint);
+}
