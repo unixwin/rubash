@@ -467,6 +467,14 @@ where
         .iter()
         .map(|entry| (entry.name.as_str(), entry.storage.as_str()))
         .collect();
+    // rubash#2702 (owner decision D7): the injected THIS_SH spelling
+    // (the running executable's own path) is an internal face, not a
+    // user variable — GNU has no such name — so it stays out of this
+    // listing, which backs plain `declare`/`typeset` as well as
+    // `set`. A caller-supplied value kept by init (the sh/bash-named
+    // wrapper exception) lists, under the same value-shaped rule
+    // compgen and the declare -p listing apply (rubash#1799).
+    let this_sh_injected = crate::builtins::complete::auto_this_sh_spelling();
     // GNU variables.c:1126-1142 print_var_value: the ansic ($'...')
     // branch is taken only when posixly_correct == 0; POSIX mode falls
     // to sh_single_quote with the raw bytes (audit B4-F11).
@@ -487,6 +495,12 @@ where
         // option state) are invisible in listings, like GNU's invisible_p
         // vars in print_var_list (variables.c).
         if name.starts_with("__RUBASH_") {
+            continue;
+        }
+        // rubash#2702: the injected THIS_SH spelling (see above).
+        if name == "THIS_SH"
+            && env_vars.get("THIS_SH").map(String::as_str) == Some(this_sh_injected.as_str())
+        {
             continue;
         }
         // GNU att_invisible (variables.c print_var_list skips
