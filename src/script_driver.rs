@@ -276,6 +276,16 @@ pub struct GroupedRunClassification {
     /// `parse_error`, in which case the jump did not count
     /// (see `stop`).
     pub exit_jump: bool,
+    /// GAP-2 (unixwin/niubash#863): the terminal group's raw
+    /// jump pending exactly as armed — either unwind class,
+    /// before the errexit correction [`GroupedRunClassification::exit_jump`]
+    /// applies. The raw carrier for consumers whose semantics
+    /// re-raise on ANY armed jump (GNU's reader re-raises both
+    /// EXITPROG and ERREXIT into its top level,
+    /// evalstring.c:396-403, :618-619 — the PROMPT_COMMAND
+    /// reader is the recorded consumer); the adjudicated fields
+    /// above remain the verdicts every other consumer reads.
+    pub exit_jump_raw: bool,
     /// The terminal group's errexit verdict: status != 0 with
     /// errexit in effect and `last_command_inverted()` false —
     /// the `! CMD` exemption of execute_cmd.c:652-656
@@ -576,6 +586,7 @@ fn run_script_grouped_at_line_offset(
             let mut classification = GroupedRunClassification {
                 parse_error,
                 exit_jump,
+                exit_jump_raw,
                 errexit_stop,
                 last_inverted,
                 stop: if exit_jump && !parse_error {
@@ -3635,6 +3646,10 @@ fn report_heredoc_overflow_fatal(
         "{}maximum here-document count exceeded",
         executor.parser_error_prefix_for_line(line + line_offset)
     );
+    executor.record_run_diagnostic(
+        "maximum here-document count exceeded".to_string(),
+        Some(line + line_offset),
+    );
     2
 }
 
@@ -3813,6 +3828,12 @@ fn run_source_impl_inner(
                 "{}unexpected EOF while looking for matching `{quote}'",
                 executor.parser_error_prefix_for_line(open_line + line_offset)
             );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    format!("unexpected EOF while looking for matching `{quote}'"),
+                    Some(open_line + line_offset),
+                );
+            }
             return 2;
         }
     }
@@ -3889,6 +3910,12 @@ fn run_source_impl_inner(
                 "{}unexpected EOF while looking for matching `{closer}'",
                 executor.parser_error_prefix_for_line(open_line + line_offset)
             );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    format!("unexpected EOF while looking for matching `{closer}'"),
+                    Some(open_line + line_offset),
+                );
+            }
             // GNU exits 1 when the subscript opened inside a compound array
             // assignment (parse_compound_assignment EOF family) and 2 for a
             // command word (parse.y:3567 read_token error path) — but
@@ -3941,6 +3968,15 @@ fn run_source_impl_inner(
                 executor.parser_error_prefix_for_line(eof.report_line + line_offset),
                 closure = eof.closer
             );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    format!(
+                        "unexpected EOF while looking for matching `{closure}'",
+                        closure = eof.closer
+                    ),
+                    Some(eof.report_line + line_offset),
+                );
+            }
             executor.errexit_live_at_diagnostic();
             return 2;
         }
@@ -4031,6 +4067,12 @@ fn run_source_impl_inner(
                         let report = line + line_offset;
                         let prefix = executor.parser_error_prefix_for_line(report);
                         unclosed_report!("{prefix}syntax error near unexpected token `{token}'");
+                        if !suppress_unclosed_diagnostic {
+                            executor.record_run_diagnostic(
+                                format!("syntax error near unexpected token `{token}'"),
+                                Some(report),
+                            );
+                        }
                         // error.c print_offending_line is non-interactive
                         // only (parse.y:6865) — the same gate the parser's
                         // source echoes use.
@@ -4069,6 +4111,12 @@ fn run_source_impl_inner(
                             "{}unexpected EOF while looking for matching `)'",
                             executor.parser_error_prefix_for_line(global_open)
                         );
+                        if !suppress_unclosed_diagnostic {
+                            executor.record_run_diagnostic(
+                                "unexpected EOF while looking for matching `)'".to_string(),
+                                Some(global_open),
+                            );
+                        }
                         executor.errexit_live_at_diagnostic();
                         return 2;
                     }
@@ -4085,6 +4133,12 @@ fn run_source_impl_inner(
                             "{}unexpected EOF while looking for matching `)'",
                             executor.parser_error_prefix_for_line(global_open)
                         );
+                        if !suppress_unclosed_diagnostic {
+                            executor.record_run_diagnostic(
+                                "unexpected EOF while looking for matching `)'".to_string(),
+                                Some(global_open),
+                            );
+                        }
                         if executor.errexit_live_at_diagnostic() {
                             return 2;
                         }
@@ -4094,12 +4148,26 @@ fn run_source_impl_inner(
                         "{}syntax error: unexpected end of file from `(' command on line {global_open}",
                         executor.parser_error_prefix_for_line(global_eof)
                     );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!(
+                                "syntax error: unexpected end of file from `(' command on line {global_open}"
+                            ),
+                            Some(global_eof),
+                        );
+                    }
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
                         "{}unexpected EOF while looking for matching `{close}'",
                         executor.parser_error_prefix_for_line(reported)
                     );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!("unexpected EOF while looking for matching `{close}'"),
+                            Some(reported),
+                        );
+                    }
                 }
                 // GNU exits 1 for an unterminated `name=(` array list —
                 // but error.c:324-327 forces exit status 2 whenever
@@ -4111,7 +4179,15 @@ fn run_source_impl_inner(
                     return 1;
                 }
             }
-            None => unclosed_report!("rubash: syntax error: unexpected end of file"),
+            None => {
+                unclosed_report!("rubash: syntax error: unexpected end of file");
+                if !suppress_unclosed_diagnostic {
+                    executor.record_run_diagnostic(
+                        "syntax error: unexpected end of file".to_string(),
+                        None,
+                    );
+                }
+            }
         }
         return 2;
     }

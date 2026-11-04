@@ -784,6 +784,7 @@ impl Executor {
         if let Some(message) = cmd.get_assignment("__RUBASH_COMPOUND_SYNTAX_ERROR__") {
             let message = bash_style_unexpected_token_message(message);
             eprintln!("{}syntax error near {message}", self.parser_error_prefix());
+            self.record_run_diagnostic(format!("syntax error near {message}"), cmd.line);
             // GNU error.c:324-327: parser_error under live errexit prints
             // only the first line and exit_shell(2)s (rubash#306).
             if self.errexit_active_at_diagnostic() {
@@ -811,6 +812,7 @@ impl Executor {
             // plain `bad=(' exits 1).
             self.mark_parse_error();
             eprintln!("{}{}", self.parser_error_prefix(), message);
+            self.record_run_diagnostic(message.clone(), cmd.line);
             if self.errexit_active_at_diagnostic() {
                 self.exit_code = 2;
                 return Err(ExecuteError::ExitCode(2));
@@ -868,6 +870,12 @@ impl Executor {
                 "{}syntax error: unexpected end of file from `{compound_name}' command on line {open_line}",
                 self.parser_error_prefix_for_line(eof_line)
             );
+            self.record_run_diagnostic(
+                format!(
+                    "syntax error: unexpected end of file from `{compound_name}' command on line {open_line}"
+                ),
+                Some(eof_line),
+            );
             // GNU error.c:324-327: parser_error + live errexit exits the
             // shell immediately (rubash#306).
             self.errexit_active_at_diagnostic();
@@ -894,6 +902,7 @@ impl Executor {
                     .map(|(line, msg)| (line.parse::<usize>().unwrap_or(1), msg))
                     .unwrap_or((1, field));
                 eprintln!("{}{}", self.parser_error_prefix_for_line(line), message);
+                self.record_run_diagnostic(message.to_string(), Some(line));
                 // GNU error.c:324-327: every one of these lines is a
                 // parser_error; with live errexit the first one already
                 // exit_shell(2)ed (rubash#306).
@@ -907,6 +916,12 @@ impl Executor {
                     "{}syntax error: unexpected end of file from `[[' command on line {aux_a}",
                     self.parser_error_prefix_for_line(aux_b)
                 );
+                self.record_run_diagnostic(
+                    format!(
+                        "syntax error: unexpected end of file from `[[' command on line {aux_a}"
+                    ),
+                    Some(aux_b),
+                );
                 self.errexit_active_at_diagnostic();
             } else if shape == "bare" {
                 // PST_NOERROR shape (parse.y:3914 + 6724-6726): the messages
@@ -917,6 +932,7 @@ impl Executor {
                     "{}syntax error near `{aux_a}'",
                     self.parser_error_prefix_for_line(aux_b)
                 );
+                self.record_run_diagnostic(format!("syntax error near `{aux_a}'"), Some(aux_b));
                 if self.errexit_active_at_diagnostic() {
                     self.exit_code = 2;
                     return Err(ExecuteError::ExitCode(2));
@@ -1026,6 +1042,10 @@ impl Executor {
                 )
                 .as_bytes(),
             );
+            self.record_run_diagnostic(
+                format!("syntax error near unexpected token `{token}'"),
+                Some(line),
+            );
             // GNU error.c:324-327: with exit_immediately_on_error live, the
             // offending-line echo (parse.y:6814 print_offending_line) never
             // runs — the first parser_error line already exit_shell(2)ed
@@ -1062,6 +1082,10 @@ impl Executor {
                     self.parser_error_prefix_for_line(eof_line)
                 )
                 .as_bytes(),
+            );
+            self.record_run_diagnostic(
+                "syntax error: unexpected end of file".to_string(),
+                Some(eof_line),
             );
             // Single-line parser_error: GNU error.c:324-327 still
             // exit_shell(2)s right after it under live errexit — record
@@ -1162,6 +1186,10 @@ impl Executor {
                             )
                             .as_bytes(),
                         );
+                        self.record_run_diagnostic(
+                            "maximum here-document count exceeded".to_string(),
+                            Some(line),
+                        );
                         self.exit_code = 2;
                         return Err(ExecuteError::ExitCode(2));
                     }
@@ -1195,6 +1223,10 @@ impl Executor {
                 )
                 .as_bytes(),
             );
+            self.record_run_diagnostic(
+                "syntax error near unexpected token `('".to_string(),
+                cmd.line,
+            );
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));
         }
@@ -1217,6 +1249,10 @@ impl Executor {
                     self.parser_error_prefix()
                 )
                 .as_bytes(),
+            );
+            self.record_run_diagnostic(
+                "syntax error near unexpected token `('".to_string(),
+                cmd.line,
             );
             self.exit_code = 2;
             return Err(ExecuteError::ExitCode(2));

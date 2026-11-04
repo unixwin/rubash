@@ -1272,6 +1272,7 @@ impl Executor {
             compound_redirect_failed: Cell::new(false),
             noclobber_prepared_targets: std::cell::RefCell::new(std::collections::HashSet::new()),
             exit_jump_pending: Cell::new(false),
+            run_diagnostics: std::cell::RefCell::new(None),
             errexit_status_converted: Cell::new(false),
             posix_special_status_converted: Cell::new(false),
             exec_do_redirections_failed: Cell::new(false),

@@ -277,6 +277,12 @@ impl Executor {
                 )
                 .as_bytes(),
             );
+            self.record_run_diagnostic(
+                format!(
+                    "syntax error: unexpected end of file from `{compound_name}' command on line {_open_line}"
+                ),
+                Some(eof_line),
+            );
             return;
         }
         // The COND encoding reaches this renderer through the same
@@ -310,6 +316,7 @@ impl Executor {
                 self.write_diagnostic_fd2(
                     format!("{}{}\n", prefix_for(self, line), message).as_bytes(),
                 );
+                self.record_run_diagnostic(message.to_string(), Some(line));
                 if self.errexit_active_at_diagnostic() {
                     return;
                 }
@@ -322,11 +329,18 @@ impl Executor {
                     )
                     .as_bytes(),
                 );
+                self.record_run_diagnostic(
+                    format!(
+                        "syntax error: unexpected end of file from `[[' command on line {aux_a}"
+                    ),
+                    Some(aux_b),
+                );
                 self.errexit_active_at_diagnostic();
             } else if shape != "bare" {
                 self.write_diagnostic_fd2(
                     format!("{}syntax error near `{aux_a}'\n", prefix_for(self, aux_b)).as_bytes(),
                 );
+                self.record_run_diagnostic(format!("syntax error near `{aux_a}'"), Some(aux_b));
                 if self.errexit_active_at_diagnostic() {
                     return;
                 }
@@ -367,6 +381,10 @@ impl Executor {
             self.write_diagnostic_fd2(
                 format!("{prefix}syntax error near unexpected token `{token}'\n").as_bytes(),
             );
+            self.record_run_diagnostic(
+                format!("syntax error near unexpected token `{token}'"),
+                Some(line),
+            );
             if self.errexit_active_at_diagnostic() {
                 return;
             }
@@ -390,6 +408,10 @@ impl Executor {
             };
             self.write_diagnostic_fd2(
                 format!("{prefix}syntax error: unexpected end of file\n").as_bytes(),
+            );
+            self.record_run_diagnostic(
+                "syntax error: unexpected end of file".to_string(),
+                Some(eof_line),
             );
             self.errexit_active_at_diagnostic();
             return;
@@ -430,6 +452,7 @@ impl Executor {
             || message.starts_with("unexpected EOF while looking for matching");
         if verbatim {
             self.write_diagnostic_fd2(format!("{prefix}{message}\n").as_bytes());
+            self.record_run_diagnostic(message.to_string(), cmd.line);
             // GNU error.c:324-327 (parser_error): with
             // exit_immediately_on_error set, the first diagnostic line is
             // followed by an immediate exit_shell(2) — the second line of
@@ -449,6 +472,7 @@ impl Executor {
         } else {
             let message = super::command_execute::bash_style_unexpected_token_message(message);
             self.write_diagnostic_fd2(format!("{prefix}syntax error near {message}\n").as_bytes());
+            self.record_run_diagnostic(format!("syntax error near {message}"), cmd.line);
             if self.errexit_active_at_diagnostic() {
                 return;
             }
@@ -514,6 +538,7 @@ impl Executor {
                 self.write_diagnostic_fd2(
                     format!("{}{}\n", self.parser_error_prefix_for_line(*line), message).as_bytes(),
                 );
+                self.record_run_diagnostic(message.clone(), Some(*line));
                 if self.errexit_active_at_diagnostic() {
                     return;
                 }
@@ -528,6 +553,10 @@ impl Executor {
                             self.parser_error_prefix_for_line(paren_line)
                         )
                         .as_bytes(),
+                    );
+                    self.record_run_diagnostic(
+                        "syntax error near unexpected token `)'".to_string(),
+                        Some(paren_line),
                     );
                 }
                 _ => {
@@ -554,6 +583,7 @@ impl Executor {
                         )
                         .as_bytes(),
                     );
+                    self.record_run_diagnostic(format!("syntax error near `{near}'"), Some(aux_b));
                     if self.errexit_active_at_diagnostic() {
                         return;
                     }
@@ -587,6 +617,12 @@ impl Executor {
                 )
                 .as_bytes(),
             );
+            self.record_run_diagnostic(
+                format!(
+                    "syntax error near unexpected token `{token}' while looking for matching `)'"
+                ),
+                Some(line),
+            );
             if self.errexit_active_at_diagnostic() {
                 return;
             }
@@ -616,6 +652,10 @@ impl Executor {
                 )
                 .as_bytes(),
             );
+            self.record_run_diagnostic(
+                "syntax error near unexpected token `)'".to_string(),
+                Some(paren_line),
+            );
             if self.errexit_active_at_diagnostic() {
                 return;
             }
@@ -641,6 +681,10 @@ impl Executor {
                     self.parser_error_prefix_for_line(paren_line)
                 )
                 .as_bytes(),
+            );
+            self.record_run_diagnostic(
+                "syntax error near unexpected token `)'".to_string(),
+                Some(paren_line),
             );
             if self.errexit_active_at_diagnostic() {
                 return;
@@ -674,6 +718,10 @@ impl Executor {
                     )
                     .as_bytes(),
                 );
+                self.record_run_diagnostic(
+                    format!("syntax error near {styled} while looking for matching `)'"),
+                    Some(line),
+                );
                 if self.errexit_active_at_diagnostic() {
                     return;
                 }
@@ -702,6 +750,10 @@ impl Executor {
                     self.parser_error_prefix_for_line(paren_line)
                 )
                 .as_bytes(),
+            );
+            self.record_run_diagnostic(
+                "syntax error near unexpected token `)'".to_string(),
+                Some(paren_line),
             );
             if self.errexit_active_at_diagnostic() {
                 return;
@@ -742,6 +794,10 @@ impl Executor {
             self.write_diagnostic_fd2(
                 format!("{prefix}syntax error near unexpected token `{token}'\n").as_bytes(),
             );
+            self.record_run_diagnostic(
+                format!("syntax error near unexpected token `{token}'"),
+                Some(line),
+            );
             // parse.y:6865: the offending-line echo is non-interactive only.
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
@@ -755,6 +811,43 @@ impl Executor {
 
     pub fn take_parse_error(&mut self) -> bool {
         std::mem::take(&mut self.parse_error_occurred)
+    }
+
+    /// GAP-2 (unixwin/niubash#863): arm the run-diagnostics
+    /// capture — subsequent parse diagnostics this executor
+    /// produces are also recorded as [`RunDiagnostic`] values
+    /// (see [`Executor::record_run_diagnostic`]) until
+    /// [`Executor::take_run_diagnostics`] drains them. Arming an
+    /// already-armed capture keeps the records it holds (a
+    /// contract operation arms once at its own entry; nested
+    /// driver runs below it accumulate into the same capture,
+    /// exactly as their text diagnostics reach the same error
+    /// stream).
+    pub(crate) fn arm_run_diagnostics(&self) {
+        let mut capture = self.run_diagnostics.borrow_mut();
+        if capture.is_none() {
+            *capture = Some(Vec::new());
+        }
+    }
+
+    /// Record one parse diagnostic the run just rendered in
+    /// text form: `message` is the rendered text after its
+    /// prefix, `line` the 1-based line the prefix named (the
+    /// raw carrier — the Session contract stamps source name
+    /// and kind at its drain). A no-op while the capture is
+    /// unarmed, so production sites record unconditionally and
+    /// non-contract consumers never accumulate.
+    pub(crate) fn record_run_diagnostic(&self, message: String, line: Option<usize>) {
+        if let Some(records) = self.run_diagnostics.borrow_mut().as_mut() {
+            records.push(RunDiagnostic { message, line });
+        }
+    }
+
+    /// Drain the armed capture and disarm it: the records the
+    /// run produced, in production order. An unarmed capture
+    /// drains empty.
+    pub(crate) fn take_run_diagnostics(&self) -> Vec<RunDiagnostic> {
+        self.run_diagnostics.borrow_mut().take().unwrap_or_default()
     }
 
     /// Non-consuming read of the parse-error mark (see
@@ -3444,6 +3537,10 @@ impl Executor {
             )
             .as_bytes(),
         );
+        self.record_run_diagnostic(
+            "unexpected EOF while looking for matching `)'".to_string(),
+            Some(last_line + 1),
+        );
     }
 
     pub(in crate::executor) fn report_unterminated_subshell_heredoc(&self, cmd: &CommandNode) {
@@ -3464,6 +3561,10 @@ impl Executor {
                 self.parser_error_prefix_for_line(syntax_line)
             )
             .as_bytes(),
+        );
+        self.record_run_diagnostic(
+            format!("syntax error: unexpected end of file from `(' command on line {start_line}"),
+            Some(syntax_line),
         );
     }
 }

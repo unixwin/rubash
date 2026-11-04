@@ -537,6 +537,22 @@ struct SavedGlobalDeclareLocal {
     local_typed: Option<crate::shell::Variable>,
 }
 
+/// One parse diagnostic a run produced, in raw carrier form
+/// (unixwin/niubash#863 GAP-2): the GNU-worded message exactly
+/// as the text form renders it after its prefix, and the
+/// 1-based line the text form prefixes it with, when the
+/// production site reports one. The Session contract maps
+/// these onto `api::Diagnostic` at its drain (stamping the
+/// run's source name there); the executor itself knows no
+/// source identity for a fed string. Recorded only while the
+/// diagnostics capture is armed — see
+/// [`Executor::run_diagnostics`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunDiagnostic {
+    pub(crate) message: String,
+    pub(crate) line: Option<usize>,
+}
+
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
@@ -1609,6 +1625,18 @@ pub struct Executor {
     /// command status (builtins source5.sub: `. missing` under `set -o
     /// posix` exits the shell even without `set -e`).
     pub(crate) exit_jump_pending: Cell<bool>,
+    /// GAP-2 (unixwin/niubash#863): the armed diagnostics capture.
+    /// `None` — recording is off and every
+    /// [`Executor::record_run_diagnostic`] call is a no-op (the
+    /// direct-driver consumers, both binaries included, pay
+    /// nothing and accumulate nothing). The Session contract arms
+    /// it (`Some(empty)`) at a run's entry and drains it into the
+    /// run outcome at the run's end, so a record exists only
+    /// between one contract operation's arm and drain. A cloned
+    /// child executor holds its own capture state: records a
+    /// substitution child produces stay with the child, exactly
+    /// the containment its text diagnostics have (issue #515).
+    pub(crate) run_diagnostics: std::cell::RefCell<Option<Vec<RunDiagnostic>>>,
     /// Set by the dispatch-level errexit conversion sites when an
     /// Ok-completed command's failing status is converted into
     /// ExecuteError::ExitCode purely for errexit/POSIX-exit adjudication
