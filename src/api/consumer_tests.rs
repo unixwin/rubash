@@ -1661,3 +1661,264 @@ fn issue863_gap2_driver_route_produces_the_same_values() {
     assert_eq!(outcome.diagnostics[0].message, records[0].message);
     assert_eq!(outcome.diagnostics[0].line, records[0].line);
 }
+
+// ---------------------------------------------------------------
+// niubash#863 GAP-3: the tier-A bind view. The registry is the
+// bind builtin's data plane; the view is one owned snapshot of
+// it — generation, editing mode, the variable table, and every
+// entry with the canonical bytes the ENGINE's keyseq_bytes
+// produces (rl_translate_keyseq, lib/readline/bind.c:516), the
+// written form, the kind, the resolved keymap, and the dump
+// line the builtin's own format helpers render
+// (rl_function_dumper bind.c:2800, rl_macro_dumper bind.c:2899,
+// print_unix_command_map bashline.c:4729). Pins drive the
+// registry through the session's own `bind` commands and read
+// it back through Session::bind_view only.
+// ---------------------------------------------------------------
+
+use super::bind::{BindKindView, BindView};
+
+fn issue863_gap3_session() -> Session {
+    // An empty INPUTRC keeps the host's own inputrc out of the
+    // registry: the first `bind` runs initialize_readline.
+    #[cfg(unix)]
+    const EMPTY_INPUTRC: &str = "/dev/null";
+    #[cfg(windows)]
+    const EMPTY_INPUTRC: &str = "NUL";
+    Session::builder()
+        .env("INPUTRC", EMPTY_INPUTRC)
+        .build()
+        .expect("session builds")
+}
+
+fn issue863_gap3_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+fn issue863_gap3_variable<'a>(view: &'a BindView, name: &str) -> Option<&'a str> {
+    view.variables
+        .iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.as_str())
+}
+
+fn issue863_gap3_entry<'a>(view: &'a BindView, keyseq: &str) -> &'a super::bind::BindEntryView {
+    view.entries
+        .iter()
+        .find(|entry| entry.keyseq == keyseq)
+        .unwrap_or_else(|| panic!("entry {keyseq} registered"))
+}
+
+#[test]
+fn issue863_gap3_canonical_bytes_cover_the_spelling_family() {
+    let mut session = issue863_gap3_session();
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\C-?": backward-delete-char'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\e[A": previous-history'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\M-a": do-lowercase-version'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\x41": self-insert'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\010": backward-char'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\C-x\C-f": character-search'"#);
+    let view = session.bind_view();
+    let bytes = |keyseq: &str| issue863_gap3_entry(&view, keyseq).bytes.clone();
+    // \C- control form and the \C-? DEL spelling.
+    assert_eq!(bytes(r"\C-a"), vec![0x01]);
+    assert_eq!(bytes(r"\C-?"), vec![0x7f]);
+    // CSI written form: ESC + the literal tail.
+    assert_eq!(bytes(r"\e[A"), vec![0x1b, b'[', b'A']);
+    // \M- meta form: ESC + the base byte.
+    assert_eq!(bytes(r"\M-a"), vec![0x1b, b'a']);
+    // \x hex and \0 octal escapes.
+    assert_eq!(bytes(r"\x41"), vec![0x41]);
+    assert_eq!(bytes(r"\010"), vec![0x08]);
+    // A multi-unit chord decodes unit by unit.
+    assert_eq!(bytes(r"\C-x\C-f"), vec![0x18, 0x06]);
+    // The written form and the kind ride along verbatim.
+    let entry = issue863_gap3_entry(&view, r"\C-a");
+    assert_eq!(entry.keyseq, r"\C-a");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Function {
+            name: "beginning-of-line".to_string()
+        }
+    );
+}
+
+#[test]
+fn issue863_gap3_generation_bumps_on_mutation_not_on_read() {
+    let mut session = issue863_gap3_session();
+    let g0 = session.bind_view().generation;
+    // A pure read moves nothing: the view reports the generation
+    // it leaves behind.
+    assert_eq!(session.bind_view().generation, g0);
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    assert_eq!(session.bind_view().generation, g0 + 1);
+    // A `bind 'set …'` variable update is a mutation too.
+    issue863_gap3_run(&mut session, "bind 'set bell-style none'");
+    assert_eq!(session.bind_view().generation, g0 + 2);
+    // Unregister bumps (entry removal + the recorded tombstone)
+    // and the entry is gone from the next view.
+    issue863_gap3_run(&mut session, r"bind -r '\C-a'");
+    assert!(session.bind_view().generation > g0 + 2);
+    assert!(session
+        .bind_view()
+        .entries
+        .iter()
+        .all(|entry| entry.keyseq != r"\C-a"));
+}
+
+#[test]
+fn issue863_gap3_variables_snapshot_reflects_bind_set() {
+    let mut session = issue863_gap3_session();
+    let before = session.bind_view();
+    assert_eq!(
+        issue863_gap3_variable(&before, "keyseq-timeout"),
+        Some("500")
+    );
+    assert_eq!(
+        issue863_gap3_variable(&before, "completion-ignore-case"),
+        Some("off")
+    );
+    let slot = before
+        .variables
+        .iter()
+        .position(|(name, _)| name == "keyseq-timeout");
+    let count = before.variables.len();
+    issue863_gap3_run(&mut session, "bind 'set keyseq-timeout 250'");
+    issue863_gap3_run(&mut session, "bind 'set completion-ignore-case on'");
+    let view = session.bind_view();
+    assert_eq!(issue863_gap3_variable(&view, "keyseq-timeout"), Some("250"));
+    assert_eq!(
+        issue863_gap3_variable(&view, "completion-ignore-case"),
+        Some("on")
+    );
+    // Updates land in place: registry order and size are the
+    // table's own, unchanged by the sets.
+    assert_eq!(
+        view.variables
+            .iter()
+            .position(|(name, _)| name == "keyseq-timeout"),
+        slot
+    );
+    assert_eq!(view.variables.len(), count);
+}
+
+#[test]
+fn issue863_gap3_dump_lines_match_the_builtin_dumps() {
+    let dir = temp_dir("gap3-dump");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = issue863_gap3_session();
+    session.variables().set("OUT", &dir_text);
+    issue863_gap3_run(&mut session, r#"bind '"\C-t": "ins-macro"'"#);
+    issue863_gap3_run(&mut session, r#"bind -x '"\C-g": echo bound-c-g'"#);
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    let view = session.bind_view();
+    assert_eq!(
+        issue863_gap3_entry(&view, r"\C-t").dump,
+        r#""\C-t": "ins-macro""#
+    );
+    assert_eq!(
+        issue863_gap3_entry(&view, r"\C-g").dump,
+        r#""\C-g" "echo bound-c-g""#
+    );
+    assert_eq!(
+        issue863_gap3_entry(&view, r"\C-a").dump,
+        r#""\C-a": beginning-of-line"#
+    );
+    assert_eq!(
+        issue863_gap3_entry(&view, r"\C-g").kind,
+        BindKindView::Execute {
+            command: "echo bound-c-g".to_string()
+        }
+    );
+    assert_eq!(
+        issue863_gap3_entry(&view, r"\C-t").kind,
+        BindKindView::Macro {
+            text: "ins-macro".to_string()
+        }
+    );
+    // The builtin's own dumps print the same lines for the same
+    // registry state: -s is exactly the macro set, -X exactly the
+    // execute set, and -p carries the function line among its
+    // effective-map listing.
+    issue863_gap3_run(&mut session, "bind -s > \"$OUT/macros.txt\"");
+    assert_eq!(
+        read(&dir, "macros.txt").lines().collect::<Vec<_>>(),
+        vec![r#""\C-t": "ins-macro""#]
+    );
+    issue863_gap3_run(&mut session, "bind -X > \"$OUT/exec.txt\"");
+    assert_eq!(
+        read(&dir, "exec.txt").lines().collect::<Vec<_>>(),
+        vec![r#""\C-g" "echo bound-c-g""#]
+    );
+    issue863_gap3_run(&mut session, "bind -p > \"$OUT/funcs.txt\"");
+    assert!(read(&dir, "funcs.txt")
+        .lines()
+        .any(|line| line == r#""\C-a": beginning-of-line"#));
+}
+
+#[test]
+fn issue863_gap3_none_keymap_lands_under_the_current_keymap() {
+    let mut session = issue863_gap3_session();
+    assert_eq!(session.bind_view().editing_mode, None);
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    issue863_gap3_run(
+        &mut session,
+        r#"bind -m vi-insert '"\C-a": beginning-of-line'"#,
+    );
+    issue863_gap3_run(&mut session, "bind 'set editing-mode vi'");
+    // Registered after the mode flip, with no -m: the registry's
+    // current keymap is vi-insert now, and the entry lands there.
+    issue863_gap3_run(&mut session, r#"bind '"\C-b": backward-char'"#);
+    let view = session.bind_view();
+    assert_eq!(view.editing_mode.as_deref(), Some("vi"));
+    let keymaps: Vec<&str> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.keyseq == r"\C-a")
+        .map(|entry| entry.keymap.as_str())
+        .collect();
+    assert_eq!(keymaps, vec!["emacs-standard", "vi-insert"]);
+    assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-insert");
+}
+
+#[test]
+fn issue863_gap3_removals_ride_the_view() {
+    let mut session = issue863_gap3_session();
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    let view = session.bind_view();
+    assert!(view.removals.is_empty());
+    assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
+
+    // Removing a registered entry: it leaves `entries` and its
+    // tombstone rides the view with canonical bytes + the
+    // resolved keymap, so a mirroring host needs no tier-C read.
+    // (`bind -r` takes the bare seq — bind.def:168/292 hands the
+    // raw optarg to unbind_keyseq, no inputrc quoting.)
+    issue863_gap3_run(&mut session, r"bind -r '\C-a'");
+    let view = session.bind_view();
+    assert!(view.entries.iter().all(|entry| entry.keyseq != r"\C-a"));
+    assert_eq!(view.removals.len(), 1);
+    assert_eq!(view.removals[0].keyseq, r"\C-a");
+    assert_eq!(view.removals[0].bytes, vec![0x01]);
+    assert_eq!(view.removals[0].keymap, "emacs-standard");
+
+    // Removing a sequence that only ever lived in the DEFAULT
+    // table records a tombstone too (GNU deletes the slot from
+    // the map itself, defaults included — rubash#2337).
+    issue863_gap3_run(&mut session, r"bind -r '\C-t'");
+    let view = session.bind_view();
+    assert_eq!(view.removals.len(), 2);
+    assert_eq!(view.removals[1].keyseq, r"\C-t");
+    assert_eq!(view.removals[1].bytes, vec![0x14]);
+
+    // Registering the sequence again clears its tombstone.
+    issue863_gap3_run(&mut session, r#"bind '"\C-a": beginning-of-line'"#);
+    let view = session.bind_view();
+    assert!(view
+        .removals
+        .iter()
+        .all(|removal| removal.keyseq != r"\C-a"));
+    assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
+}

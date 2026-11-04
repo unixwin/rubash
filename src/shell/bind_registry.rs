@@ -167,7 +167,11 @@ impl BindRegistry {
     /// rl_print_keybinding; bind.def:386 unbind_command). The
     /// registry's variable table is that same mirror, so the current
     /// keymap is the table's `keymap` row, normalized (rubash#2386).
-    fn current_keymap(&self) -> String {
+    /// Public as the resolution a keymap-less entry lands under in
+    /// the Session bind view (niubash#863 GAP-3): stored entries are
+    /// stamped at registration, so the fallback is only reachable
+    /// for entries constructed outside [`BindRegistry::register`].
+    pub fn current_keymap(&self) -> String {
         normalize_keymap_name(self.variable_value("keymap").unwrap_or("emacs")).to_string()
     }
 

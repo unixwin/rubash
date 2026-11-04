@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
+use super::bind::BindView;
 #[cfg(windows)]
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
@@ -734,6 +735,30 @@ impl Session {
             last_inverted: self.executor.last_command_inverted(),
             unwind: None,
         }
+    }
+
+    // ----------------------------------------------------------
+    // Key bindings (niubash#863 GAP-3)
+    // ----------------------------------------------------------
+
+    /// The key-binding registry as one owned snapshot
+    /// (unixwin/niubash#863 GAP-3): the registry's generation,
+    /// editing mode and readline variable table, plus every
+    /// registered entry with its canonical bytes (the engine's
+    /// own keyseq translation), written form, kind, resolved
+    /// keymap and GNU dump line.
+    ///
+    /// This is the tier-A form of the reads hosts used to make
+    /// through the tier-C executor seam (`bind_registry_snapshot`
+    /// / `bind_registry_generation` / `bind_editing_mode` /
+    /// `bind_readline_variable`) and then re-decode by hand. A
+    /// pure read: the view is captured from the registry itself
+    /// and taking it mutates nothing — the generation it reports
+    /// is the generation it leaves behind.
+    pub fn bind_view(&self) -> BindView {
+        let registry = self.executor.bind_registry();
+        let view = BindView::capture(&registry.borrow());
+        view
     }
 
     // ----------------------------------------------------------

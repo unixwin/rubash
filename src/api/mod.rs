@@ -27,6 +27,11 @@
 //! - The §5.3 state views ([`StateViews`], [`VariablesView`],
 //!   [`OptionsView`]) — the session's live state, read and
 //!   written through the engine's own machinery.
+//! - [`BindView`] — the key-binding registry as one owned
+//!   snapshot (niubash#863 GAP-3): generation, editing mode,
+//!   the readline variable table, and every entry with its
+//!   canonical bytes, written form, kind, resolved keymap and
+//!   GNU dump line, captured from the registry itself.
 //! - The capability traits a host implements:
 //!   [`HistoryProvider`] (the design's unchanged trait),
 //!   [`ExternalCommandHandler`], [`CompletionProvider`],
@@ -62,6 +67,7 @@
 //! the same printer `declare -p` uses, so the API and the shell
 //! can never disagree about what a variable looks like.
 
+pub mod bind;
 pub mod capabilities;
 pub mod diagnostic;
 pub mod events;
@@ -69,6 +75,7 @@ pub mod session;
 pub mod syntax;
 pub mod views;
 
+pub use bind::{BindEntryView, BindKindView, BindRemovalView, BindView};
 #[cfg(windows)]
 pub use capabilities::ElevationHandler;
 pub use capabilities::{
