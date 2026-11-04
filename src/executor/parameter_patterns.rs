@@ -110,6 +110,43 @@ impl Executor {
         if ref_name.is_none() {
             let target_name = self.indirect_holder_target_name(indirect_name)?;
             let target_name = &target_name;
+            // GNU subst.c: parameter_brace_transform (8923) receives
+            // the expansion's computed word as its value input, and
+            // get_var_and_type (8529) independently resolves the
+            // variable identity — for a nameref holder,
+            // parameter_brace_expand_indir's ksh93 shortcut
+            // (subst.c:7896-7903) makes that word the nameref cell's
+            // stored string, i.e. the target NAME, so `${!nr@A}`
+            // renders `tgt='tgt'`, not `tgt='hello'` (rubash#2712,
+            // owner decision D2: replicate the GNU quirk). Every
+            // other holder's word is the target's value, which the
+            // paths below already read from the cell. Array/assoc
+            // targets render from their cells (VT_ARRAYVAR /
+            // VT_ARRAYMEMBER ignore the word), so the cell-string
+            // value input applies only to scalar targets.
+            let nameref_word = if is_shell_name(indirect_name) {
+                self.nameref_target_name(indirect_name)
+            } else {
+                None
+            };
+            let scalar_target = !self.parameter_is_array_variable(target_name)
+                && !is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, target_name);
+            if let (Some(word), true) = (nameref_word.as_deref(), scalar_target) {
+                match transform {
+                    ParameterTransform::Assignment => {
+                        return Some(
+                            self.scalar_assignment_transform_with_value(target_name, word),
+                        );
+                    }
+                    ParameterTransform::KeyValueQuoted | ParameterTransform::KeyValueSplit => {
+                        return Some(shell_reusable_quote(word));
+                    }
+                    ParameterTransform::Attributes => {}
+                    _ => {
+                        return Some(self.apply_parameter_transform_value(word, transform));
+                    }
+                }
+            }
             if transform == ParameterTransform::Assignment {
                 return Some(self.parameter_assignment_transform(target_name));
             }
