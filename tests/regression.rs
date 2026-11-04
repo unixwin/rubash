@@ -863,6 +863,13 @@ fn normalize_snapshot(bytes: &[u8], scratch: &Path) -> Vec<u8> {
                 .replace(&format!("{exe}: -c:"), "bash: -c:")
                 .replace(&format!("{exe}: line "), "bash: line ");
         }
+        // The #812 pin stages the engine as `bash.exe` (Windows needs
+        // the suffix to exec) while the oracle was recorded under the
+        // name `bash`; a prolog carrying the staged name differs from
+        // the golden only by that OS suffix.
+        t = t
+            .replace("bash.exe: -c:", "bash: -c:")
+            .replace("bash.exe: line ", "bash: line ");
         t
     };
     let joined = text
