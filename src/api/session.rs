@@ -29,7 +29,7 @@ use super::completion_view::{full_env_sorted, CompletionView};
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
 use super::finish::Finish;
-use super::syntax::SyntaxView;
+use super::syntax::{SyntaxView, TokenView};
 use super::views::{OptionsView, StateViews, VariablesView};
 use crate::executor::Executor;
 use crate::history::{SessionHistory, SharedHistoryProvider};
@@ -637,6 +637,19 @@ impl Session {
     /// a session query, in the session's posix mode).
     pub fn needs_more_input(&self, source: &str) -> bool {
         script_driver::stdin_source_needs_more_posix(source, self.posix_mode())
+    }
+
+    /// The token view of `text` (GAP-9): the lexer projected
+    /// onto caller-fed text — absolute byte spans, kinds,
+    /// dequoted values, folded command positions and roles, and
+    /// synthesized comment spans — for line-editor consumers
+    /// (highlighting, completion). Recorded difference from the
+    /// GAP-3/4 views: the input is the caller's text, not session
+    /// state; tokenization derives in the session's posix mode,
+    /// exactly as [`Session::parse`] derives. A plain `&self`
+    /// read: no completion attempt is opened for it.
+    pub fn token_view(&self, text: &str) -> TokenView {
+        TokenView::project(text, self.posix_mode())
     }
 
     /// Parse source without executing it (§5.2): the returned
