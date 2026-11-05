@@ -842,6 +842,441 @@ fn issue2084_child_scenario() {
 }
 
 // ---------------------------------------------------------------------------
+// niubash#863 GAP-12: post-build invocation faces
+// ---------------------------------------------------------------------------
+//
+// The apply face GAP-7 deferred, paired with its read face: a parsed
+// ShellInvocation is applied to a live session (the Session retains
+// it), the live shape is read back from the executor's typed state —
+// never from the exported carriers — and the restore-grade removal
+// face is the Session home of Executor::remove_env. The journal is
+// pinned only as the removal face's implementation semantics: a
+// removal is journaled, and the session's Drop restores the birth
+// value; no journal read/drain face exists by design.
+
+use crate::invocation::ShellInvocation;
+
+/// Parse helper: the host's argv-shaped invocation.
+fn gap12_parse(args: &[&str]) -> ShellInvocation {
+    ShellInvocation::parse(&args.iter().map(|a| (*a).to_string()).collect::<Vec<_>>())
+        .expect("invocation parses")
+}
+
+#[test]
+fn issue863_gap12_apply_interactive_login_arms_typed_state() {
+    // Q-A + Q-B: the apply face arms the typed interactive flag the
+    // apply body alone never writes (the hop-2 asymmetry), and the
+    // live read reports it — declared and live agree here only
+    // because the session was built plain.
+    let mut session = Session::builder().build().expect("session builds");
+    assert!(!session.applied_invocation_shape().interactive);
+    assert!(!session.applied_invocation_shape().login);
+    session
+        .apply_invocation_before_startup(&gap12_parse(&["-i", "-l"]))
+        .expect("apply succeeds");
+    let live = session.applied_invocation_shape();
+    assert!(live.interactive && live.login);
+    assert_eq!(live.respawn, RespawnSource::Fresh);
+    assert!(session.executor().invocation_interactive());
+    assert!(session.executor().invocation_login());
+    // The declared shape is untouched by the apply: declared-vs-live
+    // is an explicit pinned distinction, not a silent merge.
+    let declared = session.invocation_shape();
+    assert!(!declared.interactive && !declared.login);
+    // The carrier projections track the typed state in step.
+    assert_eq!(
+        session.variable_value("__RUBASH_INTERACTIVE"),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        session.variable_value("__RUBASH_LOGIN_SHELL"),
+        Some("1".to_string())
+    );
+}
+
+#[test]
+fn issue863_gap12_restricted_is_two_phase() {
+    // Q-A: restrictions must not be live while startup files source
+    // (GNU shell.c:679-744), so apply alone arms nothing and the
+    // retained invocation's second phase activates them.
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .apply_invocation_before_startup(&gap12_parse(&["-r"]))
+        .expect("apply succeeds");
+    assert_eq!(
+        session.views().options().get("restricted"),
+        Some(false),
+        "restrictions must not be live before finish_invocation_startup"
+    );
+    session.finish_invocation_startup();
+    assert_eq!(
+        session.views().options().get("restricted"),
+        Some(true),
+        "finish activates the retained restriction"
+    );
+    // Idempotent: a second finish re-applies the same restriction.
+    session.finish_invocation_startup();
+    assert_eq!(session.views().options().get("restricted"), Some(true));
+}
+
+#[test]
+fn issue863_gap12_finish_without_apply_is_noop() {
+    // Finish with nothing retained is a no-op, not an error: a host
+    // that never applied an invocation finishes a plain session.
+    let mut session = Session::builder().build().expect("session builds");
+    session.finish_invocation_startup();
+    assert_eq!(session.views().options().get("restricted"), Some(false));
+    assert!(!session.applied_invocation_shape().interactive);
+    assert!(!session.applied_invocation_shape().login);
+}
+
+#[test]
+fn issue863_gap12_failed_apply_retains_nothing() {
+    // A failed apply retains nothing: the session is left as the
+    // partial apply left it, and finish is a no-op until a
+    // successful apply. The failure is an invalid shell-option name
+    // in the parsed invocation (the apply body's own error).
+    let mut invocation = gap12_parse(&["-i"]);
+    invocation
+        .shell_flags
+        .push(("nosuchoption".to_string(), true));
+    let mut session = Session::builder().build().expect("session builds");
+    let err = session
+        .apply_invocation_before_startup(&invocation)
+        .expect_err("apply must fail on an invalid shell option");
+    assert!(
+        err.contains("nosuchoption"),
+        "error names the bad option: {err}"
+    );
+    assert!(
+        !session.applied_invocation_shape().interactive,
+        "a failed apply leaves the live shape untouched"
+    );
+    session.finish_invocation_startup();
+    assert_eq!(
+        session.views().options().get("restricted"),
+        Some(false),
+        "finish after a failed apply is still a no-op"
+    );
+}
+
+#[test]
+fn issue863_gap12_remove_env_vs_unset_differential() {
+    // Q-C: the two removal faces differ on every arm — the side-by-side
+    // differential the Session face exists to carry. `remove_env` is
+    // the restore-grade removal (env-table entry gone, typed cell
+    // left as-is, no readonly guard, carrier clears the typed flag);
+    // `VariablesView::unset` is the `unset` builtin's leaf (typed cell
+    // dropped, readonly refused, carrier leaves a shape lie).
+
+    // Arm 1 — a plain variable: unset drops the typed cell,
+    // remove_env leaves it. The setup matters: a typed cell exists
+    // only for a variable the shell itself bound — a script
+    // assignment creates it, and the view's set then syncs it in
+    // place (`set_env`'s sync is update-in-place only; a fresh name
+    // set through the view has no typed cell at all).
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run("GAP12_DIFF=placeholder", &RunOptions::new())
+        .expect("run");
+    session.variables().set("GAP12_DIFF", "diff-value");
+    assert_eq!(
+        session.variable_value("GAP12_DIFF"),
+        Some("diff-value".to_string())
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP12_DIFF"),
+        Some("diff-value".to_string())
+    );
+    assert!(
+        session.variables().attributes("GAP12_DIFF").is_some(),
+        "the setup holds a typed cell to preserve"
+    );
+    session.remove_env("GAP12_DIFF");
+    assert_eq!(
+        session.variable_value("GAP12_DIFF"),
+        None,
+        "remove_env clears the env-table entry"
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP12_DIFF"),
+        Some("diff-value".to_string()),
+        "remove_env leaves the typed cell as-is"
+    );
+    assert!(
+        session.variables().attributes("GAP12_DIFF").is_some(),
+        "the typed cell itself survives the removal"
+    );
+
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run("GAP12_DIFF=placeholder", &RunOptions::new())
+        .expect("run");
+    session.variables().set("GAP12_DIFF", "diff-value");
+    assert!(
+        session.variables().unset("GAP12_DIFF"),
+        "unset accepts a plain variable"
+    );
+    assert_eq!(session.variable_value("GAP12_DIFF"), None);
+    assert_eq!(
+        session.variables().resolved_value("GAP12_DIFF"),
+        None,
+        "the unset leaf drops the typed cell"
+    );
+    assert!(
+        session.variables().attributes("GAP12_DIFF").is_none(),
+        "the typed cell is gone with the unset"
+    );
+
+    // Arm 2 — a readonly variable: unset refuses, remove_env removes.
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run("GAP12_RO=placeholder", &RunOptions::new())
+        .expect("run");
+    session.variables().set("GAP12_RO", "ro-value");
+    session
+        .run("readonly GAP12_RO", &RunOptions::new())
+        .expect("run");
+    assert!(
+        !session.variables().unset("GAP12_RO"),
+        "the unset leaf refuses a readonly name"
+    );
+    assert_eq!(
+        session.variable_value("GAP12_RO"),
+        Some("ro-value".to_string())
+    );
+    session.remove_env("GAP12_RO");
+    assert_eq!(
+        session.variable_value("GAP12_RO"),
+        None,
+        "remove_env has no readonly guard — it is restore-grade, not the builtin"
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP12_RO"),
+        Some("ro-value".to_string()),
+        "the typed cell survives the removal"
+    );
+
+    // Arm 3 — a shape carrier: unset leaves a shape lie (carrier
+    // gone, typed flag still set), remove_env clears both.
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .apply_invocation_before_startup(&gap12_parse(&["-i"]))
+        .expect("apply succeeds");
+    assert!(session.applied_invocation_shape().interactive);
+    assert!(
+        session.variables().unset("__RUBASH_INTERACTIVE"),
+        "the unset leaf accepts the carrier name"
+    );
+    assert_eq!(session.variable_value("__RUBASH_INTERACTIVE"), None);
+    assert!(
+        session.applied_invocation_shape().interactive,
+        "unset leaves the typed flag set — the shape lie remove_env exists to avoid"
+    );
+
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .apply_invocation_before_startup(&gap12_parse(&["-i"]))
+        .expect("apply succeeds");
+    session.remove_env("__RUBASH_INTERACTIVE");
+    assert_eq!(session.variable_value("__RUBASH_INTERACTIVE"), None);
+    assert!(
+        !session.applied_invocation_shape().interactive,
+        "remove_env clears the typed flag with the carrier"
+    );
+}
+
+#[test]
+fn issue863_gap12_mark_login_shell_companion() {
+    // Q-E: the login funnel as a Session face — the carrier and the
+    // `login_shell` shopt are written together, so they can never
+    // split. The companion of the apply face for routes whose parse
+    // never reaches a ShellInvocation.
+    let mut session = Session::builder().build().expect("session builds");
+    assert_eq!(session.views().options().get("login_shell"), Some(false));
+    assert!(!session.applied_invocation_shape().login);
+    session.mark_login_shell();
+    assert!(session.applied_invocation_shape().login);
+    assert_eq!(
+        session.variable_value("__RUBASH_LOGIN_SHELL"),
+        Some("1".to_string())
+    );
+    assert_eq!(
+        session.views().options().get("login_shell"),
+        Some(true),
+        "the funnel writes the shopt with the carrier"
+    );
+    // The removal face clears the typed flag with the carrier; the
+    // shopt the marking wrote is not part of the removal (pure lift
+    // of Executor::remove_env, verbatim).
+    session.remove_env("__RUBASH_LOGIN_SHELL");
+    assert_eq!(session.variable_value("__RUBASH_LOGIN_SHELL"), None);
+    assert!(!session.applied_invocation_shape().login);
+}
+
+/// The Q-D journal pin. A removal is journaled, and the session's
+/// Drop restores the birth value — pinned as the removal face's
+/// implementation semantics, in a re-executed child test process
+/// like the #2084 pin (process-global state is only deterministic
+/// when no sibling test's session era overlaps).
+#[test]
+fn issue863_gap12_journal_drop_restores_birth() {
+    if std::env::var_os("ISSUE863_GAP12_JOURNAL_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("test exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "api::consumer_tests::issue863_gap12_journal_drop_restores_birth",
+                "--nocapture",
+            ])
+            .env("ISSUE863_GAP12_JOURNAL_CHILD", "1")
+            .env("__RUBASH_GAP12_JOURNAL", "journal-birth")
+            .status()
+            .expect("child test process spawns");
+        assert!(status.success(), "child scenario failed: {status}");
+        return;
+    }
+    issue863_gap12_journal_child_scenario();
+}
+
+fn issue863_gap12_journal_child_scenario() {
+    assert_eq!(
+        std::env::var("__RUBASH_GAP12_JOURNAL").unwrap(),
+        "journal-birth"
+    );
+    {
+        let mut session = Session::builder().build().expect("session builds");
+        assert_eq!(
+            session.variable_value("__RUBASH_GAP12_JOURNAL"),
+            Some("journal-birth".to_string())
+        );
+        session.remove_env("__RUBASH_GAP12_JOURNAL");
+        assert_eq!(session.variable_value("__RUBASH_GAP12_JOURNAL"), None);
+        assert!(
+            std::env::var_os("__RUBASH_GAP12_JOURNAL").is_none(),
+            "the removal mirrors out of the process env while the session lives"
+        );
+    }
+    assert_eq!(
+        std::env::var("__RUBASH_GAP12_JOURNAL").unwrap(),
+        "journal-birth",
+        "the session's Drop restores the birth value its journal recorded"
+    );
+    std::env::remove_var("__RUBASH_GAP12_JOURNAL");
+}
+
+/// The U-2 read-safety pin. A poisoned environment must never
+/// classify the session: the live read consults typed state, never
+/// the carriers, and the import strips the family (table and
+/// process-env mirror) so a respawn builder seeded from the process
+/// env cannot re-import it either.
+#[test]
+fn issue863_gap12_poisoned_env_never_classifies() {
+    if std::env::var_os("ISSUE863_GAP12_U2_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("test exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "api::consumer_tests::issue863_gap12_poisoned_env_never_classifies",
+                "--nocapture",
+            ])
+            .env("ISSUE863_GAP12_U2_CHILD", "1")
+            .env("__RUBASH_INTERACTIVE", "1")
+            .env("__RUBASH_LOGIN_SHELL", "1")
+            .status()
+            .expect("child test process spawns");
+        assert!(status.success(), "child scenario failed: {status}");
+        return;
+    }
+    issue863_gap12_u2_child_scenario();
+}
+
+fn issue863_gap12_u2_child_scenario() {
+    assert_eq!(std::env::var("__RUBASH_INTERACTIVE").unwrap(), "1");
+    assert_eq!(std::env::var("__RUBASH_LOGIN_SHELL").unwrap(), "1");
+    let mut session = Session::builder().build().expect("session builds");
+    assert_eq!(
+        session.variable_value("__RUBASH_INTERACTIVE"),
+        None,
+        "the import strips the poisoned interactive carrier"
+    );
+    assert_eq!(
+        session.variable_value("__RUBASH_LOGIN_SHELL"),
+        None,
+        "the import strips the poisoned login carrier"
+    );
+    let live = session.applied_invocation_shape();
+    assert!(
+        !live.interactive && !live.login,
+        "typed state is born unshaped despite the poisoned env"
+    );
+    assert!(
+        std::env::var_os("__RUBASH_INTERACTIVE").is_none(),
+        "the import scrubs the carrier's process-env mirror too"
+    );
+    assert!(std::env::var_os("__RUBASH_LOGIN_SHELL").is_none());
+    // The session still runs: the strip is silent, not an error.
+    session.run("true", &RunOptions::new()).expect("run");
+}
+
+/// The U-3 interleaving pin. Two live sessions interleave writes to
+/// one mirrored name; each session's journal is its own lineage — a
+/// dropping session restores only keys whose current value still
+/// equals its own journal's final state, so it can never roll back
+/// a live sibling's write.
+#[test]
+fn issue863_gap12_interleaved_sessions_keep_lineage() {
+    if std::env::var_os("ISSUE863_GAP12_U3_CHILD").is_none() {
+        let exe = std::env::current_exe().expect("test exe");
+        let status = std::process::Command::new(exe)
+            .args([
+                "--exact",
+                "api::consumer_tests::issue863_gap12_interleaved_sessions_keep_lineage",
+                "--nocapture",
+            ])
+            .env("ISSUE863_GAP12_U3_CHILD", "1")
+            .env("__RUBASH_GAP12_U3", "u3-birth")
+            .status()
+            .expect("child test process spawns");
+        assert!(status.success(), "child scenario failed: {status}");
+        return;
+    }
+    issue863_gap12_u3_child_scenario();
+}
+
+fn issue863_gap12_u3_child_scenario() {
+    assert_eq!(std::env::var("__RUBASH_GAP12_U3").unwrap(), "u3-birth");
+    let mut first = Session::builder().build().expect("first session builds");
+    let mut second = Session::builder().build().expect("second session builds");
+    first.remove_env("__RUBASH_GAP12_U3");
+    assert!(
+        std::env::var_os("__RUBASH_GAP12_U3").is_none(),
+        "the first session's removal mirrors out while it lives"
+    );
+    second
+        .run("export __RUBASH_GAP12_U3=u3-second", &RunOptions::new())
+        .expect("run");
+    assert_eq!(
+        std::env::var("__RUBASH_GAP12_U3").unwrap(),
+        "u3-second",
+        "the live sibling's write mirrors in"
+    );
+    drop(first);
+    assert_eq!(
+        std::env::var("__RUBASH_GAP12_U3").unwrap(),
+        "u3-second",
+        "the dropped session does not roll back its live sibling"
+    );
+    drop(second);
+    assert_eq!(
+        std::env::var("__RUBASH_GAP12_U3").unwrap(),
+        "u3-birth",
+        "the last drop restores the birth value"
+    );
+    std::env::remove_var("__RUBASH_GAP12_U3");
+}
+
+// ---------------------------------------------------------------------------
 // niubash#822 (Bug L): the winsize bind writes BOTH storages
 // ---------------------------------------------------------------------------
 
