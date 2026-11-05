@@ -40,6 +40,14 @@
 //!   fd numbers, read through `&self`; plus
 //!   `Session::has_function`, the `&self` function probe
 //!   (GAP-4b).
+//! - The path-resolution faces on [`Session`]
+//!   (niubash#863 GAP-5): `resolve_shell_path` through
+//!   `&self`, and the associated
+//!   `resolve_shell_path_from_env` /
+//!   `resolve_shell_path_process_entries_from_env` /
+//!   `shell_pwd_display_path` — the engine's one resolver in
+//!   contract form, each delegating to the same
+//!   `executor::path` function the tier-C forms wrap.
 //! - The capability traits a host implements:
 //!   [`HistoryProvider`] (the design's unchanged trait),
 //!   [`ExternalCommandHandler`], [`CompletionProvider`],
