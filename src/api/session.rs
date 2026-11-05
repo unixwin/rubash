@@ -831,6 +831,65 @@ impl Session {
     }
 
     // ----------------------------------------------------------
+    // Path resolution (§5.2; niubash#863 GAP-5)
+    // ----------------------------------------------------------
+
+    /// Resolve a shell-visible path in this session's
+    /// namespace (niubash#863 GAP-5): the tier-A form of the
+    /// read hosts used to make through the tier-C seam
+    /// (`executor().resolve_shell_path(...)`) — the
+    /// completer's `/tmp` answer, the GAP-4 view's deliberate
+    /// omission, is this face's first consumer. A pure read
+    /// through `&self`: the resolution is the executor's own,
+    /// fed the session's environment, and the ruled path
+    /// contract does not move (bare `/` is the payload root;
+    /// the drive spellings are as the engine resolves them).
+    pub fn resolve_shell_path(&self, path: &str) -> PathBuf {
+        self.executor.resolve_shell_path(path)
+    }
+
+    /// Resolve a shell-visible path against an explicit
+    /// environment map (niubash#863 GAP-5): the associated
+    /// form, for host layers that hold an environment
+    /// snapshot but do not own the session (process-plugin
+    /// working-directory setup is the recorded case). The
+    /// same-source twin of
+    /// `Executor::resolve_shell_path_from_env`: both
+    /// delegate to the one resolver in `executor::path`, so
+    /// the contract and the tier-C form cannot disagree
+    /// about a spelling.
+    pub fn resolve_shell_path_from_env(
+        path: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> PathBuf {
+        Executor::resolve_shell_path_from_env(path, env_vars)
+    }
+
+    /// Resolve one shell PATH entry into the native
+    /// directories a child process should receive
+    /// (niubash#863 GAP-5): the associated form of
+    /// `Executor::resolve_shell_path_process_entries_from_env`,
+    /// delegating to the same `executor::path` function —
+    /// logical command directories resolve to their real
+    /// backing directory below the configured shell root.
+    pub fn resolve_shell_path_process_entries_from_env(
+        path: &str,
+        env_vars: &HashMap<String, String>,
+    ) -> Vec<PathBuf> {
+        Executor::resolve_shell_path_process_entries_from_env(path, env_vars)
+    }
+
+    /// The display-domain form of a path (niubash#863
+    /// GAP-5): the spelling `$PWD`, script identities and
+    /// dirname compositions share, as one owned String. The
+    /// tier-A form of the module function hosts used to call
+    /// directly at `rubash::executor::shell_pwd_display_path`;
+    /// a pure function of the spelling, no session state.
+    pub fn shell_pwd_display_path(path: &str) -> String {
+        crate::executor::shell_pwd_display_path(path)
+    }
+
+    // ----------------------------------------------------------
     // Functions (§5.2 / §5.3)
     // ----------------------------------------------------------
 
