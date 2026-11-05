@@ -28,6 +28,7 @@ use super::completion_attempt::CompletionAttempt;
 use super::completion_view::{full_env_sorted, CompletionView};
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
+use super::finish::Finish;
 use super::syntax::SyntaxView;
 use super::views::{OptionsView, StateViews, VariablesView};
 use crate::executor::Executor;
@@ -818,6 +819,32 @@ impl Session {
         CompletionAttempt::new(self)
     }
 
+    /// Open one session finish as an explicit object
+    /// (unixwin/niubash#863 GAP-8): the contract replacement
+    /// for the host's hand-composed finish funnels and its
+    /// tier-C trap-step seam reads. The host opens a guard per
+    /// finish from the `&mut Session` it holds, with the
+    /// route's pending status as a value (the value
+    /// [`Session::close`] used to make the host inject through
+    /// [`Session::set_last_status`] first), and drives the
+    /// finish's coarse steps through the guard — the EXIT trap
+    /// step, the post-trap cwd read, the stream-end duties
+    /// with the history step gated per route — interleaving
+    /// its own duties between them. The session is NOT
+    /// consumed: routes that cannot consume it (the
+    /// interactive REPL, whose session lives in a shared cell)
+    /// finish through the same guard the consuming
+    /// [`Session::close`] / [`Session::close_with_report`] are
+    /// re-based on. Steps are once-only and the guard reports
+    /// the finish boundary as values on its outcome.
+    pub fn begin_finish(&mut self, status: i32) -> Finish<'_> {
+        Finish::new(crate::script_driver::FinishPass::new(
+            &mut self.executor,
+            status,
+            self.interactive,
+        ))
+    }
+
     /// GNU `pathexp.c:442 shell_glob_filename` over one pattern, for the
     /// readline glob-completion entry point (`bashline.c:4053`
     /// `glob_complete_word` → `bash_glob_completion_internal`). The
@@ -1275,10 +1302,18 @@ impl Session {
     /// structural premise).
     pub fn close_with_report(mut self) -> CloseReport {
         let status = self.executor.last_exit_code();
-        let status = script_driver::finish_shell(&mut self.executor, status, self.interactive);
+        // GAP-8 (niubash#863): the consuming close is the
+        // finish guard's one-call pass with the history gate
+        // at its default — the same implementation the
+        // decomposed host routes drive step by step, so the
+        // close boundary cannot drift from the contract face.
+        let outcome = {
+            let mut finish = self.begin_finish(status);
+            finish.finish_all()
+        };
         CloseReport {
-            status,
-            cwd: self.executor.session_cwd().to_path_buf(),
+            status: outcome.status,
+            cwd: outcome.final_cwd,
         }
     }
 

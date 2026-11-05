@@ -89,6 +89,7 @@ pub mod completion_attempt;
 pub mod completion_view;
 pub mod diagnostic;
 pub mod events;
+pub mod finish;
 pub mod session;
 pub mod syntax;
 pub mod views;
@@ -104,6 +105,7 @@ pub use completion_attempt::CompletionAttempt;
 pub use completion_view::CompletionView;
 pub use diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 pub use events::{CommandEvent, JobInfo, SessionEvents};
+pub use finish::{Finish, FinishDuties, FinishOutcome, SessionHistoryWrite};
 pub use session::{
     CloseReport, Flow, InvocationShape, ParsedUnit, PreparedLine, RespawnSource, RunClassification,
     RunOptions, RunOutcome, RunUnwind, Session, SessionBuilder,

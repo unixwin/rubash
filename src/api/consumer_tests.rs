@@ -2787,3 +2787,259 @@ fn issue863_gap7_guard_widget_callback_runs_compgen_live() {
         "the temporary binding is restored after the callback"
     );
 }
+
+// ----------------------------------------------------------------
+// GAP-8 (niubash#863): the finish guard — `Session::begin_finish`
+// decomposes the one finish pass around the host's interleaved
+// duties. GNU anchors: exit_shell's single funnel (shell.c:985)
+// with the trap at shell.c:1000-1002 BEFORE the history save at
+// shell.c:1007-1009 (the captain's D1 adjudication);
+// run_exit_trap's override pair (trap.c:1075-1081);
+// maybe_save_shell_history reading HISTFILE/HISTFILESIZE at the
+// write (bashhist.c:488-530).
+
+use super::finish::{FinishDuties, SessionHistoryWrite};
+
+fn issue863_gap8_session() -> Session {
+    Session::builder().build().expect("session builds")
+}
+
+fn issue863_gap8_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+#[test]
+fn issue863_gap8_finish_trap_step_observes_pending_status() {
+    let dir = temp_dir("gap8-pending");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(
+        &mut session,
+        &format!(
+            "trap 'echo \"saw=$?\" > \"{}/trap_saw\"' EXIT",
+            dir.display()
+        ),
+    );
+    // The session's own last status is 0 (the trap registration
+    // succeeded). The guard's pending status is a caller-supplied
+    // VALUE — the trap must observe 41, not the executor's 0.
+    // This is the contract the host's set_last_status injection
+    // into a consuming close used to fake.
+    let mut finish = session.begin_finish(41);
+    assert_eq!(finish.run_exit_trap(), 41);
+    drop(finish);
+    assert_eq!(read(&dir, "trap_saw"), "saw=41\n");
+}
+
+#[test]
+fn issue863_gap8_finish_trap_exit_overrides_pending_status() {
+    // The trap.c:1075-1076 arm: an explicit `exit` inside the
+    // action makes the result.
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, "trap 'exit 7' EXIT");
+    let mut finish = session.begin_finish(3);
+    let outcome = finish.finish_all();
+    assert_eq!(outcome.status, 7);
+    assert!(outcome.trap_ran);
+    assert!(outcome.duties_run);
+    drop(finish);
+    drop(session);
+
+    // The trap.c:1081 arm: plain completion keeps the pending
+    // status — the action's own last-command status (0 here)
+    // does not override.
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, "trap 'true' EXIT");
+    let mut finish = session.begin_finish(3);
+    let outcome = finish.finish_all();
+    assert_eq!(outcome.status, 3);
+    assert!(outcome.trap_ran);
+}
+
+#[test]
+fn issue863_gap8_finish_trap_runs_once_across_entries() {
+    let dir = temp_dir("gap8-once");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(
+        &mut session,
+        &format!("trap 'echo fired >> \"{}/fires\"' EXIT", dir.display()),
+    );
+    {
+        let mut finish = session.begin_finish(5);
+        assert_eq!(finish.run_exit_trap(), 5);
+        let outcome = finish.finish_all();
+        assert!(outcome.trap_ran);
+        assert_eq!(outcome.status, 5);
+    }
+    // A second guard over the same session re-enters the finish;
+    // the action must not fire again (rubash#2212: the trap runs
+    // once per exit), and the outcome says so as a value.
+    {
+        let mut finish = session.begin_finish(9);
+        let outcome = finish.finish_all();
+        assert!(!outcome.trap_ran, "the trap action must not fire twice");
+        assert_eq!(outcome.status, 9);
+    }
+    // The consuming close is a third entry over the same finish;
+    // still no second firing.
+    let _ = session.close();
+    assert_eq!(read(&dir, "fires"), "fired\n");
+}
+
+#[test]
+fn issue863_gap8_finish_final_cwd_is_post_trap() {
+    let dir = temp_dir("gap8-cwd");
+    std::fs::create_dir_all(dir.join("sub")).expect("subdir");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, &format!("cd \"{}\"", dir.display()));
+    issue863_gap8_run(&mut session, "trap 'cd sub' EXIT");
+    let mut finish = session.begin_finish(0);
+    let before = finish.final_cwd();
+    assert_ne!(
+        before.file_name().and_then(|name| name.to_str()),
+        Some("sub"),
+        "pre-trap cwd is the session's own directory: {before:?}"
+    );
+    assert_eq!(finish.run_exit_trap(), 0);
+    // The rubash#668 value as a face: the directory the trap
+    // left behind, read while the guard holds the session —
+    // no field-parking across a consuming close.
+    let after = finish.final_cwd();
+    assert_eq!(after, before.join("sub"));
+    let outcome = finish.finish_all();
+    assert_eq!(outcome.final_cwd, after);
+}
+
+#[test]
+fn issue863_gap8_finish_after_exec_replacement_runs_no_trap() {
+    let dir = temp_dir("gap8-exec");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(
+        &mut session,
+        &format!("trap 'echo fired > \"{}/fired\"' EXIT", dir.display()),
+    );
+    // A successful exec replaces the image — no exit path
+    // exists for a finish to complete (builtins/exec.def ->
+    // execute_cmd.c:6126 shell_execve; the trap flag is cleared
+    // before it, trap.c:1440; rubash#1012). The finish over the
+    // replaced session must report that no trap ran.
+    let _ = session.run("exec true", &RunOptions::new());
+    let mut finish = session.begin_finish(0);
+    let outcome = finish.finish_all();
+    assert!(!outcome.trap_ran);
+    assert!(
+        !dir.join("fired").exists(),
+        "no exit trap fires after an exec replacement"
+    );
+}
+
+#[test]
+fn issue863_gap8_finish_order_history_write_observes_post_trap_state() {
+    // D1, arm (a): the trap's HISTFILE edit governs the save —
+    // the differential probe D shape (GNU: the session lines
+    // land in the post-trap HISTFILE; the pre-trap file is
+    // never written). shell.c:1000-1002 (trap) precedes
+    // shell.c:1007-1009 (save); bashhist.c:488 reads HISTFILE
+    // at the write.
+    let dir = temp_dir("gap8-order-a");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, "set -o history");
+    issue863_gap8_run(
+        &mut session,
+        &format!("HISTFILE=\"{}/orig\"", dir.display()),
+    );
+    issue863_gap8_run(&mut session, "HISTFILESIZE=10000");
+    issue863_gap8_run(&mut session, "history -s \"echo gap8-order-marker\"");
+    issue863_gap8_run(
+        &mut session,
+        &format!("trap 'HISTFILE=\"{}/fromtrap\"' EXIT", dir.display()),
+    );
+    {
+        let mut finish = session.begin_finish(0);
+        let outcome = finish.finish_all();
+        assert!(outcome.trap_ran);
+        assert!(outcome.history_written);
+    }
+    assert!(
+        read(&dir, "fromtrap").contains("gap8-order-marker"),
+        "the save lands in the post-trap HISTFILE"
+    );
+    assert!(
+        !dir.join("orig").exists(),
+        "the save must not land in the pre-trap HISTFILE"
+    );
+    drop(session);
+
+    // D1, arm (b): a history line the trap itself adds is in
+    // the save (the differential probe E shape; GNU's file
+    // carries the trap-added line because the save runs after
+    // the trap).
+    let dir = temp_dir("gap8-order-b");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, "set -o history");
+    issue863_gap8_run(
+        &mut session,
+        &format!("HISTFILE=\"{}/hist\"", dir.display()),
+    );
+    issue863_gap8_run(&mut session, "HISTFILESIZE=10000");
+    issue863_gap8_run(&mut session, "history -s \"echo gap8-before-trap\"");
+    issue863_gap8_run(
+        &mut session,
+        "trap 'history -s \"echo gap8-trap-added\"' EXIT",
+    );
+    {
+        let mut finish = session.begin_finish(0);
+        let outcome = finish.finish_all();
+        assert!(outcome.history_written);
+    }
+    let saved = read(&dir, "hist");
+    assert!(
+        saved.contains("gap8-before-trap"),
+        "the session line is saved: {saved:?}"
+    );
+    assert!(
+        saved.contains("gap8-trap-added"),
+        "the trap-added line is saved — the write observes post-trap state: {saved:?}"
+    );
+}
+
+#[test]
+fn issue863_gap8_finish_duties_without_history_step() {
+    // The D3 shape: the interactive route's finish — trap step
+    // and stream-end duties with the engine history step gated
+    // OFF (the host's history is its own provider's store;
+    // writing both double-writes, niu#642). The duties still
+    // run: the persistent output procsub closes (its deferred
+    // body receives the accumulated input, rubash#1336).
+    let dir = temp_dir("gap8-duties");
+    let mut session = issue863_gap8_session();
+    issue863_gap8_run(&mut session, "set -o history");
+    issue863_gap8_run(
+        &mut session,
+        &format!("HISTFILE=\"{}/hist\"", dir.display()),
+    );
+    issue863_gap8_run(&mut session, "HISTFILESIZE=10000");
+    issue863_gap8_run(&mut session, "history -s \"echo gap8-duties-marker\"");
+    issue863_gap8_run(
+        &mut session,
+        &format!("exec > >(cat > \"{}/procsub_out\")", dir.display()),
+    );
+    issue863_gap8_run(&mut session, "echo gap8-procsub-payload");
+    let outcome = {
+        let mut finish = session.begin_finish(0);
+        finish.run_stream_end_duties(FinishDuties {
+            history: SessionHistoryWrite::Skip,
+        });
+        finish.finish_all()
+    };
+    assert!(outcome.duties_run);
+    assert!(
+        !outcome.history_written,
+        "the gated-off history step writes nothing"
+    );
+    assert!(
+        !dir.join("hist").exists(),
+        "gated-off duties must not write the history file"
+    );
+    assert_eq!(read(&dir, "procsub_out"), "gap8-procsub-payload\n");
+}
