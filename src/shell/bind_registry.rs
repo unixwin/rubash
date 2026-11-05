@@ -23,7 +23,7 @@ use std::rc::Rc;
 
 /// What a key sequence is bound to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BindKind {
+pub(crate) enum BindKind {
     /// `bind -x '"\C-r": command'` — the command runs on the keypress with
     /// the READLINE_* variables set and read back
     /// (bashline.c:4593-4707 bash_execute_unix_command).
@@ -44,7 +44,7 @@ pub enum BindKind {
 /// backslash form (`bind -X` probe: `"\C-g" "echo bound-c-g"`), and the
 /// host translates it for its own key tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BindEntry {
+pub(crate) struct BindEntry {
     pub keyseq: String,
     pub kind: BindKind,
     /// `-m keymap` target (bind.def:37-40): emacs, emacs-standard,
@@ -59,7 +59,7 @@ pub struct BindEntry {
 
 /// Process-global binding registry (readline's keymap world).
 #[derive(Debug, Clone)]
-pub struct BindRegistry {
+pub(crate) struct BindRegistry {
     pub entries: Vec<BindEntry>,
     /// Bumped on every mutation so an embedding host can notice that its
     /// mirrored keymaps are stale and rebuild them between prompts.
@@ -420,7 +420,7 @@ const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
 /// Keymap aliases that are the same readline map (bind.def:37-40: vi,
 /// vi-move and vi-command name the movement keymap; emacs and
 /// emacs-standard the standard one).
-pub fn normalize_keymap_name(name: &str) -> &str {
+pub(crate) fn normalize_keymap_name(name: &str) -> &str {
     match name {
         "emacs" => "emacs-standard",
         "vi" | "vi-move" | "vi-command" => "vi-movement",
@@ -430,7 +430,7 @@ pub fn normalize_keymap_name(name: &str) -> &str {
 
 /// The `-m` names GNU accepts (bind.def:37-40). Anything else is
 /// ``bind: `<name>': invalid keymap name`` (bind.def:253-257).
-pub const KEYMAP_NAMES: &[&str] = &[
+pub(crate) const KEYMAP_NAMES: &[&str] = &[
     "emacs",
     "emacs-standard",
     "emacs-meta",
@@ -444,7 +444,7 @@ pub const KEYMAP_NAMES: &[&str] = &[
 /// Process-shared registry handle. Shared across ShellState clones so a
 /// `bind` inside a subshell mutates the same world as the parent — GNU's
 /// readline state is process-global, not fork-copied.
-pub type SharedBindRegistry = Rc<RefCell<BindRegistry>>;
+pub(crate) type SharedBindRegistry = Rc<RefCell<BindRegistry>>;
 
 #[cfg(test)]
 mod tests {

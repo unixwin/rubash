@@ -622,7 +622,7 @@ impl Executor {
     }
 
     /// Registry snapshot for hosts (niubash's reedline bridge).
-    pub fn bind_registry_snapshot(&self) -> Vec<BindEntry> {
+    pub(crate) fn bind_registry_snapshot(&self) -> Vec<BindEntry> {
         self.shell_state.bind_registry.borrow().snapshot()
     }
 
@@ -630,7 +630,7 @@ impl Executor {
     /// host must subtract from the DEFAULT key tables when mirroring
     /// them, because GNU's unbind mutates the maps themselves,
     /// defaults included (rubash#2337). Pairs with
-    /// [`Executor::bind_registry_snapshot`] and the registry
+    /// `Executor::bind_registry_snapshot` and the registry
     /// generation counter.
     pub fn bind_removed_keyseqs(&self) -> Vec<(String, Option<String>)> {
         self.shell_state.bind_registry.borrow().removals()
@@ -766,11 +766,11 @@ impl Executor {
     }
 
     /// Shared registry handle (process-global; see the field docs).
-    pub fn bind_registry(&self) -> crate::shell::bind_registry::SharedBindRegistry {
+    pub(crate) fn bind_registry(&self) -> crate::shell::bind_registry::SharedBindRegistry {
         self.shell_state.bind_registry.clone()
     }
 
-    pub fn register_bind_entry(&mut self, entry: BindEntry) {
+    pub(crate) fn register_bind_entry(&mut self, entry: BindEntry) {
         self.shell_state.bind_registry.borrow_mut().register(entry);
     }
 

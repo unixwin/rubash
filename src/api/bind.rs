@@ -1,7 +1,7 @@
 //! The key-binding view: GAP-3 of the niubash#863 API queue.
 //!
 //! The engine has always owned the binding state — the
-//! [`BindRegistry`](crate::shell::bind_registry::BindRegistry) is
+//! `BindRegistry` is
 //! the `bind` builtin's data plane — but until GAP-3 the Session
 //! contract carried none of it, so a host mirrored the registry
 //! through the tier-C executor seam and re-decoded the written
@@ -26,7 +26,7 @@ use crate::shell::bind_registry::{normalize_keymap_name, BindKind, BindRegistry}
 
 /// What a key sequence is bound to, as the contract reports it —
 /// the view form of the registry's
-/// [`BindKind`](crate::shell::bind_registry::BindKind), payload
+/// `BindKind`, payload
 /// included, so a host never re-reads the engine's internal enum
 /// through the tier-C seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,7 +59,7 @@ pub struct BindEntryView {
     /// `normalize_keymap_name`): a registration made with no
     /// `-m` lands under the keymap that was current when it was
     /// registered (see
-    /// [`BindRegistry`](crate::shell::bind_registry::BindRegistry)),
+    /// `BindRegistry`),
     /// so this always names one concrete map.
     pub keymap: String,
     /// This entry as GNU's dumpers print it, rendered at capture
