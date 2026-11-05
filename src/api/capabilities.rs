@@ -52,28 +52,89 @@ pub trait ElevationHandler {
     fn elevate(&mut self, request: ElevationRequest) -> Result<ElevationOutput, String>;
 }
 
-/// One completion candidate (§6.2): the text to insert and an
-/// optional description the host's renderer may show.
+/// One completion candidate (§6.2): the text to insert, an
+/// optional description the host's renderer may show, and the
+/// engine-side classification of the entry the candidate names
+/// (niubash#863 GAP-11) — the kind the producing generator knew,
+/// carried so the host paints and appends without re-statting
+/// engine output or guessing from the text shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub text: String,
     pub description: Option<String>,
+    /// The candidate's filesystem class as the producing action
+    /// classified it, or `None` when the producer could not
+    /// classify it from evidence already in hand (unmarked beats
+    /// wrong-marked; the host's display-side fallback for
+    /// unmarked entries is GNU-faithful readline stat-at-display).
+    /// Dynamic candidates (`-F` COMPREPLY, `-C` output) and
+    /// provider candidates the engine did not generate are
+    /// `None` unless the provider set a kind itself; non-
+    /// filesystem candidates (variables, functions, builtins,
+    /// ...) are `None` — the taxonomy is filesystem-only.
+    pub kind: Option<CandidateKind>,
+}
+
+/// The filesystem class of one completion candidate (niubash#863
+/// GAP-11): the four classes the host's LS_COLORS painting and
+/// append-whitespace decision consume. GNU itself carries no
+/// per-candidate kind (pcomplete.c flattens every generator into
+/// a STRINGLIST; lib/readline/complete.c:1087 stats at display
+/// with `path_isdir`, which follows links) — this enum is a
+/// contract design decision for the two-layer engine/host split,
+/// with the marks' MEANING anchored to GNU.
+///
+/// Generator-classification principle: kind names the entry **as
+/// the producing action classified it**. A directory action
+/// follows links, so a symlink-to-directory produced by one is
+/// `Directory`; the same entry in a plain file listing stays
+/// `Symlink`. A directory entry in a file listing is `Directory`
+/// (the dirent's own class); a regular file is `File`; anything
+/// the generator cannot classify from in-hand evidence (a
+/// fifo/socket, an entry whose class needs a fresh stat) is
+/// left unmarked (`None` on the candidate), never guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateKind {
+    /// A directory, or a symlink to one when the producing
+    /// action follows links (directory actions do).
+    Directory,
+    /// A symlink, as the producing action left it (a plain
+    /// file listing does not follow links).
+    Symlink,
+    /// An executable command (a PATH-walk entry that qualified
+    /// as executable under the generator's own rule).
+    Executable,
+    /// A regular file.
+    File,
 }
 
 impl Candidate {
-    /// A candidate without a description.
+    /// A candidate without a description (and unmarked).
     pub fn new(text: impl Into<String>) -> Candidate {
         Candidate {
             text: text.into(),
             description: None,
+            kind: None,
         }
     }
 
-    /// A candidate with a description.
+    /// A candidate with a description (and unmarked).
     pub fn described(text: impl Into<String>, description: impl Into<String>) -> Candidate {
         Candidate {
             text: text.into(),
             description: Some(description.into()),
+            kind: None,
+        }
+    }
+
+    /// A candidate classified by its producer (niubash#863
+    /// GAP-11): the `kind` the generator assigned from
+    /// evidence already in hand.
+    pub fn kinded(text: impl Into<String>, kind: CandidateKind) -> Candidate {
+        Candidate {
+            text: text.into(),
+            description: None,
+            kind: Some(kind),
         }
     }
 }
@@ -118,6 +179,21 @@ pub struct CompletionPolicy {
     /// preserves generation order and the host must not re-sort.
     /// True unless the governing compspec carries `-o nosort`.
     pub sort_matches: bool,
+    /// Filenames-intent (niubash#863 GAP-11, the Q-D rider): true
+    /// when the attempt's generation was filename-flavored — the
+    /// governing spec's generation included file/directory
+    /// actions, a filename fallback sourced candidates
+    /// (`-o dirnames` / `-o plusdirs` / `-o default`, or the
+    /// no-spec filename fallback), or `-o filenames` is in the
+    /// effective options. A truthful spec-intent fact about the
+    /// ATTEMPT (GNU analogue: `rl_filename_completion_desired`),
+    /// never a per-candidate claim: dynamic candidates (`-F`
+    /// COMPREPLY, `-C` output) stay individually unmarked
+    /// (`Candidate.kind` is `None`) even when this bit is set,
+    /// because the engine did not classify user text. It is the
+    /// wider sibling of `filename_completion_desired`, which
+    /// records only the `-o filenames` option bit.
+    pub filenames_intent: bool,
 }
 
 impl Default for CompletionPolicy {
@@ -128,6 +204,7 @@ impl Default for CompletionPolicy {
             suppress_append: false,
             filename_quoting_desired: true,
             sort_matches: true,
+            filenames_intent: false,
         }
     }
 }

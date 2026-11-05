@@ -14,6 +14,7 @@ use crate::executor::path::{
     shell_path_entries,
 };
 
+use crate::api::capabilities::{Candidate, CandidateKind};
 use crate::builtins::alias::Alias;
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -448,6 +449,11 @@ pub(crate) fn completion_policy(options: u64) -> crate::api::capabilities::Compl
         suppress_append: options & COPT_NOSPACE != 0,
         filename_quoting_desired: options & COPT_NOQUOTE == 0,
         sort_matches: options & COPT_NOSORT == 0,
+        // The filenames-intent bit needs more than the option
+        // bits (the attempt's generation, not just its options),
+        // so the detailed pipeline sets it after this call;
+        // the option-only construction defaults it off.
+        filenames_intent: false,
     }
 }
 
@@ -755,7 +761,10 @@ fn pattern_uses_extglob(pattern: &str) -> bool {
 /// Generate candidates for the action bitmask `actions` (the compgen
 /// `-a`/`-b`/`-c`/`-d`/`-f`/... flags packed into a `u64`). Shared by
 /// `execute_compgen` and the host `complete_line` hook so both behave
-/// identically for the static action set.
+/// identically for the static action set. The candidates carry the
+/// engine-side kind their generator knew (niubash#863 GAP-11);
+/// text-only consumers (compgen's printed output) project to
+/// `.text` and stay byte-identical.
 pub(crate) fn apply_completion_actions(
     actions: u64,
     word: &str,
@@ -765,7 +774,7 @@ pub(crate) fn apply_completion_actions(
     job_names: &[JobCandidate],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
-) -> Vec<String> {
+) -> Vec<Candidate> {
     apply_completion_actions_with_settings(
         actions,
         word,
@@ -794,21 +803,34 @@ pub(crate) fn apply_completion_actions_with_settings(
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     pipestatus: PipestatusListing,
     settings: &ReadlineCompletionSettings,
-) -> Vec<String> {
-    let mut candidates: Vec<String> = Vec::new();
+) -> Vec<Candidate> {
+    // Non-filesystem arms produce names the engine does not
+    // classify (the GAP-11 taxonomy is filesystem-only), so
+    // their candidates ride unmarked; the filesystem arms
+    // (command's PATH walk, directory, file) mark from the
+    // evidence their generators already hold.
+    let plain = |texts: Vec<String>| texts.into_iter().map(Candidate::new).collect::<Vec<_>>();
+    let mut candidates: Vec<Candidate> = Vec::new();
     for &(actname, actbit, _) in COMPACTS {
         if actions & actbit == 0 {
             continue;
         }
         match actname {
-            "alias" => candidates.extend(alias_completion_candidates(aliases)),
-            "arrayvar" => candidates.extend(array_variable_completion_candidates(
+            "alias" => candidates.extend(plain(alias_completion_candidates(aliases))),
+            "arrayvar" => candidates.extend(plain(array_variable_completion_candidates(
                 env_vars,
                 underlay,
                 pipestatus.live_array,
+            ))),
+            "binding" => candidates.extend(plain(
+                READLINE_BINDINGS.iter().map(|s| s.to_string()).collect(),
             )),
-            "binding" => candidates.extend(READLINE_BINDINGS.iter().map(|s| s.to_string())),
-            "builtin" => candidates.extend(shell_builtin_names().iter().map(|s| s.to_string())),
+            "builtin" => candidates.extend(plain(
+                shell_builtin_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )),
             "command" => candidates.extend(command_completion_candidates(
                 env_vars,
                 aliases,
@@ -830,42 +852,54 @@ pub(crate) fn apply_completion_actions_with_settings(
                     settings,
                 ));
             }
-            "disabled" => candidates.extend(disabled_builtin_completion_candidates(env_vars)),
-            "enabled" => candidates.extend(enabled_builtin_completion_candidates(env_vars)),
-            "export" => {
-                candidates.extend(exported_variable_completion_candidates(env_vars, underlay))
+            "disabled" => {
+                candidates.extend(plain(disabled_builtin_completion_candidates(env_vars)))
             }
-            "helptopic" => candidates.extend(
+            "enabled" => candidates.extend(plain(enabled_builtin_completion_candidates(env_vars))),
+            "export" => candidates.extend(plain(exported_variable_completion_candidates(
+                env_vars, underlay,
+            ))),
+            "helptopic" => candidates.extend(plain(
                 crate::builtins::help::help_topic_names()
                     .iter()
-                    .map(|s| s.to_string()),
-            ),
-            "hostname" => candidates.extend(hostname_completion_candidates(env_vars)),
-            "function" => candidates.extend(function_completion_candidates(function_names)),
-            "group" => candidates.extend(group_completion_candidates(env_vars)),
+                    .map(|s| s.to_string())
+                    .collect(),
+            )),
+            "hostname" => candidates.extend(plain(hostname_completion_candidates(env_vars))),
+            "function" => candidates.extend(plain(function_completion_candidates(function_names))),
+            "group" => candidates.extend(plain(group_completion_candidates(env_vars))),
             // pcomplete.c it_init_joblist filters: `job` takes every
             // entry, `running` only JRUNNING jobs, `stopped` only
             // JSTOPPED ones (rubash#2584).
-            "job" => candidates.extend(job_completion_candidates(job_names, None)),
-            "running" => candidates.extend(job_completion_candidates(
+            "job" => candidates.extend(plain(job_completion_candidates(job_names, None))),
+            "running" => candidates.extend(plain(job_completion_candidates(
                 job_names,
                 Some(crate::jobs::ProcessState::Running),
-            )),
-            "stopped" => candidates.extend(job_completion_candidates(
+            ))),
+            "stopped" => candidates.extend(plain(job_completion_candidates(
                 job_names,
                 Some(crate::jobs::ProcessState::Stopped),
+            ))),
+            "keyword" => candidates.extend(plain(
+                shell_keyword_names()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
             )),
-            "keyword" => candidates.extend(shell_keyword_names().iter().map(|s| s.to_string())),
-            "service" => candidates.extend(service_completion_candidates(word)),
-            "setopt" => candidates.extend(SETOPT_COMPLETIONS.iter().map(|s| s.to_string())),
-            "shopt" => candidates.extend(SHOPT_COMPLETIONS.iter().map(|s| s.to_string())),
-            "signal" => candidates.extend(signal_completion_candidates()),
-            "user" => candidates.extend(user_completion_candidates(env_vars)),
-            "variable" => candidates.extend(variable_completion_candidates(
+            "service" => candidates.extend(plain(service_completion_candidates(word))),
+            "setopt" => candidates.extend(plain(
+                SETOPT_COMPLETIONS.iter().map(|s| s.to_string()).collect(),
+            )),
+            "shopt" => candidates.extend(plain(
+                SHOPT_COMPLETIONS.iter().map(|s| s.to_string()).collect(),
+            )),
+            "signal" => candidates.extend(plain(signal_completion_candidates())),
+            "user" => candidates.extend(plain(user_completion_candidates(env_vars))),
+            "variable" => candidates.extend(plain(variable_completion_candidates(
                 env_vars,
                 underlay,
                 pipestatus.cell_visible,
-            )),
+            ))),
             _ => {}
         }
     }
@@ -1551,6 +1585,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
     dynamic: Option<CompgenDynamic>,
     settings: &ReadlineCompletionSettings,
 ) -> Vec<String> {
+    // Text projection of the detailed pipeline: compgen and the
+    // other text-only callers see exactly the pre-GAP-11 words
+    // (kind never leaks into text).
     complete_line_candidates_with_dynamic_detailed(
         line,
         cursor,
@@ -1563,6 +1600,9 @@ pub(crate) fn complete_line_candidates_with_dynamic(
         settings,
     )
     .0
+    .into_iter()
+    .map(|candidate| candidate.text)
+    .collect()
 }
 
 /// `complete_line_candidates_with_dynamic` plus the attempt's
@@ -1582,7 +1622,7 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
     job_names: &[JobCandidate],
     dynamic: Option<CompgenDynamic>,
     settings: &ReadlineCompletionSettings,
-) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
+) -> (Vec<Candidate>, crate::api::capabilities::CompletionPolicy) {
     // rubash#2575: disable-completion on — readline refuses the
     // completion attempt outright (rl_complete_internal with completion
     // disabled produces no matches).
@@ -1624,7 +1664,7 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
         .and_then(|d| d.options_override)
         .or_else(|| resolved.map(|cs| cs.options));
 
-    let mut candidates: Vec<String> = if let Some(cs) = resolved {
+    let mut candidates: Vec<Candidate> = if let Some(cs) = resolved {
         let mut c = Vec::new();
         if cs.actions != 0 {
             c.extend(apply_completion_actions_with_settings(
@@ -1650,7 +1690,11 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
                     &crate::executor::glob::env_cwd_path(env_vars),
                 )
             {
-                c.extend(matches);
+                // Glob matches are filesystem entries, but the
+                // expansion returns bare text — no dirent
+                // survives to classify them — so they ride
+                // unmarked rather than stat-ed into a kind.
+                c.extend(matches.into_iter().map(Candidate::new));
             }
         }
         if let Some(wordlist) = cs.words.as_deref() {
@@ -1658,9 +1702,9 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
             // pre-expanded (compgen expands it the same way); standalone,
             // split it literally.
             if let Some(expanded) = dynamic.as_ref().and_then(|d| d.expanded_wordlist.as_ref()) {
-                c.extend(expanded.iter().cloned());
+                c.extend(expanded.iter().map(Candidate::new));
             } else {
-                c.extend(wordlist.split_whitespace().map(str::to_string));
+                c.extend(wordlist.split_whitespace().map(Candidate::new));
             }
         }
         c
@@ -1687,10 +1731,14 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
     if let Some(fignore) = env_vars.get("FIGNORE") {
         let suffixes: Vec<&str> = fignore.split(':').filter(|s| !s.is_empty()).collect();
         if !suffixes.is_empty() {
-            let kept: Vec<String> = candidates
+            let kept: Vec<Candidate> = candidates
                 .iter()
                 .filter(|candidate| {
-                    let name = candidate.rsplit('/').next().unwrap_or(candidate.as_str());
+                    let name = candidate
+                        .text
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(candidate.text.as_str());
                     !suffixes.iter().any(|suffix| name.ends_with(suffix))
                 })
                 .cloned()
@@ -1703,10 +1751,12 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
     }
     // rubash#2575: the prefix filter is readline's complete_fncmp —
     // case- and map-aware when the bind variables say so.
-    candidates.retain(|c| completion_candidate_matches_word(c, &cur_word, settings));
+    candidates.retain(|c| completion_candidate_matches_word(&c.text, &cur_word, settings));
     if let Some(dynamic) = dynamic.as_ref() {
-        candidates.extend(dynamic.function_candidates.iter().cloned());
-        candidates.extend(dynamic.command_candidates.iter().cloned());
+        // Dynamic candidates are user text the engine did not
+        // classify: they ride unmarked (niubash#863 GAP-11 Q-D).
+        candidates.extend(dynamic.function_candidates.iter().map(Candidate::new));
+        candidates.extend(dynamic.command_candidates.iter().map(Candidate::new));
     }
     let (prefix, suffix, filterpat) = if let Some(cs) = resolved {
         (cs.prefix.clone(), cs.suffix.clone(), cs.filterpat.clone())
@@ -1719,14 +1769,24 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
         let extglob = crate::builtins::shopt::option_enabled(env_vars, "extglob");
         let keep_out =
             |candidate: &str| -> bool { completion_filter_excludes(filter, candidate, extglob) };
-        candidates.retain(|c| !keep_out(c));
+        candidates.retain(|c| !keep_out(&c.text));
     }
     if let (Some(p), Some(s)) = (prefix, suffix) {
+        // -P/-S wrap the TEXT; the kind rides the candidate
+        // unchanged through the wrapping.
         candidates = candidates
             .into_iter()
-            .map(|c| format!("{p}{c}{s}"))
+            .map(|mut c| {
+                c.text = format!("{p}{}{s}", c.text);
+                c
+            })
             .collect();
     }
+    // Whether a filename fallback sourced candidates in this
+    // attempt (niubash#863 GAP-11: feeds the filenames-intent
+    // policy bit below, alongside the spec's own file/directory
+    // actions and the no-spec filename fallback).
+    let mut filename_sourced = false;
     if let Some(cs) = resolved {
         // The fallback decisions consume the attempt's effective
         // option bits (computed at the head of this function —
@@ -1741,7 +1801,6 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
         // path below mirrors the same block; the fallback candidates
         // are never -X filtered and never -P/-S wrapped, so this block
         // sits after both.
-        let mut filename_sourced = false;
         if candidates.is_empty() && effective_options & COPT_DIRNAMES != 0 {
             candidates = directory_candidates_matching(&cur_word, env_vars, settings);
             filename_sourced = true;
@@ -1785,25 +1844,47 @@ pub(crate) fn complete_line_candidates_with_dynamic_detailed(
         if effective_options & COPT_FILENAMES != 0 || filename_sourced {
             let cwd = crate::executor::glob::env_cwd_path(env_vars);
             for candidate in &mut candidates {
-                if !candidate.ends_with('/')
-                    && !candidate.starts_with('-')
-                    && cwd.join(candidate.as_str()).is_dir()
+                // The trailing `/` is a TEXT mark (the insert
+                // layer's directory signal), not a classification:
+                // a dynamic candidate that gains one here keeps
+                // kind None (GAP-11 Q-D).
+                if !candidate.text.ends_with('/')
+                    && !candidate.text.starts_with('-')
+                    && cwd.join(candidate.text.as_str()).is_dir()
                 {
-                    candidate.push('/');
+                    candidate.text.push('/');
                 }
             }
         }
     }
-    let policy = completion_policy(effective_options.unwrap_or(0));
+    // niubash#863 GAP-11 (Q-D rider): the filenames-intent bit is
+    // a spec-intent fact about the attempt's generation — the
+    // governing spec's file/directory actions, a filename
+    // fallback that sourced candidates, the no-spec filename
+    // fallback at argument position, or `-o filenames` — never a
+    // claim about any one candidate's class.
+    let mut policy = completion_policy(effective_options.unwrap_or(0));
+    policy.filenames_intent = effective_options
+        .map(|options| options & COPT_FILENAMES != 0)
+        .unwrap_or(false)
+        || resolved
+            .map(|cs| cs.actions & (CA_DIRECTORY | CA_FILE) != 0)
+            .unwrap_or(false)
+        || filename_sourced
+        || (resolved.is_none() && cur_idx != 0);
     if policy.sort_matches {
-        candidates.sort();
-        candidates.dedup();
+        // Sort/dedup by TEXT: the first producer of a duplicated
+        // text keeps its kind (static generation precedes the
+        // dynamic merge, so a marked static candidate wins over
+        // an unmarked dynamic same-text one).
+        candidates.sort_by(|a, b| a.text.cmp(&b.text));
+        candidates.dedup_by(|a, b| a.text == b.text);
     } else {
         // -o nosort: rl_sort_completion_matches = 0 — generation order
         // IS the result; only exact duplicates collapse (readline
         // never shows the same match twice from one attempt).
         let mut seen = std::collections::HashSet::new();
-        candidates.retain(|candidate| seen.insert(candidate.clone()));
+        candidates.retain(|candidate| seen.insert(candidate.text.clone()));
     }
     (candidates, policy)
 }
@@ -1826,7 +1907,7 @@ fn bash_default_candidates(
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
     pipestatus: PipestatusListing,
-) -> Vec<String> {
+) -> Vec<Candidate> {
     if let Some(rest) = word.strip_prefix('$') {
         if rest.starts_with('(') || rest.starts_with('{') {
             return Vec::new();
@@ -1837,27 +1918,28 @@ fn bash_default_candidates(
             pipestatus.cell_visible,
         )
         .into_iter()
-        .map(|name| format!("${name}"))
-        .filter(|candidate| candidate.starts_with(word))
+        .map(|name| Candidate::new(format!("${name}")))
+        .filter(|candidate| candidate.text.starts_with(word))
         .collect();
     }
     if word.starts_with('~') && !word.contains('/') {
         return user_completion_candidates(env_vars)
             .into_iter()
-            .map(|name| format!("~{name}"))
-            .filter(|candidate| candidate.starts_with(word))
+            .map(|name| Candidate::new(format!("~{name}")))
+            .filter(|candidate| candidate.text.starts_with(word))
             .collect();
     }
     if word.starts_with('@') {
         return hostname_completion_candidates(env_vars)
             .into_iter()
-            .filter(|candidate| candidate.starts_with(word))
+            .map(Candidate::new)
+            .filter(|candidate| candidate.text.starts_with(word))
             .collect();
     }
     if cur_idx == 0 {
         return command_completion_candidates(env_vars, aliases, function_names)
             .into_iter()
-            .filter(|candidate| candidate.starts_with(word))
+            .filter(|candidate| candidate.text.starts_with(word))
             .collect();
     }
     Vec::new()
@@ -1966,7 +2048,9 @@ where
                 &crate::executor::glob::env_cwd_path(env_vars),
             )
         {
-            candidates.extend(matches);
+            // compgen prints bare words (GNU): kind never leaks
+            // into the printed output — project to text here.
+            candidates.extend(matches.into_iter().map(Candidate::new));
         }
     }
 
@@ -1979,9 +2063,9 @@ where
         .as_ref()
         .and_then(|dynamic| dynamic.expanded_wordlist.as_ref())
     {
-        candidates.extend(wordlist.iter().cloned());
+        candidates.extend(wordlist.iter().map(Candidate::new));
     } else if let Some(wordlist) = parsed.words.as_deref() {
-        candidates.extend(wordlist.split_whitespace().map(str::to_string));
+        candidates.extend(wordlist.split_whitespace().map(Candidate::new));
     }
 
     // gen_compspec_completions: the word-prefix filter lives INSIDE each
@@ -1995,13 +2079,13 @@ where
     let word = dequoted_word.as_str();
     let mut selected = candidates
         .into_iter()
-        .filter(|candidate| candidate.starts_with(word))
+        .filter(|candidate| candidate.text.starts_with(word))
         .collect::<Vec<_>>();
     if let Some(dynamic) = dynamic.as_ref() {
-        selected.extend(dynamic.function_candidates.iter().cloned());
-        selected.extend(dynamic.command_candidates.iter().cloned());
+        selected.extend(dynamic.function_candidates.iter().map(Candidate::new));
+        selected.extend(dynamic.command_candidates.iter().map(Candidate::new));
     }
-    selected.retain(|candidate| !completion_filter_matches_out(&parsed, candidate, extglob));
+    selected.retain(|candidate| !completion_filter_matches_out(&parsed, &candidate.text, extglob));
     // pcomplete.c:1431-1450: dirnames replaces an empty result and plusdirs
     // appends directory completions (word-filtered like the CA_DIRECTORY
     // action, never -X filtered, never -P/-S wrapped).
@@ -2032,7 +2116,7 @@ where
     // -P/-S wrapping write_compgen_matches applies to the generated
     // set (probed: `-o default -P PRE:` prints the bare names).
     if selected.is_empty() && parsed.options & (COPT_BASHDEFAULT | COPT_DEFAULT) != 0 {
-        let mut fallback: Vec<String> = Vec::new();
+        let mut fallback: Vec<Candidate> = Vec::new();
         if parsed.options & COPT_BASHDEFAULT != 0 {
             fallback.extend(bash_default_candidates(
                 word,
@@ -2055,13 +2139,13 @@ where
         }
         if !fallback.is_empty() {
             for candidate in &fallback {
-                writeln!(stdout, "{candidate}")?;
+                writeln!(stdout, "{}", candidate.text)?;
             }
             return Ok(EXECUTION_SUCCESS);
         }
     }
 
-    write_compgen_matches(selected.iter().map(String::as_str), &parsed, stdout)
+    write_compgen_matches(selected.iter().map(|c| c.text.as_str()), &parsed, stdout)
 }
 
 /// pcomplete.c:1431-1450: gen_action_completions(CA_DIRECTORY, word) —
@@ -2071,10 +2155,10 @@ fn directory_candidates_matching(
     word: &str,
     env_vars: &HashMap<String, String>,
     settings: &ReadlineCompletionSettings,
-) -> Vec<String> {
+) -> Vec<Candidate> {
     path_completion_candidates(word, PathCompletionKind::Directory, env_vars, settings)
         .into_iter()
-        .filter(|candidate| candidate.starts_with(word))
+        .filter(|candidate| candidate.text.starts_with(word))
         .collect()
 }
 
@@ -2086,10 +2170,10 @@ fn filename_candidates_matching(
     word: &str,
     env_vars: &HashMap<String, String>,
     settings: &ReadlineCompletionSettings,
-) -> Vec<String> {
+) -> Vec<Candidate> {
     path_completion_candidates(word, PathCompletionKind::File, env_vars, settings)
         .into_iter()
-        .filter(|candidate| candidate.starts_with(word))
+        .filter(|candidate| candidate.text.starts_with(word))
         .collect()
 }
 
@@ -2153,7 +2237,7 @@ fn path_completion_candidates(
     kind: PathCompletionKind,
     env_vars: &HashMap<String, String>,
     settings: &ReadlineCompletionSettings,
-) -> Vec<String> {
+) -> Vec<Candidate> {
     // Programmable-completion words reach the builtin with their quotes
     // already removed, so a quoted tilde-slash arrives as the literal `~/`
     // — and GNU still completes it: pcomplete.c tilde-expands the
@@ -2166,11 +2250,13 @@ fn path_completion_candidates(
             let expanded = format!("{home}{}", &word[1..]);
             let rewritten = path_completion_candidates(&expanded, kind, env_vars, settings)
                 .into_iter()
-                .map(|candidate| {
-                    candidate
+                .map(|mut candidate| {
+                    candidate.text = candidate
+                        .text
                         .strip_prefix(home.as_str())
                         .map(|rest| format!("~{rest}"))
-                        .unwrap_or(candidate)
+                        .unwrap_or(candidate.text);
+                    candidate
                 })
                 .collect::<Vec<_>>();
             if !rewritten.is_empty() {
@@ -2194,16 +2280,44 @@ fn path_completion_candidates(
     for entry in entries {
         // `is_dir` comes from the dirent and is false for a symlink, so
         // follow links when only directories are wanted.
-        if matches!(kind, PathCompletionKind::Directory)
-            && !entry.is_dir
-            && !entry.path.is_dir()
-        {
+        if matches!(kind, PathCompletionKind::Directory) && !entry.is_dir && !entry.path.is_dir() {
             continue;
         }
         if skip_hidden && entry.name.starts_with('.') {
             continue;
         }
-        candidates.push(format!("{display_prefix}{}", entry.name));
+        // niubash#863 GAP-11: mark from the dirent alone — no new
+        // stat per candidate (the #747 budget). A directory
+        // action's entries are all directories by construction
+        // (the follow above already admitted symlink-to-dir as
+        // one); a file listing marks the entry's own class — a
+        // real directory stays Directory, a symlink (to a file,
+        // a directory, or nothing) stays Symlink, a regular file
+        // is File. Executable is NOT marked here: exec-ness needs
+        // mode bits the dirent does not carry, so a regular file
+        // that happens to be executable reads File and the host
+        // refines it from its memoized verdict. Anything else
+        // (fifo, socket, device) has no class in the taxonomy
+        // and stays unmarked.
+        let kind = match kind {
+            PathCompletionKind::Directory => Some(CandidateKind::Directory),
+            PathCompletionKind::File => {
+                if entry.is_dir {
+                    Some(CandidateKind::Directory)
+                } else if entry.is_file {
+                    Some(CandidateKind::File)
+                } else if entry.is_symlink {
+                    Some(CandidateKind::Symlink)
+                } else {
+                    None
+                }
+            }
+        };
+        candidates.push(Candidate {
+            text: format!("{display_prefix}{}", entry.name),
+            description: None,
+            kind,
+        });
     }
     // Directory order, not sorted: GNU's filename generators walk
     // readdir() order (`compgen -A file` in a directory lists entries in
@@ -2656,7 +2770,7 @@ fn command_completion_candidates(
     env_vars: &HashMap<String, String>,
     aliases: &HashMap<String, Alias>,
     function_names: &[String],
-) -> Vec<String> {
+) -> Vec<Candidate> {
     // GNU gen_command_matches does not deduplicate across sources: a name
     // that is both a builtin and a PATH file is reported once per source
     // (`compgen -A command echo` prints echo for the builtin and again
@@ -2668,13 +2782,17 @@ fn command_completion_candidates(
     // builtins (shell_builtins table order), then the PATH walk
     // (rubash#1795).
     let mut candidates = Vec::new();
-    candidates.extend(aliases.keys().cloned());
-    candidates.extend(shell_keyword_names().iter().map(|name| (*name).to_string()));
-    candidates.extend(function_names.iter().cloned());
+    candidates.extend(aliases.keys().map(Candidate::new));
+    candidates.extend(
+        shell_keyword_names()
+            .iter()
+            .map(|name| Candidate::new(*name)),
+    );
+    candidates.extend(function_names.iter().map(Candidate::new));
     candidates.extend(
         compgen_command_builtin_names()
             .iter()
-            .map(|name| (*name).to_string()),
+            .map(|name| Candidate::new(*name)),
     );
     candidates.extend(path_command_completion_candidates(env_vars));
     candidates
@@ -2695,7 +2813,7 @@ fn command_completion_candidates(
 /// not before.
 struct PathCandidatesCache {
     fingerprint: String,
-    candidates: Vec<String>,
+    candidates: Vec<Candidate>,
 }
 
 static PATH_CANDIDATES_CACHE: OnceLock<Mutex<PathCandidatesCache>> = OnceLock::new();
@@ -2709,7 +2827,7 @@ fn path_candidates_cache() -> &'static Mutex<PathCandidatesCache> {
     })
 }
 
-fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
+fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<Candidate> {
     let Some(path_value) = env_vars.get("PATH") else {
         return Vec::new();
     };
@@ -2738,8 +2856,12 @@ fn path_command_completion_candidates(env_vars: &HashMap<String, String>) -> Vec
             // is_executable_file's `is_file()` there admits every data
             // file, which flooded `compgen -c` with the whole
             // C:\Windows\System32 listing (niubash #803).
+            // niubash#863 GAP-11: every entry kept here already
+            // passed `completion_executable_qualifies` — the
+            // executability verdict is evidence the generator paid
+            // for — so the walk's candidates carry Executable.
             if completion_executable_qualifies(&entry.path, env_vars) {
-                candidates.push(entry.name);
+                candidates.push(Candidate::kinded(entry.name, CandidateKind::Executable));
             }
         }
     }

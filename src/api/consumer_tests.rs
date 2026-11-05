@@ -4090,3 +4090,415 @@ fn issue863_gap10_no_provider_default_unchanged() {
         Some("echo gap10-engine-list".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// niubash#863 GAP-11: `Candidate.kind` — the engine marks each
+// candidate at generation from evidence already in hand (the
+// dirent's class, the followed stat a directory action already
+// performs, the PATH walk's executability verdict); the host
+// consumes the mark for painting and the append decision instead
+// of re-statting engine output or guessing from a trailing `/`
+// the engine never appends. GNU anchors: pcomplete.c flattens
+// every generator into a STRINGLIST (GNU carries no kind — this
+// is a contract design decision); lib/readline/complete.c:1087
+// `path_isdir` follows links at display, which is what the
+// generator-classification principle mirrors at generation.
+// ---------------------------------------------------------------------------
+
+use super::capabilities::{Candidate, CandidateKind, CompletionOutcome, CompletionProvider};
+
+/// Fixture directory for the kind pins: a real directory, a
+/// plain file, an executable file, and (unix only) a symlink to
+/// the directory and a symlink to the file.
+fn issue863_gap11_fixture(name: &str) -> PathBuf {
+    let dir = temp_dir(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("fixture dir");
+    std::fs::create_dir_all(dir.join("realdir")).expect("fixture realdir");
+    std::fs::write(dir.join("plain.txt"), "x\n").expect("fixture file");
+    std::fs::write(dir.join("run.sh"), "#!/bin/sh\n").expect("fixture exec file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("fixture exec bit");
+        std::os::unix::fs::symlink("realdir", dir.join("linkdir")).expect("symlink linkdir");
+        std::os::unix::fs::symlink("plain.txt", dir.join("linkfile")).expect("symlink linkfile");
+    }
+    dir
+}
+
+fn issue863_gap11_session(dir: &PathBuf) -> Session {
+    Session::builder()
+        .working_directory(dir)
+        .build()
+        .expect("session builds")
+}
+
+fn issue863_gap11_kinds(outcome: &CompletionOutcome) -> HashMap<String, Option<CandidateKind>> {
+    outcome
+        .candidates
+        .iter()
+        .map(|candidate| (candidate.text.clone(), candidate.kind))
+        .collect()
+}
+
+/// An absolute completion word under the fixture dir: relative
+/// words resolve against the PROCESS cwd in embedded sessions
+/// (the session's logical cwd moves PWD, not the process — the
+/// shell binary chdirs the process, a library session does
+/// not), so the kind pins complete absolute words to reach the
+/// fixture. `typed` is the partial name after the fixture
+/// prefix (empty for the whole listing).
+fn issue863_gap11_word(dir: &PathBuf, typed: &str) -> String {
+    format!("{}/{typed}", dir.display())
+}
+
+fn issue863_gap11_complete(
+    session: &mut Session,
+    cmd: &str,
+    dir: &PathBuf,
+    typed: &str,
+) -> CompletionOutcome {
+    let line = format!("{cmd} {}", issue863_gap11_word(dir, typed));
+    let cursor = line.len();
+    session.complete_detailed(&line, cursor)
+}
+
+fn issue863_gap11_texts(outcome: &CompletionOutcome) -> Vec<String> {
+    outcome
+        .candidates
+        .iter()
+        .map(|candidate| candidate.text.clone())
+        .collect()
+}
+
+/// `-A file` marks each entry by its own class: a real
+/// directory is Directory, a regular file is File, a symlink
+/// (to a file, a directory, or nothing) is Symlink — the
+/// producing action did not follow links, so the entry's own
+/// class is the honest mark. The plain `Session::complete`
+/// face carries the same kinds as the detailed one.
+#[test]
+fn issue863_gap11_file_action_marks_per_entry() {
+    let dir = issue863_gap11_fixture("gap11-file");
+    let mut session = issue863_gap11_session(&dir);
+    issue863_gap6_run(&mut session, "complete -A file mycmd");
+    let kinds = issue863_gap11_kinds(&issue863_gap11_complete(&mut session, "mycmd", &dir, ""));
+    let plain = format!("{}/plain.txt", dir.display());
+    let run = format!("{}/run.sh", dir.display());
+    let real = format!("{}/realdir", dir.display());
+    assert_eq!(kinds.get(&plain), Some(&Some(CandidateKind::File)));
+    assert_eq!(kinds.get(&run), Some(&Some(CandidateKind::File)));
+    assert_eq!(kinds.get(&real), Some(&Some(CandidateKind::Directory)));
+    #[cfg(unix)]
+    {
+        let linkdir = format!("{}/linkdir", dir.display());
+        let linkfile = format!("{}/linkfile", dir.display());
+        assert_eq!(kinds.get(&linkdir), Some(&Some(CandidateKind::Symlink)));
+        assert_eq!(kinds.get(&linkfile), Some(&Some(CandidateKind::Symlink)));
+    }
+    // The plain face rides the same candidates.
+    let line = format!("mycmd {}", issue863_gap11_word(&dir, ""));
+    let plain_face = session.complete(&line, line.len());
+    let plain_txt = plain_face
+        .iter()
+        .find(|candidate| candidate.text == plain)
+        .expect("plain.txt on the plain face");
+    assert_eq!(plain_txt.kind, Some(CandidateKind::File));
+}
+
+/// `-A directory` marks every entry Directory — including a
+/// symlink to a directory, because the directory action
+/// follows links (the generator-classification principle; the
+/// #2822 generation face). This is the engine half of the
+/// directory-append acceptance face: with the mark present the
+/// host can suppress the appended space for an engine-produced
+/// directory instead of guessing from a trailing `/` the engine
+/// never adds (the host-side append pin lands with the host
+/// lane).
+#[test]
+fn issue863_gap11_directory_action_marks_symlink_to_dir_as_directory() {
+    let dir = issue863_gap11_fixture("gap11-dir");
+    let mut session = issue863_gap11_session(&dir);
+    issue863_gap6_run(&mut session, "complete -A directory mycmd");
+    let outcome = issue863_gap11_complete(&mut session, "mycmd", &dir, "");
+    let kinds = issue863_gap11_kinds(&outcome);
+    let real = format!("{}/realdir", dir.display());
+    assert_eq!(kinds.get(&real), Some(&Some(CandidateKind::Directory)));
+    #[cfg(unix)]
+    {
+        let linkdir = format!("{}/linkdir", dir.display());
+        assert_eq!(kinds.get(&linkdir), Some(&Some(CandidateKind::Directory)));
+    }
+    assert!(
+        outcome
+            .candidates
+            .iter()
+            .all(|c| c.kind == Some(CandidateKind::Directory)),
+        "a directory action's every entry is a directory: {:?}",
+        outcome.candidates
+    );
+}
+
+/// `-A command` marks PATH-walk entries Executable — each one
+/// already passed the walk's executability verdict — while
+/// names from the other command sources (aliases, keywords,
+/// functions, builtins) stay unmarked: the taxonomy is
+/// filesystem-only and no origin class is fabricated for them.
+#[test]
+fn issue863_gap11_command_action_marks_path_executables() {
+    let dir = issue863_gap11_fixture("gap11-command");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).expect("fixture bin dir");
+    std::fs::write(bin.join("gap11tool"), "#!/bin/sh\n").expect("fixture tool");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            bin.join("gap11tool"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("fixture tool exec bit");
+    }
+    let separator = if cfg!(windows) { ";" } else { ":" };
+    let path = format!(
+        "{}{}{}",
+        bin.display(),
+        separator,
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut session = Session::builder()
+        .working_directory(&dir)
+        .env("PATH", path)
+        .build()
+        .expect("session builds");
+    issue863_gap6_run(&mut session, "complete -A command mycmd");
+    let kinds = issue863_gap11_kinds(&session.complete_detailed("mycmd gap11t", 12));
+    assert_eq!(
+        kinds.get("gap11tool"),
+        Some(&Some(CandidateKind::Executable)),
+        "a PATH entry that qualified as executable is Executable"
+    );
+    let builtin_kinds = issue863_gap11_kinds(&session.complete_detailed("mycmd ec", 10));
+    assert_eq!(
+        builtin_kinds.get("echo"),
+        Some(&None),
+        "a builtin command name carries no filesystem class"
+    );
+}
+
+/// Dynamic candidates are user text the engine did not
+/// classify: `-F` COMPREPLY entries ride unmarked, and the
+/// filenames-intent policy bit — not a fabricated per-candidate
+/// kind — is the only filename signal for them. With `-o
+/// filenames` the bit is set; without it, it is not.
+#[test]
+fn issue863_gap11_dynamic_candidates_stay_unmarked() {
+    let dir = issue863_gap11_fixture("gap11-dynamic");
+    let mut session = issue863_gap11_session(&dir);
+    issue863_gap6_run(
+        &mut session,
+        "_f() { COMPREPLY=(dyn-one dyn-two); }; complete -F _f mycmd",
+    );
+    let outcome = session.complete_detailed("mycmd dyn", 9);
+    assert_eq!(
+        issue863_gap11_texts(&outcome),
+        vec!["dyn-one".to_string(), "dyn-two".to_string()]
+    );
+    assert!(
+        outcome.candidates.iter().all(|c| c.kind.is_none()),
+        "dynamic candidates are never classified: {:?}",
+        outcome.candidates
+    );
+    assert!(
+        !outcome.policy.filenames_intent,
+        "a bare -F spec is not filename-flavored"
+    );
+    issue863_gap6_run(&mut session, "complete -o filenames -F _f mycmd");
+    let outcome = session.complete_detailed("mycmd dyn", 9);
+    assert!(
+        outcome.candidates.iter().all(|c| c.kind.is_none()),
+        "even under -o filenames, dynamic candidates stay unmarked: {:?}",
+        outcome.candidates
+    );
+    assert!(
+        outcome.policy.filenames_intent,
+        "-o filenames sets the filenames-intent bit"
+    );
+}
+
+/// The filenames-intent bit is a spec-intent fact about the
+/// attempt's generation: set when the spec's actions include
+/// file/directory production, unset for a non-filesystem
+/// action, set for the no-spec filename fallback at argument
+/// position, unset for the no-spec command fallback.
+#[test]
+fn issue863_gap11_filenames_intent_arms() {
+    let dir = issue863_gap11_fixture("gap11-intent");
+    let mut session = issue863_gap11_session(&dir);
+    issue863_gap6_run(&mut session, "complete -A variable mycmd");
+    let outcome = session.complete_detailed("mycmd ", 6);
+    assert!(
+        !outcome.policy.filenames_intent,
+        "a variable-only spec is not filename-flavored"
+    );
+    assert!(
+        outcome.candidates.iter().all(|c| c.kind.is_none()),
+        "non-filesystem candidates stay unmarked: {:?}",
+        outcome.candidates
+    );
+    issue863_gap6_run(&mut session, "complete -A file mycmd");
+    let outcome = session.complete_detailed("mycmd ", 6);
+    assert!(
+        outcome.policy.filenames_intent,
+        "a file-action spec is filename-flavored"
+    );
+    // No compspec governs `echo`: argument position falls back
+    // to filename generation, command position to command
+    // generation.
+    let outcome = session.complete_detailed("echo pl", 7);
+    assert!(
+        outcome.policy.filenames_intent,
+        "the no-spec argument-position fallback is filename generation"
+    );
+    let outcome = session.complete_detailed("ec", 2);
+    assert!(
+        !outcome.policy.filenames_intent,
+        "the no-spec command-position fallback is not filename generation"
+    );
+}
+
+/// Provider merge: dedup-by-text keeps the ENGINE's candidate
+/// and its mark over a provider's same-text one, and a provider
+/// candidate keeps whatever kind the provider set — the engine
+/// never re-marks provider output.
+struct Gap11Provider {
+    candidates: Vec<Candidate>,
+}
+
+impl CompletionProvider for Gap11Provider {
+    fn candidates(&mut self, _line: &str, _cursor: usize) -> Vec<Candidate> {
+        self.candidates.clone()
+    }
+}
+
+#[test]
+fn issue863_gap11_provider_merge_keeps_engine_mark_and_provider_kind() {
+    let dir = issue863_gap11_fixture("gap11-provider");
+    let provider = Gap11Provider {
+        candidates: vec![
+            // Same text as an engine file candidate, with a
+            // deliberately wrong kind: the engine mark must win.
+            Candidate::kinded(
+                format!("{}/plain.txt", dir.display()),
+                CandidateKind::Directory,
+            ),
+            Candidate::kinded("provider-only", CandidateKind::Symlink),
+        ],
+    };
+    let mut session = Session::builder()
+        .working_directory(&dir)
+        .completion_provider(Box::new(provider))
+        .build()
+        .expect("session builds");
+    issue863_gap6_run(&mut session, "complete -A file mycmd");
+    let kinds = issue863_gap11_kinds(&issue863_gap11_complete(&mut session, "mycmd", &dir, ""));
+    let plain = format!("{}/plain.txt", dir.display());
+    assert_eq!(
+        kinds.get(&plain),
+        Some(&Some(CandidateKind::File)),
+        "dedup keeps the engine candidate and its mark"
+    );
+    assert_eq!(
+        kinds.get("provider-only"),
+        Some(&Some(CandidateKind::Symlink)),
+        "a provider candidate keeps the kind the provider set"
+    );
+}
+
+/// compgen's printed output stays byte-identical to the
+/// detailed attempt's texts: kind never leaks into text. The
+/// two paths print in different orders (compgen keeps
+/// generation order, the attempt sorts), so the golden compares
+/// sorted multisets.
+#[test]
+fn issue863_gap11_compgen_text_stays_byte_identical() {
+    let dir = issue863_gap11_fixture("gap11-compgen");
+    let mut session = issue863_gap11_session(&dir);
+    issue863_gap6_run(&mut session, "complete -A file mycmd");
+    let mut detailed =
+        issue863_gap11_texts(&issue863_gap11_complete(&mut session, "mycmd", &dir, "pl"));
+    detailed.sort();
+    issue863_gap6_run(
+        &mut session,
+        &format!(
+            "OUT=$(compgen -A file -- \"{}\")",
+            issue863_gap11_word(&dir, "pl")
+        ),
+    );
+    let out = session
+        .variable_value("OUT")
+        .expect("compgen capture persisted");
+    let mut printed: Vec<String> = out.lines().map(str::to_string).collect();
+    printed.sort();
+    assert_eq!(
+        printed, detailed,
+        "compgen prints exactly the detailed attempt's texts"
+    );
+}
+
+/// The U-5 fallback arms mark through the same generators:
+/// `-o dirnames` replaces an empty result with directory
+/// candidates, `-o plusdirs` appends them beside the spec's
+/// own, and `-o default` materializes filename candidates —
+/// each marked, and each attempt filename-flavored.
+#[test]
+fn issue863_gap11_fallback_arms_mark_directories() {
+    let dir = issue863_gap11_fixture("gap11-fallback");
+    let mut session = issue863_gap11_session(&dir);
+    let real = format!("{}/realdir", dir.display());
+    let plain = format!("{}/plain.txt", dir.display());
+    // plusdirs: the wordlist candidate does not extend the
+    // absolute word, so it is prefix-filtered out, and the
+    // directory candidates append beside the empty result. The
+    // fallback sets `filename_sourced`, so the trailing-slash
+    // block marks the directory texts with `/` (the insert
+    // layer's mark — the kind stays Directory).
+    issue863_gap6_run(&mut session, "complete -W 'zzz' -o plusdirs mycmd");
+    let outcome = issue863_gap11_complete(&mut session, "mycmd", &dir, "");
+    let kinds = issue863_gap11_kinds(&outcome);
+    assert_eq!(
+        kinds.get(&format!("{real}/")),
+        Some(&Some(CandidateKind::Directory)),
+        "plusdirs appends marked directory candidates"
+    );
+    assert!(outcome.policy.filenames_intent);
+    // dirnames: the wordlist candidate is prefix-filtered out,
+    // so the directory set replaces the empty result.
+    issue863_gap6_run(&mut session, "complete -W 'zzz' -o dirnames mycmd2");
+    let outcome = issue863_gap11_complete(&mut session, "mycmd2", &dir, "r");
+    let kinds = issue863_gap11_kinds(&outcome);
+    assert_eq!(
+        kinds.get(&format!("{real}/")),
+        Some(&Some(CandidateKind::Directory)),
+        "dirnames replaces an empty result with marked directories"
+    );
+    assert!(outcome.policy.filenames_intent);
+    // default: the wordlist candidate is prefix-filtered out,
+    // so the filename set materializes.
+    issue863_gap6_run(&mut session, "complete -W 'zzz' -o default mycmd3");
+    let outcome = issue863_gap11_complete(&mut session, "mycmd3", &dir, "p");
+    let kinds = issue863_gap11_kinds(&outcome);
+    assert_eq!(
+        kinds.get(&plain),
+        Some(&Some(CandidateKind::File)),
+        "default materializes marked filename candidates"
+    );
+    assert_eq!(
+        kinds.get(&real),
+        None,
+        "default filename candidates are prefix-filtered like the rest"
+    );
+    assert!(outcome.policy.filenames_intent);
+}
