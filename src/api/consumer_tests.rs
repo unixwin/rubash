@@ -2580,17 +2580,28 @@ fn issue863_gap6_faces_read_live_state() {
 }
 
 // ---------------------------------------------------------------------------
-// GAP-7 prototype differential (niubash#863): what nested completion does
-// TODAY, before any contract change. These probes are the evidence base
-// for the Object 1 contract-shape decision and the Object 2 nested-read
-// decision; the final GAP-7 pins subsume them.
+// GAP-7 (niubash#863): the completion-bridge execution core.
+// The contract shape decision is (b) — an explicit,
+// reentrancy-aware guard object — over (a) a scoped `&self`
+// context: an attempt EXECUTES (it runs compspec functions,
+// captures COMPREPLY, mutates the governing-compspec copy
+// through compopt, and lets function bodies write session
+// state), and no `&self` context can own that without
+// interior mutability across the whole executor; the read
+// half already has `&self` faces. The first three pins are
+// the prototype differential promoted verbatim: they measured
+// current behavior before the guard landed and all three were
+// already green — nested engine reads were live, the dark
+// faces were host-side only (the scoped bridge's "no bridge"
+// under nesting). The guard pins prove the new shape keeps
+// them live through the guard.
 // ---------------------------------------------------------------------------
 
-/// P1: a -F function that defines a function mid-attempt and then runs
-/// `compgen -A function` inside the same attempt. If the inner compgen
-/// reads live state, it sees the just-defined function.
+/// Nested `compgen` inside a -F function reads live state: a
+/// function defined during the outer attempt is visible to
+/// the inner compgen.
 #[test]
-fn issue863_gap7_probe_nested_compgen_sees_live_state() {
+fn issue863_gap7_nested_compgen_sees_live_state() {
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
@@ -2608,11 +2619,12 @@ fn issue863_gap7_probe_nested_compgen_sees_live_state() {
     );
 }
 
-/// P2: the bare-`compopt` window (RL_STATE_COMPLETING port) survives an
-/// inner compgen run inside the -F function: the window is an attempt
-/// property, not a single-dynamic-resolution property.
+/// The bare-`compopt` window (RL_STATE_COMPLETING port)
+/// survives an inner compgen run inside the -F function: the
+/// window is an attempt property, not a single-resolution
+/// property.
 #[test]
-fn issue863_gap7_probe_compopt_window_survives_inner_compgen() {
+fn issue863_gap7_compopt_window_survives_inner_compgen() {
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
@@ -2633,13 +2645,12 @@ fn issue863_gap7_probe_compopt_window_survives_inner_compgen() {
     );
 }
 
-/// P3: nested dynamic resolution integrity — an inner `compgen -F` run
-/// inside the outer -F function must not clobber the outer attempt's
-/// governing-compspec copy: the outer function's later `compopt`
-/// mutation must still land on the outer attempt's policy, and the
-/// inner function's side effects must persist.
+/// Nested dynamic resolution integrity: an inner `compgen -F`
+/// run inside the outer -F function must not clobber the
+/// outer attempt's governing-compspec copy, and the inner
+/// function's side effects persist.
 #[test]
-fn issue863_gap7_probe_nested_dynamic_resolution_keeps_outer_copy() {
+fn issue863_gap7_nested_dynamic_resolution_keeps_outer_copy() {
     let mut session = issue863_gap6_session();
     issue863_gap6_run(
         &mut session,
@@ -2663,5 +2674,116 @@ fn issue863_gap7_probe_nested_dynamic_resolution_keeps_outer_copy() {
         session.variable_value("GAP7_INNER_SEEN"),
         Some("1".to_string()),
         "the inner completion function's side effects persist"
+    );
+}
+
+/// Availability probe under nesting, through the guard: the
+/// -F function registers a spec and runs `complete -p`
+/// DURING the in-flight attempt; the guard's `&self` reads
+/// afterwards observe the registration live — never dark.
+#[test]
+fn issue863_gap7_guard_attempt_reads_live_state() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "_f() { complete -F _g othercmd; RESULT=$(complete -p othercmd); COMPREPLY=(x); }; complete -F _f mycmd",
+    );
+    let mut attempt = session.begin_completion_attempt();
+    assert!(!attempt.session().has_compspec("othercmd"));
+    let outcome = attempt.complete_detailed("mycmd x", 7);
+    assert_eq!(
+        outcome
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x"]
+    );
+    assert!(attempt.session().has_compspec("othercmd"));
+    let result = attempt
+        .session()
+        .variable_value("RESULT")
+        .unwrap_or_else(|| panic!("the in-flight complete -p capture persisted"));
+    assert!(
+        result.contains("othercmd") && result.contains("_g"),
+        "the in-flight availability probe saw the just-registered spec: {result:?}"
+    );
+}
+
+/// Sequential attempts through one guard share live state:
+/// the inner attempt resolves a compspec the outer
+/// attempt's function registered; after the guard drops, the
+/// completion window is closed (bare `compopt` errors).
+#[test]
+fn issue863_gap7_guard_sequential_attempts_share_live_state() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "_f() { complete -W 'q1 q2' othercmd; COMPREPLY=(x); }; complete -F _f mycmd",
+    );
+    let mut attempt = session.begin_completion_attempt();
+    let outer = attempt.complete_detailed("mycmd x", 7);
+    assert_eq!(
+        outer
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["x"]
+    );
+    let inner = attempt.complete_detailed("othercmd q", 10);
+    assert_eq!(
+        inner
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["q1", "q2"],
+        "the inner attempt through the same guard resolves the spec the outer attempt registered"
+    );
+    drop(attempt);
+    let outcome = session.run("compopt", &RunOptions::new()).expect("run");
+    assert_eq!(
+        outcome.status, 1,
+        "bare compopt outside any attempt errors once the guard has dropped"
+    );
+}
+
+/// Widget/compdef callback through the guard: the function
+/// runs with its temporary bindings (the NIU_COMP_WORDS /
+/// NIU_COMP_CWORD injection shape), its `compgen` reads live
+/// state, and the temporary bindings are restored after.
+#[test]
+fn issue863_gap7_guard_widget_callback_runs_compgen_live() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "wfun() { OUT=$(compgen -W 'w1 w2' -- w); WSEEN=$NIU_COMP_WORDS; }",
+    );
+    let mut attempt = session.begin_completion_attempt();
+    let status = attempt
+        .call_function_with_env(
+            "wfun",
+            ["a"],
+            [("NIU_COMP_WORDS", "mycmd w"), ("NIU_COMP_CWORD", "1")],
+        )
+        .expect("widget callback runs");
+    assert_eq!(status, 0);
+    let out = attempt
+        .session()
+        .variable_value("OUT")
+        .unwrap_or_else(|| panic!("the callback's compgen capture persisted"));
+    assert!(
+        out.contains("w1") && out.contains("w2"),
+        "compgen inside the callback read live state: {out:?}"
+    );
+    assert_eq!(
+        attempt.session().variable_value("WSEEN"),
+        Some("mycmd w".to_string())
+    );
+    assert_eq!(
+        attempt.session().variable_value("NIU_COMP_WORDS"),
+        None,
+        "the temporary binding is restored after the callback"
     );
 }
