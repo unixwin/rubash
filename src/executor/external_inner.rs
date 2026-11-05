@@ -1774,6 +1774,22 @@ impl Executor {
                         entry.background = true;
                     }
                 }
+                // rubash#2838: GNU jobs.c:4335-4343
+                // set_job_status_and_cleanup — a job stopped by SIGTSTP
+                // with loop_level > 0 sets `breaking = loop_level`.
+                // Only SIGTSTP sets it (SIGTTIN/SIGTTOU never do);
+                // loop_depth is already 0 inside functions and
+                // subshells (GNU execute_cmd.c:5359/:1642), so the
+                // depth read here is the live loop level. The count is
+                // consumed one level per enclosing loop driver; the
+                // list walker suppresses further commands while it
+                // stands (GNU execute_cmd.c:635).
+                if stop_signal == libc::SIGTSTP {
+                    let depth = self.shell_state.loop_depth;
+                    if depth > 0 {
+                        self.stopped_loop_breaking = depth;
+                    }
+                }
                 // The stop notice prints here, as the wait completes
                 // (jobs.c:3385) — see format_stopped_job_notice for
                 // why it cannot ride the boundary flush.

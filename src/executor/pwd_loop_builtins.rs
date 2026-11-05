@@ -249,6 +249,18 @@ impl Executor {
         self.break_failure_status.take()
     }
 
+    /// rubash#2838: consume one level of the SIGTSTP loop-break count
+    /// (GNU execute_cmd.c:3108/3277/3609/3840 post-body `if (breaking)
+    /// { breaking--; break; }`). True when a level was consumed.
+    pub(in crate::executor) fn consume_stopped_loop_breaking(&mut self) -> bool {
+        if self.stopped_loop_breaking > 0 {
+            self.stopped_loop_breaking -= 1;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(in crate::executor) fn execute_return(
         &mut self,
         cmd: &CommandNode,

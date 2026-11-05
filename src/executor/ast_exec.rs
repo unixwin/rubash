@@ -511,6 +511,20 @@ impl Executor {
                 }
                 return Err(ExecuteError::SigintUnwind);
             }
+            // rubash#2838: GNU execute_cmd.c:635 execute_command_internal —
+            // while `breaking` stands, no further command executes. A
+            // SIGTSTP stop in this list set the count (see the
+            // job-control foreground wait); the loop driver that owns
+            // this list consumes one level post-body (or the while/until
+            // test-side exit) and abandons the loop. Return Ok with the
+            // stopped job's 148 status already in exit_code — the driver
+            // reads it as the body's status. The count can only be set
+            // while subshell_depth == 0 (the job-control gate), so no
+            // flat `( )` region is open in this frame and there is no
+            // region state to restore on this early return.
+            if self.stopped_loop_breaking > 0 {
+                return Ok(());
+            }
             let command = &commands[index];
             // rubash#439: the expansion-failure mark belongs to ONE command.
             // Reset before each iteration so a previous command's expansion

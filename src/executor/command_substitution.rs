@@ -2045,6 +2045,7 @@ impl Executor {
             exec_replaced: false,
             subshell_signal_death: None,
             fg_sigint_unwind: false,
+            stopped_loop_breaking: 0,
             // rubash#1175: a fork copy shares the parent shell's process;
             // it must never execve that process away.
             owns_process_image: false,
