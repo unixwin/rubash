@@ -72,17 +72,26 @@ pub struct CompletionView {
     pub open_fds: Vec<u32>,
 }
 
+/// The full variable table as sorted pairs: the one rendering
+/// this view's `env` component and `Session::environment_full`
+/// (niubash#863 GAP-6) share, so the two faces can never
+/// disagree about the table. The snapshot itself is a map;
+/// sorting its items by name is the presentation order, and
+/// (names being unique) is the same order whatever the map's
+/// iteration was.
+pub(crate) fn full_env_sorted(executor: &Executor) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = executor.env_vars_snapshot().into_iter().collect();
+    env.sort();
+    env
+}
+
 impl CompletionView {
     /// Capture the view from the executor's own snapshot
     /// functions: every field is one of those snapshots read
     /// at this moment, so the view can only ever agree with
     /// the reads hosts used to make through the tier-C seam.
     pub(crate) fn capture(executor: &Executor) -> CompletionView {
-        let mut env: Vec<(String, String)> = executor.env_vars_snapshot().into_iter().collect();
-        // The snapshot is a map; sorting its items by name is
-        // the presentation order, and (names being unique) is
-        // the same order whatever the map's iteration was.
-        env.sort();
+        let env = full_env_sorted(executor);
         let env_fingerprint = env_fingerprint(&env);
         CompletionView {
             cwd: executor.session_cwd().to_path_buf(),

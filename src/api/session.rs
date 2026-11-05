@@ -24,7 +24,7 @@ use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
     RcPolicy, StartupClass, StartupContext,
 };
-use super::completion_view::CompletionView;
+use super::completion_view::{full_env_sorted, CompletionView};
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
 use super::syntax::SyntaxView;
@@ -1022,6 +1022,38 @@ impl Session {
     /// variables with their values, sorted by name.
     pub fn environment(&self) -> Vec<(String, String)> {
         self.executor.view_environment()
+    }
+
+    /// The whole variable table, not just the exported subset
+    /// (niubash#863 GAP-6): every variable with its value, plus
+    /// the attribute pseudo-entries the executor's snapshot
+    /// materializes, presented sorted by name. The `&self`
+    /// form of the full-table read hosts used to make through
+    /// the tier-C seam (`executor().env_vars_snapshot()` —
+    /// the process-PATH synchronization reads the table as
+    /// conversion context, exported or not). One source with
+    /// [`CompletionView`]'s `env` component — the shared
+    /// rendering in `completion_view::full_env_sorted` over
+    /// the executor's own snapshot — so this face, the
+    /// completion capture and the snapshot itself can never
+    /// disagree about the table.
+    pub fn environment_full(&self) -> Vec<(String, String)> {
+        full_env_sorted(&self.executor)
+    }
+
+    /// The stored value of one variable (niubash#863 GAP-6):
+    /// the `&self` form of the raw table read hosts made
+    /// through the tier-C seam (`executor().get_env(name)`),
+    /// for the `&self` host methods (prompt, title and mode
+    /// probes) that cannot take the `&mut` variables view.
+    /// This is the table's stored string, deliberately NOT
+    /// the `$name` expansion read: dynamic getters, nameref
+    /// resolution and the typed-cell layer are
+    /// [`VariablesView::resolved_value`]'s semantics, and the
+    /// two reads differ exactly there (the GAP-6 consumer
+    /// pins record both readings per shape).
+    pub fn variable_value(&self, name: &str) -> Option<String> {
+        self.executor.get_env(name).map(str::to_string)
     }
 
     /// The session's current working directory.

@@ -2265,3 +2265,316 @@ fn issue863_gap5_display_path_matches_module_function() {
         );
     }
 }
+
+// ---------------------------------------------------------------
+// niubash#863 GAP-6: the `&self` variable read faces — the
+// full-table snapshot (`environment_full`) and the single-value
+// probe (`variable_value`). Until GAP-6 the contract's variable
+// reads were `&mut`-shaped (the variables view) or exported-only
+// (`environment()`), so `&self` host methods read the table
+// through the tier-C seam: `executor().env_vars_snapshot()` for
+// the full table (the process-PATH synchronization's conversion
+// context) and `executor().get_env(name)` for the probes in
+// prompt / title / mode code (ledger §2.2's retained-set note
+// counts both). The pins are parity pins against those seam
+// reads, plus a recorded divergence map: `variable_value` is
+// the table's STORED string, while the variables view's
+// `resolved_value` is the `$name` expansion read — the two
+// agree on plain shapes and differ exactly where expansion
+// semantics live (dynamic getters, nameref resolution, array
+// element-0). The face is defined to match the seam read it
+// replaces (`get_env`); the divergence pins below record both
+// readings per shape so the difference is a documented fact,
+// not a silent choice.
+// ---------------------------------------------------------------
+
+fn issue863_gap6_session() -> Session {
+    Session::builder().build().expect("session builds")
+}
+
+fn issue863_gap6_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+/// One session carrying every shape the parity matrix reads:
+/// plain and empty scalars, an exported scalar, an indexed
+/// array (plus empty-element-0 and empty forms), an associative
+/// array, an integer-attribute scalar, a readonly scalar, and
+/// a nameref with its target.
+fn issue863_gap6_populated_session() -> Session {
+    let mut session = issue863_gap6_session();
+    for line in [
+        "GAP6_PLAIN=alpha",
+        "GAP6_EMPTY=",
+        "export GAP6_EXPORTED=beta",
+        "GAP6_ARR=(aa bb cc)",
+        "GAP6_ARR0=('' bb)",
+        "GAP6_ARR_EMPTY=()",
+        "declare -A GAP6_ASSOC=([k1]=v1 [k2]=v2)",
+        "declare -i GAP6_INT=41+1",
+        "declare -r GAP6_RO=locked",
+        "GAP6_TARGET=hello_target",
+        "declare -n GAP6_REF=GAP6_TARGET",
+    ] {
+        issue863_gap6_run(&mut session, line);
+    }
+    session
+}
+
+/// The executor truth, in the faces' presentation: the
+/// snapshot map's items, sorted by name.
+fn issue863_gap6_executor_env(session: &Session) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> =
+        session.executor().env_vars_snapshot().into_iter().collect();
+    env.sort();
+    env
+}
+
+fn issue863_gap6_env_get<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    env.iter()
+        .find(|(candidate, _)| candidate == name)
+        .map(|(_, value)| value.as_str())
+}
+
+#[test]
+fn issue863_gap6_environment_full_matches_snapshot_and_view() {
+    let session = issue863_gap6_populated_session();
+    // The face is `&self`: a shared reference is all a host
+    // consumer ever holds.
+    let shared: &Session = &session;
+    let full = shared.environment_full();
+    // Byte-identical to the tier-C snapshot it replaces, in
+    // the sorted presentation.
+    assert_eq!(full, issue863_gap6_executor_env(shared));
+    // And to the GAP-4 completion view's env component: one
+    // source (the shared `full_env_sorted` rendering over the
+    // executor's snapshot), so the readings cannot disagree.
+    assert_eq!(full, shared.completion_view().env);
+    // The populated shapes are all in the table, exported or
+    // not — that width is the face's reason to exist.
+    for name in [
+        "GAP6_PLAIN",
+        "GAP6_EMPTY",
+        "GAP6_EXPORTED",
+        "GAP6_ARR",
+        "GAP6_ASSOC",
+        "GAP6_INT",
+        "GAP6_RO",
+    ] {
+        assert!(
+            issue863_gap6_env_get(&full, name).is_some(),
+            "full table carries {name}"
+        );
+    }
+    assert_eq!(issue863_gap6_env_get(&full, "GAP6_PLAIN"), Some("alpha"));
+    assert_eq!(issue863_gap6_env_get(&full, "GAP6_INT"), Some("42"));
+    // The attribute pseudo-entries ride the snapshot: the
+    // exported rendering names the exported variable, the
+    // readonly rendering names the readonly one.
+    let exported = issue863_gap6_env_get(&full, "__RUBASH_EXPORTED_VARS")
+        .expect("exported pseudo-entry present");
+    assert!(
+        exported.split('\u{1f}').any(|name| name == "GAP6_EXPORTED"),
+        "exported rendering names GAP6_EXPORTED: {exported:?}"
+    );
+    let readonly = issue863_gap6_env_get(&full, "__RUBASH_READONLY_VARS")
+        .expect("readonly pseudo-entry present");
+    assert!(
+        readonly.split('\u{1f}').any(|name| name == "GAP6_RO"),
+        "readonly rendering names GAP6_RO: {readonly:?}"
+    );
+}
+
+#[test]
+fn issue863_gap6_environment_is_the_exported_subset_of_full() {
+    let session = issue863_gap6_populated_session();
+    let full = session.environment_full();
+    let exported = session.environment();
+    // Every exported pair appears in the full table with the
+    // same value — `environment()` is a strict subset
+    // statement about `environment_full()`.
+    for (name, value) in &exported {
+        assert_eq!(
+            issue863_gap6_env_get(&full, name),
+            Some(value.as_str()),
+            "exported {name} appears in the full table with its value"
+        );
+    }
+    // The subset is strict in exactly the designed place: an
+    // unexported variable is in the full table and absent
+    // from the exported subset, while an exported one is in
+    // both.
+    assert_eq!(issue863_gap6_env_get(&full, "GAP6_PLAIN"), Some("alpha"));
+    assert!(
+        !exported.iter().any(|(name, _)| name == "GAP6_PLAIN"),
+        "unexported GAP6_PLAIN is absent from environment()"
+    );
+    assert_eq!(
+        issue863_gap6_env_get(&exported, "GAP6_EXPORTED"),
+        Some("beta")
+    );
+}
+
+#[test]
+fn issue863_gap6_variable_value_matches_get_env_matrix() {
+    let session = issue863_gap6_populated_session();
+    // Both reads are `&self`; parity is asserted through one
+    // shared reference, the only handle a host probe holds.
+    let shared: &Session = &session;
+    for name in [
+        // The populated shapes.
+        "GAP6_PLAIN",
+        "GAP6_EMPTY",
+        "GAP6_EXPORTED",
+        "GAP6_ARR",
+        "GAP6_ARR0",
+        "GAP6_ARR_EMPTY",
+        "GAP6_ASSOC",
+        "GAP6_INT",
+        "GAP6_RO",
+        "GAP6_TARGET",
+        "GAP6_REF",
+        // Unset, and the names `&self` host methods probe.
+        "GAP6_NEVER_SET",
+        "PS1",
+        "PWD",
+        "SHELLOPTS",
+        // Dynamic names: parity with the seam read is None on
+        // both sides (see the divergence pin for the other
+        // reading).
+        "RANDOM",
+        "SECONDS",
+        "BASHPID",
+    ] {
+        assert_eq!(
+            shared.variable_value(name),
+            shared.executor().get_env(name).map(str::to_string),
+            "variable_value parity with get_env for {name}"
+        );
+    }
+    // Spot values, so the matrix is not only self-referential.
+    assert_eq!(
+        shared.variable_value("GAP6_PLAIN"),
+        Some("alpha".to_string())
+    );
+    assert_eq!(shared.variable_value("GAP6_EMPTY"), Some(String::new()));
+    assert_eq!(shared.variable_value("GAP6_INT"), Some("42".to_string()));
+    assert_eq!(shared.variable_value("GAP6_RO"), Some("locked".to_string()));
+    assert_eq!(shared.variable_value("GAP6_NEVER_SET"), None);
+}
+
+#[test]
+fn issue863_gap6_variable_value_agrees_with_resolved_on_plain_shapes() {
+    let mut session = issue863_gap6_populated_session();
+    // On shapes with no expansion semantics in play, the
+    // stored read and the `$name` read are the same read —
+    // including the associative rendering and the empty
+    // array's stored rendering, which the expansion read
+    // falls through to.
+    for name in [
+        "GAP6_PLAIN",
+        "GAP6_EMPTY",
+        "GAP6_EXPORTED",
+        "GAP6_ASSOC",
+        "GAP6_ARR_EMPTY",
+        "GAP6_INT",
+        "GAP6_RO",
+        "GAP6_NEVER_SET",
+        "PWD",
+    ] {
+        assert_eq!(
+            session.variable_value(name),
+            session.variables().resolved_value(name),
+            "stored and resolved readings agree for {name}"
+        );
+    }
+}
+
+#[test]
+fn issue863_gap6_readings_diverge_exactly_at_expansion_semantics() {
+    let mut session = issue863_gap6_populated_session();
+    // Nameref: the table stores the target NAME; the
+    // expansion read follows the reference.
+    assert_eq!(
+        session.variable_value("GAP6_REF"),
+        Some("GAP6_TARGET".to_string())
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP6_REF"),
+        Some("hello_target".to_string())
+    );
+    // Indexed arrays: the table stores the compound rendering
+    // (the carrier-prefixed snapshot string); the expansion
+    // read yields element 0 — including the empty-element-0
+    // form.
+    assert_eq!(
+        session.variable_value("GAP6_ARR"),
+        session.executor().get_env("GAP6_ARR").map(str::to_string)
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP6_ARR"),
+        Some("aa".to_string())
+    );
+    assert_ne!(
+        session.variable_value("GAP6_ARR"),
+        session.variables().resolved_value("GAP6_ARR")
+    );
+    assert_eq!(
+        session.variables().resolved_value("GAP6_ARR0"),
+        Some(String::new())
+    );
+    // Dynamic parameters: nothing is stored under the name,
+    // so the stored read is None; the expansion read computes
+    // the value (a digit string for each of these).
+    for name in ["RANDOM", "SECONDS", "BASHPID"] {
+        assert_eq!(session.variable_value(name), None, "stored read of {name}");
+        let resolved = session
+            .variables()
+            .resolved_value(name)
+            .unwrap_or_else(|| panic!("resolved read of {name} is computed"));
+        assert!(
+            !resolved.is_empty() && resolved.bytes().all(|b| b.is_ascii_digit()),
+            "resolved read of {name} is a digit string: {resolved:?}"
+        );
+    }
+}
+
+#[test]
+fn issue863_gap6_faces_read_live_state() {
+    let mut session = issue863_gap6_session();
+    // Neither face is a cache: a set, a change and an unset
+    // between reads are all visible in the second read, in
+    // both faces (and in the completion view's env, the third
+    // reading of the same source).
+    assert_eq!(session.variable_value("GAP6_LIVE"), None);
+    assert!(issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE").is_none());
+
+    issue863_gap6_run(&mut session, "GAP6_LIVE=first");
+    assert_eq!(
+        session.variable_value("GAP6_LIVE"),
+        Some("first".to_string())
+    );
+    assert_eq!(
+        issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE"),
+        Some("first")
+    );
+    assert_eq!(
+        issue863_gap6_env_get(&session.completion_view().env, "GAP6_LIVE"),
+        Some("first")
+    );
+
+    issue863_gap6_run(&mut session, "GAP6_LIVE=second");
+    assert_eq!(
+        session.variable_value("GAP6_LIVE"),
+        Some("second".to_string())
+    );
+    assert_eq!(
+        issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE"),
+        Some("second")
+    );
+
+    issue863_gap6_run(&mut session, "unset GAP6_LIVE");
+    assert_eq!(session.variable_value("GAP6_LIVE"), None);
+    assert!(issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE").is_none());
+}
