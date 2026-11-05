@@ -1186,6 +1186,28 @@ impl Session {
             .map(|history| history.borrow().entries.clone())
     }
 
+    /// Install the host's [`HistoryProvider`] after build
+    /// (niubash#863 GAP-10): the tier-A form of the executor
+    /// setter the interactive single-stream discipline used
+    /// to reach through the tier-C seam. The provider becomes
+    /// the session's history list — the history builtin and
+    /// history expansion read it in preference to the
+    /// engine's own list (the provider precedence in
+    /// `execute_history`).
+    ///
+    /// The face mirrors the setter exactly: replace-always
+    /// and unguarded — installing a second provider replaces
+    /// the first, and command-substitution executors cloned
+    /// before the call keep the handle they cloned with.
+    /// Install-once discipline (a host installs at most once,
+    /// at interactive entry, so script routes of the same
+    /// construction stay provider-free) is the host's guard
+    /// to keep, not a rule of this face. The build-time
+    /// spelling is [`SessionBuilder::history_provider`].
+    pub fn set_history_provider(&mut self, provider: SharedHistoryProvider) {
+        self.executor.set_history_provider(provider);
+    }
+
     /// Install a session history list holding `entries`
     /// (oldest first), replacing any list the session has.
     pub fn set_history_entries(&mut self, entries: Vec<String>) {
@@ -1354,10 +1376,13 @@ impl Session {
     /// promise. It exists for the faces the contract does not
     /// cover, each recorded in the ledger with its reason: the
     /// tier-C bind registry behind the host's gated bind
-    /// surface, the parse→transform→execute routes of the
+    /// surface, and the parse→transform→execute routes of the
     /// consumption audit's §3.2 gap (the contract takes source
-    /// text only), and the post-build history-provider install
-    /// the interactive single-stream discipline requires.
+    /// text only). (The post-build history-provider install
+    /// the interactive single-stream discipline requires was
+    /// the third recorded reason; it is a contract face since
+    /// GAP-10 — [`Session::set_history_provider`] is its
+    /// install home, and the seam no longer carries it.)
     /// Hosts must prefer the contract faces (the run methods,
     /// the §5.3 views, the capability traits) wherever one
     /// exists; this seam is the recorded remainder, and its
