@@ -24,7 +24,13 @@ scans the paired niubash tree for every `rubash::...` path it
 consumes and verifies each one is recorded in the ledger: presence
 of the recorded symbols alone does not prove the ledger is
 complete, and the v2 census missed two consumed families for a
-full release cycle before this half existed.
+full release cycle before this half existed. The same mode also
+runs the Session-method census (ledger §5.5): it enumerates every
+`pub fn` in the engine's `impl Session` block and scans niubash
+for receiver-form calls of each name, because a receiver-form
+call names no `rubash::` path and is invisible to the path scan
+— the blind spot that left three consumed Session faces
+unrecorded until the GAP-13 recount wave.
 
 Exit status: 0 when every ledger symbol is present (and, with
 --niu, every consumed path is recorded), 1 otherwise.
@@ -228,6 +234,117 @@ def check_completeness(entries, niu_root):
     return uncovered, warnings, len(consumed)
 
 
+# Ledger §5.5: Session-method names whose receiver-form calls in
+# niubash collide with unrelated calls on other types, so the
+# census cannot decide them by name alone. Each entry is a
+# hand verification, recorded here — the list grows only with
+# one. Founding entry: `parse` — niubash calls `.parse(` as
+# `FromStr::parse` on strings and numbers, never as
+# `Session::parse` (the engine method exists but has no host
+# consumer); the scan reports its hits as a warning, not a
+# failure, and a human re-verifies the shape on each census.
+AMBIGUOUS_SESSION_METHODS = frozenset({"parse"})
+
+_IMPL_SESSION = re.compile(r"impl\s+Session\s*\{")
+_PUB_FN = re.compile(r"pub\s+(?:async\s+)?fn\s+([A-Za-z0-9_]+)\s*(?:<[^>]*>)?\s*\(")
+
+
+def session_methods(src_root):
+    """Every `pub fn` name in the engine's `impl Session` block(s).
+
+    Brace-matched from each `impl Session {` opener: impl blocks
+    for a type are spread over files in this codebase, and the
+    census needs the declared set, not a single file's. The
+    `Session` spelling is exact — `SessionError`,
+    `SessionBuilder`, `SessionDriver` and `SessionHistory` are
+    different types and never match.
+    """
+    names = set()
+    for path in sorted(src_root.rglob("*.rs")):
+        text = read_all([path])
+        for match in _IMPL_SESSION.finditer(text):
+            depth = 1
+            i = match.end()
+            while i < len(text) and depth > 0:
+                char = text[i]
+                if char == "{":
+                    depth += 1
+                elif char == "}":
+                    depth -= 1
+                i += 1
+            block = text[match.end() : i - 1]
+            names.update(_PUB_FN.findall(block))
+    return names
+
+
+def session_method_calls(niu_root, names):
+    """Receiver-form calls of each Session method name in niubash.
+
+    A call is `.name(` on any receiver (a session / guard lend,
+    or any other value — the name alone cannot tell them apart)
+    or the `Session::name(` associated spelling. Returns
+    {name: [(file, line), ...]}. Guard methods
+    (`CompletionAttempt`, `Finish`) are not enumerated here:
+    their calls ride under their opener rows in §2.3.
+    """
+    patterns = {
+        name: (
+            re.compile(r"\." + re.escape(name) + r"\s*\("),
+            re.compile(r"\bSession::" + re.escape(name) + r"\s*\("),
+        )
+        for name in names
+    }
+    hits = {name: [] for name in names}
+    for base in (niu_root / "crates", niu_root / "src"):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob("*.rs")):
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            for lineno, line in enumerate(lines, 1):
+                for name, (receiver, associated) in patterns.items():
+                    if receiver.search(line) or associated.search(line):
+                        hits[name].append((str(path), lineno))
+    return hits
+
+
+def check_session_method_census(entries, niu_root, src_root):
+    """Ledger §5.5: every consumed Session method must be recorded.
+
+    Returns (missing, ambiguous_warnings, declared_count,
+    called_count). A declared Session method with receiver-form
+    calls in niubash but no §6 `method rubash::api::Session::<name>`
+    entry fails, unless the name is on the ambiguous list — then
+    it warns, and a human re-verifies the call shape. A declared
+    method with no calls in niubash is fine either way: the ledger
+    legitimately carries staged faces with no consumer yet.
+    """
+    recorded = {
+        path.split("::")[-1]
+        for kind, path in entries
+        if kind == "method" and path.startswith("rubash::api::Session::")
+    }
+    declared = session_methods(src_root)
+    calls = session_method_calls(niu_root, declared)
+    missing = []
+    ambiguous = []
+    called = 0
+    for name in sorted(declared):
+        sites = calls.get(name, [])
+        if not sites:
+            continue
+        called += 1
+        if name in recorded:
+            continue
+        if name in AMBIGUOUS_SESSION_METHODS:
+            ambiguous.append((name, sites))
+        else:
+            missing.append((name, sites))
+    return missing, ambiguous, len(declared), called
+
+
 def check(repo_root, ledger_path, verbose=False, niu_root=None):
     src_root = repo_root / "src"
     entries = parse_ledger(ledger_path.read_text(encoding="utf-8"))
@@ -262,6 +379,30 @@ def check(repo_root, ledger_path, verbose=False, niu_root=None):
         for path in uncovered:
             missing.append(
                 ("consumed", path, "consumed by niubash but not recorded")
+            )
+        census_missing, census_ambiguous, declared_count, called_count = (
+            check_session_method_census(entries, niu_root, src_root)
+        )
+        for name, sites in census_ambiguous:
+            print(
+                f"check-api-ledger: warning: ambiguous Session method "
+                f"{name} called {len(sites)} time(s) in niubash "
+                f"(hand-verify the call shape; first: "
+                f"{sites[0][0]}:{sites[0][1]})"
+            )
+        for name, sites in census_missing:
+            missing.append(
+                (
+                    "session-method",
+                    f"rubash::api::Session::{name}",
+                    f"called {len(sites)} time(s) by niubash but not "
+                    f"recorded (first: {sites[0][0]}:{sites[0][1]})",
+                )
+            )
+        if verbose:
+            print(
+                f"check-api-ledger: Session census: {declared_count} "
+                f"declared methods, {called_count} called by niubash"
             )
     if missing:
         print(f"check-api-ledger: {len(missing)} ledger symbol(s) missing:")
@@ -342,6 +483,69 @@ def self_test():
             )
             return 1
         print("self-test: completeness check fails unrecorded, passes recorded")
+    # Session-method census (§5.5): a consumed-but-unrecorded
+    # Session method must fail; recording it must pass; an
+    # ambiguous name must warn but pass.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "src").mkdir()
+        (root / "src" / "lib.rs").write_text(
+            "pub mod api;\n", encoding="utf-8"
+        )
+        (root / "src" / "api.rs").write_text(
+            "pub struct Session;\n"
+            "impl Session {\n"
+            "    pub fn glob_filename(&self) {}\n"
+            "    pub fn parse(&mut self) {}\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        ledger = root / "ledger.md"
+        ledger.write_text(
+            "# t\n\n```api-ledger\n"
+            "item rubash::api::Session\n"
+            "method rubash::api::Session::parse\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        niu = root / "niu"
+        (niu / "src").mkdir(parents=True)
+        (niu / "src" / "main.rs").write_text(
+            "fn main() {\n"
+            "    let _ = session().glob_filename();\n"
+            "    let _ = \"1\".parse().unwrap();\n"
+            "}\n",
+            encoding="utf-8",
+        )
+        if check(root, ledger, niu_root=niu) != 1:
+            print(
+                "self-test FAILED: unrecorded consumed Session method "
+                "was not reported",
+                file=sys.stderr,
+            )
+            return 1
+        ledger.write_text(
+            "# t\n\n```api-ledger\n"
+            "item rubash::api::Session\n"
+            "method rubash::api::Session::glob_filename\n"
+            "```\n",
+            encoding="utf-8",
+        )
+        # `parse` is deliberately NOT recorded here: its `.parse(`
+        # hits are the unrelated `FromStr::parse` calls, so the
+        # census must warn on the ambiguous name — not fail — and
+        # the run must still pass.
+        if check(root, ledger, niu_root=niu) != 0:
+            print(
+                "self-test FAILED: ambiguous `parse` calls did not "
+                "pass as a warning",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "self-test: Session census fails unrecorded, passes "
+            "recorded, warns on ambiguous"
+        )
         return 0
 
 
