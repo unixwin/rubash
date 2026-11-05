@@ -373,6 +373,13 @@ pub struct TokenSpan {
 ///   at projection time.
 /// - **Dequoted values** built from the raw source slices (see
 ///   [`TokenSpan::value`]).
+/// - **Brace-group interiors.** A complete brace group reaches
+///   the lexer as one folded token; the projection descends into
+///   it (recursively, for nested groups), so a group's interior
+///   words carry their own spans, positions and roles — the
+///   painting the host's character scanner produces today.
+///   Command substitutions are NOT descended: they are
+///   word-shaped units, and the view mirrors the token stream.
 ///
 /// Two lexer shapes set the span arithmetic. A line-break
 /// separator's position stamps are meaningless (the lexer reports
@@ -411,16 +418,20 @@ impl TokenView {
             let raw_text = &text[start..end];
             let value = span_value(kind, raw_text);
             let (command_position, role) = fold.apply(token, kind, &value);
-            spans.push(TokenSpan {
-                start,
-                end,
-                kind,
-                text: raw_text.to_string(),
-                value,
-                command_position,
-                role,
-                case_pattern_close: token.case_pattern_close,
-            });
+            if is_folded_brace_group(token, raw_text) {
+                push_brace_group_spans(text, start, end, posix, command_position, role, &mut spans);
+            } else {
+                spans.push(TokenSpan {
+                    start,
+                    end,
+                    kind,
+                    text: raw_text.to_string(),
+                    value,
+                    command_position,
+                    role,
+                    case_pattern_close: token.case_pattern_close,
+                });
+            }
             placed_end = end;
         }
         push_comment_spans(text, placed_end, text.len(), &mut spans);
@@ -464,6 +475,74 @@ impl TokenView {
             .rev()
             .find(|span| span.kind.is_separator() && span.end <= cursor)
     }
+}
+
+/// Whether `token` is the lexer's folded form of a complete
+/// brace group: `{ ...; }` reaches the projection as ONE
+/// `Keyword` token whose raw text is the whole group (a function
+/// definition's body folds the same way). The fold is the lexer's
+/// own completeness judgment, and it is what makes the descent in
+/// `push_brace_group_spans` sound: a group whose interior declares
+/// a here-doc is never folded (the body is gathered from the
+/// surrounding stream — inside the group or after it — never from
+/// inside a fold), so a folded interior is self-contained text the
+/// projection may re-tokenize on its own, and no span it emits can
+/// claim text outside the group.
+fn is_folded_brace_group(token: &Token, raw_text: &str) -> bool {
+    token.kind == TokenKind::Keyword
+        && token.structural_keyword()
+        && raw_text.len() > 1
+        && raw_text.starts_with('{')
+        && raw_text.ends_with('}')
+}
+
+/// Emit the spans of one folded brace group: the `{` span
+/// (carrying the folded token's own folded position and role),
+/// the interior projected recursively over the interior slice —
+/// a command list in its own right, folded from a fresh command
+/// position, nested groups descending again — and the `}` span.
+/// Every emitted span stays an honest slice of the input: the
+/// interior projection's spans are slices of the interior text,
+/// shifted by the interior's offset in the whole.
+fn push_brace_group_spans(
+    text: &str,
+    start: usize,
+    end: usize,
+    posix: bool,
+    command_position: bool,
+    role: TokenRole,
+    spans: &mut Vec<TokenSpan>,
+) {
+    let kind = TokenKindView::Keyword;
+    let open = &text[start..start + 1];
+    spans.push(TokenSpan {
+        start,
+        end: start + 1,
+        kind,
+        text: open.to_string(),
+        value: span_value(kind, open),
+        command_position,
+        role,
+        case_pattern_close: false,
+    });
+    let interior_base = start + 1;
+    let interior = TokenView::project(&text[interior_base..end - 1], posix);
+    for mut span in interior.tokens {
+        span.start += interior_base;
+        span.end += interior_base;
+        spans.push(span);
+    }
+    let close = &text[end - 1..end];
+    spans.push(TokenSpan {
+        start: end - 1,
+        end,
+        kind,
+        text: close.to_string(),
+        value: span_value(kind, close),
+        command_position: false,
+        role: TokenRole::Reserved,
+        case_pattern_close: false,
+    });
 }
 
 /// Map one lexer kind onto its public projection. `Eof` never
