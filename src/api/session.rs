@@ -1376,10 +1376,13 @@ impl Session {
     /// promise. It exists for the faces the contract does not
     /// cover, each recorded in the ledger with its reason: the
     /// tier-C bind registry behind the host's gated bind
-    /// surface, the parse→transform→execute routes of the
+    /// surface, and the parse→transform→execute routes of the
     /// consumption audit's §3.2 gap (the contract takes source
-    /// text only), and the post-build history-provider install
-    /// the interactive single-stream discipline requires.
+    /// text only). (The post-build history-provider install
+    /// the interactive single-stream discipline requires was
+    /// the third recorded reason; it is a contract face since
+    /// GAP-10 — [`Session::set_history_provider`] is its
+    /// install home, and the seam no longer carries it.)
     /// Hosts must prefer the contract faces (the run methods,
     /// the §5.3 views, the capability traits) wherever one
     /// exists; this seam is the recorded remainder, and its

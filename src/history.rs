@@ -6,6 +6,33 @@
 //! - bashhist.c: check_history_control, history_should_ignore,
 //!   expand_histignore_pattern, load_history (HISTFILE read)
 //! - builtins/history.def: file I/O entry points (-a -w -r -n)
+//!
+//! ## The two planes and their semantics division (R-A5, niubash#863 GAP-10)
+//!
+//! GNU has ONE history list (lib/readline/history.c's global list);
+//! rubash has two planes, switched by provider presence: the
+//! engine's [`SessionHistory`] serves routes with no provider
+//! installed (script routes), and an installed [`HistoryProvider`]
+//! IS the list on interactive routes (the provider precedence in
+//! `execute_history`). The division of semantics, per row:
+//!
+//! | Row | Engine plane (`SessionHistory`) | Provider plane (host store) |
+//! | --- | --- | --- |
+//! | Numbering base | `base` field, advanced by `stifle` as entries drop — the readline shape (history.c:113 `history_base = 1`; stifled add drops the oldest and bumps the base, history.c:389-404; stifle_history, history.c:675-698). Verified continuous under a small HISTSIZE against GNU 5.3.20 (GAP-10 probe U-2: byte-identical listing). | The provider's `history_base` face owns it. The trait default 1 is correct only for a provider that never trims invisibly; a provider that stifles its store must advance the base exactly like the readline list (see the face's doc, rubash#2007). |
+//! | Stifle | `stifle(histsize)` on the list itself: capacity drops oldest entries and advances `base`. | The host's capacity/view discipline over its own store; the engine sees only the resulting `entries()` plus the provider's `history_base`. |
+//! | Timestamps | Parallel `timestamps` on the list, recorded per add (history.c:322-333 `hist_inittime`); written to the file only when HISTTIMEFORMAT arms the write. | The provider's `entry_timestamps` channel feeds the same rendering; a provider that leaves the default empty channel is stood in for by the engine's dispatch-time stamp ledger. |
+//! | Session rules | `lines_this_session` / `entries_written` accounting; the exit write follows bashhist.c:488 `maybe_save_shell_history` (append this session's lines when `history_lines_this_session <= where_history()`, bashhist.c:440-441; full write otherwise). | The ruled GNU session model (read once at start, in-session isolation, cross-session visibility only via `history -n`/`-r` or a new session) is the host store's discipline; its session-end flush is a host duty whose ORDER the GAP-8 finish guard pins, not a GAP-10 surface. |
+//! | Record filters | The engine recording path applies the bashhist.c gates (bashhist.c:757-764, 957-964). | HISTCONTROL/HISTIGNORE filtering is applied by the host before entries reach the store, under the host's settings snapshot. |
+//! | File format | `#<epoch>` stamp lines precede stamped entries on timestamped writes (histfile.c `history_write`); staged write/append faces on the list. | The provider's `write_history` / `append_history` (+ timestamped variants) own the file; a store whose format cannot carry stamp lines keeps the plain faces so its reader never swallows `#<epoch>` lines as entries (niubash#646). |
+//! | `-a`/`-w`/`-r`/`-n` faces | The history builtin drives them over the engine list (builtins/history.def). | The same builtin drives them over the provider's file faces — one builtin, the plane's list. |
+//! | `last_line_added` | The list's own flag for the in-flight line. | The provider's `last_line_added` face: a save-at-accept host reports true while its line runs (bashhist.c:174; set at bashhist.c:961, cleared per line at :764); `fc` excludes its own line through it (fc.def:328-335). The default false is the C initializer. Engine-plane parity with GNU 5.3.20 verified (GAP-10 probe U-3: byte-identical `fc -l` listings in both the pre-added and the not-added arm). |
+//! | HISTFILE retarget | The engine reads HISTFILE at its own load/save points. | Retargeting the live store's file is a host file-placement duty (niubash#661); the engine contract carries no retarget face. |
+//!
+//! Installing the provider is a contract act, not a seam
+//! exception: [`crate::api::Session::set_history_provider`]
+//! (post-build, replace-always) or `SessionBuilder`'s
+//! build-time injection. Which routes install, and when, is
+//! the host's single-stream discipline to keep.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
