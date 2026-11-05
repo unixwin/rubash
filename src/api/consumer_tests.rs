@@ -4139,7 +4139,7 @@ fn issue863_gap11_kinds(outcome: &CompletionOutcome) -> HashMap<String, Option<C
     outcome
         .candidates
         .iter()
-        .map(|candidate| (candidate.text.clone(), candidate.kind))
+        .map(|candidate| (issue863_gap11_slash(&candidate.text), candidate.kind))
         .collect()
 }
 
@@ -4149,9 +4149,29 @@ fn issue863_gap11_kinds(outcome: &CompletionOutcome) -> HashMap<String, Option<C
 /// shell binary chdirs the process, a library session does
 /// not), so the kind pins complete absolute words to reach the
 /// fixture. `typed` is the partial name after the fixture
-/// prefix (empty for the whole listing).
+/// prefix (empty for the whole listing). The dir is spelled
+/// with forward slashes: a backslash word is split at every
+/// `\` before it reaches the filename generator on Windows,
+/// while the path layer accepts `/` on all platforms.
+/// The fixture dir spelled with forward slashes. Candidate
+/// text is separator-sensitive on Windows (the engine's display
+/// prefix keeps the word's separators, and the path layer may
+/// canonicalize to `\`), and a backslash word is split at every
+/// `\` before it reaches the filename generator — so every word
+/// and every expected key is built from this spelling, and
+/// `issue863_gap11_kinds` normalizes engine texts the same way
+/// before lookup. Linux is unaffected (no backslashes occur).
+fn issue863_gap11_slash_dir(dir: &PathBuf) -> String {
+    dir.display().to_string().replace('\\', "/")
+}
+
+/// Normalize one candidate text for lookup: `\` -> `/`.
+fn issue863_gap11_slash(text: &str) -> String {
+    text.replace('\\', "/")
+}
+
 fn issue863_gap11_word(dir: &PathBuf, typed: &str) -> String {
-    format!("{}/{typed}", dir.display())
+    format!("{}/{typed}", issue863_gap11_slash_dir(dir))
 }
 
 fn issue863_gap11_complete(
@@ -4185,16 +4205,17 @@ fn issue863_gap11_file_action_marks_per_entry() {
     let mut session = issue863_gap11_session(&dir);
     issue863_gap6_run(&mut session, "complete -A file mycmd");
     let kinds = issue863_gap11_kinds(&issue863_gap11_complete(&mut session, "mycmd", &dir, ""));
-    let plain = format!("{}/plain.txt", dir.display());
-    let run = format!("{}/run.sh", dir.display());
-    let real = format!("{}/realdir", dir.display());
+    let slash = issue863_gap11_slash_dir(&dir);
+    let plain = format!("{slash}/plain.txt");
+    let run = format!("{slash}/run.sh");
+    let real = format!("{slash}/realdir");
     assert_eq!(kinds.get(&plain), Some(&Some(CandidateKind::File)));
     assert_eq!(kinds.get(&run), Some(&Some(CandidateKind::File)));
     assert_eq!(kinds.get(&real), Some(&Some(CandidateKind::Directory)));
     #[cfg(unix)]
     {
-        let linkdir = format!("{}/linkdir", dir.display());
-        let linkfile = format!("{}/linkfile", dir.display());
+        let linkdir = format!("{slash}/linkdir");
+        let linkfile = format!("{slash}/linkfile");
         assert_eq!(kinds.get(&linkdir), Some(&Some(CandidateKind::Symlink)));
         assert_eq!(kinds.get(&linkfile), Some(&Some(CandidateKind::Symlink)));
     }
@@ -4203,7 +4224,7 @@ fn issue863_gap11_file_action_marks_per_entry() {
     let plain_face = session.complete(&line, line.len());
     let plain_txt = plain_face
         .iter()
-        .find(|candidate| candidate.text == plain)
+        .find(|candidate| issue863_gap11_slash(&candidate.text) == plain)
         .expect("plain.txt on the plain face");
     assert_eq!(plain_txt.kind, Some(CandidateKind::File));
 }
@@ -4224,11 +4245,11 @@ fn issue863_gap11_directory_action_marks_symlink_to_dir_as_directory() {
     issue863_gap6_run(&mut session, "complete -A directory mycmd");
     let outcome = issue863_gap11_complete(&mut session, "mycmd", &dir, "");
     let kinds = issue863_gap11_kinds(&outcome);
-    let real = format!("{}/realdir", dir.display());
+    let real = format!("{}/realdir", issue863_gap11_slash_dir(&dir));
     assert_eq!(kinds.get(&real), Some(&Some(CandidateKind::Directory)));
     #[cfg(unix)]
     {
-        let linkdir = format!("{}/linkdir", dir.display());
+        let linkdir = format!("{}/linkdir", issue863_gap11_slash_dir(&dir));
         assert_eq!(kinds.get(&linkdir), Some(&Some(CandidateKind::Directory)));
     }
     assert!(
@@ -4386,14 +4407,23 @@ impl CompletionProvider for Gap11Provider {
 #[test]
 fn issue863_gap11_provider_merge_keeps_engine_mark_and_provider_kind() {
     let dir = issue863_gap11_fixture("gap11-provider");
+    // The provider must return the engine candidate's EXACT
+    // text for dedup-by-text to engage: on Windows the engine
+    // text may spell separators differently from the test's
+    // forward-slash spelling, so learn it from a probe
+    // completion first (same fixture dir, same spec).
+    let mut probe = issue863_gap11_session(&dir);
+    issue863_gap6_run(&mut probe, "complete -A file mycmd");
+    let engine_plain =
+        issue863_gap11_texts(&issue863_gap11_complete(&mut probe, "mycmd", &dir, ""))
+            .into_iter()
+            .find(|text| issue863_gap11_slash(&text).ends_with("/plain.txt"))
+            .expect("engine produced plain.txt");
     let provider = Gap11Provider {
         candidates: vec![
             // Same text as an engine file candidate, with a
             // deliberately wrong kind: the engine mark must win.
-            Candidate::kinded(
-                format!("{}/plain.txt", dir.display()),
-                CandidateKind::Directory,
-            ),
+            Candidate::kinded(engine_plain, CandidateKind::Directory),
             Candidate::kinded("provider-only", CandidateKind::Symlink),
         ],
     };
@@ -4404,7 +4434,7 @@ fn issue863_gap11_provider_merge_keeps_engine_mark_and_provider_kind() {
         .expect("session builds");
     issue863_gap6_run(&mut session, "complete -A file mycmd");
     let kinds = issue863_gap11_kinds(&issue863_gap11_complete(&mut session, "mycmd", &dir, ""));
-    let plain = format!("{}/plain.txt", dir.display());
+    let plain = format!("{}/plain.txt", issue863_gap11_slash_dir(&dir));
     assert_eq!(
         kinds.get(&plain),
         Some(&Some(CandidateKind::File)),
@@ -4457,8 +4487,9 @@ fn issue863_gap11_compgen_text_stays_byte_identical() {
 fn issue863_gap11_fallback_arms_mark_directories() {
     let dir = issue863_gap11_fixture("gap11-fallback");
     let mut session = issue863_gap11_session(&dir);
-    let real = format!("{}/realdir", dir.display());
-    let plain = format!("{}/plain.txt", dir.display());
+    let slash = issue863_gap11_slash_dir(&dir);
+    let real = format!("{slash}/realdir");
+    let plain = format!("{slash}/plain.txt");
     // plusdirs: the wordlist candidate does not extend the
     // absolute word, so it is prefix-filtered out, and the
     // directory candidates append beside the empty result. The
