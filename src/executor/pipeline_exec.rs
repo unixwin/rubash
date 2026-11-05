@@ -4450,6 +4450,276 @@ impl Executor {
         Ok(None)
     }
 
+    /// Join one last-member drain thread (rubash#2836 slice 4): a
+    /// missing drain (inherited stdio) reads as empty bytes.
+    #[cfg(unix)]
+    fn join_pipeline_drain(
+        drain: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    ) -> Result<Vec<u8>, ExecuteError> {
+        let Some(handle) = drain else {
+            return Ok(Vec::new());
+        };
+        Ok(handle.join().map_err(|_| {
+            ExecuteError::IoError(std::io::Error::other("pipeline drain reader panicked"))
+        })??)
+    }
+
+    /// rubash#2836 slice 4: the job-control wait for a concurrent
+    /// external pipeline (GNU jobs.c:3064 wait_for with WUNTRACED, the
+    /// multi-pid twin of `wait_fg_child_job_control`). The caller has
+    /// already spawned every stage into one process group (stage 0
+    /// leads, `job_pgrp`) and spawned drain threads for the last
+    /// member's piped stdout/stderr (the wait cannot use
+    /// `wait_with_output`, which blocks past a stop).
+    ///
+    /// Returns `(statuses, stopped, stop_signal, last_stdout, last_stderr)`:
+    /// per-member statuses in stage order (a stopped member reads
+    /// 128+stopsig), whether any member stopped, the first stop signal
+    /// (0 when nothing stopped), and the last member's drained bytes
+    /// (empty on the stop path — the drains are dropped, detached, and
+    /// their bytes are lost; a stopped job's output is not printed until
+    /// it completes, and the concurrent path's last member has nothing
+    /// to print before a stop in practice).
+    ///
+    /// On the all-exited path the job is removed from the table (as the
+    /// single-child wait does) and the drains are joined. On the stop
+    /// path the stopped members are marked Stopped, the exited members
+    /// Completed, the job flips to background, the stop notice prints,
+    /// and the stopped members' Child handles are parked in
+    /// `background_children` for fg/bg/wait; the stopped members' dev-fd
+    /// finishes are disarmed (a flush into a stopped child's pipe could
+    /// block the prompt return) while the exited members' records stay
+    /// armed and settle at the caller's scope end. The dev-fd records of
+    /// ALL members are left untouched on the success path for the same
+    /// reason (the caller settles them at scope end, in order).
+    ///
+    /// A member dying of SIGINT while the guard is armed sets
+    /// `fg_sigint_unwind` (mirroring the single-child wait): under job
+    /// control the terminal belongs to the job, so a terminal ^C never
+    /// reaches the shell — the members' SIGINT death is the interrupt.
+    #[cfg(unix)]
+    fn wait_pipeline_job_control(
+        &mut self,
+        processes: Vec<std::process::Child>,
+        commands: &[&CommandNode],
+        job_pgrp: u32,
+        stage_dev_ops: &mut [crate::executor::dev_fd_operands::DevOperandMaterialization],
+        last_stdout_drain: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+        last_stderr_drain: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    ) -> Result<(Vec<i32>, bool, i32, Vec<u8>, Vec<u8>), ExecuteError> {
+        use std::os::unix::process::ExitStatusExt;
+        let pids: Vec<u32> = processes.iter().map(|child| child.id()).collect();
+        let n = pids.len();
+        let mut processes = processes;
+        // The gate saw a tty a moment ago; if it is gone, degrade to a
+        // plain multi-pid wait rather than stranding the members (the
+        // single-child wait degrades the same way). No job is registered
+        // on this path, so the caller's plain bookkeeping applies.
+        let Some(tty) = super::job_control_wait::controlling_tty() else {
+            let mut statuses = Vec::with_capacity(n);
+            for mut child in processes {
+                let status = child.wait().map_err(ExecuteError::IoError)?;
+                super::read_helpers::note_reaped_child_cpu(&child);
+                statuses.push(crate::executor::wait_status::process_exit_status(&status));
+            }
+            let last_out = Self::join_pipeline_drain(last_stdout_drain)?;
+            let last_err = Self::join_pipeline_drain(last_stderr_drain)?;
+            return Ok((statuses, false, 0, last_out, last_err));
+        };
+        let stage_texts: Vec<String> = commands
+            .iter()
+            .map(|command| crate::executor::command_text::bash_command_source_text(command))
+            .collect();
+        let joined = stage_texts.join(" | ");
+        // GNU's job for a `( ... )` is the subshell pipeline itself, so
+        // the notice prints `( <pipeline> )` (jobs.c pretty_print_job
+        // wraps the subshell's stored command) — the same wrap
+        // `signal_notice_command_text` applies to the single-child face.
+        // The joined text is built from stage texts, never pre-wrapped,
+        // so it is always wrapped once when a subshell is open.
+        let job_command = if self.shell_state.subshell_depth.get() > 0 {
+            format!("( {joined} )")
+        } else {
+            joined
+        };
+        self.shell_state.job_table.register_pipeline_stages(
+            pids.clone(),
+            job_command,
+            false,
+            job_pgrp,
+            stage_texts,
+        );
+        if let Some(first) = pids.first() {
+            self.shell_state.job_table.set_job_control(*first, true);
+        }
+        super::job_control_wait::give_terminal_to(&tty, job_pgrp as i32);
+        // GNU wait_for installs the recording SIGINT handler for the
+        // wait (jobs.c:3086-3102): with the terminal handed over, a
+        // terminal ^C reaches only the job, so a shell-side SIGINT
+        // arrival during the wait is forwarded to the job's group by
+        // the poll below, once — the wait_fg_child_sliced discipline
+        // (rubash#1990), group-addressed here.
+        let sigint_guard =
+            super::external_inner::ForegroundWaitSigintGuard::hold_if_interactive_untrapped(self);
+        let mut statuses: Vec<Option<i32>> = vec![None; n];
+        let mut stopped: Vec<Option<i32>> = vec![None; n];
+        let mut any_sigint_death = false;
+        let mut forwarded = false;
+        let wait_error: Option<std::io::Error> = 'wait: loop {
+            for index in 0..n {
+                if statuses[index].is_some() || stopped[index].is_some() {
+                    continue;
+                }
+                let pid = pids[index];
+                let mut raw: libc::c_int = 0;
+                let waited =
+                    unsafe { libc::waitpid(pid as i32, &mut raw, libc::WNOHANG | libc::WUNTRACED) };
+                if waited == pid as i32 {
+                    if libc::WIFSTOPPED(raw) {
+                        stopped[index] = Some(libc::WSTOPSIG(raw));
+                    } else {
+                        let status = std::process::ExitStatus::from_raw(raw);
+                        if crate::executor::wait_status::exit_status_signal(&status)
+                            == Some(libc::SIGINT)
+                        {
+                            any_sigint_death = true;
+                        }
+                        super::read_helpers::note_reaped_child_cpu(&processes[index]);
+                        statuses[index] =
+                            Some(crate::executor::wait_status::process_exit_status(&status));
+                    }
+                } else if waited < 0 {
+                    let error = std::io::Error::last_os_error();
+                    match error.raw_os_error() {
+                        Some(libc::EINTR) => {}
+                        Some(libc::ECHILD) => {
+                            // Nobody else waits on these members; an
+                            // ECHILD here means the state was already
+                            // collected through the handle — take the
+                            // handle's word (the single-child wait's arm).
+                            match processes[index].try_wait() {
+                                Ok(Some(status)) => {
+                                    if crate::executor::wait_status::exit_status_signal(&status)
+                                        == Some(libc::SIGINT)
+                                    {
+                                        any_sigint_death = true;
+                                    }
+                                    super::read_helpers::note_reaped_child_cpu(&processes[index]);
+                                    statuses[index] = Some(
+                                        crate::executor::wait_status::process_exit_status(&status),
+                                    );
+                                }
+                                Ok(None) => {}
+                                Err(error) => break 'wait Some(error),
+                            }
+                        }
+                        _ => break 'wait Some(error),
+                    }
+                }
+            }
+            if (0..n).all(|i| statuses[i].is_some() || stopped[i].is_some()) {
+                break None;
+            }
+            if sigint_guard.is_armed()
+                && !forwarded
+                && super::external_inner::fg_forward_drain(&sigint_guard)
+            {
+                let _ = crate::builtins::kill::send_signal_to_process_group(
+                    job_pgrp as i32,
+                    crate::builtins::kill::SIGINT_NUMBER,
+                );
+                forwarded = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        // jobs.c:3253: the shell takes its terminal back on every way
+        // out of the wait — exit, signal death, stop, or error.
+        super::job_control_wait::give_terminal_to(&tty, super::job_control_wait::shell_pgrp());
+        if let Some(error) = wait_error {
+            self.shell_state.job_table.remove_job_by_pid(pids[0]);
+            return Err(ExecuteError::IoError(error));
+        }
+        let any_stopped = stopped.iter().any(|signal| signal.is_some());
+        if !any_stopped {
+            self.shell_state.job_table.remove_job_by_pid(pids[0]);
+            if sigint_guard.is_armed() && any_sigint_death {
+                self.fg_sigint_unwind = true;
+            }
+            let last_out = Self::join_pipeline_drain(last_stdout_drain)?;
+            let last_err = Self::join_pipeline_drain(last_stderr_drain)?;
+            let final_statuses: Vec<i32> = statuses
+                .into_iter()
+                .map(|status| status.unwrap_or(0))
+                .collect();
+            return Ok((final_statuses, false, 0, last_out, last_err));
+        }
+        let stop_signal = stopped
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or(libc::SIGTSTP);
+        for (index, pid) in pids.iter().enumerate() {
+            if let Some(signal) = stopped[index] {
+                self.shell_state.job_table.mark_stopped(*pid, Some(signal));
+            } else if let Some(status) = statuses[index] {
+                self.shell_state.job_table.mark_completed(*pid, status);
+            }
+        }
+        if let Some(job_id) = self.shell_state.job_table.job_id_for_pid(pids[0]) {
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+        }
+        // rubash#2838: breaking = loop_level on SIGTSTP; the subshell
+        // arm (slice 4, mirroring the single-child wait) sets one level
+        // when the stop landed in an in-process subshell, where
+        // loop_depth is 0 and no loop owns the count.
+        if stop_signal == libc::SIGTSTP {
+            let depth = self.shell_state.loop_depth;
+            if depth > 0 {
+                self.stopped_loop_breaking = depth;
+            } else if self.shell_state.subshell_depth.get() > 0 {
+                self.stopped_loop_breaking = 1;
+            }
+        }
+        // The stop notice prints here, as the wait completes
+        // (jobs.c:3385) — see format_stopped_job_notice for why it
+        // cannot ride the boundary flush. GNU jobs.c:4690-4691
+        // notify_of_job_status prints a leading "\n" before the
+        // JSTOPPED job line (rubash#2834).
+        if let Some(line) = self.format_stopped_job_notice(pids[0]) {
+            crate::executor::shell_options::write_stderr_bytes(b"\n")?;
+            crate::executor::shell_options::write_stderr_bytes(line.as_bytes())?;
+        }
+        // Park the stopped members' handles for fg/bg/wait; disarm their
+        // dev-fd finishes (a flush into a stopped child's pipe could
+        // block the prompt return). The drains are dropped, detached —
+        // they exit on EOF when the job finishes. Exited members' dev-fd
+        // records stay armed and settle at the caller's scope end.
+        let children: Vec<std::process::Child> = std::mem::take(&mut processes);
+        for (index, child) in children.into_iter().enumerate() {
+            if stopped[index].is_some() {
+                stage_dev_ops[index].disarm_finish();
+                self.background_children
+                    .insert(pids[index], crate::fd::SpawnedChild::from(child));
+            }
+        }
+        drop(last_stdout_drain);
+        drop(last_stderr_drain);
+        let final_statuses: Vec<i32> = (0..n)
+            .map(|index| {
+                if let Some(status) = statuses[index] {
+                    status
+                } else {
+                    128 + stopped[index].unwrap_or(libc::SIGTSTP)
+                }
+            })
+            .collect();
+        Ok((final_statuses, true, stop_signal, Vec::new(), Vec::new()))
+    }
+
     #[cfg(not(windows))]
     fn execute_external_pipeline_concurrently(
         &mut self,
@@ -4670,6 +4940,17 @@ impl Executor {
         // scope end (RAII finish, rubash#2602).
         let mut stage_dev_ops: Vec<crate::executor::dev_fd_operands::DevOperandMaterialization> =
             Vec::new();
+        // rubash#2836 slice 4: the job-control gate, evaluated once
+        // before the spawn loop — the same predicate the single-child
+        // wait uses, widened to the in-process-subshell shape (a
+        // pipeline inside `( ... )` is external children inside an
+        // in-process subshell too). `job_pgrp` is the leader's pid
+        // once stage 0 has spawned; later stages join it.
+        #[cfg(unix)]
+        let job_control =
+            self.job_control_channel_active() || self.job_control_channel_active_in_subshell();
+        #[cfg(unix)]
+        let mut job_pgrp: Option<u32> = None;
 
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             // rubash#2589: the dev-fd operand pass. The Windows twin's
@@ -4758,6 +5039,32 @@ impl Executor {
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
             process.current_dir(&self.shell_state.cwd);
             suppress_orphan_console(&mut process);
+            // rubash#2836 slice 4: under job control every stage joins
+            // one process group before exec (jobs.c:2390-2391 child
+            // setpgid; the trap.c:1489 restore runs first so the stage
+            // does not inherit the interactive shell's SIG_IGN for the
+            // stop signals). Stage 0 leads the group; later stages join
+            // the leader's pid. No other pre_exec exists on this loop's
+            // Command, so there is nothing to compose with.
+            #[cfg(unix)]
+            if job_control {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: same contract as the spawn_external_process
+                // registration — the closures run only in the forked child
+                // before exec and only reset signal dispositions and call
+                // setpgid; they touch no Rust std state that could
+                // deadlock the child.
+                match job_pgrp {
+                    None => unsafe {
+                        process.pre_exec(crate::builtins::kill::child_pre_exec_reset_grouped);
+                    },
+                    Some(leader) => unsafe {
+                        process.pre_exec(crate::builtins::kill::child_pre_exec_reset_join_group(
+                            leader as i32,
+                        ));
+                    },
+                }
+            }
             let spawned = process.spawn();
             for dup in parent_side_dups {
                 crate::fd::close_handle(dup);
@@ -4787,6 +5094,23 @@ impl Executor {
                 }
             };
             adopt_orphan_console(child.id());
+            // rubash#2836 slice 4: the parent repeats the child's
+            // setpgid after spawn (jobs.c:2455, "to avoid possible race
+            // conditions") so the group exists before the next stage
+            // spawns — a ^Z arriving between spawns finds the whole job
+            // in one group. Stage 0 leads; later stages join it.
+            #[cfg(unix)]
+            if job_control {
+                match job_pgrp {
+                    None => {
+                        crate::builtins::kill::group_spawned_child(child.id());
+                        job_pgrp = Some(child.id());
+                    }
+                    Some(leader) => {
+                        crate::builtins::kill::group_spawned_child_into(child.id(), leader);
+                    }
+                }
+            }
             if capture_intermediate_stderr && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
                     intermediate_stderr.push(std::thread::spawn(move || {
@@ -4839,8 +5163,76 @@ impl Executor {
         }
 
         let mut results = Vec::with_capacity(processes.len());
-        let last = processes.pop().expect("pipeline has at least two stages");
         self.note_foreground_wait();
+        // rubash#2836 slice 4: the job-control wait (GNU jobs.c:3064
+        // wait_for with WUNTRACED). The plain waits below run only when
+        // the gate is off — or when no leader spawned (unreachable for a
+        // >=2-stage pipeline; the branch falls through then). Both arms
+        // of the JC branch return, so `processes` is only moved on a
+        // diverging path and the plain wait below still owns it.
+        #[cfg(unix)]
+        if job_control {
+            if let Some(leader) = job_pgrp {
+                // The last member's stdout/stderr (when piped) need drain
+                // threads — the JC wait cannot use wait_with_output,
+                // which blocks past a stop. Same read_to_end shape as
+                // the intermediate-stderr drains.
+                let mut last_stdout_drain = None;
+                let mut last_stderr_drain = None;
+                if let Some(last) = processes.last_mut() {
+                    if let Some(mut stdout) = last.stdout.take() {
+                        last_stdout_drain = Some(std::thread::spawn(move || {
+                            let mut output = Vec::new();
+                            stdout.read_to_end(&mut output)?;
+                            Ok::<_, std::io::Error>(output)
+                        }));
+                    }
+                    if let Some(mut stderr) = last.stderr.take() {
+                        last_stderr_drain = Some(std::thread::spawn(move || {
+                            let mut output = Vec::new();
+                            stderr.read_to_end(&mut output)?;
+                            Ok::<_, std::io::Error>(output)
+                        }));
+                    }
+                }
+                let (statuses, stopped, stop_signal, last_out, last_err) = self
+                    .wait_pipeline_job_control(
+                        processes,
+                        commands,
+                        leader,
+                        &mut stage_dev_ops,
+                        last_stdout_drain,
+                        last_stderr_drain,
+                    )?;
+                for (index, status) in statuses.iter().enumerate() {
+                    if index + 1 == statuses.len() {
+                        results.push((
+                            crate::executor::substitution_metadata::bytes_to_shell_text(&last_out),
+                            crate::executor::substitution_metadata::bytes_to_shell_text(&last_err),
+                            *status,
+                        ));
+                    } else {
+                        results.push((String::new(), String::new(), *status));
+                    }
+                }
+                if stopped {
+                    // GNU leaves PIPESTATUS untouched when a pipeline
+                    // stops, and the pipeline's status is the stop
+                    // verdict (128+stopsig) — not the last member's
+                    // status (`sleep 30 | true` is 148 even though
+                    // `true` exited 0).
+                    self.exit_code = 128 + stop_signal;
+                    return Ok(Some(results));
+                }
+                return self.finish_concurrent_pipeline_results(
+                    commands,
+                    results,
+                    intermediate_stderr,
+                    capture_intermediate_stderr,
+                );
+            }
+        }
+        let last = processes.pop().expect("pipeline has at least two stages");
         let output = last.wait_with_output()?;
         results.push((
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
@@ -4891,6 +5283,31 @@ impl Executor {
             ));
         }
         results.reverse();
+        return self.finish_concurrent_pipeline_results(
+            commands,
+            results,
+            intermediate_stderr,
+            capture_intermediate_stderr,
+        );
+    }
+
+    /// Shared tail of the Unix concurrent pipeline path (rubash#2836
+    /// slice 4): the plain wait and the job-control wait both land here
+    /// once every member is reaped (the JC stop path returns earlier and
+    /// never reaches this). Joins the intermediate-stderr drains, writes
+    /// the last member's captured output, then records the statuses
+    /// (exit code + PIPESTATUS). The stages' dev-fd operand records are
+    /// NOT settled here: the caller still owns `stage_dev_ops` and it
+    /// drops at the caller's scope end, after this returns — that is the
+    /// ordering the #2589/#2602 comment below records.
+    #[cfg(not(windows))]
+    fn finish_concurrent_pipeline_results(
+        &mut self,
+        commands: &[&CommandNode],
+        results: Vec<(String, String, i32)>,
+        intermediate_stderr: Vec<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+        capture_intermediate_stderr: bool,
+    ) -> Result<Option<Vec<(String, String, i32)>>, ExecuteError> {
         // rubash#2589/#2602: every member has been waited — the stages'
         // operand records settle as `stage_dev_ops` drops at scope end
         // (DevOperandMaterialization's RAII finish consumes the donor

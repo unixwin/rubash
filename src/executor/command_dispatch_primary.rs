@@ -166,7 +166,15 @@ impl Executor {
                     // stop, hand the terminal to, or resume with
                     // fg/bg, so it stands down to the real spawn for
                     // exactly the channel's lifetime.
-                    && !(cfg!(unix) && self.job_control_channel_active())
+                    // rubash#2836 slice 4: the same stand-down
+                    // applies inside an in-process subshell when the
+                    // subshell channel is live — otherwise `(sleep N)`
+                    // runs the in-process emulation, which has no child
+                    // to stop, so ^Z becomes a silent no-op while the
+                    // emulation keeps sleeping.
+                    && !(cfg!(unix)
+                        && (self.job_control_channel_active()
+                            || self.job_control_channel_active_in_subshell()))
                     && crate::builtins::sleep::can_execute_fast_path(&cmd.words[1..])
                     // rubash#1497: a stamped -c tail command must reach
                     // the spawn site so it can exec-replace the process

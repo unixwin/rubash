@@ -1788,6 +1788,20 @@ impl Executor {
                     let depth = self.shell_state.loop_depth;
                     if depth > 0 {
                         self.stopped_loop_breaking = depth;
+                    } else if self.shell_state.subshell_depth.get() > 0 {
+                        // rubash#2836 slice 4: the stop landed in an
+                        // in-process subshell, where loop_depth is 0
+                        // and no loop owns the count — but the subshell
+                        // body must still abandon: GNU's forked subshell
+                        // stops as a unit, so its remaining body cannot
+                        // run while the child is parked. Set one level;
+                        // the subshell boundary consumes it (and skips
+                        // the subshell's EXIT trap — a stopped subshell
+                        // has not exited) so the parent list is
+                        // unaffected. A stop at top level (depth 0,
+                        // subshell_depth 0) sets nothing: the plain
+                        // list continues, per the oracle.
+                        self.stopped_loop_breaking = 1;
                     }
                 }
                 // The stop notice prints here, as the wait completes
@@ -3450,8 +3464,17 @@ impl Executor {
         // their readers own the child's output, and GNU's comsub
         // children share the shell's group (no WUNTRACED wait,
         // jobs.c:4077 subshell_environment condition).
+        // rubash#2836 slice 4: the same claim extends to an external
+        // child spawned inside an in-process subshell — GNU's subshell
+        // is a real forked process in its own group, so its children
+        // are waited on with WUNTRACED; here the child itself takes
+        // the treatment (own group + handover + WUNTRACED wait) and on
+        // a stop is parked as the subshell's job (see
+        // job_control_channel_active_in_subshell and the Stopped arm
+        // of wait_fg_child_job_control).
         #[cfg(unix)]
-        let fg_job_control = self.job_control_channel_active()
+        let fg_job_control = (self.job_control_channel_active()
+            || self.job_control_channel_active_in_subshell())
             && !matches!(
                 self.external_stdio_outcome,
                 Some(super::external_redirects::ExternalStdioOutcome::CapturePipe(..))
@@ -4119,8 +4142,11 @@ impl Executor {
 /// FG_INT_HOLD keeps reconcile from flipping SIGINT back to Default
 /// mid-wait; Drop releases the hold. Trapped SIGINT keeps its handler
 /// (disposition != DFL) so trap recording is untouched, and
-/// entry-ignored SIGINT stays ignored.
-struct ForegroundWaitSigintGuard {
+/// entry-ignored SIGINT stays ignored. Shared with the pipeline
+/// job-control wait (rubash#2836 slice 4), which forwards a shell-side
+/// SIGINT to the whole job group the same way this wait forwards it to
+/// one child — hence the executor-wide visibility.
+pub(in crate::executor) struct ForegroundWaitSigintGuard {
     armed: bool,
     /// Kernel-SIGINT epoch snapshot taken when the wait starts
     /// (rubash#1990): the sliced wait forwards the interrupt to the
@@ -4130,7 +4156,7 @@ struct ForegroundWaitSigintGuard {
 
 #[cfg(unix)]
 impl ForegroundWaitSigintGuard {
-    fn hold_if_interactive_untrapped(executor: &Executor) -> Self {
+    pub(in crate::executor) fn hold_if_interactive_untrapped(executor: &Executor) -> Self {
         if !foreground_sigint_needs_protection(executor) {
             return Self {
                 armed: false,
@@ -4166,8 +4192,9 @@ impl ForegroundWaitSigintGuard {
 /// forgotten with it, matching the child_caught_sigint outcome (see
 /// wait_fg_child_sliced). Returns true when the SIGINT epoch moved
 /// past the guard's arm snapshot, i.e. the caller should forward.
+/// Shared with the pipeline job-control wait (rubash#2836 slice 4).
 #[cfg(unix)]
-fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintGuard) -> bool {
+pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintGuard) -> bool {
     let pending =
         crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
     let epoch_moved =

@@ -141,4 +141,34 @@ impl Executor {
             false
         }
     }
+
+    /// rubash#2836 slice 4: the subshell twin of
+    /// [`job_control_channel_active`]. GNU's subshell is a real forked
+    /// process in its own process group, so its foreground children are
+    /// waited on with WUNTRACED by the subshell's own waitchld — but the
+    /// subshell_environment condition (jobs.c:4077) is about the
+    /// subshell's own wait, not about whether the subshell's CHILD gets
+    /// job-control treatment. Rubash runs the subshell in-process, so
+    /// there is no subshell process to own the group: the external child
+    /// itself takes the treatment directly — own process group, terminal
+    /// handover, WUNTRACED wait — and on a stop it is parked as the
+    /// subshell's job while the subshell command is abandoned by the
+    /// stop-unwind (see wait_fg_child_job_control's subshell arm).
+    /// The `monitor` OPTION (not the `job_control` variable, which the
+    /// subshell entry erases per jobs.c:5356-5366 without_job_control)
+    /// is the gate, exactly as for the top-level channel.
+    pub(in crate::executor) fn job_control_channel_active_in_subshell(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.invocation_interactive()
+                && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
+                && !self.shell_state.in_command_substitution.get()
+                && self.shell_state.subshell_depth.get() > 0
+                && controlling_tty().is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
 }

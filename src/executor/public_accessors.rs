@@ -2097,6 +2097,40 @@ impl Executor {
         // carries their registrations) is swapped back (rubash#1336).
         self.flush_region_owned_output_process_substitutions(&saved_state.env_vars);
         self.restore_shell_env(saved_state.env_vars.clone());
+        // rubash#2836 slice 4: a job stopped inside the region is a
+        // PARENT-visible job — GNU's parent wait_for registers the
+        // stopped subshell in the parent's table (jobs.c), while the
+        // region's own background jobs die with the forked child and
+        // never reach it. The wholesale restore below would wipe the
+        // stopped job the region's wait parked (and with it the %n /
+        // jobs / kill resolution), so carry stopped jobs across the
+        // boundary with their ids, entries, and current mark. Running
+        // and Completed jobs started in the region stay wiped,
+        // matching the fork; command-substitution and heredoc regions
+        // never hold a stopped job, so this is a no-op for them.
+        let stopped_jobs: Vec<crate::jobs::table::JobEntry> = self
+            .shell_state
+            .job_table
+            .jobs
+            .values()
+            .filter(|job| job.state == crate::jobs::table::ProcessState::Stopped)
+            .cloned()
+            .collect();
+        let stopped_current = self.shell_state.job_table.current_job();
+        // A stopped pipeline can hold members that already exited
+        // before the stop; their recorded statuses live in
+        // completed_statuses, which the restore would also wipe.
+        let stopped_statuses: Vec<(u32, i32)> = stopped_jobs
+            .iter()
+            .flat_map(|job| job.pids.iter().copied())
+            .filter_map(|pid| {
+                self.shell_state
+                    .job_table
+                    .completed_statuses
+                    .get(&pid)
+                    .map(|status| (pid, *status))
+            })
+            .collect();
         // rubash#1907: the region ran against this same PROCESS, so a
         // `umask` inside it re-masked the process itself; GNU's fork
         // discards that with the child. Re-apply the mask the save
@@ -2109,6 +2143,30 @@ impl Executor {
         self.shell_state = saved_state;
         if let Some(mask) = fork_saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        // Re-seat the stopped jobs into the restored table. The id
+        // allocator takes highest-occupied-id + 1, so a re-inserted id
+        // can never collide with a later registration.
+        for job in stopped_jobs {
+            let id = job.id;
+            for pid in &job.pids {
+                self.shell_state.job_table.pid_to_job.insert(*pid, id);
+            }
+            for pid in job.processes.keys() {
+                self.shell_state.job_table.pid_to_job.insert(*pid, id);
+            }
+            self.shell_state.job_table.jobs.insert(id, job);
+        }
+        for (pid, status) in stopped_statuses {
+            self.shell_state
+                .job_table
+                .completed_statuses
+                .insert(pid, status);
+        }
+        if let Some(id) = stopped_current {
+            if self.shell_state.job_table.jobs.contains_key(&id) {
+                self.shell_state.job_table.set_current_job(id);
+            }
         }
     }
 
