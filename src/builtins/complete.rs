@@ -2192,7 +2192,12 @@ fn path_completion_candidates(
     let skip_hidden = !settings.match_hidden_files && typed_part.is_empty();
     let mut candidates = Vec::new();
     for entry in entries {
-        if matches!(kind, PathCompletionKind::Directory) && !entry.is_dir {
+        // `is_dir` comes from the dirent and is false for a symlink, so
+        // follow links when only directories are wanted.
+        if matches!(kind, PathCompletionKind::Directory)
+            && !entry.is_dir
+            && !entry.path.is_dir()
+        {
             continue;
         }
         if skip_hidden && entry.name.starts_with('.') {
