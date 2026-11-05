@@ -15,6 +15,15 @@
 //! the mutations. The port reads the mutated copy's options into
 //! `CompgenDynamic::options_override` before the restore, and the
 //! fallback block consumes the effective options.
+//!
+//! Candidate spelling: directory candidates carry the trailing
+//! slash, the engine's insertion-ready convention across the whole
+//! completion pin family (see issue2570_compspec_fallback FILENAMES/
+//! DIRS). Two expectations here originally omitted the slash and
+//! failed on unmodified master; captain-adjudicated wrong-pin
+//! 2026-11-05 (GNU appends the slash at line-insert time,
+//! lib/readline/complete.c insert_match; rubash candidates are
+//! insertion-ready strings).
 
 use rubash::executor::Executor;
 use rubash::lexer::tokenize;
@@ -87,7 +96,7 @@ fn compopt_plus_o_default_suppresses_the_filename_fallback() {
     let got = fx.complete("complete -o default -F _plain mycmd", "mycmd zz");
     assert_eq!(
         got,
-        vec!["zzdirone".to_string(), "zzfile.txt".to_string()],
+        vec!["zzdirone/".to_string(), "zzfile.txt".to_string()],
         "control: the registered -o default fallback fires"
     );
     // With compopt +o default inside the function, the fallback is off.
@@ -105,7 +114,7 @@ fn compopt_minus_o_dirnames_enables_the_dirnames_fallback() {
     let got = fx.complete("complete -F _dir mycmd", "mycmd zz");
     assert_eq!(
         got,
-        vec!["zzdirone".to_string()],
+        vec!["zzdirone/".to_string()],
         "compopt -o dirnames must switch the dirnames fallback on for this attempt"
     );
 }
