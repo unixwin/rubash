@@ -431,13 +431,21 @@ pub(crate) fn shell_path_entries(path: &str) -> Vec<String> {
     split_shell_path(path)
 }
 
-/// A directory entry in the shell namespace.
+/// A directory entry in the shell namespace. The three flags are
+/// the dirent's own `file_type()` — read once at enumeration, so
+/// consumers (niubash#863 GAP-11: the filename completion
+/// generator's kind marks) use them without a fresh stat per
+/// entry. `is_symlink` is the link itself, never the target:
+/// a symlink-to-directory reads `is_dir: false` here and is
+/// followed only by generators whose action semantics follow
+/// links (the directory action's `is_dir()` probe).
 #[derive(Debug, Clone)]
 pub(crate) struct ShellDirectoryEntry {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) is_dir: bool,
     pub(crate) is_file: bool,
+    pub(crate) is_symlink: bool,
 }
 
 /// Enumerate a shell-visible directory from its real Windows backing path.
@@ -469,6 +477,7 @@ pub(crate) fn shell_directory_entries_in(
                     path: entry.path(),
                     is_dir: file_type.is_dir(),
                     is_file: file_type.is_file(),
+                    is_symlink: file_type.is_symlink(),
                 });
             }
         }

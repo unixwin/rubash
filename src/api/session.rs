@@ -799,9 +799,13 @@ impl Session {
     /// in `complete`; the policy describes the ENGINE's attempt (the
     /// provider has no compspec), so a host applying it to provider
     /// candidates too is making its own choice.
+    /// Each candidate carries the engine-side kind its generator
+    /// knew (niubash#863 GAP-11): dedup-by-text keeps the
+    /// ENGINE's candidate — and its mark — over a provider's
+    /// same-text one, and a provider candidate keeps whatever
+    /// kind the provider set (the engine never re-marks it).
     pub fn complete_detailed(&mut self, line: &str, cursor: usize) -> CompletionOutcome {
-        let (texts, policy) = self.executor.complete_line_detailed(line, cursor);
-        let mut candidates: Vec<Candidate> = texts.into_iter().map(Candidate::new).collect();
+        let (mut candidates, policy) = self.executor.complete_line_detailed(line, cursor);
         if let Some(provider) = self.completion_provider.as_mut() {
             for candidate in provider.candidates(line, cursor) {
                 if !candidates.iter().any(|known| known.text == candidate.text) {

@@ -1238,7 +1238,13 @@ impl Executor {
     /// compspec's hook with the live COMP_* context bound) and merged by
     /// `complete_line_candidates_with_dynamic` (niubash#520).
     pub fn complete_line(&mut self, line: &str, cursor: usize) -> Vec<String> {
-        self.complete_line_detailed(line, cursor).0
+        // Text projection of the detailed attempt (niubash#863
+        // GAP-11): kind rides `complete_line_detailed` only.
+        self.complete_line_detailed(line, cursor)
+            .0
+            .into_iter()
+            .map(|candidate| candidate.text)
+            .collect()
     }
 
     /// [`Executor::complete_line`] plus the attempt's insertion/display
@@ -1248,11 +1254,17 @@ impl Executor {
     /// these candidates — pcomplete.c:1458-1477
     /// pcomp_set_readline_variables. With no governing compspec the
     /// policy is the default (quote filenames, sort, append).
+    /// The candidates carry the engine-side kind their generator
+    /// knew (niubash#863 GAP-11); the plain [`Executor::complete_line`]
+    /// face projects them to text.
     pub fn complete_line_detailed(
         &mut self,
         line: &str,
         cursor: usize,
-    ) -> (Vec<String>, crate::api::capabilities::CompletionPolicy) {
+    ) -> (
+        Vec<crate::api::capabilities::Candidate>,
+        crate::api::capabilities::CompletionPolicy,
+    ) {
         let function_names: Vec<String> = self.shell_state.functions.keys().cloned().collect();
         // Job completion names are the command's first word only
         // (rubash#1052; same rule as the compgen path in job_builtins).
