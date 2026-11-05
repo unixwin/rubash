@@ -3145,6 +3145,60 @@ fn issue863_gap7_guard_attempt_reads_live_state() {
     );
 }
 
+/// rubash#2856 (B5-11): the position-aware compspec gate
+/// `Session::has_compspec_at` agrees with the generation path on
+/// the shapes the command-name form cannot name — the `-E` empty
+/// line (no command), the `-I` initial word (the command being
+/// completed), and the whitespace-line corners (W1/W2/W3). The
+/// position-blind `has_compspec` stays (Q-E): an `-I`-only
+/// registration still opens it.
+#[test]
+fn issue2856_b511_session_has_compspec_at() {
+    let mut session = issue863_gap6_session();
+    // Nothing registered: the gate stays shut everywhere.
+    assert!(!session.has_compspec_at("", 0));
+    assert!(!session.has_compspec_at("   ", 3));
+    assert!(!session.has_compspec_at("d", 1));
+    issue863_gap6_run(
+        &mut session,
+        "complete -E -W 'eone etwo'; complete -I -W 'ione itwo'; complete -D -W 'dalpha dbeta'",
+    );
+    // Empty line: -E governs (b01/b05); the -I fallback (W3) is
+    // covered by the Executor pins.
+    assert!(session.has_compspec_at("", 0));
+    // Whitespace line at end-of-line: -E never governs (W1/b09) —
+    // no -I-free shape governs here because -I IS registered, so
+    // the -I arm answers instead.
+    assert!(session.has_compspec_at("   ", 3));
+    // Column 0 ahead of the name: -E governs (W2/b11/b15).
+    assert!(session.has_compspec_at("   ls", 0));
+    assert!(session.has_compspec_at("   ", 0));
+    // Command word: -I governs, -D never does (b02/b06).
+    assert!(session.has_compspec_at("i", 1));
+    // Argument word: -D governs (b07).
+    assert!(session.has_compspec_at("zzcmd d", 6));
+    // Separator-followed position: -I governs (arm 8).
+    assert!(session.has_compspec_at("echo hi; ", 9));
+    // The position-blind face is kept (Q-E) and still counts -I.
+    assert!(session.has_compspec("git"));
+    assert!(session.has_compspec("zzcmd"));
+}
+
+#[test]
+fn issue2856_b511_session_gate_d_only_never_governs_command_word() {
+    // Q-D through the Session face: with only -D registered, no
+    // command-word position opens the gate.
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "complete -D -W 'dalpha dbeta'");
+    assert!(!session.has_compspec_at("d", 1), "b04");
+    assert!(!session.has_compspec_at("d", 0), "b16");
+    // The empty line still opens it (-D fallback, b03).
+    assert!(session.has_compspec_at("", 0));
+    // But a whitespace line at end-of-line does not (W1/b09:
+    // no -I registered, so nothing governs).
+    assert!(!session.has_compspec_at("   ", 3));
+}
+
 /// Sequential attempts through one guard share live state:
 /// the inner attempt resolves a compspec the outer
 /// attempt's function registered; after the guard drops, the

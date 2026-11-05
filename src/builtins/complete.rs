@@ -1373,13 +1373,23 @@ pub(crate) fn split_for_completion(line: &str, cursor: usize, wordbreaks: &str) 
     let sentinel = cursor - list_start;
     let segment_line = region.to_string();
     let tokens = tokenize_completion_region(region, wordbreaks);
+    // rubash#2856 (B5-11, W1/W2): GNU bashline.c arms 3-4 give the
+    // EMPTYCMD (-E) arm only when the cursor is at column 0 with the
+    // command name after it (arm 3: start == 0, start < s1) or the
+    // line is empty (arm 4: e == 0). Any other empty-word shape — a
+    // whitespace-only line with the cursor past column 0 (arm 9,
+    // -I via the post-chain), a separator-followed command position
+    // (arm 8) — is an empty command word, the -I arm, not -E. The
+    // old `line.trim().is_empty()` test could not tell `"   "`@0
+    // (-E) from `"   "`@3 (-I), and the gap-insertion arm below
+    // turned `"   ls"`@0 into `["", "ls"]` (-I) where GNU takes -E.
+    let empty_line_arm = cursor == 0 && (line.is_empty() || name_start > cursor);
     if tokens.is_empty() {
-        // No word in the segment's name region. A blank line is the
-        // empty-line completion (-E/-D arm of resolve_compspec); a
-        // fresh command position after a separator or an
-        // assignment-only prefix is one empty word (command
-        // completion / the -I arm).
-        let words = if line.trim().is_empty() {
+        // No word in the segment's name region. A blank line at
+        // column 0 is the empty-line completion (-E/-D/-I arm of
+        // resolve_compspec); any other empty shape is one empty word
+        // (command completion / the -I arm).
+        let words = if empty_line_arm {
             Vec::new()
         } else {
             vec![String::new()]
@@ -1414,6 +1424,20 @@ pub(crate) fn split_for_completion(line: &str, cursor: usize, wordbreaks: &str) 
     // The sentinel sits in a whitespace gap or past the last token:
     // split_at_delims inserts an empty word there and completes it
     // (subst.c:2616 — the gap rule and the end-of-string special case).
+    // Except at column 0 ahead of the command name: the empty-line
+    // arm (see above) governs there, and the word list is empty.
+    // (No token ends at or before the sentinel in that shape —
+    // insert_at is necessarily 0 — because the sentinel sits
+    // before the first token.)
+    if empty_line_arm {
+        return CompletionSplit {
+            words: Vec::new(),
+            cur_idx: 0,
+            cur_word: String::new(),
+            segment_line,
+            segment_point: sentinel,
+        };
+    }
     let insert_at = tokens
         .iter()
         .take_while(|(_, te, _)| *te <= sentinel)
@@ -1433,11 +1457,15 @@ pub(crate) fn split_for_completion(line: &str, cursor: usize, wordbreaks: &str) 
 /// attempt_shell_completion): the command's own registration first; the
 /// `-D` default compspec when the command has none; the `-E` compspec only
 /// for completion attempted on an empty line, where `-D` serves as its
-/// fallback. Completing the first word itself is command-name completion —
-/// no compspec applies. (Probed against GNU bash 5.3.20: a `-D` hook fires
-/// for argument words of an unregistered command and for the empty line,
-/// an `-E` hook fires only for the empty line, and neither fires for a
-/// non-empty first word or for argument words outside its class.)
+/// fallback and `-I` as the last resort (bashline.c:1785-1792 — the
+/// post-chain INITIALWORD arm runs when the EMPTYCMD call found
+/// nothing). Completing the first word itself is command-name completion —
+/// no compspec applies, except `-I` (bashline.c:1682 loads it
+/// unconditionally; `-D` never governs the command word). (Probed
+/// against GNU bash 5.3.20: a `-D` hook fires for argument words of an
+/// unregistered command and for the empty line, an `-E` hook fires only
+/// for the empty line, and neither fires for a non-empty first word or
+/// for argument words outside its class.)
 pub(crate) fn resolve_compspec<'a>(
     specs: &'a CompletionRegistry,
     words: &[String],
@@ -1446,7 +1474,15 @@ pub(crate) fn resolve_compspec<'a>(
     progcomp_alias: bool,
 ) -> Option<&'a Compspec> {
     if words.is_empty() {
-        return specs.get("-E").or_else(|| specs.get("-D"));
+        // rubash#2856 (B5-11, W3): the empty-line arm is -E, then -D
+        // (pcomplete.c's DEFAULTCMD fallback inside
+        // programmable_completions), then -I (the bashline.c
+        // post-chain arm, which runs when the EMPTYCMD call found
+        // nothing and the position is a command position).
+        return specs
+            .get("-E")
+            .or_else(|| specs.get("-D"))
+            .or_else(|| specs.get("-I"));
     }
     if cur_idx == 0 {
         // The -I (initial word) compspec GOVERNS command-word
