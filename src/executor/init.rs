@@ -1185,6 +1185,7 @@ impl Executor {
             exec_replaced: false,
             subshell_signal_death: None,
             fg_sigint_unwind: false,
+            stopped_loop_breaking: 0,
             // rubash#1175: a process root IS its process's shell; the
             // image-replacement gates live at the exec dispatcher.
             owns_process_image: true,

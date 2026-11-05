@@ -133,6 +133,10 @@ impl Executor {
             }
             let condition_matched = executor.exit_code == 0;
             if condition_matched == until {
+                // rubash#2838: GNU execute_cmd.c:3819-3831 — a stop in
+                // the test set `breaking`; the test-side exit consumes
+                // one level (alias-reparse twin of execute_loop_command).
+                executor.consume_stopped_loop_breaking();
                 break Ok(());
             }
 
@@ -160,6 +164,12 @@ impl Executor {
                     break Err(ExecuteError::Continue(level - 1));
                 }
                 Err(error) => break Err(error),
+            }
+            // rubash#2838: GNU execute_cmd.c:3840-3843 — a SIGTSTP stop
+            // in the body set `breaking`; consume one level and abandon
+            // the loop (alias-reparse twin of execute_loop_command).
+            if executor.consume_stopped_loop_breaking() {
+                break Ok(());
             }
         });
 

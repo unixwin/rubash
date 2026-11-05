@@ -296,6 +296,12 @@ impl Executor {
             let body_flow = self.execute_select_body(&select_command.body)?;
             // GNU execute_cmd.c:3606 REAP() (execute_select_command).
             self.reap_dead_jobs_after_loop_body();
+            // rubash#2838: GNU execute_cmd.c:3609-3612
+            // execute_select_command — a SIGTSTP stop in the body set
+            // `breaking`; consume one level and abandon the select.
+            if self.consume_stopped_loop_breaking() {
+                break;
+            }
             match body_flow {
                 SelectBodyFlow::ContinueLoop => {
                     // GNU config-top.h:89 KSH_COMPATIBLE_SELECT tail: the

@@ -1006,6 +1006,24 @@ pub struct Executor {
     /// state: set only by a wait, consumed by the boundary that
     /// immediately follows it.
     fg_sigint_unwind: bool,
+    /// rubash#2838: GNU jobs.c:4335-4343 set_job_status_and_cleanup —
+    /// a foreground job stopped by SIGTSTP while `loop_level > 0`
+    /// sets `breaking = loop_level` ("Suspending a job with SIGTSTP
+    /// breaks all active loops"). A counter, not a bool: each
+    /// enclosing loop driver consumes one level post-body (GNU
+    /// execute_cmd.c:3108 for, :3277 arith-for, :3840 while/until,
+    /// :3609 select) and the while/until test-side exit consumes one
+    /// (:3819/:3827), so a stop inside N nested loops abandons all N.
+    /// Only SIGTSTP sets it — SIGTTIN/SIGTTOU stops never do, and
+    /// SIGINT is a separate arm (jobs.c:3316-3336). Set only by the
+    /// job-control foreground wait; `loop_depth` is already 0 inside
+    /// functions and subshells (GNU execute_cmd.c:5359/:1642), so the
+    /// depth read at the wait is the live loop level. The list walker
+    /// treats a standing count like GNU execute_cmd.c:635
+    /// execute_command_internal (no further command executes until a
+    /// loop driver consumes it); loop drivers always consume it, so it
+    /// never reaches the reader top.
+    stopped_loop_breaking: usize,
     /// rubash#1175: true only on the executor that IS this OS process's
     /// shell (constructed by Executor::new for a real process root).
     /// Fork-copy clones (command_substitution_executor) construct with

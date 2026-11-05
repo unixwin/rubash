@@ -3525,6 +3525,14 @@ impl Executor {
                     }
                 }
             }
+            // rubash#2838: GNU execute_cmd.c:3252-3256
+            // execute_arith_for_command — a stop in the test set
+            // `breaking`; consume one level and abandon the loop,
+            // before the test-outcome break (a false test must not
+            // let the count leak to an enclosing loop).
+            if self.consume_stopped_loop_breaking() {
+                break;
+            }
             if test_skipped {
                 break;
             }
@@ -3610,6 +3618,13 @@ impl Executor {
                     self.shell_state.loop_depth -= 1;
                     return Err(error);
                 }
+            }
+            // rubash#2838: GNU execute_cmd.c:3277-3280
+            // execute_arith_for_command — a SIGTSTP stop in the body set
+            // `breaking`; consume one level and abandon the loop, before
+            // the step expression (GNU checks breaking before stepping).
+            if self.consume_stopped_loop_breaking() {
+                break;
             }
 
             // execute_cmd.c:3191-3199: the skipped update evaluates as 0 —
@@ -4473,6 +4488,11 @@ impl Executor {
             self.run_pending_signal_traps()?;
             let condition_matched = self.exit_code == 0;
             if condition_matched == loop_command.until {
+                // rubash#2838: GNU execute_cmd.c:3819-3831
+                // execute_while_or_until — a stop in the test set
+                // `breaking`; the test-side exit consumes one level so
+                // the count does not leak to an enclosing loop.
+                self.consume_stopped_loop_breaking();
                 break;
             }
 
@@ -4508,6 +4528,14 @@ impl Executor {
                     return Err(ExecuteError::Continue(level - 1));
                 }
                 Err(error) => return Err(error),
+            }
+            // rubash#2838: GNU execute_cmd.c:3840-3843
+            // execute_while_or_until — a SIGTSTP stop in the body set
+            // `breaking`; consume one level and abandon the loop. The
+            // tail below keeps last_body_status (148 for the stopped
+            // job): GNU returns the body status.
+            if self.consume_stopped_loop_breaking() {
+                break;
             }
         }
 
