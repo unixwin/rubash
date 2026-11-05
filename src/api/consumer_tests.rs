@@ -4980,3 +4980,423 @@ fn issue863_gap11_fallback_arms_mark_directories() {
     );
     assert!(outcome.policy.filenames_intent);
 }
+
+// ---------------------------------------------------------------
+// niubash#863 GAP-13: the bind/readline assembly faces. The
+// registry is the `bind` builtin's data plane and the host
+// mirrors it through Session::bind_view (GAP-3), but the two
+// assembly verbs — registering a binding and triggering the
+// once-per-process inputrc read — existed only as tier-C
+// executor seam calls, and the host built the engine's internal
+// BindEntry by hand to register anything. These pins drive the
+// registry through the Session faces only and read it back
+// through Session::bind_view / the `bind` builtin's own dumps.
+// ---------------------------------------------------------------
+
+fn issue863_gap13_session() -> Session {
+    // An empty INPUTRC keeps the host's own inputrc out of the
+    // registry: the first `bind` runs initialize_readline.
+    #[cfg(unix)]
+    const EMPTY_INPUTRC: &str = "/dev/null";
+    #[cfg(windows)]
+    const EMPTY_INPUTRC: &str = "NUL";
+    Session::builder()
+        .env("INPUTRC", EMPTY_INPUTRC)
+        .build()
+        .expect("session builds")
+}
+
+fn issue863_gap13_session_with_inputrc(path: &std::path::Path) -> Session {
+    Session::builder()
+        .env("INPUTRC", path.to_string_lossy())
+        .build()
+        .expect("session builds")
+}
+
+#[test]
+fn issue863_gap13_register_binding_reads_back_through_bind_view() {
+    let mut session = issue863_gap13_session();
+    let g0 = session.bind_view().generation;
+
+    // None keymap resolves to the registry's current keymap at
+    // registration time; the three kinds round-trip verbatim.
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "beginning-of-line".to_string(),
+        },
+        None,
+    );
+    let view = session.bind_view();
+    assert_eq!(view.generation, g0 + 1);
+    let entry = issue863_gap3_entry(&view, r"\C-a");
+    assert_eq!(entry.keymap, "emacs-standard");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Function {
+            name: "beginning-of-line".to_string()
+        }
+    );
+    assert_eq!(entry.dump, r#""\C-a": beginning-of-line"#);
+
+    session.register_binding(
+        r"\C-t",
+        BindKindView::Macro {
+            text: "ins-macro".to_string(),
+        },
+        Some("vi-insert"),
+    );
+    let view = session.bind_view();
+    assert_eq!(view.generation, g0 + 2);
+    let entry = issue863_gap3_entry(&view, r"\C-t");
+    assert_eq!(entry.keymap, "vi-insert");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Macro {
+            text: "ins-macro".to_string()
+        }
+    );
+    assert_eq!(entry.dump, r#""\C-t": "ins-macro""#);
+
+    session.register_binding(
+        r"\C-g",
+        BindKindView::Execute {
+            command: "echo bound-c-g".to_string(),
+        },
+        None,
+    );
+    let view = session.bind_view();
+    assert_eq!(view.generation, g0 + 3);
+    let entry = issue863_gap3_entry(&view, r"\C-g");
+    assert_eq!(entry.keymap, "emacs-standard");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Execute {
+            command: "echo bound-c-g".to_string()
+        }
+    );
+    assert_eq!(entry.dump, r#""\C-g" "echo bound-c-g""#);
+
+    // The view normalizes the keymap alias: "vi" folds to
+    // "vi-movement" (normalize_keymap_name, bind.def:37-40).
+    session.register_binding(
+        r"\C-b",
+        BindKindView::Function {
+            name: "backward-char".to_string(),
+        },
+        Some("vi"),
+    );
+    let view = session.bind_view();
+    assert_eq!(issue863_gap3_entry(&view, r"\C-b").keymap, "vi-movement");
+}
+
+#[test]
+fn issue863_gap13_reregister_replaces_in_place_and_bumps_generation_once() {
+    let mut session = issue863_gap13_session();
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "beginning-of-line".to_string(),
+        },
+        None,
+    );
+    let before = session.bind_view();
+    assert_eq!(
+        before
+            .entries
+            .iter()
+            .filter(|entry| entry.keyseq == r"\C-a")
+            .count(),
+        1
+    );
+
+    // Same keyseq, same keymap, different function: replace in
+    // place (no duplicate) and bump the generation by exactly one.
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "backward-char".to_string(),
+        },
+        None,
+    );
+    let view = session.bind_view();
+    assert_eq!(view.generation, before.generation + 1);
+    let matches: Vec<_> = view
+        .entries
+        .iter()
+        .filter(|entry| entry.keyseq == r"\C-a")
+        .collect();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        matches[0].kind,
+        BindKindView::Function {
+            name: "backward-char".to_string()
+        }
+    );
+    assert_eq!(matches[0].dump, r#""\C-a": backward-char"#);
+}
+
+#[test]
+fn issue863_gap13_register_clears_bind_r_tombstone() {
+    let mut session = issue863_gap13_session();
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "beginning-of-line".to_string(),
+        },
+        None,
+    );
+    issue863_gap3_run(&mut session, r"bind -r '\C-a'");
+    let view = session.bind_view();
+    assert!(view.entries.iter().all(|entry| entry.keyseq != r"\C-a"));
+    assert!(view
+        .removals
+        .iter()
+        .any(|removal| removal.keyseq == r"\C-a"));
+
+    // Registering the sequence again through the face clears its
+    // tombstone — the same sink the `bind` builtin writes.
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "beginning-of-line".to_string(),
+        },
+        None,
+    );
+    let view = session.bind_view();
+    assert!(view
+        .removals
+        .iter()
+        .all(|removal| removal.keyseq != r"\C-a"));
+    assert!(view.entries.iter().any(|entry| entry.keyseq == r"\C-a"));
+}
+
+#[test]
+fn issue863_gap13_face_writes_visible_to_bind_builtin_dump() {
+    let dir = temp_dir("gap13-dump");
+    let dir_text = dir.to_string_lossy().into_owned();
+    let mut session = issue863_gap13_session();
+    session.variables().set("OUT", &dir_text);
+    session.register_binding(
+        r"\C-a",
+        BindKindView::Function {
+            name: "beginning-of-line".to_string(),
+        },
+        None,
+    );
+    session.register_binding(
+        r"\C-t",
+        BindKindView::Macro {
+            text: "ins-macro".to_string(),
+        },
+        None,
+    );
+    session.register_binding(
+        r"\C-g",
+        BindKindView::Execute {
+            command: "echo bound-c-g".to_string(),
+        },
+        None,
+    );
+    // One pool, two doors: the face's writes show up in the
+    // `bind` builtin's own dumps.
+    issue863_gap3_run(&mut session, "bind -s > \"$OUT/macros.txt\"");
+    assert_eq!(
+        read(&dir, "macros.txt").lines().collect::<Vec<_>>(),
+        vec![r#""\C-t": "ins-macro""#]
+    );
+    issue863_gap3_run(&mut session, "bind -X > \"$OUT/exec.txt\"");
+    assert_eq!(
+        read(&dir, "exec.txt").lines().collect::<Vec<_>>(),
+        vec![r#""\C-g" "echo bound-c-g""#]
+    );
+    issue863_gap3_run(&mut session, "bind -p > \"$OUT/funcs.txt\"");
+    assert!(read(&dir, "funcs.txt")
+        .lines()
+        .any(|line| line == r#""\C-a": beginning-of-line"#));
+}
+
+#[test]
+fn issue863_gap13_initialize_readline_loads_inputrc_and_second_call_is_noop() {
+    let dir = temp_dir("gap13-initrc");
+    let rc_path = dir.join(".inputrc");
+    std::fs::write(
+        &rc_path,
+        "\"\\C-t\": \"ins-macro\"\nset editing-mode vi\nset keyseq-timeout 250\n",
+    )
+    .expect("inputrc written");
+    let mut session = issue863_gap13_session_with_inputrc(&rc_path);
+    session.initialize_readline();
+    let view = session.bind_view();
+    assert_eq!(view.editing_mode.as_deref(), Some("vi"));
+    assert_eq!(issue863_gap3_variable(&view, "keyseq-timeout"), Some("250"));
+    let entry = issue863_gap3_entry(&view, r"\C-t");
+    assert_eq!(
+        entry.kind,
+        BindKindView::Macro {
+            text: "ins-macro".to_string()
+        }
+    );
+
+    // The file changes between calls — the second call must not
+    // re-read it (re-reading is the separate `bind -f` route).
+    std::fs::write(
+        &rc_path,
+        "\"\\C-y\": \"second-macro\"\nset editing-mode emacs\nset keyseq-timeout 300\n",
+    )
+    .expect("inputrc rewritten");
+    session.initialize_readline();
+    let view = session.bind_view();
+    assert_eq!(view.editing_mode.as_deref(), Some("vi"));
+    assert_eq!(issue863_gap3_variable(&view, "keyseq-timeout"), Some("250"));
+    assert!(view.entries.iter().all(|entry| entry.keyseq != r"\C-y"));
+}
+
+#[test]
+fn issue863_gap13_initialize_flag_poisoned_when_home_empty_first() {
+    // U-1 through the Session face: the first call with HOME
+    // empty sets the engine flag and reads nothing; a later call
+    // with HOME set must not re-read the file. GNU poisons the
+    // same way (bashline.c:451-456 early return on the flag, :646
+    // flag set unconditionally after rl_initialize). The session
+    // is built plain — NOT with INPUTRC=/dev/null, which would
+    // take precedence over the HOME path and mask the probe.
+    let dir = temp_dir("gap13-u1");
+    std::fs::write(dir.join(".inputrc"), "set editing-mode vi\n").expect("inputrc written");
+    let dir_text = dir.to_string_lossy().into_owned();
+
+    // Control: HOME set from the start — the file IS read.
+    let mut control = Session::builder().build().expect("session builds");
+    control.variables().unset("INPUTRC");
+    control.variables().set("HOME", &dir_text);
+    control.initialize_readline();
+    assert_eq!(
+        control.bind_view().editing_mode.as_deref(),
+        Some("vi"),
+        "control: inputrc read when HOME is set before the first call"
+    );
+
+    let mut session = Session::builder().build().expect("session builds");
+    session.variables().unset("INPUTRC");
+    session.variables().set("HOME", "");
+    session.initialize_readline();
+    assert_eq!(
+        session.bind_view().editing_mode.as_deref(),
+        None,
+        "first call with HOME empty reads nothing"
+    );
+    session.variables().set("HOME", &dir_text);
+    session.initialize_readline();
+    assert_eq!(
+        session.bind_view().editing_mode.as_deref(),
+        None,
+        "U-1: second call after HOME is set must NOT re-read the inputrc"
+    );
+}
+
+#[test]
+fn issue863_gap13_is_known_keymap() {
+    let session = issue863_gap13_session();
+    for name in [
+        "emacs",
+        "emacs-standard",
+        "emacs-meta",
+        "emacs-ctlx",
+        "vi",
+        "vi-move",
+        "vi-command",
+        "vi-insert",
+    ] {
+        assert!(
+            session.is_known_keymap(name),
+            "{name} is one of the eight GNU keymap names (bind.def:37-40)"
+        );
+    }
+    assert!(!session.is_known_keymap("bogus"));
+    assert!(!session.is_known_keymap(""));
+    assert!(!session.is_known_keymap("VI"));
+}
+
+#[test]
+fn issue863_gap13_applied_invocation_shopt_flag_oracle_arms() {
+    // rubash#2848: the retained invocation's explicit shopt flag
+    // — the read `enter_interactive` needs for `expand_aliases`
+    // (last entry wins, default true). GNU oracle arms, as the
+    // face's Option values (the host maps None to the interactive
+    // default, ON): silent + `-i` -> None; `+O expand_aliases
+    // -i` -> Some(false), OFF wins; `-O expand_aliases -i` ->
+    // Some(true), ON.
+    let mut silent = Session::builder().build().expect("session builds");
+    silent
+        .apply_invocation_before_startup(&gap12_parse(&["-i"]))
+        .expect("apply succeeds");
+    assert_eq!(
+        silent.applied_invocation_shopt_flag("expand_aliases"),
+        None,
+        "silent invocation says nothing about expand_aliases"
+    );
+
+    let mut off = Session::builder().build().expect("session builds");
+    off.apply_invocation_before_startup(&gap12_parse(&["+O", "expand_aliases", "-i"]))
+        .expect("apply succeeds");
+    assert_eq!(
+        off.applied_invocation_shopt_flag("expand_aliases"),
+        Some(false),
+        "+O expand_aliases -i: the explicit OFF wins over the interactive default"
+    );
+
+    let mut on = Session::builder().build().expect("session builds");
+    on.apply_invocation_before_startup(&gap12_parse(&["-O", "expand_aliases", "-i"]))
+        .expect("apply succeeds");
+    assert_eq!(
+        on.applied_invocation_shopt_flag("expand_aliases"),
+        Some(true),
+        "-O expand_aliases -i: explicitly ON"
+    );
+
+    // No invocation applied at all: None, like silence.
+    let plain = Session::builder().build().expect("session builds");
+    assert_eq!(plain.applied_invocation_shopt_flag("expand_aliases"), None);
+    // An unrelated flag does not leak into the answer.
+    assert_eq!(
+        silent.applied_invocation_shopt_flag("extglob"),
+        None,
+        "silent invocation says nothing about extglob either"
+    );
+    let mut other = Session::builder().build().expect("session builds");
+    other
+        .apply_invocation_before_startup(&gap12_parse(&["-O", "extglob"]))
+        .expect("apply succeeds");
+    assert_eq!(other.applied_invocation_shopt_flag("extglob"), Some(true));
+    assert_eq!(other.applied_invocation_shopt_flag("expand_aliases"), None);
+}
+
+#[test]
+fn issue863_gap13_applied_invocation_shopt_flag_last_entry_wins() {
+    // The argv walk records every -O/+O pair in order; the face
+    // answers from the last entry for the name (shell.c:931-958).
+    let mut off = Session::builder().build().expect("session builds");
+    off.apply_invocation_before_startup(&gap12_parse(&[
+        "-O",
+        "expand_aliases",
+        "+O",
+        "expand_aliases",
+    ]))
+    .expect("apply succeeds");
+    assert_eq!(
+        off.applied_invocation_shopt_flag("expand_aliases"),
+        Some(false)
+    );
+    let mut on = Session::builder().build().expect("session builds");
+    on.apply_invocation_before_startup(&gap12_parse(&[
+        "+O",
+        "expand_aliases",
+        "-O",
+        "expand_aliases",
+    ]))
+    .expect("apply succeeds");
+    assert_eq!(
+        on.applied_invocation_shopt_flag("expand_aliases"),
+        Some(true)
+    );
+}
