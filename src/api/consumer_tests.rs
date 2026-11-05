@@ -2110,3 +2110,158 @@ fn issue863_gap4_env_fingerprint_stability_and_sensitivity() {
     assert_eq!(issue863_gap4_env_get(&after_export, "GAP4_FP"), Some("2"));
     assert_ne!(after_export.env_fingerprint, after_change.env_fingerprint);
 }
+
+// ---------------------------------------------------------------
+// niubash#863 GAP-5: the host adopts the path resolver through
+// Session faces only — the `&self` instance form, the two
+// associated env forms, and the associated display form. The
+// pins are parity pins: for every shape, the Session face's
+// result equals the tier-C face's result, because both
+// delegate to the one resolver in `executor::path`. The ruled
+// path contract itself (bare `/` is the payload root,
+// Option B, the drive spellings) is pinned by the resolver's
+// own suites; here only the consumption shape is.
+// ---------------------------------------------------------------
+
+use std::collections::HashMap;
+
+fn issue863_gap5_session() -> Session {
+    Session::builder().build().expect("session builds")
+}
+
+fn issue863_gap5_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+/// The shape matrix the instance and from-env pins share:
+/// the payload root, virtual-system spellings, both drive
+/// spellings, relative shapes, the device/proc classes, and
+/// the empty string.
+const ISSUE863_GAP5_SHAPES: &[&str] = &[
+    "/",
+    "/tmp",
+    "/etc/profile",
+    "/d/.",
+    "/mnt/d/",
+    "D:/",
+    "plainname",
+    "foo/bar",
+    "/dev/null",
+    "/proc/self/fd",
+    "",
+];
+
+fn issue863_gap5_populated_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert("HOME".to_string(), "/home/gap5".to_string());
+    env.insert("TMPDIR".to_string(), "/mnt/d/tmp".to_string());
+    env.insert("PATH".to_string(), "/usr/bin:/mnt/d/tools".to_string());
+    env.insert("USERPROFILE".to_string(), "D:\\Users\\gap5".to_string());
+    env
+}
+
+#[test]
+fn issue863_gap5_instance_face_matches_executor_matrix() {
+    let session = issue863_gap5_session();
+    // The instance face is `&self`: a shared reference is all
+    // a host consumer ever holds. That this compiles is half
+    // the pin; the matrix below is the other.
+    let shared: &Session = &session;
+    for shape in ISSUE863_GAP5_SHAPES {
+        assert_eq!(
+            shared.resolve_shell_path(shape),
+            shared.executor().resolve_shell_path(shape),
+            "instance parity for {shape:?}"
+        );
+    }
+}
+
+#[test]
+fn issue863_gap5_instance_face_reads_live_session_state() {
+    let mut session = issue863_gap5_session();
+    // The face reads the session's live environment (the
+    // executor form feeds `&self.shell_state.env_vars`), so
+    // parity must survive the state moving under it: a cd, a
+    // plain assignment, an export, a cd back.
+    let steps = ["cd /tmp", "GAP5_MARK=one", "export GAP5_MARK", "cd /"];
+    for step in steps {
+        issue863_gap5_run(&mut session, step);
+        let shared: &Session = &session;
+        for shape in ISSUE863_GAP5_SHAPES {
+            assert_eq!(
+                shared.resolve_shell_path(shape),
+                shared.executor().resolve_shell_path(shape),
+                "instance parity for {shape:?} after {step:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue863_gap5_from_env_matches_executor_assoc() {
+    // The associated form resolves against a caller-supplied
+    // map — an empty one and a populated one — and must agree
+    // with the executor's associated form on every shape,
+    // because both call the one `executor::path` function.
+    let envs = [HashMap::new(), issue863_gap5_populated_env()];
+    for env in &envs {
+        for shape in ISSUE863_GAP5_SHAPES {
+            assert_eq!(
+                Session::resolve_shell_path_from_env(shape, env),
+                Executor::resolve_shell_path_from_env(shape, env),
+                "from-env parity for {shape:?} with env {env:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue863_gap5_process_entries_match_executor_assoc() {
+    // PATH-shaped inputs: one shell PATH entry resolved to
+    // its native directories, Session face against the
+    // executor's associated form, under both env shapes.
+    let inputs = ["/usr/bin", "/mnt/d/tools", "bin", "/d/.", "D:/tools", ""];
+    let envs = [HashMap::new(), issue863_gap5_populated_env()];
+    for env in &envs {
+        for input in inputs {
+            assert_eq!(
+                Session::resolve_shell_path_process_entries_from_env(input, env),
+                Executor::resolve_shell_path_process_entries_from_env(input, env),
+                "process-entries parity for {input:?} with env {env:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn issue863_gap5_display_path_matches_module_function() {
+    // The display form is three-way pinned: the Session
+    // associated face, the module function it delegates to,
+    // and the executor's script-identity wrapper over the
+    // same function must all spell a path identically.
+    let session = issue863_gap5_session();
+    let inputs = [
+        "D:\\Users\\cmx",
+        "D:/Users/cmx",
+        "/c/Users/cmx",
+        "\\\\?\\C:\\Users\\cmx",
+        "//?/C:/Users/cmx",
+        "/tmp",
+        "relative/name",
+        "",
+    ];
+    for input in inputs {
+        let expected = crate::executor::shell_pwd_display_path(input);
+        assert_eq!(
+            Session::shell_pwd_display_path(input),
+            expected,
+            "display parity (module function) for {input:?}"
+        );
+        assert_eq!(
+            session.executor().script_identity_display_path(input),
+            expected,
+            "display parity (executor wrapper) for {input:?}"
+        );
+    }
+}
