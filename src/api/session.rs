@@ -1186,6 +1186,28 @@ impl Session {
             .map(|history| history.borrow().entries.clone())
     }
 
+    /// Install the host's [`HistoryProvider`] after build
+    /// (niubash#863 GAP-10): the tier-A form of the executor
+    /// setter the interactive single-stream discipline used
+    /// to reach through the tier-C seam. The provider becomes
+    /// the session's history list — the history builtin and
+    /// history expansion read it in preference to the
+    /// engine's own list (the provider precedence in
+    /// `execute_history`).
+    ///
+    /// The face mirrors the setter exactly: replace-always
+    /// and unguarded — installing a second provider replaces
+    /// the first, and command-substitution executors cloned
+    /// before the call keep the handle they cloned with.
+    /// Install-once discipline (a host installs at most once,
+    /// at interactive entry, so script routes of the same
+    /// construction stay provider-free) is the host's guard
+    /// to keep, not a rule of this face. The build-time
+    /// spelling is [`SessionBuilder::history_provider`].
+    pub fn set_history_provider(&mut self, provider: SharedHistoryProvider) {
+        self.executor.set_history_provider(provider);
+    }
+
     /// Install a session history list holding `entries`
     /// (oldest first), replacing any list the session has.
     pub fn set_history_entries(&mut self, entries: Vec<String>) {

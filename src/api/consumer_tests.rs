@@ -3943,3 +3943,150 @@ fn issue863_gap9_token_view_posix_mode() {
         "in posix mode `ls` is `time`'s argument"
     );
 }
+
+// ---------------------------------------------------------------------------
+// niubash#863 GAP-10: the history-provider install is a Session
+// contract face. The face is a pure lift of the executor setter:
+// replace-always, unguarded; install-once stays the host's guard.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default)]
+struct Gap10Provider {
+    entries: Vec<String>,
+}
+
+impl crate::history::HistoryProvider for Gap10Provider {
+    fn entries(&mut self) -> std::io::Result<Vec<String>> {
+        Ok(self.entries.clone())
+    }
+    fn clear(&mut self) -> std::io::Result<()> {
+        self.entries.clear();
+        Ok(())
+    }
+    fn append(&mut self, command: String) -> std::io::Result<()> {
+        self.entries.push(command);
+        Ok(())
+    }
+    fn replace(&mut self, entries: Vec<String>) -> std::io::Result<()> {
+        self.entries = entries;
+        Ok(())
+    }
+    fn write_history(&mut self, path: &str) -> std::io::Result<()> {
+        std::fs::write(path, self.entries.join("\n"))
+    }
+    fn read_history(&mut self, path: &str) -> std::io::Result<()> {
+        let text = std::fs::read_to_string(path)?;
+        self.entries = text.lines().map(str::to_string).collect();
+        Ok(())
+    }
+    fn append_history(&mut self, path: &str) -> std::io::Result<()> {
+        let mut text = std::fs::read_to_string(path).unwrap_or_default();
+        for entry in &self.entries {
+            text.push_str(entry);
+            text.push('\n');
+        }
+        std::fs::write(path, text)
+    }
+    fn read_new_history(&mut self, path: &str) -> std::io::Result<()> {
+        let text = std::fs::read_to_string(path)?;
+        for line in text.lines() {
+            if !self.entries.iter().any(|entry| entry == line) {
+                self.entries.push(line.to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn issue863_gap10_provider(entries: &[&str]) -> crate::history::SharedHistoryProvider {
+    Rc::new(RefCell::new(Gap10Provider {
+        entries: entries.iter().map(|entry| entry.to_string()).collect(),
+    }))
+}
+
+fn issue863_gap10_run(session: &mut Session, source: &str) {
+    let outcome = session.run(source, &RunOptions::new()).expect("run");
+    assert_eq!(outcome.status, 0, "run of {source:?}");
+}
+
+#[test]
+fn issue863_gap10_install_via_session_face_reaches_history_faces() {
+    use super::session::PreparedLine;
+    let dir = temp_dir("gap10-install");
+    let mut session = issue863_gap8_session();
+    // Install AFTER build, through the Session face alone (no
+    // builder injection, no executor seam).
+    session.set_history_provider(issue863_gap10_provider(&["echo alpha", "echo beta"]));
+
+    // History expansion resolves against the provider's list.
+    issue863_gap10_run(&mut session, "set -H");
+    assert_eq!(
+        session.prepare_line("!!"),
+        PreparedLine::Execute("echo beta".to_string())
+    );
+
+    // The history builtin reads the provider's list (provider
+    // precedence over the engine's own session list).
+    let out = dir.join("hist.txt");
+    issue863_gap10_run(
+        &mut session,
+        &format!("history > \"{}\"", out.to_string_lossy()),
+    );
+    let text = read(&dir, "hist.txt");
+    assert!(
+        text.contains("echo alpha"),
+        "provider entry listed: {text:?}"
+    );
+    assert!(
+        text.contains("echo beta"),
+        "provider entry listed: {text:?}"
+    );
+}
+
+#[test]
+fn issue863_gap10_second_install_replaces_first() {
+    let dir = temp_dir("gap10-replace");
+    let mut session = issue863_gap8_session();
+    session.set_history_provider(issue863_gap10_provider(&["echo first-provider"]));
+    // Replace-always: the face carries no install-once guard;
+    // the second install wins outright.
+    session.set_history_provider(issue863_gap10_provider(&["echo second-provider"]));
+    let out = dir.join("hist.txt");
+    issue863_gap10_run(
+        &mut session,
+        &format!("history > \"{}\"", out.to_string_lossy()),
+    );
+    let text = read(&dir, "hist.txt");
+    assert!(
+        text.contains("echo second-provider"),
+        "second install is the list: {text:?}"
+    );
+    assert!(
+        !text.contains("echo first-provider"),
+        "first install fully replaced: {text:?}"
+    );
+}
+
+#[test]
+fn issue863_gap10_no_provider_default_unchanged() {
+    let dir = temp_dir("gap10-default");
+    let mut session = issue863_gap8_session();
+    // No install: the engine's own session list is the plane,
+    // exactly as before the face existed.
+    issue863_gap10_run(&mut session, "set -o history");
+    issue863_gap10_run(&mut session, "history -s \"echo gap10-engine-list\"");
+    let out = dir.join("hist.txt");
+    issue863_gap10_run(
+        &mut session,
+        &format!("history > \"{}\"", out.to_string_lossy()),
+    );
+    let text = read(&dir, "hist.txt");
+    assert!(
+        text.contains("echo gap10-engine-list"),
+        "engine list serves the builtin: {text:?}"
+    );
+    assert_eq!(
+        session.history_entries().map(|entries| entries.concat()),
+        Some("echo gap10-engine-list".to_string())
+    );
+}
