@@ -2454,7 +2454,10 @@ fn issue863_gap6_variable_value_matches_get_env_matrix() {
         );
     }
     // Spot values, so the matrix is not only self-referential.
-    assert_eq!(shared.variable_value("GAP6_PLAIN"), Some("alpha".to_string()));
+    assert_eq!(
+        shared.variable_value("GAP6_PLAIN"),
+        Some("alpha".to_string())
+    );
     assert_eq!(shared.variable_value("GAP6_EMPTY"), Some(String::new()));
     assert_eq!(shared.variable_value("GAP6_INT"), Some("42".to_string()));
     assert_eq!(shared.variable_value("GAP6_RO"), Some("locked".to_string()));
@@ -2548,7 +2551,10 @@ fn issue863_gap6_faces_read_live_state() {
     assert!(issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE").is_none());
 
     issue863_gap6_run(&mut session, "GAP6_LIVE=first");
-    assert_eq!(session.variable_value("GAP6_LIVE"), Some("first".to_string()));
+    assert_eq!(
+        session.variable_value("GAP6_LIVE"),
+        Some("first".to_string())
+    );
     assert_eq!(
         issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE"),
         Some("first")
@@ -2559,7 +2565,10 @@ fn issue863_gap6_faces_read_live_state() {
     );
 
     issue863_gap6_run(&mut session, "GAP6_LIVE=second");
-    assert_eq!(session.variable_value("GAP6_LIVE"), Some("second".to_string()));
+    assert_eq!(
+        session.variable_value("GAP6_LIVE"),
+        Some("second".to_string())
+    );
     assert_eq!(
         issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE"),
         Some("second")
