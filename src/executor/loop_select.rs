@@ -315,6 +315,14 @@ impl Executor {
                 }
                 Err(error) => return Err(error),
             }
+            // rubash#2838: GNU execute_cmd.c:3108-3111
+            // execute_for_command — a SIGTSTP stop in the body set
+            // `breaking`; consume one level and abandon the loop. The
+            // body's status (148 for the stopped job) stays in
+            // exit_code: GNU returns the body status.
+            if self.consume_stopped_loop_breaking() {
+                break;
+            }
         }
 
         if !ran_body {

@@ -3238,9 +3238,13 @@ impl Executor {
             // wait_for_fg_job_control, rubash#2398): GNU reports the
             // stop as fg's own output — the notice rides fg's stderr
             // so it lands after the command text printed above, in
-            // the order wait_for's notify produces it.
+            // the order wait_for's notify produces it. Same
+            // jobs.c:4690-4691 leading "\n" as the foreground-wait
+            // print (rubash#2834): the JSTOPPED arm prints it for
+            // every stop notification, whichever wait observed it.
             WaitPidOutcome::Stopped { stop_signal, .. } => {
                 if let Some(line) = self.format_stopped_job_notice(pid) {
+                    let _ = stderr.write_all(b"\n");
                     let _ = stderr.write_all(line.as_bytes());
                 }
                 Ok(128 + stop_signal)
