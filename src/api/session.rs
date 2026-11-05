@@ -33,6 +33,7 @@ use super::syntax::{SyntaxView, TokenView};
 use super::views::{OptionsView, StateViews, VariablesView};
 use crate::executor::Executor;
 use crate::history::{SessionHistory, SharedHistoryProvider};
+use crate::invocation::ShellInvocation;
 use crate::script_driver;
 
 /// How a run ended, as a value the host acts on (§5.2): an
@@ -404,6 +405,15 @@ pub struct Session {
     /// live copy engine decisions read; this is the as-built
     /// record the host reads back.
     shape: InvocationShape,
+    /// The invocation applied post-build through
+    /// [`Session::apply_invocation_before_startup`]
+    /// (niubash#863 GAP-12), retained so
+    /// [`Session::finish_invocation_startup`] can run the second
+    /// phase without the host holding a clone: the two-phase
+    /// split (restrictions must not be live while startup files
+    /// source, GNU shell.c:679-744) is a Session lifecycle, not
+    /// host state. `None` until a successful apply.
+    applied_invocation: Option<ShellInvocation>,
     /// Q5 made literal: whatever the executor's own auto traits
     /// do, a `Session` never becomes `Send`/`Sync` by accident.
     _single_thread: PhantomData<Rc<()>>,
@@ -1121,6 +1131,103 @@ impl Session {
     /// [`SessionBuilder::interactive`].
     pub fn invocation_shape(&self) -> InvocationShape {
         self.shape
+    }
+
+    /// The invocation shape as currently APPLIED to this session
+    /// (niubash#863 GAP-12): the executor's typed invocation
+    /// state — interactive/login as applied, including
+    /// `enter_interactive` and mark corrections — read back as
+    /// a value. This is the live read;
+    /// [`Session::invocation_shape`] is the build-time
+    /// declaration, and the two can disagree: a post-build apply
+    /// (or a mark correction) moves the live facts without
+    /// touching the declared record. The read consults the typed
+    /// state only, never the exported `__RUBASH_*` carriers
+    /// (rubash#2129: a respawned child must not adopt a parent's
+    /// login shape from an inherited carrier). `respawn` is the
+    /// construction fact carried from the declared shape — it is
+    /// not an applied fact and never changes post-build.
+    pub fn applied_invocation_shape(&self) -> InvocationShape {
+        InvocationShape {
+            interactive: self.executor.invocation_interactive(),
+            login: self.executor.invocation_login(),
+            respawn: self.shape.respawn,
+        }
+    }
+
+    /// Apply a parsed [`ShellInvocation`] to this live session,
+    /// before startup files run (niubash#863 GAP-12): the tier-A
+    /// form of the host's `apply_invocation_before_startup` —
+    /// the apply face GAP-7 deferred, paired here with its read
+    /// face [`Session::applied_invocation_shape`]. The body is
+    /// `ShellInvocation::apply_to_executor_before_startup` plus
+    /// the hop the host used to write by hand: when the
+    /// invocation is interactive, the typed interactive flag is
+    /// armed through `set_invocation_shape` — the apply body
+    /// itself arms `expand_aliases` for interactive and
+    /// `mark_login_shell` for login, but never the typed
+    /// interactive flag, so without this step the applied shape
+    /// would lie. Apply is the single writer
+    /// of the applied shape.
+    ///
+    /// The invocation is retained by the Session, so
+    /// [`Session::finish_invocation_startup`] can run the second
+    /// phase without the host holding a clone (the host's
+    /// `startup_invocation` field deletes). A failed apply
+    /// retains nothing: the session is left as the partial apply
+    /// left it, and finish is a no-op until a successful apply.
+    pub fn apply_invocation_before_startup(
+        &mut self,
+        invocation: &ShellInvocation,
+    ) -> Result<(), String> {
+        invocation.apply_to_executor_before_startup(&mut self.executor)?;
+        if invocation.interactive {
+            self.executor.set_invocation_shape(true, invocation.login);
+        }
+        self.applied_invocation = Some(invocation.clone());
+        Ok(())
+    }
+
+    /// Activate the retained invocation's restrictions after
+    /// startup files have run (niubash#863 GAP-12): the second
+    /// phase of [`Session::apply_invocation_before_startup`].
+    /// Restrictions must not be live while startup files source
+    /// (GNU shell.c:679-744), so this call belongs after the
+    /// host's startup chain. A no-op when no invocation was
+    /// applied (nothing retained to activate), and idempotent:
+    /// a second call re-applies the same restriction.
+    pub fn finish_invocation_startup(&mut self) {
+        if let Some(invocation) = &self.applied_invocation {
+            invocation.finish_startup(&mut self.executor);
+        }
+    }
+
+    /// Remove a name from the session's environment table with
+    /// restore-grade semantics (niubash#863 GAP-12): a pure lift
+    /// of `Executor::remove_env`. The env-table entry is removed,
+    /// the typed invocation flags are cleared when the name is a
+    /// shape carrier (`__RUBASH_INTERACTIVE` /
+    /// `__RUBASH_LOGIN_SHELL`), the removal is journaled so the
+    /// session's Drop restores the birth value, and the typed
+    /// shell-variable cell is left as-is. This is NOT the
+    /// `unset` builtin's leaf ([`VariablesView::unset`]): that
+    /// leaf refuses readonly names, drops the typed cell, and
+    /// neither clears shape flags nor journals — the side-by-side
+    /// differential is pinned in the GAP-12 consumer pins.
+    pub fn remove_env(&mut self, name: &str) {
+        self.executor.remove_env(name);
+    }
+
+    /// Mark this session a login shell through the login funnel
+    /// (niubash#863 GAP-12): a pure lift of
+    /// `Executor::mark_login_shell` — the carrier and the
+    /// `login_shell` shopt are written together, so they can
+    /// never split. The companion of the apply face for routes
+    /// whose parse never reaches a `ShellInvocation` (the legacy
+    /// `-c -l` route): the route classification itself stays
+    /// host knowledge; this face only does the marking.
+    pub fn mark_login_shell(&mut self) {
+        self.executor.mark_login_shell();
     }
 
     pub fn cwd(&self) -> &Path {
@@ -1938,6 +2045,7 @@ impl SessionBuilder {
             argv0: self.argv0,
             interactive: self.interactive,
             shape: self.shape,
+            applied_invocation: None,
             _single_thread: PhantomData,
         })
     }
