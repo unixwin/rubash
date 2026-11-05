@@ -4129,8 +4129,19 @@ fn issue863_gap11_fixture(name: &str) -> PathBuf {
 }
 
 fn issue863_gap11_session(dir: &PathBuf) -> Session {
+    // The kind pins complete absolute fixture words. The
+    // default COMP_WORDBREAKS splits at `:` (GNU bashline.c:313)
+    // — on Windows that strips the drive letter from a `C:/...`
+    // word, leaving a root-relative `/Users/...` that never
+    // resolves to the fixture, while compgen (explicit word, no
+    // split) completes the same word fine. Wordbreaks are not
+    // what these pins test (issue2578 owns them), so the pins
+    // bind the default set minus `:` and isolate kind marking.
+    // The drive-letter completion shape itself is flagged for
+    // triage in REPORT.md, not fixed here.
     Session::builder()
         .working_directory(dir)
+        .env("COMP_WORDBREAKS", " \t\n\"'@><=;|&(")
         .build()
         .expect("session builds")
 }
@@ -4429,6 +4440,7 @@ fn issue863_gap11_provider_merge_keeps_engine_mark_and_provider_kind() {
     };
     let mut session = Session::builder()
         .working_directory(&dir)
+        .env("COMP_WORDBREAKS", " \t\n\"'@><=;|&(")
         .completion_provider(Box::new(provider))
         .build()
         .expect("session builds");
