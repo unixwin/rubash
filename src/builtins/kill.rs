@@ -3660,6 +3660,21 @@ pub fn reconcile_kernel_trap_dispositions(env_vars: &std::collections::HashMap<S
             {
                 Disposition::Ignore
             }
+            // rubash#2836(i): GNU jobs.c:4949 initialize_job_signals
+            // — an interactive shell ignores the stop class
+            // (SIGTSTP/SIGTTOU/SIGTTIN) so ^Z at an empty prompt
+            // cannot stop the shell itself; the terminal delivery
+            // still reaches the foreground job's own process group.
+            // Non-interactive shells keep SIG_DFL (the else-if
+            // job_control arm is #2836(ii) territory, not this
+            // slice). A user trap still wins via the Some arms
+            // above, and a reset still restores Default via the
+            // reset arm above. The ignore is a shell-policy
+            // disposition like the interactive SIGTERM pin: it is
+            // NOT recorded in TRAP_IGNORED, so
+            // pre_exec_child_dispositions restores SIG_DFL for
+            // children (trap.c:1489 restore_original_signals).
+            None if interactive && kernel_signals::is_stop_class(*sig) => Disposition::Ignore,
             None => Disposition::Default,
         };
         dispositions.push((*sig, want));

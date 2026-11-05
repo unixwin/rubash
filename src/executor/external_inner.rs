@@ -1792,8 +1792,13 @@ impl Executor {
                 }
                 // The stop notice prints here, as the wait completes
                 // (jobs.c:3385) — see format_stopped_job_notice for
-                // why it cannot ride the boundary flush.
+                // why it cannot ride the boundary flush. GNU
+                // jobs.c:4690-4691 notify_of_job_status prints a
+                // leading "\n" before the JSTOPPED job line
+                // (rubash#2834): without it the echoed ^Z glues onto
+                // the notice (`^Z[1]+  Stopped`).
                 if let Some(line) = self.format_stopped_job_notice(pid) {
+                    crate::executor::shell_options::write_stderr_bytes(b"\n")?;
                     crate::executor::shell_options::write_stderr_bytes(line.as_bytes())?;
                 }
                 self.background_children
