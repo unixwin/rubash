@@ -787,6 +787,25 @@ impl GroupScanFeeder {
             )
     }
 
+    /// Whether the folded stream has reached a read-time TERMINAL
+    /// verdict: a stray `)` / foreign keyword closer / stray
+    /// `;;`-family token (the niubash#482 family — see the
+    /// `stray_close` field) that GNU's reader rejects on the spot
+    /// (parse.y:6724 yyerror: report and reset, never read on).
+    /// `token_level_needs_more` already answers false in that state,
+    /// but the gather's verdict fusions OR this half with the
+    /// text-level half, whose continuation verdict over the same
+    /// text (an unclosed function body around the stray close:
+    /// `f() {\n)`) would resurrect the dead group. The fusions
+    /// therefore consult this channel FIRST — the terminal verdict
+    /// overrides, exactly as in the batch composition
+    /// (`stdin_source_needs_more_posix`'s `TokenWalkVerdict::
+    /// Terminal`), keeping the parked and fresh paths in agreement
+    /// (GAP-9 round 2, niubash#863).
+    pub(crate) fn token_level_terminal(&self) -> bool {
+        self.stray_close
+    }
+
     /// Whether this feeder's line loop EFFECTIVELY toggled the process-global
     /// extglob parse gate (see the field docs). Token-reuse consumers must
     /// fall back to a fresh whole-text re-lex when this is `true`.

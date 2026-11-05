@@ -804,7 +804,14 @@ impl ParkShadow {
     }
 
     /// The gather's usual verdict fusion, over the shadow machines.
+    /// GAP-9 round 2: the terminal channel is consulted FIRST (see
+    /// GroupScanFeeder::token_level_terminal) — a stray close ends
+    /// the group even when the text half still sees an open
+    /// construct around it.
     fn needs_more(&mut self, group_has_body: bool) -> bool {
+        if self.scan.token_level_terminal() {
+            return false;
+        }
         let skip_quote_comsub = !group_has_body && self.scan.gates_prove_quotes_comsub_closed();
         self.scan.token_level_needs_more() || self.scans.needs_more(&self.mirror, skip_quote_comsub)
     }
@@ -1210,8 +1217,11 @@ pub(crate) fn read_next_source_group(
                 }
                 let skip_quote_comsub =
                     !group_has_body && spec_scan.gates_prove_quotes_comsub_closed();
-                let needs_more = spec_scan.token_level_needs_more()
-                    || spec_scans.needs_more(&spec_mirror, skip_quote_comsub);
+                // GAP-9 round 2: terminal channel first (see
+                // GroupScanFeeder::token_level_terminal).
+                let needs_more = !spec_scan.token_level_terminal()
+                    && (spec_scan.token_level_needs_more()
+                        || spec_scans.needs_more(&spec_mirror, skip_quote_comsub));
                 if !needs_more {
                     broke_complete = true;
                     break;
@@ -1254,8 +1264,15 @@ pub(crate) fn read_next_source_group(
                 } else {
                     &pending
                 };
-                let needs_more = scan.token_level_needs_more()
-                    || text_scans.needs_more(mirror, skip_quote_comsub);
+                // GAP-9 round 2: the terminal channel overrides the
+                // text half (see GroupScanFeeder::token_level_terminal)
+                // — `f() {\n)` ends the gather here exactly as the
+                // batch verdict ends it, so the parked and fresh paths
+                // agree. The O(1) checks still run before the text
+                // scans, so the short-circuit shape above is unchanged.
+                let needs_more = !scan.token_level_terminal()
+                    && (scan.token_level_needs_more()
+                        || text_scans.needs_more(mirror, skip_quote_comsub));
                 if !needs_more {
                     broke_complete = true;
                     alias_machines_break = aliases_live;
@@ -2256,6 +2273,24 @@ fn advance_regexp_scan_depth(depth: isize, token: &crate::lexer::Token) -> isize
 /// POSIX-aware variant: `set -o posix` changes `'` scanning inside
 /// `"${...}"` (Interp 221), which decides whether the input is complete.
 pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
+    // GAP-9 round 2 (niubash#863; captain adjudication): the
+    // composition has a TERMINAL channel. The token walk's terminal
+    // verdicts (stray `)`, foreign keyword closers, stray
+    // `;;`-family) are GNU's read-time syntax errors — parse.y:6724
+    // yyerror reports the token and resets the parser; the reader
+    // does not read on in hope of a cure — so they override the text
+    // half's continuation verdicts: `f() {\n)` is textually an
+    // unclosed function body, but the stray `)` already ended the
+    // read, and gathering more lines into the dead group only
+    // buries the diagnostic (the niubash#482 wedge). Genuine
+    // continuation signals from either half still yield needs-more
+    // below; the parked-feeder fusion makes the same cut (see
+    // GroupScanFeeder::token_level_terminal), keeping the two paths
+    // in agreement.
+    let verdict = token_walk_verdict(source);
+    if verdict == TokenWalkVerdict::Terminal {
+        return false;
+    }
     if stdin_source_text_needs_more(source, posix) {
         return true;
     }
@@ -2267,9 +2302,36 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
     if crate::lexer::source_ends_in_cond_command(source, posix) {
         return true;
     }
+    verdict == TokenWalkVerdict::NeedsMore
+}
 
+/// The token-level half of `stdin_source_needs_more_posix` over one
+/// whole text, in the three channels the composition keeps apart:
+/// what the fresh token stream says about the text's completeness.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TokenWalkVerdict {
+    /// Nothing open, nothing terminal: a complete unit.
+    Complete,
+    /// A construct is still open (keyword stack, `=~` scan,
+    /// trailing connector, unread here-doc body): read on.
+    NeedsMore,
+    /// A token GNU's reader rejects at read time (stray `)`,
+    /// foreign keyword closer, stray `;;`-family): the group is
+    /// finished — as an error — however open the text still looks.
+    Terminal,
+}
+
+fn token_walk_verdict(source: &str) -> TokenWalkVerdict {
     let tokens = tokenize(source);
     let mut stack = Vec::new();
+    // parse.y:3119 gather_here_documents: at the newline the reader
+    // drains every queued here-doc's body from the input stream
+    // before the command counts as read (the calls ride the grammar
+    // actions, parse.y:1266/1344/1362/1377), so a body the lexer
+    // stamps unterminated means this read is still inside the body.
+    // Body tokens are data, never grammar: they fold nothing, and
+    // their text must never reach the stray-close arms below.
+    let mut heredoc_pending = false;
     // parse.y:5443-5461 read_token_word under PST_REGEXP: once an
     // unquoted `(' opens parse_matched_pair inside a `=~' RHS word, the
     // reader consumes raw text until the balancing `)' — every following
@@ -2283,6 +2345,12 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
     // from the fragment stream and then tracked across whatever follows.
     let mut regexp_scan_depth = 0isize;
     for token in &tokens {
+        if token.kind == TokenKind::HereDocBody {
+            if token.is_unterminated_heredoc_body() {
+                heredoc_pending = true;
+            }
+            continue;
+        }
         if regexp_scan_depth > 0 {
             regexp_scan_depth = advance_regexp_scan_depth(regexp_scan_depth, token);
             continue;
@@ -2300,7 +2368,7 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
             && matches!(token.value.as_str(), ";;" | ";&" | ";;&")
         {
             if !matches!(stack.last(), Some(&"esac") | Some(&")")) {
-                return false;
+                return TokenWalkVerdict::Terminal;
             }
             continue;
         }
@@ -2333,7 +2401,7 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
                     // abandons the whole group (yyerror), so gathering can
                     // never produce a legal completion: the group ends here
                     // and the parser reports the stray close.
-                    return false;
+                    return TokenWalkVerdict::Terminal;
                 }
             }
             "esac" | "fi" | "done" | "}" => {
@@ -2346,14 +2414,14 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
                     // `(`/case frames `done`/`fi`/`esac` are legal text
                     // (arithmetic, patterns) — keep gathering
                     // (niubash#482).
-                    return false;
+                    return TokenWalkVerdict::Terminal;
                 }
             }
             _ => {}
         }
     }
-    if regexp_scan_depth > 0 || !stack.is_empty() {
-        return true;
+    if regexp_scan_depth > 0 || !stack.is_empty() || heredoc_pending {
+        return TokenWalkVerdict::NeedsMore;
     }
     // GNU parse.y grammar consumes the newline AFTER a binary connector as
     // part of the same production — `list1: list1 AND_AND newline_list
@@ -2373,13 +2441,17 @@ pub fn stdin_source_needs_more_posix(source: &str, posix: bool) -> bool {
         .rev()
         .find(|token| !(token.kind == TokenKind::Semicolon && token.line_break))
         .map(|token| token.kind.clone());
-    matches!(
+    if matches!(
         last_significant,
         Some(TokenKind::And)
             | Some(TokenKind::Or)
             | Some(TokenKind::Pipe)
             | Some(TokenKind::PipeErr)
-    )
+    ) {
+        TokenWalkVerdict::NeedsMore
+    } else {
+        TokenWalkVerdict::Complete
+    }
 }
 
 /// The text-level (non-tokenizing) half of `stdin_source_needs_more_posix`:
