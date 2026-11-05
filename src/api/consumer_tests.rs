@@ -3043,3 +3043,703 @@ fn issue863_gap8_finish_duties_without_history_step() {
     );
     assert_eq!(read(&dir, "procsub_out"), "gap8-procsub-payload\n");
 }
+
+// ----------------------------------------------------------------
+// GAP-9 (niubash#863): the token view — `Session::token_view`
+// projects the lexer onto caller-fed text (absolute byte spans,
+// kinds, dequoted values, folded command positions and roles,
+// synthesized comment spans), and `Session::needs_more_input`
+// enters the ledger as the completeness face the host validator
+// adopts. The fold's sources are the lexer's own stamps and the
+// engine's builtin table; the value rule is the host-shaped
+// dequote the editor consumers are built on.
+
+use super::syntax::{TokenKindView, TokenRole, TokenView};
+
+fn issue863_gap9_session() -> Session {
+    Session::builder().build().expect("session builds")
+}
+
+fn issue863_gap9_posix_session() -> Session {
+    let mut session = issue863_gap9_session();
+    let outcome = session
+        .run("set -o posix", &RunOptions::new())
+        .expect("set posix");
+    assert_eq!(outcome.status, 0);
+    session
+}
+
+/// One span as a comparable tuple:
+/// (start, end, kind, text, command_position, role).
+type Gap9Shape = (usize, usize, TokenKindView, String, bool, TokenRole);
+
+fn issue863_gap9_shape(view: &TokenView) -> Vec<Gap9Shape> {
+    view.tokens
+        .iter()
+        .map(|span| {
+            (
+                span.start,
+                span.end,
+                span.kind,
+                span.text.clone(),
+                span.command_position,
+                span.role,
+            )
+        })
+        .collect()
+}
+
+fn gap9_shape(
+    start: usize,
+    end: usize,
+    kind: TokenKindView,
+    text: &str,
+    command_position: bool,
+    role: TokenRole,
+) -> Gap9Shape {
+    (start, end, kind, text.to_string(), command_position, role)
+}
+
+#[test]
+fn issue863_gap9_token_view_spans_and_kinds() {
+    use TokenKindView as K;
+    use TokenRole as R;
+    let session = issue863_gap9_session();
+
+    // One full line: prefix assignment, builtin, quoted words, a
+    // pipeline, a demoted keyword as argument, both redirect
+    // shapes, and a trailing comment.
+    let view = session
+        .token_view("FOO=bar printf '%s' \"$HOME\" | wc -c && echo done > out.txt 2>&1 # tally");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 7, K::Assignment, "FOO=bar", true, R::Assignment),
+            gap9_shape(8, 14, K::Word, "printf", true, R::Builtin),
+            gap9_shape(15, 19, K::Word, "'%s'", false, R::Plain),
+            gap9_shape(20, 27, K::Word, "\"$HOME\"", false, R::Plain),
+            gap9_shape(28, 29, K::Pipe, "|", false, R::Plain),
+            gap9_shape(30, 32, K::Word, "wc", true, R::Plain),
+            gap9_shape(33, 35, K::Word, "-c", false, R::Plain),
+            gap9_shape(36, 38, K::And, "&&", false, R::Plain),
+            gap9_shape(39, 43, K::Word, "echo", true, R::Builtin),
+            gap9_shape(44, 48, K::Keyword, "done", false, R::Plain),
+            gap9_shape(49, 50, K::RedirectOut, ">", false, R::Plain),
+            gap9_shape(51, 58, K::Word, "out.txt", false, R::RedirectTarget),
+            gap9_shape(59, 62, K::RedirectErr, "2>&", false, R::Plain),
+            gap9_shape(62, 63, K::Word, "1", false, R::RedirectTarget),
+            gap9_shape(64, 71, K::Comment, "# tally", false, R::Plain),
+        ]
+    );
+    // Dequoted values ride along: quotes vanish, the variable
+    // word keeps its spelling.
+    let values: Vec<&str> = view.tokens.iter().map(|span| span.value.as_str()).collect();
+    assert_eq!(values[2], "%s");
+    assert_eq!(values[3], "$HOME");
+    assert_eq!(values[14], "# tally");
+
+    // Comment lines and a trailing comment: comments are spans,
+    // line breaks are Semicolon spans over the newline byte.
+    let view = session.token_view("# head\necho a # trail\n# last");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 6, K::Comment, "# head", false, R::Plain),
+            gap9_shape(6, 7, K::Semicolon, "\n", false, R::Plain),
+            gap9_shape(7, 11, K::Word, "echo", true, R::Builtin),
+            gap9_shape(12, 13, K::Word, "a", false, R::Plain),
+            gap9_shape(14, 21, K::Comment, "# trail", false, R::Plain),
+            gap9_shape(21, 22, K::Semicolon, "\n", false, R::Plain),
+            gap9_shape(22, 28, K::Comment, "# last", false, R::Plain),
+        ]
+    );
+
+    // A quoted here-doc: the delimiter word is the redirect
+    // target, the body span covers the body lines as fed, and the
+    // delimiter line itself carries no span.
+    let view = session.token_view("cat <<'EOF'\nbody line\nEOF\necho after");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 3, K::Word, "cat", true, R::Plain),
+            gap9_shape(4, 6, K::HereDoc, "<<", false, R::Plain),
+            gap9_shape(6, 11, K::Word, "'EOF'", false, R::RedirectTarget),
+            gap9_shape(12, 22, K::HereDocBody, "body line\n", false, R::Plain),
+            gap9_shape(25, 26, K::Semicolon, "\n", false, R::Plain),
+            gap9_shape(26, 30, K::Word, "echo", true, R::Builtin),
+            gap9_shape(31, 36, K::Word, "after", false, R::Plain),
+        ]
+    );
+    assert_eq!(view.tokens[2].value, "EOF");
+
+    // A `<<-` body: the span covers the input lines WITH their
+    // leading tabs (the lexer's raw body has them stripped; the
+    // input slice is the truth).
+    let view = session.token_view("cat <<-EOF\n\tbody\n\tEOF\necho done");
+    let body = &view.tokens[3];
+    assert_eq!(body.kind, K::HereDocBody);
+    assert_eq!((body.start, body.end), (11, 17));
+    assert_eq!(body.text, "\tbody\n");
+
+    // A line continuation: the second physical line's word is
+    // addressed within its logical line.
+    let view = session.token_view("echo one \\\n two");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 4, K::Word, "echo", true, R::Builtin),
+            gap9_shape(5, 8, K::Word, "one", false, R::Plain),
+            gap9_shape(12, 15, K::Word, "two", false, R::Plain),
+        ]
+    );
+
+    // The derivation methods: word under the cursor, the words of
+    // the cursor's segment, the segment's separator.
+    let view = session.token_view("echo one | wc -c");
+    assert_eq!(view.word_at(2).map(|span| span.text.as_str()), Some("echo"));
+    assert_eq!(view.word_at(6).map(|span| span.text.as_str()), Some("one"));
+    assert_eq!(view.word_at(9), None, "the pipe is not a word");
+    assert_eq!(view.word_at(5), None, "a word start is not inside the word");
+    let before: Vec<&str> = view
+        .segment_words_before(14)
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(before, vec!["wc"], "only the cursor's segment counts");
+    let before: Vec<&str> = view
+        .segment_words_before(16)
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(before, vec!["wc", "-c"], "a straddling word counts");
+    assert_eq!(
+        view.last_separator_before(15)
+            .map(|span| span.text.as_str()),
+        Some("|")
+    );
+    assert_eq!(view.last_separator_before(4), None);
+}
+
+#[test]
+fn issue863_gap9_token_view_command_position() {
+    let session = issue863_gap9_session();
+    // (line, [(span text, command_position)]) over the whole view.
+    let cases: Vec<(&str, Vec<(&str, bool)>)> = vec![
+        (
+            "echo a | wc -c",
+            vec![
+                ("echo", true),
+                ("a", false),
+                ("|", false),
+                ("wc", true),
+                ("-c", false),
+            ],
+        ),
+        (
+            "A=1 B=2 cmd x",
+            vec![("A=1", true), ("B=2", true), ("cmd", true), ("x", false)],
+        ),
+        (
+            // A keyword after a separator stands where a command
+            // word may stand (the condition/body list could
+            // continue there), so `then` / `fi` / `do` / `done`
+            // in that position report command position too.
+            "if true; then echo yes; fi",
+            vec![
+                ("if", true),
+                ("true", true),
+                (";", false),
+                ("then", true),
+                ("echo", true),
+                ("yes", false),
+                (";", false),
+                ("fi", true),
+            ],
+        ),
+        (
+            "while read -r line; do echo \"$line\"; done < names",
+            vec![
+                ("while", true),
+                ("read", true),
+                ("-r", false),
+                ("line", false),
+                (";", false),
+                ("do", true),
+                ("echo", true),
+                ("\"$line\"", false),
+                (";", false),
+                ("done", true),
+                ("<", false),
+                ("names", false),
+            ],
+        ),
+        (
+            "cmd && other || third",
+            vec![
+                ("cmd", true),
+                ("&&", false),
+                ("other", true),
+                ("||", false),
+                ("third", true),
+            ],
+        ),
+        (
+            "! time -p ls",
+            vec![("!", true), ("time", true), ("-p", false), ("ls", true)],
+        ),
+        (
+            // A brace group folds into ONE lexer token; the view
+            // cannot see inside it (a recorded fidelity note).
+            "{ echo grouped; }",
+            vec![("{ echo grouped; }", true)],
+        ),
+        (
+            "(cd sub && ls)",
+            vec![
+                ("(", true),
+                ("cd", true),
+                ("sub", false),
+                ("&&", false),
+                ("ls", true),
+                (")", false),
+            ],
+        ),
+        (
+            "foo() { echo body; }",
+            vec![
+                ("foo", true),
+                ("(", false),
+                (")", false),
+                ("{ echo body; }", false),
+            ],
+        ),
+        ("time ls", vec![("time", true), ("ls", true)]),
+        (
+            // Nothing follows the delimiter line, so the lexer
+            // emits no line-break separator after the body.
+            "cat <<EOF\nbody\nEOF",
+            vec![
+                ("cat", true),
+                ("<<", false),
+                ("EOF", false),
+                ("body\n", false),
+            ],
+        ),
+    ];
+    for (line, expected) in cases {
+        let view = session.token_view(line);
+        let got: Vec<(&str, bool)> = view
+            .tokens
+            .iter()
+            .map(|span| (span.text.as_str(), span.command_position))
+            .collect();
+        assert_eq!(got, expected, "command positions for {line:?}");
+    }
+}
+
+#[test]
+fn issue863_gap9_token_view_word_roles() {
+    use TokenRole as R;
+    let session = issue863_gap9_session();
+    let roles = |line: &str| -> Vec<(String, R)> {
+        session
+            .token_view(line)
+            .tokens
+            .iter()
+            .map(|span| (span.text.clone(), span.role))
+            .collect()
+    };
+    let expect = |line: &str, expected: Vec<(&str, R)>| {
+        let expected: Vec<(String, R)> = expected
+            .into_iter()
+            .map(|(t, r)| (t.to_string(), r))
+            .collect();
+        assert_eq!(roles(line), expected, "roles for {line:?}");
+    };
+
+    // `printf` is an engine builtin — the role table is the
+    // engine's own, not any host-side list.
+    expect(
+        "printf '%s' x",
+        vec![("printf", R::Builtin), ("'%s'", R::Plain), ("x", R::Plain)],
+    );
+    expect(
+        "echo x > f",
+        vec![
+            ("echo", R::Builtin),
+            ("x", R::Plain),
+            (">", R::Plain),
+            ("f", R::RedirectTarget),
+        ],
+    );
+    expect("A=1 cmd", vec![("A=1", R::Assignment), ("cmd", R::Plain)]);
+    // An assignment-shaped word in argument position is plain:
+    // kind is not role.
+    expect("echo A=1", vec![("echo", R::Builtin), ("A=1", R::Plain)]);
+    expect(
+        "if true; then echo ok; fi",
+        vec![
+            ("if", R::Reserved),
+            ("true", R::Builtin),
+            (";", R::Plain),
+            ("then", R::Reserved),
+            ("echo", R::Builtin),
+            ("ok", R::Plain),
+            (";", R::Plain),
+            ("fi", R::Reserved),
+        ],
+    );
+    expect(
+        "for i in a b; do echo $i; done",
+        vec![
+            ("for", R::Reserved),
+            ("i", R::Plain),
+            ("in", R::Plain),
+            ("a", R::Plain),
+            ("b", R::Plain),
+            (";", R::Plain),
+            ("do", R::Reserved),
+            ("echo", R::Builtin),
+            ("$i", R::Plain),
+            (";", R::Plain),
+            ("done", R::Reserved),
+        ],
+    );
+    expect(
+        "case $x in a) echo hit;; esac",
+        vec![
+            ("case", R::Reserved),
+            ("$x", R::Plain),
+            ("in", R::Reserved),
+            ("a", R::Plain),
+            (")", R::Plain),
+            ("echo", R::Builtin),
+            ("hit", R::Plain),
+            (";;", R::Plain),
+            ("esac", R::Reserved),
+        ],
+    );
+    expect(
+        "time -p ls",
+        vec![("time", R::Reserved), ("-p", R::Plain), ("ls", R::Plain)],
+    );
+    expect(
+        // A pending here-doc's body token rides the stream with
+        // an empty span at the end of the text.
+        "cat <<EOF",
+        vec![
+            ("cat", R::Plain),
+            ("<<", R::Plain),
+            ("EOF", R::RedirectTarget),
+            ("", R::Plain),
+        ],
+    );
+    expect(
+        "function greet { echo hi; }",
+        vec![
+            ("function", R::Reserved),
+            ("greet", R::Plain),
+            ("{ echo hi; }", R::Reserved),
+        ],
+    );
+    expect(
+        "select opt in x y; do break; done",
+        vec![
+            ("select", R::Reserved),
+            ("opt", R::Plain),
+            ("in", R::Plain),
+            ("x", R::Plain),
+            ("y", R::Plain),
+            (";", R::Plain),
+            ("do", R::Reserved),
+            ("break", R::Builtin),
+            (";", R::Plain),
+            ("done", R::Reserved),
+        ],
+    );
+    // Reserved spellings in argument position are demoted words.
+    expect(
+        "echo if done time",
+        vec![
+            ("echo", R::Builtin),
+            ("if", R::Plain),
+            ("done", R::Plain),
+            ("time", R::Plain),
+        ],
+    );
+}
+
+#[test]
+fn issue863_gap9_token_view_value_dequote_parity() {
+    use TokenKindView as K;
+    let session = issue863_gap9_session();
+    // (line, [(span text, dequoted value)] over the word-shaped
+    // spans). The expected values are the host editor's current
+    // `unescape_shell_word` outputs for the same words — the
+    // parity this view exists to keep when the host retires its
+    // private copy of the machine.
+    let cases: Vec<(&str, Vec<(&str, &str)>)> = vec![
+        (
+            "echo 'it'\\''s'",
+            vec![("echo", "echo"), ("'it'\\''s'", "it's")],
+        ),
+        (
+            "echo \"a\\\"b\"",
+            vec![("echo", "echo"), ("\"a\\\"b\"", "a\"b")],
+        ),
+        // Inside double quotes the host rule quotes the next
+        // character literally, whatever it is.
+        (
+            "echo \"a\\nb\"",
+            vec![("echo", "echo"), ("\"a\\nb\"", "anb")],
+        ),
+        // Inside single quotes a backslash is literal.
+        ("echo 'a\\nb'", vec![("echo", "echo"), ("'a\\nb'", "a\\nb")]),
+        ("echo a\\ b", vec![("echo", "echo"), ("a\\ b", "a b")]),
+        // $'...' ANSI-C escapes are NOT interpreted by the host
+        // machine: it reads a `$` plus a single-quoted body — the
+        // `$` survives, the quotes vanish, the backslash stays a
+        // literal character (never a TAB).
+        (
+            "echo $'a\\tb'",
+            vec![("echo", "echo"), ("$'a\\tb'", "$a\\tb")],
+        ),
+        (
+            "echo \"$(foo bar)\"",
+            vec![("echo", "echo"), ("\"$(foo bar)\"", "$(foo bar)")],
+        ),
+        ("echo $(foo)", vec![("echo", "echo"), ("$(foo)", "$(foo)")]),
+        (
+            "echo \"pre 'mid' post\"",
+            vec![("echo", "echo"), ("\"pre 'mid' post\"", "pre 'mid' post")],
+        ),
+        (
+            "echo 'don'\\''t' \"say \\\"hi\\\"\"",
+            vec![
+                ("echo", "echo"),
+                ("'don'\\''t'", "don't"),
+                ("\"say \\\"hi\\\"\"", "say \"hi\""),
+            ],
+        ),
+        // A trailing lone backslash survives.
+        ("echo abc\\", vec![("echo", "echo"), ("abc\\", "abc\\")]),
+        // An unterminated quote yields its content.
+        (
+            "echo \"unclosed",
+            vec![("echo", "echo"), ("\"unclosed", "unclosed")],
+        ),
+        // Dequote applies to assignment words too.
+        ("x='a b' cmd", vec![("x='a b'", "x=a b"), ("cmd", "cmd")]),
+    ];
+    for (line, expected) in cases {
+        let view = session.token_view(line);
+        let got: Vec<(&str, &str)> = view
+            .tokens
+            .iter()
+            .filter(|span| span.kind.is_word_shaped())
+            .map(|span| (span.text.as_str(), span.value.as_str()))
+            .collect();
+        assert_eq!(got, expected, "dequote parity for {line:?}");
+        // Carrier bytes never cross: the lexer's in-band quoting
+        // carriers (PUA block and the C0 carriers) appear in no
+        // span value, for any shape.
+        for span in &view.tokens {
+            assert!(
+                !span
+                    .value
+                    .chars()
+                    .any(|ch| ('\u{e000}'..='\u{f8ff}').contains(&ch)
+                        || matches!(ch, '\u{17}' | '\u{18}' | '\u{1f}')),
+                "carrier byte in value of {span:?} for {line:?}"
+            );
+        }
+    }
+    // The $'...' value holds the `$` and a literal backslash +
+    // t, never a TAB, and the bare substitution is its own kind.
+    let view = session.token_view("echo $'a\\tb'");
+    assert_eq!(view.tokens[1].value, "$a\\tb");
+    assert!(!view.tokens[1].value.contains('\t'));
+    let view = session.token_view("echo $(foo)");
+    assert_eq!(view.tokens[1].kind, K::CommandSubst);
+}
+
+#[test]
+fn issue863_gap9_token_view_case_pattern_close() {
+    use TokenKindView as K;
+    let session = issue863_gap9_session();
+    let view = session.token_view("case $x in a) echo one;; b|c) echo two;; esac");
+    let closes: Vec<&str> = view
+        .tokens
+        .iter()
+        .filter(|span| span.case_pattern_close)
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(
+        closes,
+        vec![")", ")"],
+        "exactly the two pattern closes are stamped"
+    );
+    assert!(
+        view.tokens
+            .iter()
+            .filter(|span| span.case_pattern_close)
+            .all(|span| span.kind == K::Keyword),
+        "pattern closes are keyword spans"
+    );
+    // The pattern alternation pipe is a Pipe span inside the
+    // clause, and the second body still folds as a command.
+    let pipe = view.tokens.iter().find(|span| span.text == "|");
+    assert_eq!(pipe.map(|span| span.kind), Some(K::Pipe));
+    let two = view.tokens.iter().find(|span| span.text == "two");
+    assert_eq!(two.map(|span| span.command_position), Some(false));
+    let echo_two = view.tokens.iter().filter(|span| span.text == "echo").nth(1);
+    assert_eq!(echo_two.map(|span| span.command_position), Some(true));
+
+    // The optional `(` opener is not a close; a subshell close
+    // and a function-definition paren pair carry no stamp either.
+    let view = session.token_view("case $x in (a) echo one;; esac");
+    assert_eq!(
+        view.tokens
+            .iter()
+            .filter(|span| span.case_pattern_close)
+            .count(),
+        1
+    );
+    let view = session.token_view("(echo a); foo() { x; }");
+    assert_eq!(
+        view.tokens
+            .iter()
+            .filter(|span| span.case_pattern_close)
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn issue863_gap9_needs_more_input_verdict_parity() {
+    let session = issue863_gap9_session();
+    // The adjudicated subset of the GAP-9 Q-B differential: the
+    // host completeness corpus (the inputs behind niubash's
+    // `repl_input_complete_*` tests and the issue482 suite shapes)
+    // run through the engine face, with the host's scanner-walk
+    // verdict beside it. 54 of the 66 corpus rows agree and are
+    // pinned here. The remaining 12 rows are UNCLASSIFIED —
+    // excluded by design, recorded in the lane report for the
+    // captain's classification before the host lane adopts this
+    // face: 9 heredoc-pending rows (the face carries no
+    // heredoc-pending signal; the host's heredoc arm reads the
+    // lexer's unterminated-body stamp directly today) and 3
+    // function-body stray-close rows (`f() {\n)` and kin: the
+    // host walk and the engine reader both stop terminal there,
+    // the face's token walk does not). Where a row's verdict is
+    // terminal for a stray close, the terminal verdict itself was
+    // verified against the engine's reader behavior (the issue482
+    // suite forms), not just the host walk.
+    // (input, host_complete) — the face must answer
+    // needs_more_input == !host_complete.
+    let corpus: Vec<(&str, bool)> = vec![
+        ("# 11. if comment", true),
+        ("# case/esac/function() are comments", true),
+        ("(echo a\n)", true),
+        (")", true),
+        ("a=(1 2\n)", true),
+        ("case $x in", false),
+        ("case $x in\n  a) echo A ;;\n  *) echo other ;;\nesac", true),
+        ("case x in\na) echo hit\n)", true),
+        ("cat <<'EOF'\nbody with \"quotes && (parens)\nEOF", true),
+        ("cat <<-EOF\n\tindented; if x\n\tEOF", true),
+        ("cat <<< \"unterminated", false),
+        ("cat <<E1 <<E2\nA; if a\nB; fi b\nE1\nE2", true),
+        ("cat <<EOF\nx; if y\nEOF", true),
+        ("cat > out.txt <<'EOF'\nbody A\nEOF", true),
+        ("cat > out.txt <<EOF\nbody A\nEOF", true),
+        ("echo $((1 + 2)", false),
+        ("echo $(foo bar", false),
+        ("echo 'unterminated", false),
+        ("echo \"<<EOF\"", true),
+        ("echo \"terminated\"", true),
+        ("echo \"unterminated", false),
+        ("echo done", true),
+        ("echo foo # if (comment)", true),
+        ("echo foo#bar", true),
+        ("echo hi ;;", true),
+        ("echo one \\", false),
+        ("echo one \\\n  two", true),
+        ("echo one |", false),
+        ("echo one |\n  grep one", true),
+        ("f() {\ncat <<EOF\nx; if y\nEOF\n}", true),
+        ("fi", true),
+        ("for ((i=0; i<height; i++)); do\n  echo $i\ndone", true),
+        ("for ((i=0; i<height; i++); do\n  echo $i\ndone", false),
+        ("for item in a b; do", false),
+        ("for item in a b; do\n  echo $item\ndone", true),
+        ("hello() {", false),
+        ("hello() {\n  echo hi\n}", true),
+        ("hello()", false),
+        ("if [ $HTTP_CODE -eq 200 ]; then echo OK; fi", true),
+        ("if [ $HTTP_CODE -eq 200 ]; then\n  echo OK", false),
+        ("if [ $HTTP_CODE -eq 200 ]; then\n  echo OK\nfi", true),
+        ("if true; then", false),
+        ("if true; then\n  # fi in comment", false),
+        ("if true; then\n  # fi in comment\n  echo ok\nfi", true),
+        ("if true; then\n)", true),
+        ("while true; do", false),
+        ("while true; do\n  break\ndone", true),
+        ("while true; do\nfi", true),
+        ("x=$(echo hi\n)", true),
+        ("{ echo c\n)", true),
+        ("{ echo c\necho a)", true),
+        ("{ echo hi; }", true),
+        ("{\n)", true),
+        ("}", true),
+    ];
+    assert_eq!(corpus.len(), 54);
+    for (input, host_complete) in corpus {
+        assert_eq!(
+            session.needs_more_input(input),
+            !host_complete,
+            "face verdict for {input:?}"
+        );
+    }
+    // The posix arm: inside "${...}", a `'` opens a quote in the
+    // default mode (the face asks for more input) and is literal
+    // in posix mode (complete) — the face derives in the
+    // session's posix mode.
+    assert!(session.needs_more_input("echo \"${x'}\""));
+    let posix = issue863_gap9_posix_session();
+    assert!(!posix.needs_more_input("echo \"${x'}\""));
+}
+
+#[test]
+fn issue863_gap9_token_view_posix_mode() {
+    use TokenKindView as K;
+    use TokenRole as R;
+    // `time` is a reserved word in the default mode and a plain
+    // word in posix mode — the one tokenization delta between
+    // the modes. The view derives in the session's mode: under
+    // posix, `time` itself takes the command position and `ls`
+    // becomes its argument.
+    let plain = issue863_gap9_session();
+    let view = plain.token_view("time -p ls");
+    assert_eq!(view.tokens.len(), 3);
+    assert_eq!(view.tokens[0].kind, K::Keyword);
+    assert_eq!(view.tokens[0].role, R::Reserved);
+    assert!(view.tokens[0].command_position);
+    assert_eq!(view.tokens[2].text, "ls");
+    assert!(
+        view.tokens[2].command_position,
+        "after the `time` keyword and its option, `ls` is the command"
+    );
+
+    let posix = issue863_gap9_posix_session();
+    let view = posix.token_view("time -p ls");
+    assert_eq!(view.tokens.len(), 3);
+    assert_eq!(view.tokens[0].kind, K::Word);
+    assert_eq!(view.tokens[0].role, R::Plain);
+    assert!(view.tokens[0].command_position);
+    assert_eq!(view.tokens[2].text, "ls");
+    assert!(
+        !view.tokens[2].command_position,
+        "in posix mode `ls` is `time`'s argument"
+    );
+}

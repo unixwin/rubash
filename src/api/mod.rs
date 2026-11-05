@@ -110,7 +110,9 @@ pub use session::{
     CloseReport, Flow, InvocationShape, ParsedUnit, PreparedLine, RespawnSource, RunClassification,
     RunOptions, RunOutcome, RunUnwind, Session, SessionBuilder,
 };
-pub use syntax::{FunctionSite, LineClass, SyntaxView};
+pub use syntax::{
+    FunctionSite, LineClass, SyntaxView, TokenKindView, TokenRole, TokenSpan, TokenView,
+};
 pub use views::{OptionState, OptionsView, StateViews, VariableSnapshot, VariablesView};
 
 pub use crate::executor::HostExternalCommandOutput;
