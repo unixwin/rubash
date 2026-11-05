@@ -8,7 +8,7 @@
 //! - bashline.c:4720 print_unix_command + print_unix_command_map (`-X`
 //!   listing format)
 //! - The stateful half lives in the executor (`Executor::execute_bind`,
-//!   the registry in [`crate::shell::bind_registry`]); hosts mirror the
+//!   the registry in `crate::shell::bind_registry`); hosts mirror the
 //!   registry into their own line-editor keymaps.
 //!
 //! Probe evidence (WSL GNU bash 5.3.0, target/issue-suites/results/
@@ -1199,11 +1199,11 @@ pub const DEFAULT_BINDINGS_VI_MOVEMENT: &[(&str, &str)] = &[
 
 /// The default function-binding table for one keymap name (the `-m`
 /// names of bind.def:37-40, aliases folded by
-/// [`crate::shell::bind_registry::normalize_keymap_name`]). `None`
+/// `crate::shell::bind_registry::normalize_keymap_name`). `None`
 /// selects the emacs-standard table; callers resolving "the current
 /// keymap" (bind.def:205-216 — the no-`-m` case, rubash#2386) pass
 /// the registry's resolved current-keymap name explicitly. Every
-/// name in [`crate::shell::bind_registry::KEYMAP_NAMES`] resolves
+/// name in `crate::shell::bind_registry::KEYMAP_NAMES` resolves
 /// here.
 pub fn default_bindings_for_keymap(
     keymap: Option<&str>,
