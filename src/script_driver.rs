@@ -5296,6 +5296,17 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 };
                 if aborted {
                     guard.restore();
+                    // rubash#2835: settle the discard mark with the
+                    // aborted read. The prompt-period dispatch above
+                    // marked this empty read DISCARD (trap_exec.rs
+                    // :2280); nobody consumes the mark on this path,
+                    // so it used to survive into the next unit and
+                    // misclassify a genuine `exit` as a discard
+                    // (run_source_impl's ExitCode arm). The mark
+                    // belongs to the aborted read, not to the next
+                    // unit (trap_exec.rs:2673 precedent: a swallowed
+                    // unwind must not leave its mark behind).
+                    let _ = executor.take_signal_discard_pending();
                     pending.clear();
                     group.clear();
                     st = EditState::default();
@@ -5304,7 +5315,35 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 let mut operate_next: Option<Option<usize>> = None;
                 let mut eof_now = false;
                 let mut read_dead = false;
+                let mut read_aborted = false;
                 'tty_read: loop {
+                    // rubash#2837: slice the blocking key read like
+                    // prompt_wait_for_input, dispatching pending
+                    // signals between slices. GNU readline frees the
+                    // partial line at delivery time (lib/readline/
+                    // signals.c _rl_handle_signal, SIGINT arm:
+                    // rl_free_line_state()), so a ^C mid-line aborts
+                    // THIS read — the delivery must never sit in the
+                    // mailbox until the next accepted line's first
+                    // command boundary, where it used to ambush the
+                    // whole line. The poll only gates the read: a
+                    // readable fd returns at once, so keystroke
+                    // latency is unchanged.
+                    match guard.wait_readable(50) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            if executor.run_pending_signal_traps().is_err() {
+                                read_aborted = true;
+                                break 'tty_read;
+                            }
+                            continue;
+                        }
+                        Err(_) => {
+                            read_dead = true;
+                            eof_now = true;
+                            break 'tty_read;
+                        }
+                    }
                     match guard.next_key() {
                         Ok(Some(c)) => match apply_edit_char(executor, &mut st, c) {
                             EditOutcome::None => {
@@ -5338,7 +5377,18 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     }
                 }
                 guard.restore();
-                if eof_now {
+                if read_aborted {
+                    // rubash#2837/#2835: the abort discards the
+                    // partial line and settles the discard mark with
+                    // it — the mark belongs to this aborted read, not
+                    // to the next unit (trap_exec.rs:2673 precedent).
+                    // A trap action's exit jump is honored by the
+                    // loop-top check after this cleanup.
+                    let _ = executor.take_signal_discard_pending();
+                    pending.clear();
+                    group.clear();
+                    st = EditState::default();
+                } else if eof_now {
                     if read_dead {
                         // The terminal itself ended the input (pty
                         // master closed / read error): classify a
@@ -5389,6 +5439,12 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 executor.run_pending_signal_traps().is_err()
             };
             if aborted {
+                // rubash#2835: settle the discard mark with the
+                // aborted read — same shape as the Unix tty branch
+                // above (trap_exec.rs:2280 set it for this empty
+                // read; run_source_impl's ExitCode arm must never
+                // see it attached to the next unit's `exit`).
+                let _ = executor.take_signal_discard_pending();
                 pending.clear();
                 group.clear();
                 st = EditState::default();
@@ -6593,6 +6649,42 @@ impl UnixTtyEditGuard {
         let mut err = std::io::stderr();
         let _ = err.write_all(text.as_bytes());
         let _ = err.flush();
+    }
+
+    /// rubash#2837: poll fd 0 for readability with a bounded slice so
+    /// the tty read loop can dispatch pending signals between slices
+    /// (prompt_wait_for_input's shape). Ok(true) = a byte is readable,
+    /// a partial UTF-8 sequence is already buffered (next_key returns
+    /// it without reading), or the fd shows HUP/ERR (next_key reports
+    /// it as EOF); Ok(false) = the slice expired, or a signal
+    /// interrupted the poll — either way the caller re-checks the
+    /// signal queue at once. A real poll error propagates for the
+    /// caller's read-dead path.
+    fn wait_readable(&self, timeout_ms: i32) -> std::io::Result<bool> {
+        if !self.pending.is_empty() {
+            return Ok(true);
+        }
+        let mut pfd = libc::pollfd {
+            fd: 0,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd, fd 0 is the process's own stdin.
+        let rc = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if rc > 0 || pfd.revents != 0 {
+            return Ok(true);
+        }
+        if rc == 0 {
+            return Ok(false);
+        }
+        let err = std::io::Error::last_os_error();
+        if err.kind() == std::io::ErrorKind::Interrupted {
+            // A signal arrived mid-poll: the delivery is in the
+            // mailbox, so report a slice expiry and let the caller
+            // dispatch it at once instead of waiting out the slice.
+            return Ok(false);
+        }
+        Err(err)
     }
 
     /// Read one key character. `Ok(None)` is fd-0 EOF; a read error
