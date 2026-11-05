@@ -36,10 +36,13 @@ impl Executor {
         // down: the remaining file builtins (mkdir/touch/chmod/cp/rm/
         // rmdir/mkfifo/tty/pwd/printf) never read stdin and complete
         // before a stop could be observed. The gate is the channel
-        // predicate itself, so non-interactive, script, subshell and
+        // predicate itself, so non-interactive, script and
         // command-substitution routes keep the emulation untouched.
+        // rubash#2836 slice 4: the subshell channel counts too — a
+        // `(cat)` in a subshell is a real GNU child, so the emulation
+        // stands down there as well.
         if cfg!(unix)
-            && self.job_control_channel_active()
+            && (self.job_control_channel_active() || self.job_control_channel_active_in_subshell())
             && matches!(name, "cat" | "/bin/cat" | "/usr/bin/cat" | "sed")
         {
             return Ok(false);

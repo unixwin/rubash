@@ -2208,102 +2208,249 @@ impl Executor {
     /// the twin of wait_for_background_pid with GNU wait_for's
     /// WUNTRACED semantics (jobs.c:3064 via waitchld, jobs.c:4077).
     /// The caller (execute_fg_jobs) already handed the terminal to
-    /// the job's pgrp and SIGCONT'd it, so the blocking waitpid needs
-    /// no signal forwarding: terminal signals address the job's group
-    /// alone, and a signal delivered to the SHELL surfaces as EINTR
-    /// and is adjudicated through the same pending-signal drain
-    /// wait_for_background_pid uses (trap.c:604-611 — the signal wins
-    /// the race, the job stays live and waitable). A re-stop is a
-    /// first-class outcome: the job goes back to Stopped in the
-    /// table, its handle returns to background_children, and the
+    /// the job's pgrp and SIGCONT'd it, so the wait needs no signal
+    /// forwarding: terminal signals address the job's group alone, and
+    /// a signal delivered to the SHELL surfaces as an EINTR / pending-
+    /// signal drain (trap.c:604-611 — the signal wins the race, the job
+    /// stays live and waitable), adjudicated through the same
+    /// pending-signal drain wait_for_background_pid uses. A re-stop is
+    /// a first-class outcome: the job goes back to Stopped in the
+    /// table, its handles return to background_children, and the
     /// caller prints the stop notice and maps the outcome to
     /// 128 + stop-signal.
+    ///
+    /// rubash#2836 slice 4: the wait is generalized from one pid to the
+    /// job's whole pid list (GNU jobs.c:3064 wait_for waits for every
+    /// member of the job, and fg's status is the last element's). The
+    /// pid list comes from the job table via `job_id_for_pid`; a pid
+    /// with no job entry (a recorded completion, a procsub placeholder,
+    /// ...) falls back to the single-pid path exactly as before.
+    /// Members already Completed when fg starts (their handle was
+    /// dropped when they were reaped) contribute their recorded status
+    /// and are never waitpid'd again. Members still Running or Stopped
+    /// are polled with `waitpid(WNOHANG|WUNTRACED)` until every member
+    /// is exited-or-stopped (GNU wait_for); on a re-stop every live
+    /// handle is parked back in `background_children` and the job
+    /// flips to background, exactly as the single-pid path did for its
+    /// one member.
     #[cfg(unix)]
     fn wait_for_fg_job_control(&mut self, pid: u32) -> Result<WaitPidOutcome, ExecuteError> {
         use std::os::unix::process::ExitStatusExt;
         if let Some(interrupt) = self.wait_pending_signal_status()? {
             return Ok(WaitPidOutcome::Interrupted(interrupt));
         }
-        let Some(mut child) = self.background_children.remove(&pid) else {
-            // No live handle (a recorded completion, a procsub
-            // placeholder, ...): the poll-based wait owns those
-            // shapes exactly as before.
-            return self.wait_for_background_pid(pid, false, false);
-        };
+        let job_id = self.shell_state.job_table.job_id_for_pid(pid);
+        let (pids, job_command): (Vec<u32>, String) = job_id
+            .and_then(|job_id| self.shell_state.job_table.jobs.get(&job_id))
+            .map(|entry| (entry.pids.clone(), entry.command.clone()))
+            .unwrap_or_else(|| (vec![pid], String::new()));
+        // No live handle for the only member (a recorded completion, a
+        // procsub placeholder, ...): the poll-based wait owns those
+        // shapes exactly as before.
+        if pids.len() == 1 && !self.background_children.contains_key(&pids[0]) {
+            return self.wait_for_background_pid(pids[0], false, false);
+        }
         self.procsub_stream_children.remove(&pid);
-        let raw = loop {
-            let mut raw_status: libc::c_int = 0;
-            let waited = unsafe { libc::waitpid(pid as i32, &mut raw_status, libc::WUNTRACED) };
-            if waited == pid as i32 {
-                break raw_status;
+        // Per-member state. `statuses` holds the exit status once known
+        // (recorded for members already Completed, reaped for the rest);
+        // `stopped` the stop signal of a member that re-stopped;
+        // `death_signals` the killing signal of a member this wait
+        // reaped (for the signal-death notice, deferred until the wait
+        // completes like the single-pid path); `reaped` whether this
+        // wait reaped the member (pre-recorded completions need no reap
+        // bookkeeping — it ran when they were reaped).
+        let mut statuses: Vec<Option<i32>> = vec![None; pids.len()];
+        let mut stopped: Vec<Option<i32>> = vec![None; pids.len()];
+        let mut death_signals: Vec<Option<i32>> = vec![None; pids.len()];
+        let mut reaped: Vec<bool> = vec![false; pids.len()];
+        let mut handles: std::collections::HashMap<u32, crate::fd::SpawnedChild> =
+            std::collections::HashMap::new();
+        for (index, member) in pids.iter().enumerate() {
+            // A member already Completed contributes its recorded
+            // status. The process state (not just completed_statuses)
+            // is the authority — a stale completed_statuses entry for
+            // a pid the table still shows Running must not short-
+            // circuit the wait.
+            let process_completed = job_id
+                .and_then(|job_id| self.shell_state.job_table.jobs.get(&job_id))
+                .and_then(|entry| entry.processes.get(member))
+                .map(|process| process.state == crate::jobs::ProcessState::Completed)
+                .unwrap_or(false);
+            if process_completed {
+                let status = self
+                    .shell_state
+                    .job_table
+                    .completed_statuses
+                    .get(member)
+                    .copied()
+                    .or_else(|| {
+                        job_id
+                            .and_then(|job_id| self.shell_state.job_table.jobs.get(&job_id))
+                            .and_then(|entry| entry.processes.get(member))
+                            .and_then(|process| process.exit_status)
+                    })
+                    .unwrap_or(0);
+                statuses[index] = Some(status);
+                continue;
             }
-            if waited < 0 {
-                let error = std::io::Error::last_os_error();
-                match error.raw_os_error() {
-                    Some(libc::EINTR) => match self.wait_pending_signal_status() {
-                        Ok(Some(interrupt)) => {
-                            self.background_children.insert(pid, child);
-                            return Ok(WaitPidOutcome::Interrupted(interrupt));
+            if let Some(child) = self.background_children.remove(member) {
+                handles.insert(*member, child);
+            }
+        }
+        let mut reaped_any = false;
+        let poll_error: Option<std::io::Error> = 'poll: loop {
+            // A pending-signal interrupt aborts the wait (the single-pid
+            // path checks it in the EINTR arm of the blocking wait).
+            // Park every live handle back before reporting it.
+            let interrupt = match self.wait_pending_signal_status() {
+                Ok(interrupt) => interrupt,
+                Err(error) => {
+                    for (member, child) in handles {
+                        self.background_children.insert(member, child);
+                    }
+                    return Err(error);
+                }
+            };
+            if let Some(interrupt) = interrupt {
+                for (member, child) in handles {
+                    self.background_children.insert(member, child);
+                }
+                return Ok(WaitPidOutcome::Interrupted(interrupt));
+            }
+            for (index, member) in pids.iter().enumerate() {
+                if statuses[index].is_some() || stopped[index].is_some() {
+                    continue;
+                }
+                let mut raw: libc::c_int = 0;
+                let waited = unsafe {
+                    libc::waitpid(*member as i32, &mut raw, libc::WNOHANG | libc::WUNTRACED)
+                };
+                if waited == *member as i32 {
+                    if libc::WIFSTOPPED(raw) {
+                        stopped[index] = Some(libc::WSTOPSIG(raw));
+                    } else {
+                        let status = std::process::ExitStatus::from_raw(raw);
+                        death_signals[index] =
+                            crate::executor::wait_status::exit_status_signal(&status);
+                        statuses[index] =
+                            Some(crate::executor::wait_status::process_exit_status(&status));
+                        handles.remove(member);
+                        reaped[index] = true;
+                        reaped_any = true;
+                    }
+                } else if waited < 0 {
+                    let error = std::io::Error::last_os_error();
+                    match error.raw_os_error() {
+                        Some(libc::EINTR) => {}
+                        Some(libc::ECHILD) => {
+                            // Take the handle's word when there is one
+                            // (the single-pid arm); without one the
+                            // member is gone and fg has nothing to wait
+                            // for. The handle is taken out and put back
+                            // when the member is still running, so the
+                            // borrow never crosses the move.
+                            match handles.remove(member) {
+                                Some(mut child) => match child.try_wait() {
+                                    Ok(Some(done)) => {
+                                        death_signals[index] =
+                                            crate::executor::wait_status::exit_status_signal(&done);
+                                        statuses[index] = Some(
+                                            crate::executor::wait_status::process_exit_status(
+                                                &done,
+                                            ),
+                                        );
+                                        reaped[index] = true;
+                                        reaped_any = true;
+                                    }
+                                    Ok(None) => {
+                                        handles.insert(*member, child);
+                                    }
+                                    Err(error) => {
+                                        handles.insert(*member, child);
+                                        break 'poll Some(error);
+                                    }
+                                },
+                                None => {
+                                    for (member, child) in handles {
+                                        self.background_children.insert(member, child);
+                                    }
+                                    return Ok(WaitPidOutcome::NotFound);
+                                }
+                            }
                         }
-                        Ok(None) => continue,
-                        Err(error) => {
-                            self.background_children.insert(pid, child);
-                            return Err(error);
-                        }
-                    },
-                    Some(libc::ECHILD) => match child.try_wait()? {
-                        Some(done) => break done.into_raw(),
-                        None => {
-                            self.background_children.insert(pid, child);
-                            return Ok(WaitPidOutcome::NotFound);
-                        }
-                    },
-                    _ => return Err(ExecuteError::IoError(error)),
+                        _ => break 'poll Some(error),
+                    }
                 }
             }
-        };
-        if libc::WIFSTOPPED(raw) {
-            let stop_signal = libc::WSTOPSIG(raw);
-            let job_id = self.shell_state.job_table.job_id_for_pid(pid).unwrap_or(0);
-            self.shell_state
-                .job_table
-                .mark_stopped(pid, Some(stop_signal));
-            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
-                entry.foreground = false;
-                entry.background = true;
+            if (0..pids.len()).all(|i| statuses[i].is_some() || stopped[i].is_some()) {
+                break None;
             }
-            self.background_children.insert(pid, child);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        if let Some(error) = poll_error {
+            for (member, child) in handles {
+                self.background_children.insert(member, child);
+            }
+            return Err(ExecuteError::IoError(error));
+        }
+        let any_stopped = stopped.iter().any(|signal| signal.is_some());
+        // The reap bookkeeping mirrors wait_for_background_pid's tail
+        // (and the single-pid path above): signal-death notice while
+        // the job entry still exists, then completion, for every member
+        // this wait reaped. Pre-recorded completions need none of it.
+        for (index, member) in pids.iter().enumerate() {
+            if !reaped[index] {
+                continue;
+            }
+            if let Some(signal) = death_signals[index] {
+                self.note_child_signal_death(*member, signal, job_command.clone(), false);
+            }
+            if let Some(status) = statuses[index] {
+                self.shell_state.job_table.mark_completed(*member, status);
+            }
+            self.join_coproc_stderr_forwarder(*member)?;
+            self.flush_timed_coproc_report(*member);
+            self.forget_background_runtime(*member);
+        }
+        if reaped_any {
+            self.run_sigchld_trap_for_reaped_child()?;
+        }
+        if any_stopped {
+            let stop_signal = stopped
+                .iter()
+                .flatten()
+                .next()
+                .copied()
+                .unwrap_or(libc::SIGTSTP);
+            for (index, member) in pids.iter().enumerate() {
+                if let Some(signal) = stopped[index] {
+                    self.shell_state
+                        .job_table
+                        .mark_stopped(*member, Some(signal));
+                }
+            }
+            if let Some(job_id) = job_id {
+                if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                    entry.foreground = false;
+                    entry.background = true;
+                }
+            }
+            for (member, child) in handles {
+                self.background_children.insert(member, child);
+            }
             return Ok(WaitPidOutcome::Stopped {
-                job_id,
+                job_id: job_id.unwrap_or(0),
                 stop_signal,
             });
         }
-        let status = std::process::ExitStatus::from_raw(raw);
-        // The reap bookkeeping mirrors wait_for_background_pid's tail:
-        // signal-death notice while the job entry still exists, then
-        // completion, SIGCHLD trap, and status-preserving removal.
-        // (The Windows CHILDREN CPU sampling in the twin has no unix
-        // counterpart to mirror.)
-        if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status) {
-            let command = self
-                .shell_state
-                .job_table
-                .pid_to_job
-                .get(&pid)
-                .and_then(|job_id| self.shell_state.job_table.jobs.get(job_id))
-                .map(|job| job.command.clone())
-                .unwrap_or_default();
-            self.note_child_signal_death(pid, signal, command, false);
-        }
-        let status = crate::executor::wait_status::process_exit_status(&status);
-        self.join_coproc_stderr_forwarder(pid)?;
-        self.shell_state.job_table.mark_completed(pid, status);
-        self.flush_timed_coproc_report(pid);
-        self.run_sigchld_trap_for_reaped_child()?;
+        // All members exited: GNU fg's status is the last element's.
+        let status = statuses.last().copied().flatten().unwrap_or(0);
+        // fg drives a foreground wait, not the wait builtin: a job fg
+        // consumed leaves the table with the wait (the caller also
+        // removes it on Status — the second call is a no-op).
         self.shell_state
             .job_table
             .remove_job_by_pid_preserve_status(pid);
-        self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
     }
 
@@ -3178,7 +3325,35 @@ impl Executor {
         // continue_job), per-pid only in the shared-group fallback
         // model (see job_control_wait::deliver_job_sigcont).
         super::job_control_wait::deliver_job_sigcont(fg_pgrp, &pids);
-        self.shell_state.job_table.mark_running(pid);
+        // rubash#2836 slice 4: fg resumes the WHOLE job, not just the
+        // resolved (last) member — every still-Stopped member goes
+        // Running before the wait (GNU start_job continues the whole
+        // job). `mark_running` flips unconditionally and clears the
+        // job's stop signal, so only Stopped members are marked; a
+        // single-pid job reduces to exactly the old `mark_running(pid)`.
+        let stopped_members: Vec<u32> = self
+            .shell_state
+            .job_table
+            .jobs
+            .get(&job_id)
+            .map(|entry| {
+                entry
+                    .pids
+                    .iter()
+                    .copied()
+                    .filter(|member| {
+                        entry
+                            .processes
+                            .get(member)
+                            .map(|process| process.state == crate::jobs::ProcessState::Stopped)
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for member in stopped_members {
+            self.shell_state.job_table.mark_running(member);
+        }
         if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
             entry.foreground = true;
             entry.background = false;

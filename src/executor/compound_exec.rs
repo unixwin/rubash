@@ -4302,6 +4302,19 @@ impl Executor {
                         trap_result = None;
                         return Ok(());
                     }
+                    // rubash#2836 slice 4: the stop-unwind's subshell arm.
+                    // A child stopped by SIGTSTP inside this subshell set
+                    // `stopped_loop_breaking = 1` (the single-child and
+                    // pipeline job-control waits); the body has abandoned
+                    // its remaining commands, and the subshell itself has
+                    // NOT exited — so its EXIT trap must not run (GNU: a
+                    // stopped subshell has not exited). Consume exactly
+                    // one level here so the parent list is unaffected
+                    // (same-line commands run, oracle-verified).
+                    if executor.consume_stopped_loop_breaking() {
+                        trap_result = None;
+                        return Ok(());
+                    }
                     // GNU execute_cmd.c runs the subshell's own EXIT trap
                     // (trap.c run_exit_trap) while the subshell state is
                     // still live: `( trap "echo T" EXIT; echo body )` prints

@@ -4546,6 +4546,32 @@ pub fn child_pre_exec_reset_grouped() -> std::io::Result<()> {
     child_pre_exec_setpgid()
 }
 
+/// Child side of joining an EXISTING job process group (rubash#2836
+/// slice 4: pipeline stages after the first). GNU jobs.c make_child
+/// places every job child into the job's process group between fork
+/// and exec (jobs.c:2390 `setpgid (mypid, pipeline_pgrp)`); the first
+/// stage leads the group (pgrp 0 == its own pid, the
+/// `child_pre_exec_reset_grouped` shape), later stages join it. The
+/// entry-disposition reset runs first for the same reason as the
+/// single-child hook: the interactive shell ignores the stop signals
+/// (slice 1's reconcile arm), and without the trap.c:1489 restore the
+/// stage would inherit SIG_IGN for SIGTSTP and a terminal ^Z could
+/// never stop it. Returns the closure so the spawn site passes it to
+/// pre_exec directly (pre_exec composes: an earlier reset call is
+/// kept, not replaced).
+#[cfg(unix)]
+pub fn child_pre_exec_reset_join_group(
+    pgrp: i32,
+) -> impl FnMut() -> std::io::Result<()> + Send + Sync + 'static {
+    move || {
+        child_pre_exec_reset()?;
+        if unsafe { libc::setpgid(0, pgrp) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 /// Parent half of the job-control grouping (rubash#2241): GNU repeats
 /// the child's setpgid in the parent after fork (jobs.c:2455, "to
 /// avoid possible race conditions", POSIX Rationale B.4.3.3) so the
@@ -4556,6 +4582,18 @@ pub fn child_pre_exec_reset_grouped() -> std::io::Result<()> {
 pub fn group_spawned_child(pid: u32) {
     unsafe {
         libc::setpgid(pid as libc::pid_t, pid as libc::pid_t);
+    }
+}
+
+/// Parent half for a pipeline stage after the first (rubash#2836 slice
+/// 4): the same jobs.c:2455 repeat, into the job's group instead of the
+/// child's own pid — the leader's group must already exist when the
+/// later stage's spawn returns, so a ^Z arriving between spawns finds
+/// the whole job in one group.
+#[cfg(unix)]
+pub fn group_spawned_child_into(pid: u32, pgrp: u32) {
+    unsafe {
+        libc::setpgid(pid as libc::pid_t, pgrp as libc::pid_t);
     }
 }
 
