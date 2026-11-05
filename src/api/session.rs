@@ -897,8 +897,27 @@ impl Session {
     }
 
     /// Whether a compspec is registered for `command`.
+    ///
+    /// For positions the command name cannot name — the `-E` empty
+    /// line (no command) and the `-I` initial word (the command
+    /// being completed) — see [`Session::has_compspec_at`], which
+    /// asks the engine about the position itself.
     pub fn has_compspec(&self, command: &str) -> bool {
         self.executor.has_compspec(command)
+    }
+
+    /// Whether a compspec governs completion at `(line, cursor)` —
+    /// the position-aware form of [`Session::has_compspec`]
+    /// (rubash#2856, B5-11): the engine answers with the same split
+    /// the generation path uses (`split_for_completion` +
+    /// `resolve_compspec`), so the host's routing gate and the
+    /// engine's candidates cannot disagree. True exactly when a
+    /// compspec resolves for the position — the `-E`/`-D` empty-line
+    /// arm, the `-I` initial-word arm, or the command's own spec
+    /// (else `-D`) on an argument word. With `progcomp` off no
+    /// compspec governs, matching the generation path.
+    pub fn has_compspec_at(&self, line: &str, cursor: usize) -> bool {
+        self.executor.has_compspec_at(line, cursor)
     }
 
     /// Open one completion attempt as an explicit object

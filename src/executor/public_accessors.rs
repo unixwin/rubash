@@ -1355,6 +1355,37 @@ impl Executor {
             || self.shell_state.completion_specs.get("-I").is_some()
     }
 
+    /// Whether a compspec governs completion at `(line, cursor)` — the
+    /// position-aware form of [`Executor::has_compspec`] (rubash#2856,
+    /// B5-11). The host's routing gate for [`Executor::complete_line`]
+    /// cannot be answered from a command name: the `-E` empty line has
+    /// no command and the `-I` initial word IS the command being
+    /// completed, so the gate must ask the engine about the position
+    /// itself. Answered with the same split the generation path uses
+    /// (`split_for_completion` + `resolve_compspec`), so the gate and
+    /// the candidates cannot disagree — true exactly when
+    /// `resolve_compspec` resolves a spec for the position. With
+    /// `progcomp` off no compspec governs (bashline.c:1681), matching
+    /// the generation path.
+    pub fn has_compspec_at(&self, line: &str, cursor: usize) -> bool {
+        if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp") {
+            return false;
+        }
+        let split = crate::builtins::complete::split_for_completion(
+            line,
+            cursor,
+            &crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars),
+        );
+        crate::builtins::complete::resolve_compspec(
+            &self.shell_state.completion_specs,
+            &split.words,
+            split.cur_idx,
+            &self.shell_state.aliases,
+            crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
+        )
+        .is_some()
+    }
+
     /// The session's open fd numbers, ascending: every fd-table entry
     /// holding a live read or write endpoint. This is the table the
     /// `/dev/fd/N` spellings resolve against (the special-path
