@@ -22,6 +22,28 @@ impl Executor {
         if !name.contains('/') && !name.contains('\\') && self.emulated_external_stands_down(name) {
             return Ok(false);
         }
+        // rubash#2836 (r70 slice 5): with the job-control channel live,
+        // GNU's cat/sed are real job-controlled children (jobs.c
+        // waitchld's WUNTRACED face; execute_cmd.c execute_disk_command
+        // forks every external command) — the in-process emulation has
+        // no process group to stop, hand the terminal to, or resume with
+        // fg/bg, so ^Z either stops the shell itself or (once the shell
+        // ignores the stop class) becomes a silent no-op while the
+        // emulation keeps reading. Stand down to the real spawn for
+        // exactly the channel's lifetime, the same shape as the
+        // PrimarySlot::Sleep fast path (command_dispatch_primary.rs,
+        // rubash#2398). Only the two stdin-reading emulations stand
+        // down: the remaining file builtins (mkdir/touch/chmod/cp/rm/
+        // rmdir/mkfifo/tty/pwd/printf) never read stdin and complete
+        // before a stop could be observed. The gate is the channel
+        // predicate itself, so non-interactive, script, subshell and
+        // command-substitution routes keep the emulation untouched.
+        if cfg!(unix)
+            && self.job_control_channel_active()
+            && matches!(name, "cat" | "/bin/cat" | "/usr/bin/cat" | "sed")
+        {
+            return Ok(false);
+        }
         let emulated = matches!(
             name,
             "/bin/pwd"
