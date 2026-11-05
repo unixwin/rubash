@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-use super::bind::BindView;
+use super::bind::{BindKindView, BindView};
 #[cfg(windows)]
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
@@ -787,6 +787,76 @@ impl Session {
         view
     }
 
+    /// Register one key binding through the contract
+    /// (unixwin/niubash#863 GAP-13): the tier-A form of the write
+    /// hosts used to make by constructing the engine's internal
+    /// `BindEntry` and calling the tier-C
+    /// `Executor::register_bind_entry` seam. The engine converts the
+    /// view kind to its internal kind and constructs the entry
+    /// itself, so the host never names `shell::bind_registry` on
+    /// this path; the registration lands in the same
+    /// `BindRegistry::register` sink the `bind` builtin writes
+    /// through — one pool, two doors.
+    ///
+    /// Semantics, verbatim from the sink
+    /// (src/shell/bind_registry.rs): a `None` keymap resolves to
+    /// the registry's current keymap at registration time (a stored
+    /// entry always names one concrete map); registering a sequence
+    /// clears its `bind -r` tombstone in that keymap; a sequence
+    /// already present is replaced in place; every call bumps the
+    /// generation by one, including a same-value re-register. This
+    /// is an unbounded runtime verb, not a startup phase: the host
+    /// drains its plugin macros through it on every REPL
+    /// iteration, interleaved with the user's own `bind` commands.
+    pub fn register_binding(&mut self, keyseq: &str, kind: BindKindView, keymap: Option<&str>) {
+        let kind = match kind {
+            BindKindView::Execute { command } => {
+                crate::shell::bind_registry::BindKind::Execute { command }
+            }
+            BindKindView::Function { name } => {
+                crate::shell::bind_registry::BindKind::Function { name }
+            }
+            BindKindView::Macro { text } => crate::shell::bind_registry::BindKind::Macro { text },
+        };
+        self.executor
+            .register_bind_entry(crate::shell::bind_registry::BindEntry {
+                keyseq: keyseq.to_string(),
+                kind,
+                keymap: keymap.map(str::to_string),
+            });
+    }
+
+    /// Trigger the once-per-process inputrc read
+    /// (unixwin/niubash#863 GAP-13): the tier-A form of
+    /// `Executor::initialize_readline` (bashline.c:451). The engine
+    /// reads `$INPUTRC`, else `~/.inputrc`, once per process,
+    /// applying the file's variables and bindings into the
+    /// registry; the call is idempotent by the engine's flag — a
+    /// second call is a no-op and does not re-read the file
+    /// (re-reading is the separate `bind -f` route) — and a
+    /// missing or unreadable file is silent.
+    ///
+    /// Call ordering is the CALLER's duty, and this face does not
+    /// enforce it: the inputrc read must land after the rc files
+    /// (rc `bind` commands run first, the inputrc overrides them —
+    /// bashline.c:451's order) and before the host's first registry
+    /// snapshot, which is what makes the file's variables and
+    /// bindings visible to the mirrored keymaps.
+    pub fn initialize_readline(&mut self) {
+        self.executor.initialize_readline();
+    }
+
+    /// Whether `name` is one of the eight keymap names GNU accepts
+    /// (unixwin/niubash#863 GAP-13; bind.def:37-40). A plain
+    /// membership test against `KEYMAP_NAMES`: the `[keymap]` rule
+    /// parser validates a name before any entry exists, so no
+    /// registry capture is needed to answer it — and no alias
+    /// folding is done here (folding belongs to the register path
+    /// inside the engine).
+    pub fn is_known_keymap(&self, name: &str) -> bool {
+        crate::shell::bind_registry::KEYMAP_NAMES.contains(&name)
+    }
+
     // ----------------------------------------------------------
     // Completion (§6.2)
     // ----------------------------------------------------------
@@ -1155,6 +1225,34 @@ impl Session {
         }
     }
 
+    /// The retained invocation's explicit shopt flag for `name`,
+    /// if any (niubash#863 GAP-12 follow-up, rubash#2848): the
+    /// last `-O`/`+O` entry for that flag in the invocation
+    /// applied through
+    /// [`Session::apply_invocation_before_startup`], or `None`
+    /// when the invocation said nothing about it — and `None`
+    /// also when no invocation was applied. The host needs the
+    /// explicit-vs-silent distinction the shape read cannot
+    /// carry: `enter_interactive` arms `expand_aliases` for an
+    /// interactive session unless the invocation explicitly
+    /// turned it off (`+O expand_aliases -i` must win over the
+    /// interactive default — GNU: silent + `-i` leaves it on,
+    /// `+O expand_aliases -i` turns it off, `-O expand_aliases
+    /// -i` turns it on). Last entry wins, matching the argv walk
+    /// (shell.c:931-958); the option store cannot carry
+    /// explicit-vs-silent in one bit, so the retained invocation
+    /// is the only place this fact lives.
+    pub fn applied_invocation_shopt_flag(&self, name: &str) -> Option<bool> {
+        self.applied_invocation.as_ref().and_then(|invocation| {
+            invocation
+                .shopt_flags
+                .iter()
+                .rev()
+                .find(|(candidate, _)| candidate == name)
+                .map(|(_, enabled)| *enabled)
+        })
+    }
+
     /// Apply a parsed [`ShellInvocation`] to this live session,
     /// before startup files run (niubash#863 GAP-12): the tier-A
     /// form of the host's `apply_invocation_before_startup` —
@@ -1173,9 +1271,12 @@ impl Session {
     /// The invocation is retained by the Session, so
     /// [`Session::finish_invocation_startup`] can run the second
     /// phase without the host holding a clone (the host's
-    /// `startup_invocation` field deletes). A failed apply
-    /// retains nothing: the session is left as the partial apply
-    /// left it, and finish is a no-op until a successful apply.
+    /// `startup_invocation` field deletes once the host adopts
+    /// the retained-invocation reads — `applied_invocation_shape`
+    /// plus `applied_invocation_shopt_flag` (rubash#2848) — not
+    /// by this face alone). A failed apply retains nothing: the
+    /// session is left as the partial apply left it, and finish
+    /// is a no-op until a successful apply.
     pub fn apply_invocation_before_startup(
         &mut self,
         invocation: &ShellInvocation,
