@@ -467,6 +467,28 @@
 > before it; the §2.1 `lexer` row's host counts retire
 > (2 → 1: the heredoc-arm `tokenize` read) when the
 > host lane lands.
+> Round 2 (GAP-9 captain adjudications executed,
+> 2026-11-05): both divergence classes are classified
+> DIVERGE — engine reader governs — and the face is
+> fixed in the same PR: heredoc-pending joins the
+> completeness composition (the token walk reads the
+> lexer's unterminated-body stamp; parse.y:3119
+> `gather_here_documents` — an unread body is part of
+> the still-open read), and the composition gains a
+> terminal channel (a token-walk terminal verdict —
+> stray `)`, foreign keyword closers, stray
+> `;;`-family — overrides the text half's
+> continuation verdicts; parse.y:6724 `yyerror` ends
+> the read at the token), with the parked-feeder
+> verdict fusions making the same cut so the fresh
+> and parked paths agree. The Q-B differential now
+> stands at 66 of 66 AGREE, pinned in the consumer
+> tests. The brace-group fidelity note is discharged
+> in the same round: the projection descends into
+> folded brace groups (recursively), projecting the
+> interior words with their own spans, positions and
+> roles; command substitutions remain unprojected
+> (word-shaped units, captain-ruled).
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`
 > (full contract in 1.5.0; niubash migrates onto it inside the same
@@ -928,7 +950,7 @@ to the split core crate without changing its shape.
 | `execute_ast`, `execute_command`, `execute_prompt_command`, `run_exit_trap_with_status`, `expand_prompt_string_mut`, `set_positional_params`, `take_parse_error`, `take_exit_jump_pending` | A (run path) | `Session::run` + `RunOptions` / `RunOutcome`; the finish-path half of `run_exit_trap_with_status` lands as the `Session::begin_finish` guard's trap step (niubash#863 GAP-8 — see the finish guard row below) |
 | `script_driver` run family | A (driver wrappers B) | `Session::run`; thin wrappers stay in the driver crate |
 | `pre_process_interactive_line` + `InteractiveExpansion` | A | `Session::prepare_line` |
-| completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` — the face is recorded with the GAP-9 record (see the header addendum): verdict parity with the host's scanner walk is pinned over the adjudicated corpus subset in the engine's consumer tests, and the two UNCLASSIFIED divergence classes (heredoc-pending; function-body stray close) stay the host validator's own arms until the captain classifies them and the GAP-9 host lane adopts the face for those shapes |
+| completeness (`has_unclosed_input_syntax*`, `script_uses_*`, `check_binary_file`, `heredoc_delimiter_unclosed_quote`, `READ_STDIN_MARKER`) | A / B | `Session::needs_more_input`; helpers in `api::syntax` — the face is recorded with the GAP-9 record (see the header addendum): verdict parity with the host's scanner walk is pinned over the full corpus in the engine's consumer tests — 66 of 66 rows AGREE since the GAP-9 round-2 adjudication classified both divergence classes DIVERGE/engine-governs and fixed the face (the token walk reads the lexer's unterminated-body stamp for heredoc-pending, parse.y:3119 `gather_here_documents`; the composition gained a terminal channel so a token-walk terminal verdict overrides the text half's continuation verdicts, parse.y:6724 `yyerror`), with the parked-feeder verdict fusions making the same cut, so the host lane adopts the face for every corpus shape |
 | `usage` printers and option tables | B | stay the shared host/engine bridge |
 | `parser` family (`parse*`, `CommandNode`, `ParseLoopOptions`, `WordMetadata`, `ast_print`) | B | `Session::parse` + `api::syntax` view types (no internal `Ast` in Tier A) |
 | `lexer` family (`tokenize*`) | B | `api::syntax` token view — the target home is REACHED with the GAP-9 record: the token view exists in `api::syntax` (`Session::token_view`; see the header addendum). The family's remaining host reads retire when the GAP-9 host lane lands |

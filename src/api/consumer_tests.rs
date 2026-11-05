@@ -3288,10 +3288,17 @@ fn issue863_gap9_token_view_command_position() {
             vec![("!", true), ("time", true), ("-p", false), ("ls", true)],
         ),
         (
-            // A brace group folds into ONE lexer token; the view
-            // cannot see inside it (a recorded fidelity note).
+            // A brace group folds into ONE lexer token; the
+            // projection descends into it (round 2), so its
+            // interior words carry their own positions.
             "{ echo grouped; }",
-            vec![("{ echo grouped; }", true)],
+            vec![
+                ("{", true),
+                ("echo", true),
+                ("grouped", false),
+                (";", false),
+                ("}", false),
+            ],
         ),
         (
             "(cd sub && ls)",
@@ -3310,7 +3317,11 @@ fn issue863_gap9_token_view_command_position() {
                 ("foo", true),
                 ("(", false),
                 (")", false),
-                ("{ echo body; }", false),
+                ("{", false),
+                ("echo", true),
+                ("body", false),
+                (";", false),
+                ("}", false),
             ],
         ),
         ("time ls", vec![("time", true), ("ls", true)]),
@@ -3439,7 +3450,11 @@ fn issue863_gap9_token_view_word_roles() {
         vec![
             ("function", R::Reserved),
             ("greet", R::Plain),
-            ("{ echo hi; }", R::Reserved),
+            ("{", R::Reserved),
+            ("echo", R::Builtin),
+            ("hi", R::Plain),
+            (";", R::Plain),
+            ("}", R::Reserved),
         ],
     );
     expect(
@@ -3618,23 +3633,26 @@ fn issue863_gap9_token_view_case_pattern_close() {
 #[test]
 fn issue863_gap9_needs_more_input_verdict_parity() {
     let session = issue863_gap9_session();
-    // The adjudicated subset of the GAP-9 Q-B differential: the
-    // host completeness corpus (the inputs behind niubash's
+    // The GAP-9 Q-B differential, fully adjudicated: the host
+    // completeness corpus (the inputs behind niubash's
     // `repl_input_complete_*` tests and the issue482 suite shapes)
     // run through the engine face, with the host's scanner-walk
-    // verdict beside it. 54 of the 66 corpus rows agree and are
-    // pinned here. The remaining 12 rows are UNCLASSIFIED —
-    // excluded by design, recorded in the lane report for the
-    // captain's classification before the host lane adopts this
-    // face: 9 heredoc-pending rows (the face carries no
-    // heredoc-pending signal; the host's heredoc arm reads the
-    // lexer's unterminated-body stamp directly today) and 3
-    // function-body stray-close rows (`f() {\n)` and kin: the
-    // host walk and the engine reader both stop terminal there,
-    // the face's token walk does not). Where a row's verdict is
-    // terminal for a stray close, the terminal verdict itself was
-    // verified against the engine's reader behavior (the issue482
-    // suite forms), not just the host walk.
+    // verdict beside it — 66 of 66 rows AGREE. The first 54 rows
+    // agreed from the start. The remaining 12 (pinned separately
+    // below) diverged at the first differential and were
+    // classified by the captain as DIVERGE, engine reader governs
+    // — the face was deficient on both classes and was fixed in
+    // round 2: heredoc-pending (9 rows: the face's token walk now
+    // reads the lexer's unterminated-body stamp — parse.y:3119
+    // `gather_here_documents` makes an unread body part of the
+    // still-open read) and the function-body stray close (3 rows:
+    // the composition gained a terminal channel, so a token-walk
+    // terminal verdict overrides the text half's unclosed-body
+    // continuation — parse.y:6724 `yyerror` ends the read at the
+    // token). Where a row's verdict is terminal for a stray close,
+    // the terminal verdict itself was verified against the
+    // engine's reader behavior (the issue482 suite forms), not
+    // just the host walk.
     // (input, host_complete) — the face must answer
     // needs_more_input == !host_complete.
     let corpus: Vec<(&str, bool)> = vec![
@@ -3701,6 +3719,49 @@ fn issue863_gap9_needs_more_input_verdict_parity() {
             "face verdict for {input:?}"
         );
     }
+    // The round-2 adjudicated rows: (input, host_complete).
+    let adjudicated: Vec<(&str, bool)> = vec![
+        // Heredoc-pending: the host's heredoc arm reads these as
+        // incomplete; the face answers the same from the token
+        // stream's unterminated-body stamp. The `EOF trailing`
+        // row pins that a delimiter word with trailing text is
+        // not a delimiter line; the `<<A <<'B'` row pins that one
+        // closed body does not clear the other's pending read.
+        ("cat > out.txt <<'EOF'", false),
+        ("cat > out.txt <<\"EOF\"", false),
+        ("cat > out.txt <<EOF", false),
+        ("cat > out.txt <<-EOF", false),
+        ("cat <<A <<'B'\nA-body\nA", false),
+        ("cat <<EOF\nnever closed", false),
+        ("cat <<EOF\nbody\nEOF trailing\nmore", false),
+        ("cat <<EOF\n", false),
+        ("echo x; cat <<EOF", false),
+        // Function-body stray close: terminal for the host walk
+        // and the engine reader; the face's terminal channel
+        // answers the same through the text half's unclosed-body
+        // continuation verdict.
+        ("f() {\n)", true),
+        ("hello() {\n)", true),
+        ("f() {\necho a\n)", true),
+    ];
+    assert_eq!(adjudicated.len(), 12);
+    for (input, host_complete) in &adjudicated {
+        assert_eq!(
+            session.needs_more_input(input),
+            !host_complete,
+            "face verdict for {input:?}"
+        );
+    }
+    // Both adjudicated classes are posix-invariant: neither the
+    // heredoc stamp nor the terminal channel depends on the mode.
+    let posix_session = issue863_gap9_posix_session();
+    for (input, host_complete) in &adjudicated {
+        assert_eq!(
+            posix_session.needs_more_input(input),
+            !host_complete,
+            "posix face verdict for {input:?}"
+        );
+    }
     // The posix arm: inside "${...}", a `'` opens a quote in the
     // default mode (the face asks for more input) and is literal
     // in posix mode (complete) — the face derives in the
@@ -3708,6 +3769,145 @@ fn issue863_gap9_needs_more_input_verdict_parity() {
     assert!(session.needs_more_input("echo \"${x'}\""));
     let posix = issue863_gap9_posix_session();
     assert!(!posix.needs_more_input("echo \"${x'}\""));
+}
+
+#[test]
+fn issue863_gap9_token_view_brace_group_descent() {
+    use TokenKindView as K;
+    use TokenRole as R;
+    let session = issue863_gap9_session();
+
+    // A complete brace group reaches the lexer as ONE folded
+    // token; the projection descends into it (GAP-9 round 2,
+    // captain-ruled): the `{` span carries the folded token's own
+    // position and role, the interior is a command list folded
+    // from a fresh command position, and the `}` closes.
+    let view = session.token_view("{ echo body; }");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 1, K::Keyword, "{", true, R::Reserved),
+            gap9_shape(2, 6, K::Word, "echo", true, R::Builtin),
+            gap9_shape(7, 11, K::Word, "body", false, R::Plain),
+            gap9_shape(11, 12, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(13, 14, K::Keyword, "}", false, R::Reserved),
+        ]
+    );
+
+    // A function definition's body folds the same way; the name
+    // and parens keep the outer fold's verdicts, and the body's
+    // `{` is not itself a command word.
+    let view = session.token_view("f() { echo body; }");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 1, K::Word, "f", true, R::Plain),
+            gap9_shape(1, 2, K::Keyword, "(", false, R::Reserved),
+            gap9_shape(2, 3, K::Keyword, ")", false, R::Reserved),
+            gap9_shape(4, 5, K::Keyword, "{", false, R::Reserved),
+            gap9_shape(6, 10, K::Word, "echo", true, R::Builtin),
+            gap9_shape(11, 15, K::Word, "body", false, R::Plain),
+            gap9_shape(15, 16, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(17, 18, K::Keyword, "}", false, R::Reserved),
+        ]
+    );
+
+    // Nested groups descend recursively.
+    let view = session.token_view("{ { echo a; }; }");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 1, K::Keyword, "{", true, R::Reserved),
+            gap9_shape(2, 3, K::Keyword, "{", true, R::Reserved),
+            gap9_shape(4, 8, K::Word, "echo", true, R::Builtin),
+            gap9_shape(9, 10, K::Word, "a", false, R::Plain),
+            gap9_shape(10, 11, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(12, 13, K::Keyword, "}", false, R::Reserved),
+            gap9_shape(13, 14, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(15, 16, K::Keyword, "}", false, R::Reserved),
+        ]
+    );
+
+    // A `case` in the interior folds through its phases exactly
+    // as at top level, pattern-close stamp included.
+    let view = session.token_view("{ case $x in a) b;; esac; }");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 1, K::Keyword, "{", true, R::Reserved),
+            gap9_shape(2, 6, K::Keyword, "case", true, R::Reserved),
+            gap9_shape(7, 9, K::Variable, "$x", false, R::Plain),
+            gap9_shape(10, 12, K::Keyword, "in", false, R::Reserved),
+            gap9_shape(13, 14, K::Word, "a", false, R::Plain),
+            gap9_shape(14, 15, K::Keyword, ")", false, R::Plain),
+            gap9_shape(16, 17, K::Word, "b", true, R::Plain),
+            gap9_shape(17, 19, K::Word, ";;", false, R::Plain),
+            gap9_shape(20, 24, K::Keyword, "esac", false, R::Reserved),
+            gap9_shape(24, 25, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(26, 27, K::Keyword, "}", false, R::Reserved),
+        ]
+    );
+    let close = view.tokens.iter().find(|span| span.text == ")");
+    assert_eq!(close.map(|span| span.case_pattern_close), Some(true));
+
+    // Command substitutions are NOT descended (captain-ruled:
+    // word-shaped units; the view mirrors the token stream).
+    let view = session.token_view("{ echo $(echo inner); }");
+    assert_eq!(
+        issue863_gap9_shape(&view),
+        vec![
+            gap9_shape(0, 1, K::Keyword, "{", true, R::Reserved),
+            gap9_shape(2, 6, K::Word, "echo", true, R::Builtin),
+            gap9_shape(7, 20, K::CommandSubst, "$(echo inner)", false, R::Plain),
+            gap9_shape(20, 21, K::Semicolon, ";", false, R::Plain),
+            gap9_shape(22, 23, K::Keyword, "}", false, R::Reserved),
+        ]
+    );
+
+    // Honesty battery: over every group shape, spans are ordered
+    // and non-overlapping, every span's text is the input slice
+    // at its own offsets, and the gaps between spans are
+    // whitespace only (comments are spans of their own).
+    for input in [
+        "{ echo body; }",
+        "f() { echo body; }",
+        "{ { echo a; }; }",
+        "{ case $x in a) b;; esac; }",
+        "{ # c\necho a\n}",
+        "{ local x=1; }",
+        "{ echo a; } > out",
+        "if { echo a; }; then echo ok; fi",
+        "{ echo a\necho b\n}",
+        "{ }",
+        "echo before; { echo body; }; echo after",
+    ] {
+        let view = session.token_view(input);
+        let mut covered = 0usize;
+        for span in &view.tokens {
+            assert!(
+                span.start >= covered,
+                "spans ordered and non-overlapping in {input:?}: {span:?} after {covered}"
+            );
+            assert_eq!(
+                &input[span.start..span.end],
+                span.text,
+                "span text is the input slice in {input:?}"
+            );
+            assert!(
+                input[covered..span.start].trim().is_empty(),
+                "gap before {span:?} in {input:?} is whitespace only"
+            );
+            covered = span.end;
+        }
+        assert!(
+            input[covered..].trim().is_empty(),
+            "tail after the last span in {input:?} is whitespace only"
+        );
+    }
+    // The comment inside a folded group is a span of its own.
+    let view = session.token_view("{ # c\necho a\n}");
+    let comment = view.tokens.iter().find(|span| span.kind == K::Comment);
+    assert_eq!(comment.map(|span| span.text.as_str()), Some("# c"));
 }
 
 #[test]
