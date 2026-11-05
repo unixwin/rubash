@@ -2578,3 +2578,90 @@ fn issue863_gap6_faces_read_live_state() {
     assert_eq!(session.variable_value("GAP6_LIVE"), None);
     assert!(issue863_gap6_env_get(&session.environment_full(), "GAP6_LIVE").is_none());
 }
+
+// ---------------------------------------------------------------------------
+// GAP-7 prototype differential (niubash#863): what nested completion does
+// TODAY, before any contract change. These probes are the evidence base
+// for the Object 1 contract-shape decision and the Object 2 nested-read
+// decision; the final GAP-7 pins subsume them.
+// ---------------------------------------------------------------------------
+
+/// P1: a -F function that defines a function mid-attempt and then runs
+/// `compgen -A function` inside the same attempt. If the inner compgen
+/// reads live state, it sees the just-defined function.
+#[test]
+fn issue863_gap7_probe_nested_compgen_sees_live_state() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "_f() { _gap7_inner_fn() { :; }; COMPREPLY=( $(compgen -A function -- _gap7) ); }; complete -F _f mycmd",
+    );
+    let outcome = session.complete_detailed("mycmd d", 7);
+    assert_eq!(
+        outcome
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["_gap7_inner_fn"],
+        "inner compgen inside a -F function must see state created during the outer attempt"
+    );
+}
+
+/// P2: the bare-`compopt` window (RL_STATE_COMPLETING port) survives an
+/// inner compgen run inside the -F function: the window is an attempt
+/// property, not a single-dynamic-resolution property.
+#[test]
+fn issue863_gap7_probe_compopt_window_survives_inner_compgen() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "_f() { compgen -W 'a b' -- \"$2\" > /dev/null; compopt -o nospace; COMPREPLY=(zz); }; complete -F _f mycmd",
+    );
+    let outcome = session.complete_detailed("mycmd zz", 8);
+    assert_eq!(
+        outcome
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["zz"]
+    );
+    assert!(
+        outcome.policy.suppress_append,
+        "bare compopt after an inner compgen must still reach the policy"
+    );
+}
+
+/// P3: nested dynamic resolution integrity — an inner `compgen -F` run
+/// inside the outer -F function must not clobber the outer attempt's
+/// governing-compspec copy: the outer function's later `compopt`
+/// mutation must still land on the outer attempt's policy, and the
+/// inner function's side effects must persist.
+#[test]
+fn issue863_gap7_probe_nested_dynamic_resolution_keeps_outer_copy() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "_g() { GAP7_INNER_SEEN=1; COMPREPLY=(inner_done); }; _f() { compgen -F _g -- x > /dev/null; compopt -o nospace; COMPREPLY=(outer_done); }; complete -F _f mycmd",
+    );
+    let outcome = session.complete_detailed("mycmd ou", 8);
+    assert_eq!(
+        outcome
+            .candidates
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["outer_done"],
+        "the outer function's COMPREPLY wins; the inner compgen output was captured aside"
+    );
+    assert!(
+        outcome.policy.suppress_append,
+        "outer compopt after nested dynamic resolution must reach the outer policy"
+    );
+    assert_eq!(
+        session.variable_value("GAP7_INNER_SEEN"),
+        Some("1".to_string()),
+        "the inner completion function's side effects persist"
+    );
+}
