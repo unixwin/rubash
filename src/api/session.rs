@@ -24,6 +24,7 @@ use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
     RcPolicy, StartupClass, StartupContext,
 };
+use super::completion_attempt::CompletionAttempt;
 use super::completion_view::{full_env_sorted, CompletionView};
 use super::diagnostic::{Diagnostic, DiagnosticKind, ParseFailure, SessionError};
 use super::events::{CommandEvent, SessionEvents};
@@ -802,6 +803,21 @@ impl Session {
         self.executor.has_compspec(command)
     }
 
+    /// Open one completion attempt as an explicit object
+    /// (unixwin/niubash#863 GAP-7): the contract replacement
+    /// for the host's thread-local shell lend. The host opens
+    /// a guard per attempt from the `&mut Session` it holds,
+    /// drives the attempt's execution faces through the guard,
+    /// and reads live state through the guard's [`Session`]
+    /// lend for the attempt's duration. Nested attempts are
+    /// repeated calls on the same guard; a second guard
+    /// cannot exist while this one lives, so the aliasing
+    /// hazard the thread-local's reentrancy flag papered over
+    /// is a compile error instead of a dark face at runtime.
+    pub fn begin_completion_attempt(&mut self) -> CompletionAttempt<'_> {
+        CompletionAttempt::new(self)
+    }
+
     /// GNU `pathexp.c:442 shell_glob_filename` over one pattern, for the
     /// readline glob-completion entry point (`bashline.c:4053`
     /// `glob_complete_word` → `bash_glob_completion_internal`). The
@@ -858,10 +874,7 @@ impl Session {
     /// delegate to the one resolver in `executor::path`, so
     /// the contract and the tier-C form cannot disagree
     /// about a spelling.
-    pub fn resolve_shell_path_from_env(
-        path: &str,
-        env_vars: &HashMap<String, String>,
-    ) -> PathBuf {
+    pub fn resolve_shell_path_from_env(path: &str, env_vars: &HashMap<String, String>) -> PathBuf {
         Executor::resolve_shell_path_from_env(path, env_vars)
     }
 

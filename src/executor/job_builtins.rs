@@ -4419,12 +4419,12 @@ impl Executor {
             // complete.def:862-886: `list == 0 && wl == 0` is the
             // completion-state form. Inside a live completion attempt
             // (RL_STATE_COMPLETING set AND pcomp_curcs != NULL — the
-            // ports are `line_completion_active` / `pcomp_curcs`) it
+            // ports are `line_completion_depth` / `pcomp_curcs`) it
             // operates on the governing compspec copy: bare prints the
             // compopts line, `-o/+o` sets the bits on the copy for the
             // rest of this attempt. Outside it always errors.
             if parsed.operands.is_empty() && pseudo.is_none() {
-                if !self.shell_state.line_completion_active
+                if self.shell_state.line_completion_depth == 0
                     || self.shell_state.pcomp_curcs.is_none()
                 {
                     writeln!(

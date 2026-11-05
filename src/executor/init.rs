@@ -1093,7 +1093,7 @@ impl Executor {
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
                 pcomp_curcs: None,
                 pcomp_curcmd: None,
-                line_completion_active: false,
+                line_completion_depth: 0,
                 bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
                     crate::shell::bind_registry::BindRegistry::default(),
                 )),
