@@ -6949,166 +6949,363 @@ fn record_stdin_group_if_armed(executor: &mut Executor, pending: &str) {
         .record(trimmed, &control, &ignore, histsize);
 }
 
-pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> i32 {
-    // shell.c:1007-1009 exit_shell: if remember_on_history is set,
-    // maybe_save_shell_history() writes the session's history to $HISTFILE
-    // (bashhist.c:488-530): append only this session's lines when the list
-    // was not stifled below them, rewrite the file otherwise, then
-    // sv_histsize("HISTFILESIZE") truncates the file (variables.c:6088).
-    {
-        // shell.c:1008: the save is gated on remember_on_history (the
-        // `history` set option), which `set +o history` clears. It is
-        // NOT gated on interactivity: a non-interactive shell that ran
-        // `set -o history` appends its session lines at exit too
-        // (rubash#1049 — the save used to sit inside `if interactive`).
-        let remember_on_history =
-            executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
-        if remember_on_history {
-            if let Some(session) = executor.get_session_history() {
-                let write_ts = executor.get_env("HISTTIMEFORMAT").is_some();
-                let histfile = executor.get_env("HISTFILE").map(String::from);
-                let histfilesize = SessionHistory::size_limit(executor.get_env("HISTFILESIZE"));
-                let mut shell = session.borrow_mut();
-                if shell.lines_this_session > 0 {
-                    if let Some(hf) = histfile.as_deref().filter(|hf| !hf.is_empty()) {
-                        let path = executor.resolve_shell_path(hf);
-                        let path_str = path.to_string_lossy().to_string();
-                        if !path.exists() {
-                            let _ = fs::write(&path, "");
-                        }
-                        // bashhist.c:513: force_append_history is the histappend
-                        // shopt; it always appends instead of rewriting.
-                        let force_append = executor
-                            .get_env("__RUBASH_SHOPT_STATE")
-                            .is_some_and(|s| s.split('\u{1f}').any(|e| e == "histappend"));
-                        if force_append || shell.lines_this_session <= shell.entries.len() {
-                            let _ = shell.append_file(&path_str, write_ts);
-                        } else {
-                            let _ = shell.write_file(&path_str, write_ts);
-                        }
-                        shell.lines_this_session = 0;
-                        if let Some(max) = histfilesize {
-                            let _ = shell.truncate_file(&path_str, max, write_ts);
+/// Whether a finish pass's stream-end duties write the engine
+/// session-history list (GAP-8, niubash#863): the consuming
+/// close defaults to `Run`; a host whose interactive history
+/// lives in its own provider gates the step off so the two
+/// stores never double-write (niu#642).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FinishHistoryGate {
+    Run,
+    Skip,
+}
+
+/// One session finish as a step-decomposed pass (GAP-8,
+/// niubash#863): the single implementation behind
+/// [`finish_shell`], [`Session::close`] /
+/// [`Session::close_with_report`] and the contract guard
+/// `Session::begin_finish`. The steps are coarse and each is
+/// once-only; calling a later step completes any earlier step
+/// it depends on, in the pass's canonical order, so a caller
+/// can interleave its own duties (a post-trap cwd read, a
+/// host-provider history flush) between steps without ever
+/// re-deriving the order itself.
+///
+/// Canonical order, and the D1 adjudication it encodes: the
+/// PLAIN path follows GNU `exit_shell` (shell.c:985) — the
+/// EXIT trap runs (shell.c:1000-1002) BEFORE the history save
+/// (shell.c:1007-1009), because `maybe_save_shell_history`
+/// (bashhist.c:488) reads HISTFILE/HISTFILESIZE at the write,
+/// so the trap's own edits and additions govern the save. The
+/// TERMSIG path keeps the sig.c:590-667 funnel order exactly
+/// as built (history save first, SIGHUP hangup before the
+/// trap, die-by-signal last): when the duties step runs with a
+/// termsig death pending and the trap step has not run yet, it
+/// writes history BEFORE the trap step; on the plain path it
+/// runs the trap step first. A caller that runs the trap step
+/// standalone owns the interleaving from that point (the
+/// interactive host's shape: trap, then its own post-trap
+/// duties, with the engine history step gated off).
+pub(crate) struct FinishPass<'e> {
+    executor: &'e mut Executor,
+    /// The caller-supplied status the finish was opened with:
+    /// the EXIT trap observes it as its entry `$?` and a plain
+    /// completion resolves to it.
+    pending_status: i32,
+    interactive: bool,
+    trap_step_done: bool,
+    /// `pending_status` until the trap step resolves it.
+    resolved_status: i32,
+    /// Whether the EXIT trap action actually fired during this
+    /// pass (the runner's once-latch transition), as opposed to
+    /// being already consumed, exec-cleared, or never set.
+    trap_ran: bool,
+    marks_taken: bool,
+    termsig_death: Option<i32>,
+    termsig_trap_status: Option<i32>,
+    history_step_done: bool,
+    history_written: bool,
+    duties_done: bool,
+}
+
+impl<'e> FinishPass<'e> {
+    pub(crate) fn new(executor: &'e mut Executor, pending_status: i32, interactive: bool) -> Self {
+        Self {
+            executor,
+            pending_status,
+            interactive,
+            trap_step_done: false,
+            resolved_status: pending_status,
+            trap_ran: false,
+            marks_taken: false,
+            termsig_death: None,
+            termsig_trap_status: None,
+            history_step_done: false,
+            history_written: false,
+            duties_done: false,
+        }
+    }
+
+    pub(crate) fn resolved_status(&self) -> i32 {
+        self.resolved_status
+    }
+
+    pub(crate) fn trap_ran(&self) -> bool {
+        self.trap_ran
+    }
+
+    pub(crate) fn history_written(&self) -> bool {
+        self.history_written
+    }
+
+    pub(crate) fn duties_done(&self) -> bool {
+        self.duties_done
+    }
+
+    /// The session's working directory at this point of the
+    /// pass: read after the trap step, this is the post-trap
+    /// directory (the rubash#668 value).
+    pub(crate) fn final_cwd(&self) -> std::path::PathBuf {
+        self.executor.session_cwd().to_path_buf()
+    }
+
+    /// The trap step: termsig marks, SIGHUP hangup, the
+    /// end-of-stream job-notification flush, and the EXIT trap
+    /// itself, in the order `finish_shell` has always run them.
+    /// Returns the resolved status — the trap's own `exit`
+    /// overrides, plain completion keeps the pending status
+    /// (trap_exec.rs run_exit_trap_action). Once-only: a later
+    /// call returns the resolved status without re-running.
+    pub(crate) fn run_exit_trap(&mut self) -> i32 {
+        if self.trap_step_done {
+            return self.resolved_status;
+        }
+        self.trap_step_done = true;
+        // rubash#2233, generalized by rubash#2346: the
+        // termsig-death funnel's marks are taken here — this
+        // pass is their only consumer — so a stale mark can
+        // never leak into a later session in the same process.
+        // (In the pass as originally composed, the take sat
+        // between the history write and the hangup; see
+        // run_stream_end_duties for how the two orders share
+        // this take.)
+        if !self.marks_taken {
+            self.marks_taken = true;
+            self.termsig_death = self.executor.take_termsig_death_pending();
+            // rubash#2352: the EXIT trap's entry status under a
+            // termsig death — the value captured when the death
+            // was noted (the last command completed before the
+            // signal; trap.c:1036 trap_saved_exit_value =
+            // last_command_exit_value), NOT this finish's
+            // 128+sig unwind status. Taken with the mark; a
+            // death noted without a capture (none should exist)
+            // falls back to the unwind status rather than
+            // inventing one.
+            self.termsig_trap_status = self.executor.take_termsig_death_trap_status();
+        }
+        let termsig_death = self.termsig_death;
+        // sig.c:621-622 gates the job hangup on SIGHUP reaching
+        // an interactive (or comsub/procsub subshell) shell; a
+        // script shell caught by its EXIT trap — and any shell
+        // dying by another terminating signal — dies by the
+        // signal without it.
+        #[cfg(unix)]
+        if termsig_death == Some(libc::SIGHUP as i32) && self.executor.invocation_interactive() {
+            self.executor.hangup_all_jobs();
+        }
+        // rubash#1853: end-of-stream job notifications. The
+        // boundary flush in execute_ast only fires when a
+        // further top-level command is walked, so a signal
+        // death in the stream's last command would otherwise
+        // leave the shell silently (GNU prints it from the
+        // wait itself — jobs.c:3385 notify_and_cleanup in
+        // wait_for; jobs.c:4723 maybe_print_job_notifications).
+        // This runs before the EXIT trap below, matching GNU's
+        // order.
+        let _ = self.executor.flush_job_notifications_at_stream_end();
+        // rubash#2352: under a termsig death the trap runs with
+        // the captured pre-signal status; every other finish
+        // keeps the caller's status (a plain exit's status IS
+        // its trap entry status). The late-mark re-take in the
+        // duties step never re-runs the trap — GNU
+        // short-circuits a second terminating signal straight
+        // to kill_shell — so the capture belongs to this first
+        // take alone.
+        let trap_entry_status = match (termsig_death, self.termsig_trap_status) {
+            (Some(_), Some(saved)) => saved,
+            _ => self.pending_status,
+        };
+        let latch_before = self.executor.exit_trap_ran.get();
+        let code = match self.executor.run_exit_trap_with_status(trap_entry_status) {
+            Ok(code) => code,
+            Err(ExecuteError::ExitCode(code)) => code,
+            Err(e) => {
+                if self.interactive {
+                    eprintln!("Error: {}", e);
+                } else {
+                    eprintln!("{}", e);
+                }
+                1
+            }
+        };
+        self.trap_ran = !latch_before && self.executor.exit_trap_ran.get();
+        self.resolved_status = code;
+        code
+    }
+
+    /// The session-history write, verbatim the step
+    /// `finish_shell` has always run (bashhist.c semantics);
+    /// its position relative to the trap step is the caller's
+    /// (see the type's order contract). Once-only; records
+    /// whether a write actually happened for the outcome.
+    fn run_history_write(&mut self) {
+        if self.history_step_done {
+            return;
+        }
+        self.history_step_done = true;
+        // shell.c:1007-1009 exit_shell: if remember_on_history is set,
+        // maybe_save_shell_history() writes the session's history to $HISTFILE
+        // (bashhist.c:488-530): append only this session's lines when the list
+        // was not stifled below them, rewrite the file otherwise, then
+        // sv_histsize("HISTFILESIZE") truncates the file (variables.c:6088).
+        {
+            // shell.c:1008: the save is gated on remember_on_history (the
+            // `history` set option), which `set +o history` clears. It is
+            // NOT gated on interactivity: a non-interactive shell that ran
+            // `set -o history` appends its session lines at exit too
+            // (rubash#1049 — the save used to sit inside `if interactive`).
+            let remember_on_history =
+                self.executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
+            if remember_on_history {
+                if let Some(session) = self.executor.get_session_history() {
+                    let write_ts = self.executor.get_env("HISTTIMEFORMAT").is_some();
+                    let histfile = self.executor.get_env("HISTFILE").map(String::from);
+                    let histfilesize =
+                        SessionHistory::size_limit(self.executor.get_env("HISTFILESIZE"));
+                    let mut shell = session.borrow_mut();
+                    if shell.lines_this_session > 0 {
+                        if let Some(hf) = histfile.as_deref().filter(|hf| !hf.is_empty()) {
+                            let path = self.executor.resolve_shell_path(hf);
+                            let path_str = path.to_string_lossy().to_string();
+                            if !path.exists() {
+                                let _ = fs::write(&path, "");
+                            }
+                            // bashhist.c:513: force_append_history is the histappend
+                            // shopt; it always appends instead of rewriting.
+                            let force_append = self
+                                .executor
+                                .get_env("__RUBASH_SHOPT_STATE")
+                                .is_some_and(|s| s.split('\u{1f}').any(|e| e == "histappend"));
+                            if force_append || shell.lines_this_session <= shell.entries.len() {
+                                let _ = shell.append_file(&path_str, write_ts);
+                            } else {
+                                let _ = shell.write_file(&path_str, write_ts);
+                            }
+                            self.history_written = true;
+                            shell.lines_this_session = 0;
+                            if let Some(max) = histfilesize {
+                                let _ = shell.truncate_file(&path_str, max, write_ts);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    // rubash#2233, generalized by rubash#2346: the termsig-death
-    // funnel (sig.c:590 termsig_handler) hangs the jobs up AFTER the
-    // history save above and BEFORE the EXIT trap below (sig.c:621-622
-    // precedes the run_exit_trap call), then dies by the signal at the
-    // end of this function. The mark is taken here — finish_shell is
-    // its only consumer — so a stale mark can never leak into a later
-    // session in the same process.
-    let termsig_death = executor.take_termsig_death_pending();
-    // rubash#2352: the EXIT trap's entry status under a termsig
-    // death — the value captured when the death was noted (the last
-    // command completed before the signal; trap.c:1036
-    // trap_saved_exit_value = last_command_exit_value), NOT this
-    // finish's 128+sig unwind status. Taken with the mark; a death
-    // noted without a capture (none should exist) falls back to the
-    // unwind status rather than inventing one.
-    let termsig_trap_status = executor.take_termsig_death_trap_status();
-    // sig.c:621-622 gates the job hangup on SIGHUP reaching an
-    // interactive (or comsub/procsub subshell) shell; a script shell
-    // caught by its EXIT trap — and any shell dying by another
-    // terminating signal — dies by the signal without it.
-    #[cfg(unix)]
-    if termsig_death == Some(libc::SIGHUP as i32) && executor.invocation_interactive() {
-        executor.hangup_all_jobs();
-    }
-    // rubash#1853: end-of-stream job notifications. The boundary
-    // flush in execute_ast only fires when a further top-level
-    // command is walked, so a signal death in the stream's last
-    // command would otherwise leave the shell silently (GNU prints
-    // it from the wait itself — jobs.c:3385 notify_and_cleanup in
-    // wait_for; jobs.c:4723 maybe_print_job_notifications). This
-    // runs before the EXIT trap below, matching GNU's order.
-    let _ = executor.flush_job_notifications_at_stream_end();
-    // rubash#2352: under a termsig death the trap runs with the
-    // captured pre-signal status; every other finish keeps the
-    // caller's status (a plain exit's status IS its trap entry
-    // status). The late-mark re-take below never re-runs the trap —
-    // GNU short-circuits a second terminating signal straight to
-    // kill_shell — so the capture belongs to this first take alone.
-    let trap_entry_status = match (termsig_death, termsig_trap_status) {
-        (Some(_), Some(saved)) => saved,
-        _ => status,
-    };
-    let code = match executor.run_exit_trap_with_status(trap_entry_status) {
-        Ok(code) => code,
-        Err(ExecuteError::ExitCode(code)) => code,
-        Err(e) => {
-            if interactive {
-                eprintln!("Error: {}", e);
+
+    /// The stream-end duties: the history write (positioned by
+    /// the pass's order contract, gated per route) plus the
+    /// post-trap duties — debugger exit note, persistent
+    /// output procsub close, huponexit hangup, and the termsig
+    /// funnel's late re-take + die-by-signal. Once-only.
+    pub(crate) fn run_stream_end_duties(&mut self, history_gate: FinishHistoryGate) {
+        if self.duties_done {
+            return;
+        }
+        // D1 order (see the type documentation): the termsig
+        // funnel writes history BEFORE the trap (sig.c:613-618);
+        // the plain exit_shell path runs the trap first
+        // (shell.c:1000-1009). The decision reads the termsig
+        // mark without taking it — the trap step takes it, in
+        // both orders, at the point the built pass always did.
+        if !self.trap_step_done {
+            if self.executor.termsig_death_pending().is_some() {
+                if history_gate == FinishHistoryGate::Run {
+                    self.run_history_write();
+                } else {
+                    self.history_step_done = true;
+                }
+                self.run_exit_trap();
             } else {
-                eprintln!("{}", e);
+                self.run_exit_trap();
+                if history_gate == FinishHistoryGate::Run {
+                    self.run_history_write();
+                } else {
+                    self.history_step_done = true;
+                }
             }
-            1
+        } else if history_gate == FinishHistoryGate::Run {
+            self.run_history_write();
+        } else {
+            self.history_step_done = true;
         }
-    };
-    // DE-09 (design WP-1 G-13): the driver finish side reports the
-    // final status to the session — never the EXIT funnel itself.
-    // Idempotent with the exit builtin's dispatch-side report: the
-    // first finish point to speak wins.
-    executor.debugger_note_exit(code);
-    // After the EXIT trap (whose writes still belong to the streams):
-    // shell exit closes every descriptor, so each still-open persistent
-    // output process substitution sees EOF and finishes — run the
-    // deferred bodies with their accumulated input (rubash#1336:
-    // `exec > >(tee log)` scripts lost the whole log at end-of-script).
-    executor.close_all_persistent_output_process_substitutions();
-    // rubash#2233: the huponexit funnel (shell.c:1017-1020
-    // exit_shell) — an interactive LOGIN shell with the shopt set
-    // hangs up its jobs on the normal exit path. GNU's order is trap
-    // then hangup (the exit builtin runs the EXIT trap before
-    // exit_shell), mirrored here: for an `exit`-builtin finish the
-    // EXIT trap was already consumed at dispatch, and for an
-    // end-of-stream finish it ran above; the hangup follows. A
-    // hangup death already hung the jobs up in termsig order (before
-    // the trap) and is not repeated.
-    #[cfg(unix)]
-    if termsig_death.is_none()
-        && interactive
-        && executor.invocation_login()
-        && executor
-            .get_env("__RUBASH_SHOPT_STATE")
-            .is_some_and(|s| s.split('\u{1f}').any(|e| e == "huponexit"))
-    {
-        executor.hangup_all_jobs();
-    }
-    // rubash#2233, generalized by rubash#2346: the termsig funnel
-    // ends in kill_shell (sig.c:649-667): restore SIG_DFL and
-    // re-raise, so after history, hangup, and the EXIT trap the
-    // process dies BY the signal rather than exiting 128+sig. A
-    // signal that landed while THIS finish was already running — its
-    // delivery drains inside the EXIT trap above and records the
-    // mark there, unwinding the trap with 128+sig — still owes the
-    // signal death, and (as GNU's termsig_sighandler short-circuits
-    // a second terminating signal through kill_shell with the NEW
-    // signal) it supersedes an earlier mark. Jobs get their hangup
-    // at this late point when the late signal is a SIGHUP the
-    // in-order funnel above did not already service.
-    #[cfg(unix)]
-    let termsig_death = match executor.take_termsig_death_pending() {
-        Some(late) => {
-            if termsig_death.is_none()
-                && late == libc::SIGHUP as i32
-                && executor.invocation_interactive()
-            {
-                executor.hangup_all_jobs();
+        self.duties_done = true;
+        let code = self.resolved_status;
+        // DE-09 (design WP-1 G-13): the driver finish side reports the
+        // final status to the session — never the EXIT funnel itself.
+        // Idempotent with the exit builtin's dispatch-side report: the
+        // first finish point to speak wins.
+        self.executor.debugger_note_exit(code);
+        // After the EXIT trap (whose writes still belong to the streams):
+        // shell exit closes every descriptor, so each still-open persistent
+        // output process substitution sees EOF and finishes — run the
+        // deferred bodies with their accumulated input (rubash#1336:
+        // `exec > >(tee log)` scripts lost the whole log at end-of-script).
+        self.executor
+            .close_all_persistent_output_process_substitutions();
+        // rubash#2233: the huponexit funnel (shell.c:1017-1020
+        // exit_shell) — an interactive LOGIN shell with the shopt set
+        // hangs up its jobs on the normal exit path. GNU's order is trap
+        // then hangup (the exit builtin runs the EXIT trap before
+        // exit_shell), mirrored here: for an `exit`-builtin finish the
+        // EXIT trap was already consumed at dispatch, and for an
+        // end-of-stream finish it ran above; the hangup follows. A
+        // hangup death already hung the jobs up in termsig order (before
+        // the trap) and is not repeated.
+        #[cfg(unix)]
+        if self.termsig_death.is_none()
+            && self.interactive
+            && self.executor.invocation_login()
+            && self
+                .executor
+                .get_env("__RUBASH_SHOPT_STATE")
+                .is_some_and(|s| s.split('\u{1f}').any(|e| e == "huponexit"))
+        {
+            self.executor.hangup_all_jobs();
+        }
+        // rubash#2233, generalized by rubash#2346: the termsig funnel
+        // ends in kill_shell (sig.c:649-667): restore SIG_DFL and
+        // re-raise, so after history, hangup, and the EXIT trap the
+        // process dies BY the signal rather than exiting 128+sig. A
+        // signal that landed while THIS finish was already running — its
+        // delivery drains inside the EXIT trap above and records the
+        // mark there, unwinding the trap with 128+sig — still owes the
+        // signal death, and (as GNU's termsig_sighandler short-circuits
+        // a second terminating signal through kill_shell with the NEW
+        // signal) it supersedes an earlier mark. Jobs get their hangup
+        // at this late point when the late signal is a SIGHUP the
+        // in-order funnel above did not already service.
+        #[cfg(unix)]
+        let termsig_death = match self.executor.take_termsig_death_pending() {
+            Some(late) => {
+                if self.termsig_death.is_none()
+                    && late == libc::SIGHUP as i32
+                    && self.executor.invocation_interactive()
+                {
+                    self.executor.hangup_all_jobs();
+                }
+                Some(late)
             }
-            Some(late)
+            None => self.termsig_death,
+        };
+        #[cfg(unix)]
+        if let Some(sig) = termsig_death {
+            die_by_signal(sig);
         }
-        None => termsig_death,
-    };
-    #[cfg(unix)]
-    if let Some(sig) = termsig_death {
-        die_by_signal(sig);
     }
-    code
+
+    /// The one-call pass: trap step + duties with the history
+    /// gate at `Run` (the consuming close's default). Returns
+    /// the resolved status.
+    pub(crate) fn finish_all(&mut self) -> i32 {
+        self.run_stream_end_duties(FinishHistoryGate::Run);
+        self.resolved_status
+    }
+}
+
+pub fn finish_shell(executor: &mut Executor, status: i32, interactive: bool) -> i32 {
+    let mut pass = FinishPass::new(executor, status, interactive);
+    pass.finish_all()
 }
 
 /// rubash#2233, generalized by rubash#2346: GNU sig.c:649-667
