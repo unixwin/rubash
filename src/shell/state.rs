@@ -422,13 +422,18 @@ pub struct ShellState {
     /// `pcomp_curcs` governs (printed by the bare `compopt` report form,
     /// complete.def:872 print_compopts (pcomp_curcmd, ...)).
     pub(crate) pcomp_curcmd: Option<String>,
-    /// Readline's RL_STATE_COMPLETING port: set for the whole host completion
-    /// attempt (`Executor::complete_line`), including nested `compgen`
+    /// Readline's RL_STATE_COMPLETING port: the depth of the host
+    /// completion attempts currently in flight
+    /// (`Executor::complete_line`, including nested `compgen`
     /// runs, exactly as rl_complete_internal keeps the bit set while
-    /// programmable completion runs the -F/-C generators. The bare
-    /// `compopt` form is accepted only while this is true AND
+    /// programmable completion runs the -F/-C generators). A depth,
+    /// not a bit: nested attempts (an inner attempt driven through
+    /// one `Session::begin_completion_attempt` guard while an outer
+    /// attempt is in flight) must not clear the window for the
+    /// outer attempt when they return. The bare `compopt` form is
+    /// accepted only while this is nonzero AND
     /// [`Self::pcomp_curcs`] is set (complete.def:865).
-    pub(crate) line_completion_active: bool,
+    pub(crate) line_completion_depth: u32,
     /// readline binding registry (`bind` builtin's data plane):
     /// function/macro bindings and the `bind -x` command map
     /// (bashline.c:4771 init_unix_command_map). Unlike session_history,
@@ -868,7 +873,7 @@ impl Clone for ShellState {
             // keeps the governing compspec context.
             pcomp_curcs: self.pcomp_curcs.clone(),
             pcomp_curcmd: self.pcomp_curcmd.clone(),
-            line_completion_active: self.line_completion_active,
+            line_completion_depth: self.line_completion_depth,
             // Process-global (see field docs): the shared handle, not a copy.
             bind_registry: self.bind_registry.clone(),
             session_history: self

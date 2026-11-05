@@ -46,6 +46,45 @@ fn stamp_env_usize(env_vars: &mut VarTable, key: &str, line: usize) -> bool {
     }
 }
 
+/// RAII guard for one completion-attempt window depth level
+/// (niubash#863 GAP-7): arming increments the depth, dropping
+/// decrements it, so nested attempts compose instead of the
+/// inner return closing the outer attempt's `compopt` window.
+///
+/// The guard holds a raw pointer, not a `&mut u32`: the arm
+/// site still needs `&mut self` for the dynamic resolution
+/// below, so a borrow would conflict (E0499). Safety: the
+/// pointer is taken from a `&mut self` that outlives the call,
+/// the executor cannot move while borrowed, and the guard
+/// never escapes the call that armed it — the pointer is
+/// dereferenced only in `Drop`, which runs before the borrow
+/// ends.
+struct CompletionWindowGuard {
+    depth: *mut u32,
+}
+
+impl CompletionWindowGuard {
+    fn arm(depth: *mut u32) -> Self {
+        // SAFETY: `depth` points at the executor's window
+        // counter for the duration of the arming call (see the
+        // struct doc); the field is live and unaliased here.
+        unsafe {
+            *depth += 1;
+        }
+        Self { depth }
+    }
+}
+
+impl Drop for CompletionWindowGuard {
+    fn drop(&mut self) {
+        // SAFETY: same as `arm` — the executor is still
+        // borrowed by the arming call, so the counter is live.
+        unsafe {
+            *self.depth = (*self.depth).saturating_sub(1);
+        }
+    }
+}
+
 impl Executor {
     pub fn last_exit_code(&self) -> i32 {
         self.exit_code
@@ -1239,13 +1278,18 @@ impl Executor {
         // attempt (readline/complete.c complete_internal) and clears it on
         // the way out; the bare `compopt` form is admissible only inside
         // that window (complete.def:865). Host completion is this port's
-        // equivalent of the readline completion attempt, so arm the flag
-        // across the whole call — the dynamic resolution below RUNS the
-        // completion function — including the nested `compgen` runs it
-        // makes (a command-line `compgen` outside a live completion never
-        // passes through here and keeps the flag down, matching
-        // RL_STATE_COMPLETING's scope).
-        self.shell_state.line_completion_active = true;
+        // equivalent of the readline completion attempt, so arm the
+        // window across the whole call — the dynamic resolution below
+        // RUNS the completion function — including the nested `compgen`
+        // runs it makes (a command-line `compgen` outside a live
+        // completion never passes through here and keeps the window
+        // shut, matching RL_STATE_COMPLETING's scope). The window is
+        // a depth, not a bit: an inner attempt returning must not
+        // close the window for an outer attempt still in flight
+        // (niubash#863 GAP-7), and the RAII guard restores the
+        // depth even if the attempt unwinds.
+        let _completion_window =
+            CompletionWindowGuard::arm(&mut self.shell_state.line_completion_depth as *mut u32);
         // rubash#2576: bashline.c:1681 — with progcomp off the dynamic
         // (-F/-C) hooks never run; the static pipeline falls back to
         // command/file completion.
@@ -1273,7 +1317,6 @@ impl Executor {
             dynamic,
             &rl_settings,
         );
-        self.shell_state.line_completion_active = false;
         outcome
     }
 
