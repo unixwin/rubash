@@ -3,9 +3,11 @@
 //! GNU Bash source ownership:
 // - builtins/jobs.def (`disown_builtin`)
 
-use std::io::{self, Write};
+use std::io;
 
-const EX_USAGE: i32 = 2;
+use crate::executor::builtin_diag::{Diag, EX_USAGE};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DisownAction {
@@ -30,71 +32,67 @@ pub enum DisownAction {
     },
 }
 
-pub fn execute_with_io<E>(
-    args: &[String],
-    diagnostic_prefix: &str,
-    stderr: &mut E,
-) -> io::Result<DisownAction>
-where
-    E: Write,
-{
-    let mut all_jobs = false;
-    let mut running_only = false;
-    let mut nohup_only = false;
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            break;
-        }
-
-        for option in arg[1..].chars() {
-            match option {
-                'a' => all_jobs = true,
-                'r' => {
+/// One `BuiltinOpt` scan over the table row (`"ahr"`,
+/// builtins/jobs.def:249): `--help` in option position prints the
+/// long help (status 2); any other option word is an invalid option
+/// (usage + `EX_USAGE`). The action logic below is unchanged.
+pub fn execute_with_io<'a>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
+    diag: &mut Diag<'a>,
+    stdout: &mut Vec<u8>,
+) -> io::Result<DisownAction> {
+    let (all_jobs, running_only, nohup_only, help, operands) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut all_jobs = false;
+        let mut running_only = false;
+        let mut nohup_only = false;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b'a') => all_jobs = true,
+                OptEvent::Opt(b'r') => {
                     all_jobs = true;
                     running_only = true;
                 }
-                'h' => nohup_only = true,
-                other => {
-                    writeln!(
-                        stderr,
-                        "{diagnostic_prefix}disown: -{other}: invalid option"
-                    )?;
-                    write_usage(stderr)?;
-                    return Ok(DisownAction::Complete(EX_USAGE));
+                OptEvent::Opt(b'h') => nohup_only = true,
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is `"ahr"`: no other option character
+                // (and no argument-taking option) can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("disown spec is \"ahr\"")
                 }
             }
         }
-        index += 1;
+        let operands = opt.operands().to_vec();
+        (all_jobs, running_only, nohup_only, help, operands)
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(DisownAction::Complete(EX_USAGE));
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(DisownAction::Complete(diag.status()));
     }
 
-    if all_jobs && args.get(index).is_none() {
+    if all_jobs && operands.is_empty() {
         return Ok(DisownAction::All {
             nohup_only,
             running_only,
         });
     }
 
-    if index < args.len() {
+    if !operands.is_empty() {
         Ok(DisownAction::Jobs {
-            specs: args[index..].to_vec(),
+            specs: operands,
             nohup_only,
         })
     } else {
         Ok(DisownAction::Current { nohup_only })
     }
-}
-
-fn write_usage<E>(stderr: &mut E) -> io::Result<()>
-where
-    E: Write,
-{
-    writeln!(
-        stderr,
-        "disown: usage: disown [-h] [-ar] [jobspec ... | pid ...]"
-    )
 }
