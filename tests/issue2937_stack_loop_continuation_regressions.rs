@@ -183,6 +183,32 @@ fn dirs_clear_after_long_form_clears() {
     let _ = run.dir;
 }
 
+#[test]
+fn dirs_last_index_word_wins_range() {
+    // Last `+N` wins for the range check too: `dirs +1 +9` errors
+    // naming the digits of the LAST word, and `dirs +9 +1` prints d1.
+    let run = stack_run("dirs +1 +9\n");
+    assert_eq!(run.status, 1, "stderr: {}", run.stderr);
+    assert!(run.stdout.is_empty(), "stdout: {}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("dirs: 9: directory stack index out of range"),
+        "stderr: {}",
+        run.stderr
+    );
+    let _ = run.dir;
+
+    let run = stack_run("dirs +9 +1\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        format!("{}\n", p(&run.dir, "d1")),
+        "stdout: {}",
+        run.stdout
+    );
+    let _ = run.dir;
+}
+
 // --------------------------------------------------------------- pushd ---
 
 #[test]
@@ -440,6 +466,44 @@ fn popd_empty_word_removes_the_bottom_entry_without_chdir() {
     assert_eq!(
         run.stdout,
         format!("{d2} {d1} {d0}\n{d2}\n{d2} {d1} {d0}\n"),
+        "stdout: {}",
+        run.stdout
+    );
+    let _ = run.dir;
+}
+
+#[test]
+fn popd_last_index_word_wins_range() {
+    // popd records which_word and range-checks AFTER the loop, so the
+    // LAST `+N` decides: `popd +9 +1` pops d1 (rc 0), `popd +1 +9`
+    // errors naming `+9` (rc 1, stack unchanged).
+    let run = stack_run("popd +9 +1\npwd\ndirs\n");
+    let cell = run.dir.to_string_lossy().into_owned();
+    let d2 = p(&run.dir, "d2");
+    let d0 = p(&run.dir, "d0");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout,
+        format!("{d2} {d0} {cell}\n{d2}\n{d2} {d0} {cell}\n"),
+        "stdout: {}",
+        run.stdout
+    );
+    let _ = run.dir;
+
+    let run = stack_run("popd +1 +9\npwd\ndirs\n");
+    assert!(
+        run.stderr
+            .contains("popd: +9: directory stack index out of range"),
+        "stderr: {}",
+        run.stderr
+    );
+    let cell = run.dir.to_string_lossy().into_owned();
+    let d2 = p(&run.dir, "d2");
+    let d1 = p(&run.dir, "d1");
+    let d0 = p(&run.dir, "d0");
+    assert_eq!(
+        run.stdout,
+        format!("{d2}\n{d2} {d1} {d0} {cell}\n"),
         "stdout: {}",
         run.stdout
     );
