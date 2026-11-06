@@ -4134,8 +4134,10 @@ fn run_source_impl_inner(
                     if let Some((
                         crate::lexer::UnclosedComsubShape::MainLevelTokenError { line, token },
                         _paren_open,
-                    )) = crate::lexer::unclosed_comsub_eof_shape(input)
-                    {
+                    )) = crate::lexer::unclosed_comsub_eof_shape(
+                        input,
+                        crate::lexer::parse_extended_glob(),
+                    ) {
                         let report = line + line_offset;
                         let prefix = executor.parser_error_prefix_for_line(report);
                         unclosed_report!("{prefix}syntax error near unexpected token `{token}'");

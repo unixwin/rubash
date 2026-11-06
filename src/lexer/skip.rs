@@ -2716,9 +2716,14 @@ pub enum UnclosedComsubShape {
     /// (evalstring.c:584-600) applies the posix ERREXIT gate — no
     /// unconditional exit.
     MainLevelTokenError { line: usize, token: String },
-    /// A `(` inside a compound-assignment list (`x=((`): parse_compound_
-    /// assignment expects WORDs, so any `(` is a token error naming itself
+    /// A BARE `(` inside a compound-assignment list (`x=((`):
+    /// parse_compound_assignment expects WORDs, so a `(` that no
+    /// word-internal construct consumes is a token error naming itself
     /// (parse.y:7141-7151, yyerror branch 1 with current_token == '(').
+    /// Word-internal openers — `$(`, `$((`, `<(`, `>(`, a `${` body's
+    /// parens, and a pattern operator's group under the live extglob
+    /// gate — are consumed by read_token_word itself (parse.y:5466,
+    /// PST_COMPASSIGN) and never become tokens.
     /// Abort: parse.y:7173-7179 — posix non-interactive shells jump
     /// FORCE_EOF with status 1 (no `command' gate; GNU `command eval
     /// 'x=('` posix dies rc 1), otherwise the DISCARD arm contains it and
@@ -2743,7 +2748,10 @@ pub enum UnclosedComsubShape {
 ///   never a reader abort (push_stream/pop_stream clear EOF_Reached per
 ///   stream, parse.y:1908/1915, so an eval-string parse error cannot stop
 ///   the outer script by itself).
-pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, usize)> {
+pub fn unclosed_comsub_eof_shape(
+    input: &str,
+    extglob_live: bool,
+) -> Option<(UnclosedComsubShape, usize)> {
     let chars: Vec<char> = input.chars().collect();
     let mut index = 0usize;
     // (char index of `(`, string-relative open line, opener kind)
@@ -2752,6 +2760,12 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     let mut single = false;
     let mut double = false;
     let mut escaped = false;
+    // Whether the previously consumed character was backslash-escaped:
+    // an escaped `$`, `<`, `>` or pattern operator does not open its
+    // construct (GNU: `x=(\$(a))` and `x=(a\!(b))` keep the bare-`(`
+    // token error), so the word-internal readings below require the
+    // unescaped form.
+    let mut prev_escaped = false;
     // GNU read_token (parse.y:3630-3643, word-initial test :3937-3940): `#`
     // introduces a comment only at a token boundary — after start of input,
     // whitespace, or a separator (`;&|()<>`). Without this, quote and paren
@@ -2768,6 +2782,7 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             // A backslash-quoted character is word text (read_token_word:
             // `\;#' keeps `#' mid-word), so it never ends a token.
             token_boundary = false;
+            prev_escaped = true;
             index += 1;
             continue;
         }
@@ -2775,6 +2790,7 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             if ch == '\'' {
                 single = false;
             }
+            prev_escaped = false;
             index += 1;
             continue;
         }
@@ -2784,6 +2800,7 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
             } else if ch == '"' {
                 double = false;
             }
+            prev_escaped = false;
             index += 1;
             continue;
         }
@@ -2801,6 +2818,7 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
                 while index + 1 < chars.len() && chars[index + 1] != '\n' {
                     index += 1;
                 }
+                prev_escaped = false;
                 index += 1;
                 continue;
             }
@@ -2818,28 +2836,108 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
                 }
             }
             '(' => {
-                // parse.y:7173-7179: inside a compound-assignment word list
-                // every `(` is a token error naming itself — `x=((`.
-                if matches!(stack.last().map(|e| e.2), Some(OpenerKind::Compassign)) {
-                    return Some((UnclosedComsubShape::CompassignTokenError { line }, line));
-                }
                 let prev = if index > 0 {
                     Some(chars[index - 1])
                 } else {
                     None
                 };
-                let kind = match prev {
-                    Some('$') => OpenerKind::Comsub,
-                    Some('=') => OpenerKind::Compassign,
-                    _ => OpenerKind::Plain,
+                let top = stack.last().map(|e| e.2);
+                // Word-internal openers are not paren TOKENS:
+                // read_token_word consumes them into the word being
+                // read — `$(` (and the `$((` digraph) as a substitution,
+                // `<(`/`>(` as a process substitution, and, under the
+                // live extglob gate, a pattern operator's `(` as the
+                // group's matched pair (parse.y:5466). This holds
+                // inside a compound-assignment list (PST_COMPASSIGN)
+                // exactly as elsewhere: only a BARE `(` there is the
+                // parse.y:7173-7179 token error (`x=((`), so the
+                // word-internal readings are tested before it
+                // (rubash#2876). An escaped opener char opens nothing
+                // (GNU keeps the token error for `x=(\$(a))`).
+                let extglob_group = extglob_live
+                    && !prev_escaped
+                    && matches!(prev, Some('@' | '*' | '+' | '?' | '!'));
+                if matches!(top, Some(OpenerKind::Compassign))
+                    && !extglob_group
+                    && !(!prev_escaped && matches!(prev, Some('$' | '<' | '>')))
+                {
+                    return Some((UnclosedComsubShape::CompassignTokenError { line }, line));
+                }
+                let kind = match top {
+                    // Inside an extglob group every further `(` is
+                    // depth in the same matched pair; a `$(` still
+                    // opens its own substitution frame.
+                    Some(OpenerKind::ExtglobGroup) if prev != Some('$') => OpenerKind::ExtglobGroup,
+                    // Inside a `${` body a bare `(` is paren depth in
+                    // the body text; a `$(` opens a substitution.
+                    Some(OpenerKind::Brace) | Some(OpenerKind::BraceParen) if prev != Some('$') => {
+                        OpenerKind::BraceParen
+                    }
+                    _ if extglob_group
+                        && matches!(
+                            top,
+                            Some(OpenerKind::Compassign) | Some(OpenerKind::ExtglobGroup)
+                        ) =>
+                    {
+                        OpenerKind::ExtglobGroup
+                    }
+                    _ => match prev {
+                        Some('$') => OpenerKind::Comsub,
+                        Some('=') => OpenerKind::Compassign,
+                        _ => OpenerKind::Plain,
+                    },
                 };
                 stack.push((index, line, kind));
             }
             ')' => {
-                stack.pop();
+                // A `)` in the text of a `${` body (not closing a
+                // paren depth inside it) is literal word text, not a
+                // frame close: `${y:-a)b}` keeps its `)'.
+                if !matches!(stack.last().map(|e| e.2), Some(OpenerKind::Brace)) {
+                    stack.pop();
+                }
+            }
+            '{' => {
+                // An unescaped `${` opens a parameter-expansion body
+                // (parse_matched_pair): parens inside it are word
+                // text. Modeled only where this scan tracks
+                // word-internal constructs — directly inside a
+                // compound-assignment list or one of its matched
+                // groups — so main-level brace classification is
+                // untouched.
+                let top = stack.last().map(|e| e.2);
+                if !prev_escaped
+                    && matches!(chars.get(index.wrapping_sub(1)), Some('$'))
+                    && matches!(
+                        top,
+                        Some(OpenerKind::Compassign)
+                            | Some(OpenerKind::ExtglobGroup)
+                            | Some(OpenerKind::Brace)
+                            | Some(OpenerKind::BraceParen)
+                    )
+                {
+                    stack.push((index, line, OpenerKind::Brace));
+                }
+            }
+            '}' => {
+                // Close the innermost modeled `${` body: paren-depth
+                // frames belonging to the body go with it (GNU:
+                // `${y:-(a}` ends at the `}'), but a substitution or
+                // other construct frame above the body means the `}`
+                // is that construct's text (`${y:-$(echo hi}` is
+                // still waiting for the substitution's `)').
+                if let Some(pos) = stack.iter().rposition(|e| e.2 == OpenerKind::Brace) {
+                    if stack[pos + 1..]
+                        .iter()
+                        .all(|e| e.2 == OpenerKind::BraceParen)
+                    {
+                        stack.truncate(pos);
+                    }
+                }
             }
             _ => {}
         }
+        prev_escaped = false;
         token_boundary =
             ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
         index += 1;
@@ -2848,8 +2946,16 @@ pub fn unclosed_comsub_eof_shape(input: &str) -> Option<(UnclosedComsubShape, us
     let newlines = input.matches('\n').count();
 
     // `x=(` is the compound-assignment EOF family — its own report/exit
-    // rules live in the generic close-char scan.
-    if open_kind == OpenerKind::Compassign {
+    // rules live in the generic close-char scan. The same deferral
+    // covers a construct left open inside the list (an extglob group
+    // or a `${` body): the unclosed tail belongs to that same family.
+    if matches!(
+        open_kind,
+        OpenerKind::Compassign
+            | OpenerKind::ExtglobGroup
+            | OpenerKind::Brace
+            | OpenerKind::BraceParen
+    ) {
         return None;
     }
 
@@ -2992,6 +3098,15 @@ enum OpenerKind {
     Comsub,
     /// `name=(`
     Compassign,
+    /// A pattern operator's `(` under the live extglob gate, inside a
+    /// compound-assignment list: the balanced group is element word
+    /// text (parse.y:5466 read_token_word / parse_matched_pair).
+    ExtglobGroup,
+    /// A `${` body modeled inside a compound-assignment list: parens
+    /// in the body are word text (parse_matched_pair).
+    Brace,
+    /// Paren depth inside a `Brace` body.
+    BraceParen,
     /// any other `(`
     Plain,
 }
