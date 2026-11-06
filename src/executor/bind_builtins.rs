@@ -422,8 +422,12 @@ impl Executor {
         //   ``readline: NAME: unknown variable name`` /
         //   ```readline: NAME: could not set value to `V'``` and keep
         //   going.
-        // - non-quote, non-set text is silently ignored (`bind 'ls -l'`
-        //   → rc 0, no output).
+        // - non-quote, non-set text with a separator is absorbed
+        //   silently (`bind 'ls -l'` → rc 0, no output), but a
+        //   malformed spec is reported, not swallowed: a bare token
+        //   with no separator gets `no key sequence terminator` and a
+        //   separator-first spec gets `missing key sequence`
+        //   (rl_parse_and_bind, bind.c:1637/1754; rubash#2873).
         // - parse failures print `readline: …` and do NOT fail the
         //   command (bind.def:304-333 ignores rl_parse_and_bind's return;
         //   probe: `bind '"\C-t'` → rc 0).
@@ -435,6 +439,10 @@ impl Executor {
                 let name = parts.next().unwrap_or_default();
                 let value = parts.next().unwrap_or_default().trim();
                 if name.is_empty() {
+                    // `bind 'set '` — the set path with an empty
+                    // variable name: readline reports it like any
+                    // unknown name (bind.c:1709 via rl_variable_bind).
+                    let _ = writeln!(stderr, "readline: : unknown variable name");
                     continue;
                 }
                 let outcome = self
@@ -453,7 +461,21 @@ impl Executor {
                 }
                 continue;
             }
+            if arg.trim().eq_ignore_ascii_case("set") {
+                // `bind 'set'` alone: the separator scan truncates the
+                // line at the token, the token IS `set`, and
+                // rl_parse_and_bind enters the variable path with an
+                // empty name (bind.c:1652, 1709) — reported, rc 0.
+                let _ = writeln!(stderr, "readline: : unknown variable name");
+                continue;
+            }
             if !arg.trim_start().starts_with('"') {
+                // A non-quoted spec still goes through
+                // rl_parse_and_bind's validation before the old-style
+                // path absorbs it (rubash#2873).
+                if let Some(diagnostic) = crate::builtins::bind::unquoted_spec_diagnostic(&arg) {
+                    let _ = writeln!(stderr, "readline: {diagnostic}");
+                }
                 continue;
             }
             match crate::builtins::bind::parse_positional_binding(&arg) {

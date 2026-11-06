@@ -670,9 +670,19 @@ impl Executor {
                     //    string — push_stream/pop_stream clear EOF_Reached
                     //    per stream (parse.y:1908/1915), so it can never
                     //    stop the outer script's reader by itself.
-                    if let Some((shape, open_line)) =
-                        crate::lexer::unclosed_comsub_eof_shape(&source)
-                    {
+                    if let Some((shape, open_line)) = crate::lexer::unclosed_comsub_eof_shape(
+                        &source,
+                        // The classification must use the same live
+                        // extglob value the unit's parse will use
+                        // (the pin execute_eval_source applies):
+                        // a pattern operator's group inside a
+                        // compound assignment is word text only
+                        // while the gate is live (rubash#2876).
+                        crate::builtins::shopt::option_enabled(
+                            &self.shell_state.env_vars,
+                            "extglob",
+                        ),
+                    ) {
                         let caller_line: usize = self
                             .shell_state
                             .env_vars
@@ -997,6 +1007,17 @@ impl Executor {
         }
     }
 
+    /// Set the extglob gate from the live `extglob` shopt state (GNU
+    /// builtins/shopt.def:640 keeps the parser's `extended_glob` equal
+    /// to `extglob_flag`; see `execute_eval_source` for why the pin
+    /// spans the whole parse_and_execute unit, rubash#2876).
+    fn pin_extglob_gate_to_live(&self) {
+        crate::lexer::set_parse_extended_glob(crate::builtins::shopt::option_enabled(
+            &self.shell_state.env_vars,
+            "extglob",
+        ));
+    }
+
     /// Reparse and execute one eval-source string with the caller's line
     /// numbering (GNU variables.c:parse_and_execute SEVAL flags; eval-input
     /// line i sits at script line caller_line+i-1).
@@ -1025,7 +1046,27 @@ impl Executor {
         // was itself dispatched from an exempt position) for the body's
         // duration, restored on every path below.
         let saved_frame = self.enter_parse_and_execute_frame();
+        // rubash#2876: the extglob gate is pinned to the live shopt
+        // state for the WHOLE parse_and_execute unit, parse and
+        // execution alike. GNU keeps one live value:
+        // builtins/shopt.def:640 (shopt_set_extglob) writes
+        // extended_glob = extglob_flag and parse.y:3502 (reset_parser)
+        // propagates it, so evalstring.c parse_and_execute parses the
+        // string and runs it against the same flag. rubash reads the
+        // gate at execution time too — compound-assignment element
+        // splitting (split_compound_assignment_words) and the pattern
+        // consumers in the assignment/array executors — so a pin that
+        // ends at the parse boundary leaves those readers on the
+        // ambient stream gate and an eval'd `arr=(x/!(a))` dies with a
+        // syntax error even with extglob on. On exit the gate is
+        // pinned again to the live state AS IT THEN STANDS: a
+        // `shopt -s/-u extglob` executed by the eval'd text updated
+        // that state (and the gate, through the shopt builtin) and
+        // must persist, exactly like GNU's single variable — restoring
+        // the value saved at entry would silently undo it.
+        self.pin_extglob_gate_to_live();
         let result = self.execute_eval_source_inner(source, caller_line, cmd);
+        self.pin_extglob_gate_to_live();
         self.exit_parse_and_execute_frame(saved_frame);
         self.exit_read_unit(saved_read_generation);
         // rubash#846: eval runs its string as a fresh frame (GNU evalstring
@@ -1042,23 +1083,23 @@ impl Executor {
         caller_line: usize,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        // GNU evalstring.c parse_and_execute parses the string with the
-        // CURRENT extglob_flag (builtins/shopt.def:640 propagates the
-        // option to the parser when the builtin RUNS). The lexer global
-        // is a lex-time simulation for the script stream: the feeder
-        // flips it when it LEXES a `shopt -s/-u extglob` line, which can
-        // be lines ahead of execution — an eval running before that
+        // The extglob gate for this unit is pinned by the caller
+        // (execute_eval_source) for the unit's whole duration, parse
+        // AND execution (rubash#2876). GNU evalstring.c
+        // parse_and_execute parses the string with the CURRENT
+        // extglob_flag (builtins/shopt.def:640 propagates the option
+        // to the parser when the builtin RUNS), and that same live
+        // value serves every execution-side gate reader. The pin must
+        // not end at this parse boundary: the lexer global is a
+        // lex-time simulation for the script stream — the feeder flips
+        // it when it LEXES a `shopt -s/-u extglob` line, which can be
+        // lines ahead of execution, so an eval running before that
         // shopt line executes would see the gate flipped early and
-        // accept extglob patterns GNU rejects (rubash#1114). Pin the
-        // gate to the live runtime shopt state for this reparse
-        // (tokenize + parse; the case parser consults the global at
-        // parse time) and restore the stream value afterwards — a shopt
-        // executed BY the eval'd code re-pins it through set_option.
-        let saved_extglob = crate::lexer::parse_extended_glob();
-        crate::lexer::set_parse_extended_glob(crate::builtins::shopt::option_enabled(
-            &self.shell_state.env_vars,
-            "extglob",
-        ));
+        // accept extglob patterns GNU rejects (rubash#1114) — and
+        // compound-assignment element splitting reads the gate when
+        // the assignment RUNS, after this parse is done, so restoring
+        // the stream value here left the split on the ambient gate
+        // (rubash#2876).
         // rubash#1520: eval's string is a fresh reader unit parsed at
         // this moment (evalstring.c parse_and_execute), so its initial
         // parse mode is the live one — the plain tokenize() default
@@ -1083,7 +1124,6 @@ impl Executor {
                 source_line_offset: caller_line.saturating_sub(1),
             },
         );
-        crate::lexer::set_parse_extended_glob(saved_extglob);
         self.apply_command_output_redirects(cmd, &mut ast)?;
         crate::script_driver::apply_parse_error_unit_voiding(&mut ast);
         // GNU builtins/evalstring.c:351 parse_and_execute: last_result starts

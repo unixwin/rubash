@@ -765,6 +765,29 @@ impl JobTable {
             job.notified = true;
         }
         self.cleanup_dead_jobs();
+        // rubash#2896: wait_for_background_pids' tail is
+        // mark_dead_jobs_as_notified(1); cleanup_dead_jobs(); and then
+        // bgp_clear() (jobs.c:2863-2866) — the saved-status list is
+        // wiped WHOLESALE, so a pid whose status an earlier explicit
+        // wait saved is forgotten too and a later `wait <pid>` reports
+        // "not a child of this shell" (127). cleanup_dead_jobs
+        // deliberately preserves completed_statuses (the bgpids
+        // equivalent) for its other callers, so the clear belongs
+        // here, in the bare-wait endgame only. (GNU's bgp_clear also
+        // drops the exempt $! job's saved status — its table entry
+        // survives above, but with no status and no live child a
+        // later wait on it reports not-a-child, matching the oracle.)
+        self.clear_completed_statuses();
+    }
+
+    /// rubash#2896: bgp_clear (jobs.c) — wipe the saved-status list
+    /// (the bgpids equivalent) wholesale. Only the bare `wait` does
+    /// this, at wait_for_background_pids' tail (jobs.c:2866); it runs
+    /// even when the job table is already empty (the statuses an
+    /// earlier explicit wait saved are still forgotten), so the
+    /// no-jobs bare-wait exit in execute_wait_inner calls it too.
+    pub fn clear_completed_statuses(&mut self) {
+        self.completed_statuses.clear();
     }
 
     /// jobs.c:3652 reap_dead_jobs — non-interactive shells (and shells
@@ -878,6 +901,22 @@ impl JobTable {
         self.completed_statuses.clear();
         self.current_job = None;
         self.previous_job = None;
+    }
+
+    /// rubash#2897: the job world a `( )` subshell starts with — GNU's
+    /// execute_in_subshell reaches without_job_control (jobs.c:5356),
+    /// whose delete_all_jobs(0) (jobs.c:5065) deletes every job AND
+    /// clears the bgpids list, so the child sees no jobs, no saved
+    /// statuses, and nothing waitable: `wait <pid>` for a parent job
+    /// answers "not a child of this shell" and a bare `wait` is a
+    /// no-op. The procsub placeholder set clears with the rest — the
+    /// parent's placeholders are not the child's to reap either. The
+    /// caller runs this on the live table at the region boundary; the
+    /// boundary's saved-state restore brings the parent's table back
+    /// wholesale, so nothing here leaks outward.
+    pub fn clear_for_subshell(&mut self) {
+        self.clear_jobs();
+        self.procsub_placeholders.clear();
     }
 
     /// GNU jobs.c:5078-5079 delete_all_jobs: js.j_current and

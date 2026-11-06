@@ -4076,6 +4076,15 @@ impl Executor {
         // flags.c:257 (rubash#2487). saved_state's wholesale restore
         // reverts it at the boundary.
         self.shell_state.job_control.set(false);
+        // rubash#2897: without_job_control's other half — it also runs
+        // delete_all_jobs(0) (jobs.c:5363), so the forked child starts
+        // with an EMPTY job list and no claim on the parent's
+        // children. This in-place region shares the executor, so set
+        // the parent's child-process state aside (restored by
+        // restore_flat_subshell) and clear the job table; the saved
+        // state's wholesale restore reverts the table at the boundary.
+        self.push_subshell_process_save(saved_depth);
+        self.shell_state.job_table.clear_for_subshell();
         // rubash#1493: GNU's signal-death notice for a job killed inside
         // the parens names the WHOLE subshell command (jobs.c:4625
         // pretty_print_job on the dead job). Record the node's print_cmd
@@ -5181,6 +5190,25 @@ impl Executor {
                     env_entries.push((key, value));
                 }
             }
+            // rubash#2894: GNU's coproc child is a fork that passes
+            // through execute_in_subshell (execute_cmd.c:2546,
+            // SUBSHELL_COPROC), which runs reset_signal_handlers with
+            // SUBSHELL_RESETTRAP — the parent's trap strings stay
+            // VISIBLE in the child (`trap -p` lists them) with their
+            // dispositions reset, exactly the shape the async-subshell
+            // respawn path forwards (rubash#1630). The snapshot above
+            // admits no trap-table keys, so run the same transform on
+            // a clone of the live table and forward the resulting
+            // __RUBASH_TRAP* entries; the child seeds the identical
+            // reset-but-listed table and nothing fires there.
+            env_entries.retain(|(key, _)| !key.starts_with("__RUBASH_TRAP"));
+            let mut child_trap_table = self.shell_state.env_vars.clone();
+            crate::builtins::trap::reset_for_subshell_child(&mut child_trap_table);
+            for (key, value) in &child_trap_table {
+                if key.starts_with("__RUBASH_TRAP") {
+                    env_entries.push((key.clone(), value.clone()));
+                }
+            }
             // GNU coproc forks (execute_cmd.c coproc_getfd -> make_child), so the
             // coprocess shell inherits the parent's FULL function table — not
             // just `export -f` names. A DEBUG trap installed before the coproc
@@ -5446,6 +5474,18 @@ impl Executor {
                     use std::os::unix::process::CommandExt as _;
                     child.pre_exec(crate::builtins::kill::child_pre_exec_setpgid);
                 }
+            }
+            // rubash#2893: the coproc child must not inherit a blocked
+            // SIGPIPE mask across the exec — when the coproc command
+            // runs as a pipeline stage, this spawn happens under the
+            // stage's sigpipe_block_guard, and the inherited block made
+            // the child survive EPIPE and print a spurious
+            // `Broken pipe' diagnostic. GNU's forked child carries the
+            // shell's ordinary (unblocked, SIG_DFL) disposition.
+            #[cfg(unix)]
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                child.pre_exec(crate::builtins::kill::child_pre_exec_unblock_sigpipe);
             }
             suppress_orphan_console(&mut child);
             child.current_dir(&self.shell_state.cwd);

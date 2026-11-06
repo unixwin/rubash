@@ -72,6 +72,11 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // Brace group body (single token from lexer)
         if is_brace_group_token(token) {
             let body = parse_inline_brace_body(token);
+            // rubash#2890: an empty brace body is a syntax error (see
+            // the split-token arm below).
+            if body.is_empty() {
+                return Some(coproc_empty_brace_body_error(tokens, start, i));
+            }
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
             command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -88,6 +93,15 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
 
         if is_keyword(tokens, i, "{") {
             let (body, close_i) = parse_split_brace_body(tokens, i)?;
+            // rubash#2890: GNU's compound_list (parse.y:1262) has no
+            // empty production — the brace body of a coproc must hold
+            // at least one command, so `coproc { }` is a syntax error
+            // blaming the `}' (parse.y:1125 coproc -> shell_command ->
+            // brace group). An empty parse here means the braces held
+            // only separators/newlines.
+            if body.is_empty() {
+                return Some(coproc_empty_brace_body_error(tokens, start, close_i));
+            }
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
             command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -222,10 +236,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // immediately followed by `(` `)` is a definition, which GNU
         // rejects as a coproc body (A1 F06). Error node, not None —
         // see the body-position guard above.
-        if !words.is_empty()
-            && is_keyword(tokens, i, "(")
-            && is_keyword(tokens, i + 1, ")")
-        {
+        if !words.is_empty() && is_keyword(tokens, i, "(") && is_keyword(tokens, i + 1, ")") {
             return Some(coproc_funcdef_error(tokens, start, i + 1));
         }
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
@@ -347,11 +358,7 @@ fn coproc_missing_command_error(
 /// body — same __RUBASH_PARSE_ERROR_NEAR__ plumbing as coproc_bang_error,
 /// blaming the `)` of the `()` pair (GNU's blamed token for the unnamed
 /// spelling).
-fn coproc_funcdef_error(
-    tokens: &[Token],
-    start: usize,
-    paren: usize,
-) -> (CommandNode, usize) {
+fn coproc_funcdef_error(tokens: &[Token], start: usize, paren: usize) -> (CommandNode, usize) {
     let mut command = CommandNode::new();
     command.line = tokens.get(start).map(|t| t.position);
     command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -372,6 +379,35 @@ fn coproc_funcdef_error(
         end += 1;
     }
     finish_coproc_command(command, tokens, end)
+}
+
+/// rubash#2890: the error node for an EMPTY brace-group coproc body
+/// (`coproc { }`, `coproc NAME { }`). GNU's compound_list (parse.y:1262)
+/// requires a non-empty list, so the parse fails at the closing `}' —
+/// same __RUBASH_PARSE_ERROR_NEAR__ plumbing as coproc_funcdef_error,
+/// blaming the `}' token (for the folded single-token spelling, the
+/// brace-group token itself). Consumption ends just past the `}'.
+fn coproc_empty_brace_body_error(
+    tokens: &[Token],
+    start: usize,
+    close: usize,
+) -> (CommandNode, usize) {
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
+    command.insert_assignment(
+        "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
+        format!(
+            "}}{}{}",
+            crate::executor::markers::PARSE_ERROR_FIELD_SEP,
+            tokens[close].position,
+        ),
+    );
+    command.insert_assignment(
+        "__RUBASH_PARSE_SOURCE__".to_string(),
+        offending_line_text(tokens, close, None, 0),
+    );
+    finish_coproc_command(command, tokens, close + 1)
 }
 
 fn coproc_bang_error(tokens: &[Token], start: usize, bang: usize) -> (CommandNode, usize) {

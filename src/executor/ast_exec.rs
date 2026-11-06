@@ -1076,6 +1076,15 @@ impl Executor {
                 // (rubash#2487). The saved state clone reverts this
                 // with every other boundary write above.
                 self.shell_state.job_control.set(false);
+                // rubash#2897: without_job_control's other half —
+                // delete_all_jobs(0) (jobs.c:5363) gives the forked
+                // child an EMPTY job list and no claim on the
+                // parent's children. Set the parent's child-process
+                // state aside (restored by restore_flat_subshell) and
+                // clear the job table, like the node-form entry in
+                // compound_exec.rs.
+                self.push_subshell_process_save(old_depth);
+                self.shell_state.job_table.clear_for_subshell();
                 // rubash#1493: record the region's whole `( ... )` text
                 // for the exec signal-death notice (jobs.c:4625 names
                 // the whole job command) — a node-form region renders

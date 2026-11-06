@@ -582,6 +582,21 @@ impl Executor {
                         )?;
                     }
                     JobOperandResolution::NoMatch => {
+                        // rubash#2898: set_waitlist (wait.def:352+)
+                        // routes a digit operand that cannot be a pid
+                        // (outside pid_t range) through get_job_spec,
+                        // which warns about the missing `%' before
+                        // sh_badpid reports it — an in-range pid takes
+                        // check_nonjobs instead and warns never.
+                        if let crate::builtins::wait::WaitPidClass::BadPid =
+                            crate::builtins::wait::classify_wait_pid_operand(operand)
+                        {
+                            writeln!(
+                                stderr,
+                                "{}wait: warning: {operand}: job specification requires leading `%'",
+                                self.diagnostic_prefix()
+                            )?;
+                        }
                         write_wait_operand_error(
                             operand,
                             true,
@@ -853,6 +868,14 @@ impl Executor {
                             )?
                         }
                     };
+                    // rubash#2898: wait.def:285-291 WAIT_RETURNs on a
+                    // digit operand outside pid_t range — later
+                    // operands are never diagnosed.
+                    if let crate::builtins::wait::WaitPidClass::BadPid =
+                        crate::builtins::wait::classify_wait_pid_operand(operand)
+                    {
+                        break;
+                    }
                 }
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 return Ok(status);
@@ -869,6 +892,14 @@ impl Executor {
                 return Ok(interrupt);
             }
             self.sweep_procsub_placeholders();
+            // rubash#2896: bgp_clear (jobs.c:2866) is part of
+            // wait_for_background_pids' tail even when the job table
+            // is already empty — the main bare-wait arm above only
+            // fires while a background entry remains (a preceding
+            // line boundary may have retired the waited job's entry),
+            // so the clear runs here too, or a status saved by an
+            // earlier explicit wait would survive this bare wait.
+            self.shell_state.job_table.clear_completed_statuses();
         }
 
         let mut stderr = Vec::new();
@@ -995,6 +1026,24 @@ impl Executor {
         let mut last_pid = None;
 
         for (operand, resolution) in resolved {
+            // rubash#2898: GNU wait.def:285-291 — a digit operand
+            // outside pid_t range is sh_badpid + WAIT_RETURN
+            // (EXECUTION_FAILURE) the moment its turn comes: earlier
+            // operands have already waited (above), later ones are
+            // never looked at.
+            if let crate::builtins::wait::WaitPidClass::BadPid =
+                crate::builtins::wait::classify_wait_pid_operand(&operand)
+            {
+                write_wait_operand_error(
+                    &operand,
+                    false,
+                    &self.diagnostic_prefix(),
+                    &self.error_prefix(),
+                    &mut stderr,
+                )?;
+                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                return Ok(1);
+            }
             let pid = match resolution {
                 JobOperandResolution::Pid(pid) => pid,
                 JobOperandResolution::Ambiguous => {
@@ -1335,8 +1384,8 @@ impl Executor {
         // `jobs` listing) retires a dead+notified entry. Without the
         // mark the entry survived its own notice and `jobs` listed
         // the death a second time.
-        for pid in printed_pids {
-            self.shell_state.job_table.mark_job_notified_by_pid(pid);
+        for pid in &printed_pids {
+            self.shell_state.job_table.mark_job_notified_by_pid(*pid);
         }
         // rubash#2698 (second face): GNU's boundary step is
         // notify_and_cleanup (jobs.c) — it deletes a notified dead job
@@ -1347,7 +1396,22 @@ impl Executor {
         // cleanup_dead_jobs preserves). Marking without retiring left
         // the jobspec resolvable and the late `wait %1` returned the
         // death status a second time.
-        self.shell_state.job_table.cleanup_dead_jobs();
+        //
+        // rubash#2896: the cleanup rides ONLY a pass that actually
+        // printed a notice. GNU's notify_and_cleanup is driven by
+        // read_command — once per freshly read LIST (eval.c:355) —
+        // never between the commands of one list, so a job a `wait`
+        // just consumed (marked J_NOTIFIED by wait_for_job,
+        // jobs.c:3434-3437) survives the rest of the list and a
+        // repeated `wait %1` in the same list still resolves it; its
+        // entry is deleted inside the NEXT wait's own tail cleanup
+        // (jobs.c:3385) or at the next list boundary. This report runs
+        // at every command boundary, so an unconditional cleanup here
+        // retired the entry one command too early and the repeated
+        // jobspec wait reported "no such job".
+        if !printed_pids.is_empty() {
+            self.shell_state.job_table.cleanup_dead_jobs();
+        }
         if !out.is_empty() {
             crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
         }
@@ -2816,8 +2880,13 @@ impl Executor {
                             .unwrap_or_default();
                         for pid in &pids {
                             self.background_children.remove(pid);
-                            self.close_coproc_endpoints(*pid);
-                            self.fd_table.close(*pid);
+                            // rubash#2891: delete_job (jobs.c:1486)
+                            // touches only the job slot — a disowned
+                            // coproc's pipe fds are NOT disposed (they
+                            // die only via coproc_dispose on reap,
+                            // execute_cmd.c:2166, or coproc_closeall at
+                            // shell exit), so no endpoint/fd teardown
+                            // belongs on any disown path.
                         }
                         self.shell_state.job_table.remove_job(job_id);
                     }
@@ -2857,8 +2926,9 @@ impl Executor {
                         // waitable (GNU: a later `wait <pid>` reports
                         // "not a child of this shell", 127) — unlike a
                         // single disown, no status is preserved here.
-                        self.close_coproc_endpoints(*pid);
-                        self.fd_table.close(*pid);
+                        // rubash#2891: still no coproc endpoint/fd
+                        // teardown — delete_job disposes nothing but
+                        // the job slot (jobs.c:1486).
                     }
                     self.shell_state.job_table.clear_jobs();
                     0
@@ -2958,8 +3028,9 @@ impl Executor {
                                     self.warn_deleting_stopped_job(job_id, &mut stderr)?;
                                 }
                                 self.background_children.remove(&pid);
-                                self.close_coproc_endpoints(pid);
-                                self.fd_table.close(pid);
+                                // rubash#2891: no coproc endpoint/fd
+                                // teardown on disown (jobs.c:1486
+                                // delete_job touches only the job slot).
                                 self.disown_job_by_pid(pid);
                             }
                         }
@@ -2999,8 +3070,8 @@ impl Executor {
         }
 
         self.background_children.remove(&pid);
-        self.close_coproc_endpoints(pid);
-        self.fd_table.close(pid);
+        // rubash#2891: no coproc endpoint/fd teardown on disown
+        // (jobs.c:1486 delete_job touches only the job slot).
         self.disown_job_by_pid(pid);
         true
     }
@@ -5591,6 +5662,13 @@ where
     }
 
     if !operand.is_empty() && operand.chars().all(|ch| ch.is_ascii_digit()) {
+        // rubash#2898: GNU wait.def:272-291 classifies a digit-leading
+        // operand as a pid only when the value fits pid_t; an
+        // out-of-range digit string takes sh_badpid with
+        // EXECUTION_FAILURE (and the caller returns at once), while an
+        // in-range value is reported by its parsed pid, never the raw
+        // word (`wait 007` -> `pid 7`).
+        let pid_class = crate::builtins::wait::classify_wait_pid_operand(operand);
         if wait_any {
             // GNU builtins/wait.def set_waitlist: under `-n' operands are
             // validated against the JOB TABLE, so a pid that is not a
@@ -5602,13 +5680,24 @@ where
             )?;
             return Ok(127);
         }
+        if let crate::builtins::wait::WaitPidClass::BadPid = pid_class {
+            writeln!(
+                stderr,
+                "{diagnostic_prefix}wait: `{operand}': not a pid or valid job spec"
+            )?;
+            return Ok(1);
+        }
+        let pid = match pid_class {
+            crate::builtins::wait::WaitPidClass::Pid(pid) => pid,
+            _ => unreachable!("all-digit operand classified NotPid"),
+        };
         // GNU jobs.c:2753-2754 wait_for_single_pid JWAIT_PERROR: the
         // pid-not-a-child report is internal_error (error_prolog family),
         // so it honors gnu_errfmt while the sibling builtin_error lines
         // keep `line N:`.
         writeln!(
             stderr,
-            "{error_prefix}wait: pid {operand} is not a child of this shell"
+            "{error_prefix}wait: pid {pid} is not a child of this shell"
         )?;
         return Ok(127);
     }

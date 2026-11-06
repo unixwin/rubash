@@ -3261,7 +3261,7 @@ mod kernel_signals {
 
     /// Unblock SIGPIPE on the calling thread (child pre-exec: the
     /// pipeline guard's block must not cross an exec).
-    fn block_sigpipe_on_this_thread_unblock() {
+    pub(super) fn block_sigpipe_on_this_thread_unblock() {
         let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
         unsafe {
             libc::sigemptyset(&mut set);
@@ -3849,6 +3849,23 @@ pub fn sigpipe_block_guard() -> kernel_signals::SigpipeBlockGuard {
 #[cfg(unix)]
 pub fn block_sigpipe_on_this_thread() {
     kernel_signals::block_sigpipe_on_this_thread()
+}
+
+/// rubash#2893: child pre-exec for coproc spawns — undo any SIGPIPE
+/// block in force on the spawning thread so it cannot cross the exec.
+/// A coproc created while its command runs as a pipeline stage spawns
+/// under the stage's sigpipe_block_guard; GNU's forked coproc child
+/// (execute_cmd.c:2477 execute_coproc -> make_child) carries the
+/// shell's ordinary disposition (SIGPIPE unblocked, SIG_DFL), so a
+/// write to a reader-less coproc pipe kills the child silently
+/// instead of surfacing a `Broken pipe' diagnostic from the child
+/// shell. Only the mask is touched: the respawned child's own startup
+/// re-seeds its dispositions, and a foreign (direct-plan) child gets
+/// exactly the ambient program environment GNU would give it.
+#[cfg(unix)]
+pub fn child_pre_exec_unblock_sigpipe() -> std::io::Result<()> {
+    kernel_signals::block_sigpipe_on_this_thread_unblock();
+    Ok(())
 }
 
 /// rubash#1250: release the foreground SIGINT hold (restores the
