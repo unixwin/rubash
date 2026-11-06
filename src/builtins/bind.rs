@@ -1965,7 +1965,7 @@ pub fn untranslate_macro_value(text: &str) -> String {
         } else if c < 0x20 {
             // CTRL_CHAR: \C- + _rl_to_lower (UNCTRL (c)).
             out.push_str("\\C-");
-            c = ((c + 0x40) as u8 as char).to_ascii_lowercase() as u32;
+            c = char::from((c + 0x40) as u8).to_ascii_lowercase() as u32;
         } else if c == 0x7f {
             // RUBOUT prints as \C-?.
             out.push_str("\\C-");
