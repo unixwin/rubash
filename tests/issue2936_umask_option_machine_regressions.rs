@@ -54,10 +54,11 @@ fn bare_dash_is_a_mode_operand() {
 #[test]
 fn bare_dash_after_s_is_a_mode_operand() {
     // GNU: `umask -S -` prints the symbolic form of the current mask.
+    // Mask 027 allows u=rwx, g=rx (w denied), o= (all denied).
     let run = run_script("umask 027\numask -S -\n");
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
     assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
-    assert_eq!(run.stdout, "u=rwx,g=rwx,o=\n", "stdout: {}", run.stdout);
+    assert_eq!(run.stdout, "u=rwx,g=rx,o=\n", "stdout: {}", run.stdout);
     let _ = run.dir;
 }
 

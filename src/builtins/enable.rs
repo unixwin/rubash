@@ -4,6 +4,9 @@
 //! - builtins/enable.def (`enable_builtin`)
 
 use crate::builtins::dynamic;
+use crate::executor::builtin_diag::Diag;
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -16,25 +19,18 @@ const EX_USAGE: i32 = 2;
 
 const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 
-pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    execute_with_io_in_dir(args, env_vars, &cwd, &mut stdout, &mut stderr)
-}
-
-pub(crate) fn execute_with_io<W, E>(
-    args: &[String],
+pub(crate) fn execute_with_io<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     let cwd = std::env::current_dir().unwrap_or_default();
-    execute_with_io_in_dir(args, env_vars, &cwd, stdout, stderr)
+    execute_with_io_in_dir(row, args, env_vars, &cwd, diag, stdout)
 }
 
 /// `enable` entry point with the shell's physical cwd.  Loadable objects
@@ -42,97 +38,72 @@ where
 /// `cd` moves `ShellState::cwd` without calling `chdir` (see
 /// `src/shell/state.rs`), while GNU resolves `make_absolute(filename,
 /// ".")` against the process cwd because its `cd` really chdirs.
-pub(crate) fn execute_with_io_in_dir<W, E>(
-    args: &[String],
+///
+/// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
+/// `Diag`) triple (`internal_getopt (list, "adnpsf:")`,
+/// builtins/enable.def:126-127); every diagnostic speaks through `diag`.
+pub(crate) fn execute_with_io_in_dir<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut VarTable,
     cwd: &Path,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
-    let mut list_all = false;
-    let mut disable = false;
-    let mut reusable = false;
-    let mut special_only = false;
-    let mut delete = false;
-    let mut load_file = None;
-    let mut operands = Vec::new();
-
-    let mut index = 0;
-    // GNU builtins/bashgetopt.c:76 (NOTOPT) and :84-89: option parsing ends
-    // at the first non-option word or at a bare `--` (consumed, not an
-    // operand); the rest are names. (rubash#1375)
-    let mut parsing_options = true;
-    while index < args.len() {
-        let arg = &args[index];
-        if parsing_options && arg == "--" {
-            parsing_options = false;
-            index += 1;
-            continue;
-        }
-        if parsing_options && arg.starts_with('-') && arg != "-" {
-            let mut options = arg[1..].char_indices().peekable();
-            while let Some((offset, option)) = options.next() {
-                match option {
-                    'a' => list_all = true,
-                    'n' => disable = true,
-                    'p' => reusable = true,
-                    's' => special_only = true,
-                    'd' => delete = true,
-                    'f' => {
-                        let value_start = 1 + offset + option.len_utf8();
-                        if value_start < arg.len() {
-                            load_file = Some(arg[value_start..].to_string());
-                            break;
-                        }
-                        let Some(value) = args.get(index + 1) else {
-                            writeln!(
-                                stderr,
-                                "{}enable: -f: option requires an argument",
-                                diagnostic_prefix(env_vars)
-                            )?;
-                            writeln!(
-                                stderr,
-                                "enable: usage: enable [-a] [-dnps] [-f filename] [name ...]"
-                            )?;
-                            // rubash#705 R7.4: GNU enable.def routes a
-                            // missing -f operand through internal_getopt's
-                            // `?` into the default arm — builtin_usage()
-                            // + `return (EX_USAGE)` (enable.def:163): the
-                            // usage failure is 2, not EXECUTION_FAILURE.
-                            // (GNU 5.3.0 probe: `enable -f` exits 2.)
-                            return Ok(EX_USAGE);
-                        };
-                        load_file = Some(value.clone());
-                        index += 1;
-                        break;
-                    }
-                    _ => {
-                        writeln!(
-                            stderr,
-                            "{}enable: -{option}: invalid option",
-                            diagnostic_prefix(env_vars)
-                        )?;
-                        writeln!(
-                            stderr,
-                            "enable: usage: enable [-a] [-dnps] [-f filename] [name ...]"
-                        )?;
-                        // rubash#705 R7.4: the default getopt arm in
-                        // enable.def:161-163 returns EX_USAGE for an
-                        // invalid option. (GNU 5.3.0 probe: `enable -Q`
-                        // exits 2.)
-                        return Ok(EX_USAGE);
-                    }
+    let (list_all, disable, reusable, special_only, delete, load_file, help, operands) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut list_all = false;
+        let mut disable = false;
+        let mut reusable = false;
+        let mut special_only = false;
+        let mut delete = false;
+        let mut load_file: Option<String> = None;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b'a') => list_all = true,
+                OptEvent::Opt(b'n') => disable = true,
+                OptEvent::Opt(b'p') => reusable = true,
+                OptEvent::Opt(b's') => special_only = true,
+                OptEvent::Opt(b'd') => delete = true,
+                // GNU: `-f` takes the rest of the word or the next
+                // word as its filename argument (bashgetopt.c).
+                OptEvent::OptArg(b'f', value) => load_file = Some(value.to_string()),
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is `"adnpsf:"`: no other option
+                // character (and no other argument-taking option)
+                // can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("enable spec is \"adnpsf:\"")
                 }
             }
-        } else {
-            parsing_options = false;
-            operands.push(arg.as_str());
         }
-        index += 1;
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        (
+            list_all,
+            disable,
+            reusable,
+            special_only,
+            delete,
+            load_file,
+            help,
+            operands,
+        )
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(EX_USAGE);
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(diag.status());
     }
 
     // GNU builtins/enable.def (`if (list == 0 || (flags & PFLAG))`): this
@@ -141,66 +112,57 @@ where
     // lists even when operands are present — the operands are ignored
     // (rubash#1397). Plain `enable` with no operands lists in every mode.
     if operands.is_empty() || reusable {
-        if special_only {
-            let disabled = disabled_builtins(env_vars);
-            for name in crate::executor::command_registry::SPECIAL_BUILTINS {
-                if disable {
-                    if disabled.iter().any(|disabled| disabled == name) {
-                        writeln!(stdout, "enable -n {name}")?;
-                    }
-                } else {
-                    writeln!(stdout, "enable {name}")?;
-                }
+        // GNU builtins/enable.def:172-180: the list filter is
+        // `AFLAG ? (ENABLED|DISABLED) : NFLAG ? DISABLED : ENABLED`,
+        // with SPECIAL OR'd in when `-s` is given — and it applies
+        // UNIFORMLY to the full, disabled-only, and special listings
+        // alike. The old code had three separate listing branches
+        // whose filter rules disagreed: `-an` listed only disabled
+        // builtins (empty in a fresh shell) instead of the full
+        // listing, `-s` with `-n` ignored the filter, and a disabled
+        // special builtin printed as enabled under `-s`
+        // (rubash#2938). One filter, applied to every row:
+        //   list_some_builtins walks the table; a row prints
+        //   `enable name` when it is enabled and ENABLED is in the
+        //   filter, `enable -n name` when it is disabled and
+        //   DISABLED is in the filter (enable.def:449-466).
+        let disabled = disabled_builtins(env_vars);
+        let show_enabled = list_all || !disable;
+        let show_disabled = list_all || disable;
+        // Stage-2 ④ Phase 0: the listing walks the one declaration
+        // table (D1) instead of the registry ledger. The two sets are
+        // pinned equal by the table's unit tests
+        // (`builtin_table::tests::names_match_builtin_names` and
+        // `introspection_matches_registry`); the dynamic-load dedup
+        // below still consults the registry, unchanged.
+        for name in crate::executor::builtin_table::table_builtin_names() {
+            if special_only && !is_table_special_builtin(name) {
+                continue;
             }
-            // GNU list_some_builtins walks the whole shell_builtins table,
-            // so a loadable builtin loaded with `-s` appears here too.
-            for name in dynamic::loaded_names() {
-                if !dynamic::is_special(&name) || is_static_special_builtin(&name) {
-                    continue;
+            if disabled.iter().any(|disabled| disabled == name) {
+                if show_disabled {
+                    writeln!(stdout, "enable -n {name}")?;
                 }
-                if disable {
-                    if !dynamic::is_enabled(&name) {
-                        writeln!(stdout, "enable -n {name}")?;
-                    }
-                } else {
-                    writeln!(stdout, "enable {name}")?;
-                }
+            } else if show_enabled {
+                writeln!(stdout, "enable {name}")?;
             }
-        } else if disable {
-            for name in disabled_builtins(env_vars) {
-                writeln!(stdout, "enable -n {name}")?;
+        }
+        // GNU appends dynamically loaded builtins after the compiled
+        // table (enable.def:449-466).  Skip a loaded name that already
+        // has a static row: a shadowing load replaces that one slot.
+        for name in dynamic::loaded_names() {
+            if crate::executor::builtin_table::is_table_builtin_name(&name) {
+                continue;
             }
-        } else {
-            let disabled = disabled_builtins(env_vars);
-            // Stage-2 ④ Phase 0: the listing now walks the one
-            // declaration table (D1) instead of the registry ledger.
-            // The two sets are pinned equal by the table's unit
-            // tests (`builtin_table::tests::names_match_builtin_names`
-            // and `introspection_matches_registry`); the dynamic-load
-            // dedup below still consults the registry, unchanged.
-            for name in crate::executor::builtin_table::table_builtin_names() {
-                if disabled.iter().any(|disabled| disabled == name) {
-                    if list_all {
-                        writeln!(stdout, "enable -n {name}")?;
-                    }
-                } else {
-                    writeln!(stdout, "enable {name}")?;
-                }
+            if special_only && !dynamic::is_special(&name) {
+                continue;
             }
-            // GNU appends dynamically loaded builtins after the compiled
-            // table (enable.def:449-466).  Skip a loaded name that already
-            // has a static row: a shadowing load replaces that one slot.
-            for name in dynamic::loaded_names() {
-                if crate::executor::command_registry::is_static_introspection_builtin(&name) {
-                    continue;
+            if disabled.iter().any(|disabled| disabled == &name) {
+                if show_disabled {
+                    writeln!(stdout, "enable -n {name}")?;
                 }
-                if disabled.iter().any(|disabled| disabled == &name) {
-                    if list_all {
-                        writeln!(stdout, "enable -n {name}")?;
-                    }
-                } else {
-                    writeln!(stdout, "enable {name}")?;
-                }
+            } else if show_enabled {
+                writeln!(stdout, "enable {name}")?;
             }
         }
         return Ok(EXECUTION_SUCCESS);
@@ -212,14 +174,10 @@ where
         match dynamic::load_builtin(&file, &names, loadables_path, cwd, special_only, disable) {
             Ok(outcome) => {
                 for warning in &outcome.warnings {
-                    writeln!(
-                        stderr,
-                        "{}enable: warning: {warning}",
-                        diagnostic_prefix(env_vars)
-                    )?;
+                    diag.free(format_args!("warning: {warning}"));
                 }
                 for error in &outcome.errors {
-                    writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                    diag.free(format_args!("{error}"));
                 }
                 for name in &outcome.loaded {
                     set_builtin_enabled(env_vars, name, !disable);
@@ -233,7 +191,7 @@ where
                 return Ok(EXECUTION_SUCCESS);
             }
             Err(error) => {
-                writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                diag.free(format_args!("{error}"));
                 return Ok(EXECUTION_FAILURE);
             }
         }
@@ -246,24 +204,16 @@ where
         let mut status = EXECUTION_SUCCESS;
         for name in operands {
             if !is_builtin(name) {
-                writeln!(
-                    stderr,
-                    "{}enable: {name}: not a shell builtin",
-                    diagnostic_prefix(env_vars)
-                )?;
+                diag.free(format_args!("{name}: not a shell builtin"));
                 status = EXECUTION_FAILURE;
             } else if !dynamic::is_loaded(name) {
-                writeln!(
-                    stderr,
-                    "{}enable: {name}: not dynamically loaded",
-                    diagnostic_prefix(env_vars)
-                )?;
+                diag.free(format_args!("{name}: not dynamically loaded"));
                 status = EXECUTION_FAILURE;
             } else {
                 match dynamic::unload_builtin(name) {
                     Ok(()) => set_builtin_enabled(env_vars, name, true),
                     Err(error) => {
-                        writeln!(stderr, "{}enable: {error}", diagnostic_prefix(env_vars))?;
+                        diag.free(format_args!("{error}"));
                         status = EXECUTION_FAILURE;
                     }
                 }
@@ -276,11 +226,7 @@ where
     let mut status = EXECUTION_SUCCESS;
     for name in operands {
         if !is_builtin(name) {
-            writeln!(
-                stderr,
-                "{}enable: {name}: not a shell builtin",
-                diagnostic_prefix(env_vars)
-            )?;
+            diag.free(format_args!("{name}: not a shell builtin"));
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -342,15 +288,15 @@ fn set_disabled_builtins(env_vars: &mut VarTable, disabled: &[String]) {
 }
 
 fn is_builtin(name: &str) -> bool {
-    // The registry projection (rubash#2036 S2): `env` is a builtin
-    // here too — KD-1's third face. The hand ALL_BUILTINS copy that
-    // lacked env is gone. Loadable builtins join the same table from
-    // the process-global dynamic registry.
-    crate::executor::command_registry::is_introspection_builtin(name) || dynamic::is_loaded(name)
+    // Stage-2 ④ Phase 2: the introspection face reads the DERIVED
+    // table (D1) — `env` is a builtin here too (KD-1's third face).
+    // Loadable builtins join the same table from the process-global
+    // dynamic registry.
+    crate::executor::builtin_table::is_table_builtin_name(name) || dynamic::is_loaded(name)
 }
 
-fn is_static_special_builtin(name: &str) -> bool {
-    crate::executor::command_registry::SPECIAL_BUILTINS.contains(&name)
+fn is_table_special_builtin(name: &str) -> bool {
+    crate::executor::builtin_table::is_table_special_builtin_name(name)
 }
 
 /// Set NAME's enabled state in the existing `enable -n` carrier used by
@@ -365,19 +311,4 @@ fn set_builtin_enabled(env_vars: &mut VarTable, name: &str, enabled: bool) {
     }
     set_disabled_builtins(env_vars, &disabled);
     dynamic::set_enabled(name, enabled);
-}
-
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    // rubash#705 R7.4: GNU's report_prolog falls back to the shell name
-    // ("bash:") when neither a script nor a line context exists. The old
-    // `rubash:` fallback was a second brand leaking into user-visible
-    // diagnostics.
-    "bash: ".to_string()
 }

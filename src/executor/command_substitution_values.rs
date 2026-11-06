@@ -86,8 +86,18 @@ impl Executor {
         {
             return None;
         }
-        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(&words[1..])
-        else {
+        // The parse is only a predicate here: its Diag is a discard
+        // sink over a throwaway buffer — a missing mode, an invalid
+        // option, or `--help` all return None and the caller falls
+        // through to the normal substitution path.
+        let mut discard: Vec<u8> = Vec::new();
+        let Some((mode, use_standard_path, first_name)) = ({
+            let row = super::builtin_table::builtin_table_row("command")
+                .expect("command row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut discard);
+            parse_command_describe_args(&words[1..], &mut diag)
+        }) else {
             return None;
         };
 

@@ -187,6 +187,17 @@ impl<'a> Diag<'a> {
         self.row
     }
 
+    /// The raw diagnostic sink, for diagnostics that carry their own
+    /// prefix and cannot speak through the standard `{prolog}{name}:`
+    /// skeleton — the readonly-variable bind errors (`err_readonly`,
+    /// error.c:453), which are `{prefix}VAR: readonly variable` with
+    /// no builtin name and a gnu_errfmt-aware prefix of their own.
+    /// The caller must not write a standard builtin diagnostic
+    /// through this handle (that is what `free` is for).
+    pub fn sink(&mut self) -> &mut dyn DiagSink {
+        self.sink
+    }
+
     /// Render one standard skeleton: `{prolog}{name}: {body}\n`.
     /// The getopt family (`InvalidOpt` / `NeedArg` / `NeedNumArg`)
     /// also sets `EX_USAGE`, matching the `.def` loops' `default:`

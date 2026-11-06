@@ -474,13 +474,20 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::enable::execute_with_io_in_dir(
-            &cmd.words[1..],
-            &mut self.shell_state.env_vars,
-            &self.shell_state.cwd,
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let status = {
+            let row = super::builtin_table::builtin_table_row("enable")
+                .expect("enable row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::enable::execute_with_io_in_dir(
+                row,
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                &mut diag,
+                &mut stdout,
+            )?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }

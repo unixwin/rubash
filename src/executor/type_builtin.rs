@@ -19,12 +19,14 @@ impl Executor {
             return Ok(true);
         }
 
-        match crate::builtins::command::execute_with_io(
-            cmd.words[1..].iter().map(String::as_str),
-            &self.diagnostic_prefix(),
-            &mut stdout,
-            &mut stderr,
-        )? {
+        let action = {
+            let row = super::builtin_table::builtin_table_row("command")
+                .expect("command row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::command::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
+        match action {
             crate::builtins::command::CommandAction::Complete(status) => {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 self.exit_code = status;
@@ -44,7 +46,16 @@ impl Executor {
         W: Write,
         E: Write,
     {
-        let Some((mode, use_standard_path, first_name)) = parse_command_describe_args(args) else {
+        // The parse is only a predicate here: its Diag is a discard
+        // sink — a missing mode, an invalid option, or `--help` all
+        // return None and the caller falls through to the builtin's
+        // own scan, which reports them.
+        let Some((mode, use_standard_path, first_name)) = ({
+            let row = super::builtin_table::builtin_table_row("command")
+                .expect("command row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, stderr);
+            parse_command_describe_args(args, &mut diag)
+        }) else {
             return Ok(false);
         };
         let saved_path = self.use_standard_path_for_lookup(use_standard_path);
@@ -147,57 +158,87 @@ impl Executor {
             return Ok(status);
         }
 
-        let mut mode = TypeDescribeMode::Verbose;
-        let mut all = false;
-        let mut force_path = false;
-        // GNU builtins/type.def:153-154 — `-f` sets CDESC_NOFUNCS, which
-        // suppresses ONLY the function lookup (type.def:281); aliases,
-        // keywords, builtins and files are still reported.
-        let mut skip_functions = false;
-        let mut index = 0;
-
-        while let Some(arg) = args.get(index) {
-            if arg == "--" {
-                index += 1;
-                break;
+        // Stage-2 ④ Phase 2: the option scan is the (table row +
+        // `BuiltinOpt` + `Diag`) triple (`internal_getopt (list,
+        // "afptP")`, builtins/type.def:145-146). GNU runs a PRESCAN
+        // first (type.def:122-141): the loop walks the LEADING dash
+        // words and rewrites `-type`/`--type` to `-t`, `-path`/`--path`
+        // to `-p`, `-all`/`--all` to `-a` IN PLACE, continuing past a
+        // bare `-` and stopping at the first non-dash word — so
+        // `type - -type echo` and `type -- -type echo` describe `-t`
+        // as a NAME (rubash#2940). Only then does getopt scan the
+        // rewritten list.
+        let row =
+            super::builtin_table::builtin_table_row("type").expect("type row in BUILTIN_TABLE");
+        let rewritten: Vec<String> = {
+            let mut words: Vec<String> = args.to_vec();
+            for word in words.iter_mut() {
+                if !word.starts_with('-') {
+                    break;
+                }
+                let rest = &word[1..];
+                if rest == "type" || rest == "-type" {
+                    *word = "-t".to_string();
+                } else if rest == "path" || rest == "-path" {
+                    *word = "-p".to_string();
+                } else if rest == "all" || rest == "-all" {
+                    *word = "-a".to_string();
+                }
             }
-            // GNU type.def's getopt table maps --help to CASE_HELPOPT:
-            // long help to stdout, EX_USAGE status (rubash#1229). Only in
-            // option position — after `--` it is a name to describe.
-            if arg == "--help" {
-                crate::builtins::help::print_builtin_help("type", stdout)?;
-                return Ok(2);
-            }
-            if !arg.starts_with('-') || arg == "-" {
-                break;
-            }
-            let normalized = normalize_type_option(arg);
-            for option in normalized[1..].chars() {
-                match option {
-                    'a' => all = true,
-                    'f' => skip_functions = true,
-                    'p' => mode = TypeDescribeMode::PathOnly,
-                    'P' => {
+            words
+        };
+        let mut diag = super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, stderr);
+        let (all, force_path, mode, skip_functions, help, names) = {
+            let mut opt = super::builtin_opt::BuiltinOpt::new(row, &rewritten, &mut diag, false);
+            let mut all = false;
+            let mut force_path = false;
+            // GNU builtins/type.def:153-154 — `-f` sets CDESC_NOFUNCS,
+            // which suppresses ONLY the function lookup (type.def:281);
+            // aliases, keywords, builtins and files are still reported.
+            let mut skip_functions = false;
+            let mut mode = TypeDescribeMode::Verbose;
+            let mut help = false;
+            loop {
+                match opt.next() {
+                    super::builtin_opt::OptEvent::Opt(b'a') => all = true,
+                    super::builtin_opt::OptEvent::Opt(b'f') => skip_functions = true,
+                    super::builtin_opt::OptEvent::Opt(b'p') => {
+                        mode = TypeDescribeMode::PathOnly;
+                        force_path = false;
+                    }
+                    super::builtin_opt::OptEvent::Opt(b'P') => {
                         mode = TypeDescribeMode::PathOnly;
                         force_path = true;
                     }
-                    't' => mode = TypeDescribeMode::TypeOnly,
-                    other => {
-                        writeln!(
-                            stderr,
-                            "{}type: -{other}: invalid option",
-                            self.diagnostic_prefix()
-                        )?;
-                        writeln!(stderr, "type: usage: type [-afptP] name [name ...]")?;
-                        return Ok(2);
+                    super::builtin_opt::OptEvent::Opt(b't') => mode = TypeDescribeMode::TypeOnly,
+                    super::builtin_opt::OptEvent::Help => {
+                        help = true;
+                        break;
+                    }
+                    super::builtin_opt::OptEvent::End => break,
+                    // The row's spec is `"afptP"`: no other option
+                    // character (and no argument-taking option) can
+                    // ever arrive.
+                    super::builtin_opt::OptEvent::Opt(_)
+                    | super::builtin_opt::OptEvent::OptArg(_, _) => {
+                        unreachable!("type spec is \"afptP\"")
                     }
                 }
             }
-            index += 1;
+            let names: Vec<String> = opt.operands().iter().map(|s| s.to_string()).collect();
+            (all, force_path, mode, skip_functions, help, names)
+        };
+        if help {
+            crate::builtins::help::print_builtin_help(row.name, stdout)?;
+            return Ok(2);
+        }
+        if diag.status() != 0 {
+            diag.usage();
+            return Ok(diag.status());
         }
 
         let mut status = 0;
-        for name in &args[index..] {
+        for name in &names {
             // GNU type.def -> describe_command -> find_user_command: each
             // non-absolute name lookup runs phash_search, whose hit bumps
             // times_found (hashlib.c:254). `-P` (force_path) skips the table.
@@ -212,11 +253,7 @@ impl Executor {
             if !found {
                 status = 1;
                 if mode == TypeDescribeMode::Verbose {
-                    writeln!(
-                        stderr,
-                        "{}type: {name}: not found",
-                        self.diagnostic_prefix()
-                    )?;
+                    diag.free(format_args!("{name}: not found"));
                 }
             }
         }

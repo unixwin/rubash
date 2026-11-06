@@ -40,7 +40,6 @@ pub mod suspend;
 pub mod test;
 pub mod times;
 pub mod trap;
-pub mod r#type;
 pub mod ulimit;
 pub mod umask;
 pub mod uname;

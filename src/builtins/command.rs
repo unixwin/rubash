@@ -3,6 +3,9 @@
 //! GNU Bash source ownership:
 //! - builtins/command.def (`command_builtin`)
 
+use crate::executor::builtin_diag::Diag;
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -27,68 +30,60 @@ enum DescribeMode {
 }
 
 /// Execute `command` with arguments after the command name.
-pub fn execute(args: &[String], prefix: &str) -> io::Result<CommandAction> {
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    execute_with_io(
-        args.iter().map(String::as_str),
-        prefix,
-        &mut stdout,
-        &mut stderr,
-    )
-}
-
-pub(crate) fn execute_with_io<'a, I, W, E>(
-    args: I,
-    prefix: &str,
+///
+/// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
+/// `Diag`) triple (`internal_getopt (list, "pvV")`,
+/// builtins/command.def:74-75); every diagnostic speaks through `diag`.
+/// The describe loop here is the FALLBACK face: the executor's own
+/// describe (`execute_command_describe_with_io`, fed by
+/// `parse_command_describe_args`) handles the primary `-v`/`-V` path
+/// first — this loop runs only for the shapes that parser rejects —
+/// so it keeps its process-env lookup and any-found rule as-is.
+pub(crate) fn execute_with_io<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<CommandAction>
 where
-    I: IntoIterator<Item = &'a str>,
     W: Write,
-    E: Write,
 {
-    let args: Vec<&str> = args.into_iter().collect();
-    let mut use_standard_path = false;
-    let mut describe_mode = None;
-    let mut index = 0;
-
-    while let Some(arg) = args.get(index) {
-        if *arg == "--" {
-            index += 1;
-            break;
-        }
-
-        // GNU command.def's getopt table maps --help to CASE_HELPOPT:
-        // long help to stdout, EX_USAGE status (rubash#1229). Only in
-        // option position — after `--` it is the command name itself.
-        if *arg == "--help" {
-            crate::builtins::help::print_builtin_help("command", stdout)?;
-            return Ok(CommandAction::Complete(EX_USAGE));
-        }
-
-        if !arg.starts_with('-') || *arg == "-" {
-            break;
-        }
-
-        for option in arg[1..].chars() {
-            match option {
-                'p' => use_standard_path = true,
-                'v' => describe_mode = Some(DescribeMode::Reusable),
-                'V' => describe_mode = Some(DescribeMode::Verbose),
-                other => {
-                    writeln!(stderr, "{prefix}command: -{}: invalid option", other)?;
-                    writeln!(stderr, "command: usage: command [-pVv] command [arg ...]")?;
-                    return Ok(CommandAction::Complete(EX_USAGE));
+    let (use_standard_path, describe_mode, help, operands) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut use_standard_path = false;
+        let mut describe_mode = None;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b'p') => use_standard_path = true,
+                // GNU command.def:74-75: `-v`/`-V` are plain flags and
+                // the LAST one wins (assignment, not accumulation).
+                OptEvent::Opt(b'v') => describe_mode = Some(DescribeMode::Reusable),
+                OptEvent::Opt(b'V') => describe_mode = Some(DescribeMode::Verbose),
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is `"pvV"`: no other option character
+                // (and no argument-taking option) can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("command spec is \"pvV\"")
                 }
             }
         }
-
-        index += 1;
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        (use_standard_path, describe_mode, help, operands)
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(CommandAction::Complete(EX_USAGE));
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(CommandAction::Complete(diag.status()));
     }
 
-    let operands = &args[index..];
     if operands.is_empty() {
         return Ok(CommandAction::Complete(EXECUTION_SUCCESS));
     }
@@ -99,7 +94,7 @@ where
             if describe_command(name, mode, use_standard_path, stdout)? {
                 any_found = true;
             } else if mode == DescribeMode::Verbose {
-                writeln!(stderr, "{prefix}command: {}: not found", name)?;
+                diag.free(format_args!("{name}: not found"));
             }
         }
 
@@ -146,9 +141,9 @@ where
 }
 
 fn is_shell_builtin(name: &str) -> bool {
-    // Registry projection (rubash#2036 S2): this fallback describe
-    // face used to carry its own copy of the builtin table.
-    crate::executor::command_registry::is_introspection_builtin(name)
+    // Stage-2 ④ Phase 2: the introspection face reads the DERIVED
+    // table (D1) instead of the registry projection.
+    crate::executor::builtin_table::is_table_builtin_name(name)
 }
 
 fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
@@ -172,12 +167,24 @@ fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::builtin_diag::{Diag, Prolog};
 
     fn run(args: &[&str]) -> (CommandAction, String, String) {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action =
-            execute_with_io(args.iter().copied(), "rubash: ", &mut stdout, &mut stderr).unwrap();
+        let row = crate::executor::builtin_table::builtin_table_row("command").unwrap();
+        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let action = {
+            let prolog = Prolog {
+                interactive: false,
+                shell_basename: "rubash".to_string(),
+                error_name: "rubash".to_string(),
+                script_file: None,
+                line: None,
+            };
+            let mut diag = Diag::new(prolog, row, &mut stderr);
+            execute_with_io(row, &args, &mut diag, &mut stdout).unwrap()
+        };
 
         (
             action,

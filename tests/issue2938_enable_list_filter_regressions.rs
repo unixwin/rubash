@@ -171,25 +171,30 @@ fn special_list_filter_uses_the_same_a_before_n_rule() {
     // GNU enable.def:172-180: the A-before-N filter applies to the `-s`
     // listing too (SFLAG is OR'd into the filter). The old special
     // branch ignored both the filter and the disabled state.
-    let run = run_script("enable -n :\nenable -as\n");
+    // The disabled special builtin here is `.`, not `:` — `:` cannot be
+    // the subject: the disabled-state carrier is colon-separated, so
+    // `enable -n :` does not persist at all (rubash#2942, filed
+    // separately; the carrier encoding is not this filter's mechanism).
+    let run = run_script("enable -n .\nenable -as\n");
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
     assert!(
-        run.stdout.contains("enable -n :\n"),
+        run.stdout.contains("enable -n .\n"),
         "stdout: {}",
         run.stdout
     );
-    assert!(run.stdout.contains("enable .\n"), "stdout: {}", run.stdout);
-    assert!(!run.stdout.contains("enable :\n"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("enable :\n"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("enable .\n"), "stdout: {}", run.stdout);
     let _ = run.dir;
 
-    let run = run_script("enable -n :\nenable -ns\n");
+    let run = run_script("enable -n .\nenable -ns\n");
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
-    assert_eq!(run.stdout, "enable -n :\n", "stdout: {}", run.stdout);
+    assert_eq!(run.stdout, "enable -n .\n", "stdout: {}", run.stdout);
     let _ = run.dir;
 
-    let run = run_script("enable -n :\nenable -s\n");
+    let run = run_script("enable -n .\nenable -s\n");
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
-    assert!(run.stdout.contains("enable .\n"), "stdout: {}", run.stdout);
-    assert!(!run.stdout.contains("enable :\n"), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("enable :\n"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("enable .\n"), "stdout: {}", run.stdout);
     let _ = run.dir;
 }

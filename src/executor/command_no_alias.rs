@@ -257,12 +257,13 @@ impl Executor {
         // stdio, bypassing every enclosing redirect).
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action = crate::builtins::command::execute_with_io(
-            cmd.words[1..].iter().map(String::as_str),
-            &self.diagnostic_prefix(),
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let action = {
+            let row = super::builtin_table::builtin_table_row("command")
+                .expect("command row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::command::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         match action {
             crate::builtins::command::CommandAction::Complete(status) => {

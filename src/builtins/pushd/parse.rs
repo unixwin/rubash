@@ -1,5 +1,17 @@
-use super::stack::is_stack_index;
-use std::io::{self, Write};
+//! Faithful ports of the `pushd`/`popd` option walks in
+//! builtins/pushd.def (pushd.def:199-260, :340-368).
+//!
+//! These are NOT `internal_getopt` loops: `dirs`/`pushd`/`popd` walk
+//! exact words (`ISOPTION`) and CONTINUE after `+N` words — the last
+//! `+N` wins, a `-n` after a `+N` still accumulates, and an invalid
+//! word after a `+N` still errors. A plain `BuiltinOpt` spec would
+//! wrongly accept clusters like `-nl`, which GNU rejects with
+//! `sh_invalidnum` (the `+`/`-` arm validates the digits inline).
+//! Diagnostics speak through the caller's `Diag` (D3); the outcome
+//! tells the caller which status the already-printed diagnostic
+//! carries, so the parse itself never returns a status.
+
+use crate::executor::builtin_diag::Diag;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum PushdOperand {
@@ -12,8 +24,11 @@ pub(super) enum PushdOperand {
     /// rubash#859, #896.
     NoOp,
     Index {
-        index: usize,
-        from_right: bool,
+        /// The POST-conversion rotation count: `+N` is N, `-N` is
+        /// `offset - N` (pushd.def:235-244). The range check already
+        /// fired inline during the walk, so this is always in
+        /// `0..=offset`; the display stack rotates left by it.
+        num: usize,
         no_cd: bool,
         /// The raw ±N word. GNU hands the word itself to pushd_error
         /// (pushd.def:242 walks it inline), so the range diagnostic echoes
@@ -27,7 +42,8 @@ pub(super) enum PushdOperand {
     /// GNU pushd.def:298 routes the Dir operand through cd_builtin, whose
     /// CD_COMPLAINS argc check (cd.def:326-330, active via config-top.h)
     /// rejects a multi-word list with `too many arguments` and no usage
-    /// line; pushd maps the non-zero verdict to EXECUTION_FAILURE (:310-315).
+    /// line; pushd maps the non-zero verdict to EXECUTION_FAILURE
+    /// (:310-315).
     TooManyArgs,
 }
 
@@ -37,181 +53,222 @@ pub(super) enum PopdOperand {
         no_cd: bool,
     },
     Index {
-        index: usize,
-        from_right: bool,
+        /// The display-stack slot to free (no chdir ever runs for a
+        /// non-top pop, pushd.def:404-421). The `""` empty-word quirk
+        /// lands here too: GNU's loop test assigns `direction =
+        /// word[0]` — `'\0'` for `""` — and the post-loop else-branch
+        /// removes `list[0]`, the OLDEST entry, so the display index
+        /// is `len - 1`.
+        display_index: usize,
         no_cd: bool,
-        /// The raw ±N word: popd's walk records it as which_word
-        /// (pushd.def:374-377) and hands it to pushd_error at :382/:414,
-        /// so `popd +5 -n` reports "+5", not the option that follows it.
-        word: String,
     },
 }
 
-pub(super) fn parse_pushd_operand<W>(
-    args: &[&str],
-    diagnostic_prefix: &str,
-    stderr: &mut W,
-) -> io::Result<Option<PushdOperand>>
-where
-    W: Write,
-{
+/// The outcome of a stack option walk. A usage diagnostic
+/// (`invalid number` / `invalid option` / `invalid argument` + the
+/// usage line) was already printed for `Usage`; a failure diagnostic
+/// (the out-of-range `pushd_error`) was already printed for
+/// `Failed`. The caller only supplies the status.
+pub(super) enum ParseOutcome<T> {
+    Ok(T),
+    Usage,
+    Failed,
+}
+
+/// GNU pushd.def:199-260, verbatim in structure. `offset` is
+/// `directory_list_offset` — the display stack length minus one
+/// (rubash models the cwd as display slot 0).
+pub(super) fn parse_pushd_operand<'a>(
+    args: &[&'a str],
+    offset: usize,
+    diag: &mut Diag<'a>,
+) -> ParseOutcome<PushdOperand> {
     // GNU pushd.def:183-190: a LEADING `--` sets skipopt and skips the whole
     // option walk — the remainder goes verbatim to cd_builtin, so `-- -n`
     // is a cd-to-`-n` failure (rc 1), `-- +1` never rotates, and a lone
     // `--` still swaps. More than one word is cd's argc failure.
     if args.first().copied() == Some("--") {
         match &args[1..] {
-            [] => return Ok(Some(PushdOperand::Swap)),
+            [] => return ParseOutcome::Ok(PushdOperand::Swap),
             [dir] => {
-                return Ok(Some(PushdOperand::Dir {
+                return ParseOutcome::Ok(PushdOperand::Dir {
                     dir: dir.to_string(),
                     no_cd: false,
-                }));
+                });
             }
-            _ => return Ok(Some(PushdOperand::TooManyArgs)),
+            _ => return ParseOutcome::Ok(PushdOperand::TooManyArgs),
         }
     }
     if args.is_empty() {
         // Bare `pushd` (no words at all; a leading `--` returned above) is
         // the no-argument swap. Consumed-options no-ops (`pushd -n`,
         // `pushd -n --`) are judged after the walk via `rest.is_empty()`.
-        return Ok(Some(PushdOperand::Swap));
+        return ParseOutcome::Ok(PushdOperand::Swap);
     }
 
     // GNU pushd.def:214-260 option walk: `-n` accumulates NOCD, `--` ends
-    // the walk with the remainder verbatim, and a lone `-` breaks out as a
-    // Dir operand (cd $OLDPWD) instead of an option or rotation.
+    // the walk with the remainder verbatim, a lone `-` breaks out as a
+    // Dir operand (cd $OLDPWD), and a `+N`/`-N` word converts, range-
+    // checks INLINE (naming the word), sets ROTATE, and the loop
+    // CONTINUES — the last `+N` wins and a `-n` after it still applies.
     let mut no_cd = false;
+    let mut rotate: Option<(usize, String)> = None;
     let mut index = 0;
-    let mut saw_dashdash = false;
     while let Some(arg) = args.get(index).copied() {
-        match arg {
-            "-n" => {
-                no_cd = true;
-                index += 1;
+        if arg == "-n" {
+            no_cd = true;
+            index += 1;
+        } else if arg == "--" {
+            index += 1;
+            break;
+        } else if arg == "-" {
+            break;
+        } else if arg.starts_with('+') || arg.starts_with('-') {
+            // pushd.def:232-244: `direction = word[0]`,
+            // `valid_number (word + 1, &num)` else `sh_invalidnum` +
+            // usage + EX_USAGE; `-N` converts to `offset - N`;
+            // `num > offset || num < 0` is `pushd_error (word)` +
+            // EXECUTION_FAILURE, fired here, before any later word is
+            // examined — `pushd +9 -n` reports "+9" even though the
+            // walk never reaches the -n.
+            let Ok(digits) = arg[1..].parse::<i64>() else {
+                diag.free(format_args!("{arg}: invalid number"));
+                diag.usage();
+                return ParseOutcome::Usage;
+            };
+            let mut num = digits;
+            if arg.starts_with('-') {
+                num = offset as i64 - num;
             }
-            "--" => {
-                index += 1;
-                saw_dashdash = true;
-                break;
+            if num > offset as i64 || num < 0 {
+                super::pushd_error("pushd", offset, arg, diag);
+                return ParseOutcome::Failed;
             }
-            "-" => break,
-            _ => break,
+            rotate = Some((num as usize, arg.to_string()));
+            index += 1;
+        } else if arg.starts_with('-') {
+            // Dead in GNU: every dash word reaches the `+`/`-` arm
+            // first (its test assigns `direction = word[0]`, so `-`
+            // always enters it). Kept so the loop keeps GNU's shape.
+            diag.free(format_args!("{arg}: invalid option"));
+            diag.usage();
+            return ParseOutcome::Usage;
+        } else {
+            break;
         }
+    }
+    if let Some((num, word)) = rotate {
+        return ParseOutcome::Ok(PushdOperand::Index { num, no_cd, word });
     }
     let rest = &args[index..];
     if rest.is_empty() {
         // pushd.def:288: options with nothing left are a silent success.
-        return Ok(Some(PushdOperand::NoOp));
+        return ParseOutcome::Ok(PushdOperand::NoOp);
     }
     let arg = rest[0];
-    // A ±N word rotates only straight out of the option walk: past `--`
-    // it is a verbatim directory word (`pushd -n -- +1` pushes a literal
-    // `+1`, never rotates).
-    if !saw_dashdash && is_stack_index(arg) {
-        return Ok(Some(PushdOperand::Index {
-            index: arg[1..].parse::<usize>().unwrap_or(usize::MAX),
-            from_right: arg.starts_with('-'),
-            no_cd,
-            word: arg.to_string(),
-        }));
-    }
     // The argc check lives in cd_builtin (CD_COMPLAINS) ahead of the null
     // and `-` judgments, so `pushd "" extra` and `pushd - -n` are `too many
     // arguments`, never null-directory or OLDPWD diagnostics. NOCD pushes
     // word one and ignores the rest; ROTATE ignores leftovers.
     if !no_cd && rest.len() > 1 {
-        return Ok(Some(PushdOperand::TooManyArgs));
+        return ParseOutcome::Ok(PushdOperand::TooManyArgs);
     }
     // A lone `-` is the verbatim Dir operand, not a ±-shaped word.
-    if arg == "-" {
-        return Ok(Some(PushdOperand::Dir {
-            dir: arg.to_string(),
-            no_cd,
-        }));
-    }
-    // GNU pushd.def validates the operand through get_numeric_arg when it
-    // is ±-shaped: EITHER sign failing to parse is
-    // `%s: invalid number` + usage (builtins/common.c), not a directory
-    // operand — `pushd +q` must not fall through to the Dir arm (issue
-    // #509).
-    // Past `--` the walk already ended: the word is verbatim for cd_builtin
-    // or the NOCD push (`pushd -n -- -n` stores a literal `-n`), never a
-    // number-or-usage judgment.
-    if !saw_dashdash && (arg.starts_with('-') || arg.starts_with('+')) && !is_stack_index(arg) {
-        writeln!(stderr, "{diagnostic_prefix}pushd: {arg}: invalid number")?;
-        writeln!(stderr, "pushd: usage: pushd [-n] [+N | -N | dir]")?;
-        return Ok(None);
-    }
-
-    Ok(Some(PushdOperand::Dir {
+    // Past `--` the walk already ended: the word is verbatim for
+    // cd_builtin or the NOCD push (`pushd -n -- -n` stores a literal
+    // `-n`), never a number-or-usage judgment.
+    ParseOutcome::Ok(PushdOperand::Dir {
         dir: arg.to_string(),
         no_cd,
-    }))
+    })
 }
 
-pub(super) fn parse_popd_operand<W>(
-    args: &[&str],
-    diagnostic_prefix: &str,
-    stderr: &mut W,
-) -> io::Result<Option<PopdOperand>>
-where
-    W: Write,
-{
-    if args.first().copied() == Some("--") {
-        return Ok(Some(PopdOperand::Top { no_cd: false }));
-    }
-
-    let (no_cd, args) = parse_stack_options(args);
-    if args.is_empty() {
-        return Ok(Some(PopdOperand::Top { no_cd }));
-    }
-
-    let arg = args[0];
-    // GNU builtins/pushd.def:318 popd_builtin()'s option walk treats an
-    // operand word that expanded to the empty string as the END of the
-    // argument list (`else if (*list->word->word) { invalid argument } else
-    // break;`, pushd.def:356-363) — `HOME=; popd ~` lands here with "" and
-    // performs the default top-of-stack pop instead of erroring (#754
-    // family: an empty tilde expansion is a real word, and each builtin
-    // judges it by its own operand rules).
-    if arg.is_empty() {
-        return Ok(Some(PopdOperand::Top { no_cd }));
-    }
-    if !is_stack_index(arg) {
-        // GNU popd.def: a ±-shaped non-number is get_numeric_arg's
-        // `%s: invalid number`; anything else in the operand position is
-        // `invalid argument` (both EX_USAGE — the caller returns 2).
-        if arg.starts_with('-') || arg.starts_with('+') {
-            writeln!(stderr, "{diagnostic_prefix}popd: {arg}: invalid number")?;
-        } else {
-            writeln!(stderr, "{diagnostic_prefix}popd: {arg}: invalid argument")?;
-        }
-        writeln!(stderr, "popd: usage: popd [-n] [+N | -N]")?;
-        return Ok(None);
-    }
-
-    let index = arg[1..].parse::<usize>().unwrap_or(usize::MAX);
-    Ok(Some(PopdOperand::Index {
-        index,
-        from_right: arg.starts_with('-'),
-        no_cd,
-        word: arg.to_string(),
-    }))
-}
-
-fn parse_stack_options<'a>(args: &'a [&str]) -> (bool, &'a [&'a str]) {
+/// GNU pushd.def:340-368 (popd_builtin's option walk) plus the
+/// post-loop range check and branch selection (:374-421). `offset` is
+/// `directory_list_offset` — the display stack length minus one.
+pub(super) fn parse_popd_operand<'a>(
+    args: &[&'a str],
+    offset: usize,
+    diag: &mut Diag<'a>,
+) -> ParseOutcome<PopdOperand> {
+    // No skipopt pre-check in popd: the loop's ISOPTION '-' arm skips
+    // the word and breaks, and the `#if 0` block is DISABLED — words
+    // after `--` are IGNORED entirely, so `popd -n -- +1` pops the
+    // top and `popd --` pops the top too.
     let mut no_cd = false;
+    let mut direction = '+';
+    let mut which: i64 = 0;
+    let mut which_word: Option<&str> = None;
     let mut index = 0;
     while let Some(arg) = args.get(index).copied() {
-        match arg {
-            "--" => return (no_cd, &args[index + 1..]),
-            "-n" => {
-                no_cd = true;
-                index += 1;
-            }
-            _ => break,
+        if arg == "-n" {
+            no_cd = true;
+            index += 1;
+        } else if arg == "--" {
+            index += 1;
+            break;
+        } else if arg.starts_with('+') || arg.starts_with('-') {
+            // pushd.def:344-352: `direction = word[0]` (assigned in
+            // the test itself), `valid_number (word + 1, &which)` else
+            // `sh_invalidnum` + usage + EX_USAGE; `which_word` records
+            // the word for the post-loop range check. The loop
+            // CONTINUES — the last ±N wins.
+            direction = arg.chars().next().unwrap_or('+');
+            let Ok(digits) = arg[1..].parse::<i64>() else {
+                diag.free(format_args!("{arg}: invalid number"));
+                diag.usage();
+                return ParseOutcome::Usage;
+            };
+            which = digits;
+            which_word = Some(arg);
+            index += 1;
+        } else if arg.starts_with('-') {
+            // Dead in GNU (see pushd above).
+            diag.free(format_args!("{arg}: invalid option"));
+            diag.usage();
+            return ParseOutcome::Usage;
+        } else if !arg.is_empty() {
+            // pushd.def:356-363: a non-empty non-dash word in the
+            // operand position is `%s: invalid argument` + usage.
+            diag.free(format_args!("{arg}: invalid argument"));
+            diag.usage();
+            return ParseOutcome::Usage;
+        } else {
+            // Empty word: the loop test assigns `direction =
+            // word[0]` — `'\0'` — and the `else break` fires. The
+            // post-loop else-branch then removes `list[0]`, the
+            // OLDEST entry, without chdir (pushd.def:404-421).
+            direction = '\0';
+            break;
         }
     }
-    (no_cd, &args[index..])
+
+    // pushd.def:374-377: `which > offset || which < -offset ||
+    // (offset == 0 && which == 0)` hands `which_word` (or "" when no
+    // ±N word was seen) to pushd_error. `which` is the raw digits,
+    // always >= 0, so the `which < -offset` arm is dead in practice.
+    if which > offset as i64 || (offset == 0 && which == 0) {
+        super::pushd_error("popd", offset, which_word.unwrap_or(""), diag);
+        return ParseOutcome::Failed;
+    }
+
+    // pushd.def:383-391: `(direction == '+' && which == 0) ||
+    // (direction == '-' && which == offset)` is the top-of-stack
+    // branch (cd to the new top, then free it); anything else frees
+    // `list[i]` with `i = direction == '+' ? offset - which : which`
+    // and shifts the remainder left, no chdir. `list[i]` is display
+    // slot `len - 1 - i` (the list holds the display tail oldest-
+    // first, without the cwd).
+    if (direction == '+' && which == 0) || (direction == '-' && which == offset as i64) {
+        return ParseOutcome::Ok(PopdOperand::Top { no_cd });
+    }
+    let list_index = if direction == '+' {
+        offset as i64 - which
+    } else {
+        which
+    };
+    ParseOutcome::Ok(PopdOperand::Index {
+        display_index: offset - list_index as usize,
+        no_cd,
+    })
 }
