@@ -190,6 +190,14 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
+// Stage-2 project ④ Phase 0 (立柱): the one declaration table (D1),
+// the single option machine (D2), the diagnostic handle (D3) and the
+// differential-matrix generator (D5). Pure additive posts: no existing
+// call site is re-routed in this phase.
+pub(crate) mod builtin_diag;
+pub(crate) mod builtin_matrix;
+pub(crate) mod builtin_opt;
+pub(crate) mod builtin_table;
 #[allow(dead_code)]
 // rubash#2036: consumers landed through S4 (introspection, dispatch,
 // pipeline and comsub projections); a few registration-only fields

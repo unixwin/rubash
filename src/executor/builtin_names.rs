@@ -128,9 +128,18 @@ const BUILTIN_NAMES: &[&str] = &[
 /// The canonical, sorted list of shell builtin command names. Host completion
 /// (and the `compgen -b` action) read builtins from here instead of
 /// hardcoding their own copy, so the lists never drift when builtins change.
+///
+/// Stage-2 ④ Phase 0: the member set is derived from the
+/// declaration table (`BUILTIN_TABLE`); `BUILTIN_NAMES` stays as the
+/// doc-sync anchor and the pinned oracle for the table tests.
 pub fn builtin_names() -> &'static [&'static str] {
-    BUILTIN_NAMES
+    super::builtin_table::table_builtin_names()
 }
+
+/// Test-only access to the hand-written name list, so the table
+/// tests pin the derivation against the oracle, not against itself.
+#[cfg(test)]
+pub(crate) const BUILTIN_NAMES_FOR_TEST: &[&str] = BUILTIN_NAMES;
 
 pub(in crate::executor) fn is_shell_builtin_name(name: &str) -> bool {
     // The compiled table plus process-global `enable -f` builtins.  GNU

@@ -1,0 +1,729 @@
+//! The single getopt for builtins (Stage-2 project ④, D2).
+//!
+//! A state machine porting `builtins/bashgetopt.c:61-192`
+//! (`internal_getopt`) — behavior ported, not code translated —
+//! over the spec string the declaration table carries for the
+//! builtin. One instance per call: GNU's global getopt state
+//! (`reset_internal_getopt`) is dissolved by ownership, so nested
+//! builtin calls each hold their own machine and there is no
+//! save/restore protocol. The `getopts` builtin's `OPTIND` is user
+//! visible state and unrelated to this machine.
+//!
+//! Spec syntax (same shape as GNU's): plain letters, `':'`
+//! (required argument), `';'` (optional argument), `'#'` (numeric
+//! argument, `valid_number` grammar), a leading `'+'` (plus mode:
+//! `+x` words are option words too). A leading `':'` in a spec
+//! (fc's `":e:lnrs"`) is inert — `bashgetopt.c` rejects the option
+//! character `':'` before consulting the spec.
+//!
+//! The scan rules, from `bashgetopt.c`:
+//!
+//! * A word is an option word when it starts with `-` (or with
+//!   `+` in plus mode) and has a second character (`ISOPT` /
+//!   `NOTOPT`, `bashgetopt.c:36-37`); a bare `-` / `+` is an
+//!   operand. Scanning stops at the first non-option word — there
+//!   is no permutation in `internal_getopt`, POSIX mode or not
+//!   (the file has no `posixly_correct` branch; the `posix`
+//!   constructor bit is the hook project ② owns, and in Phase 0 it
+//!   changes nothing — pinned by test).
+//! * `--help` exactly (`ISHELP`, `common.h:27`) in option position
+//!   yields `Help`; `--` exactly ends scanning (consumed).
+//! * An option character absent from the spec (or `':'` itself)
+//!   reports `"{sign}{char}: invalid option"` through the `Diag`
+//!   and ends scanning (`End`, status `EX_USAGE`) — the `.def`
+//!   loops' `default:` arm then prints usage and returns
+//!   `EX_USAGE`, so only the first bad character is ever reported.
+//! * `':'` / `';'`: an attached rest-of-word is the argument; else
+//!   the next word is taken when it exists (for `':'` always; for
+//!   `';'` only when it does not look like an option); else `';'`
+//!   yields the option with no argument, while `':'` reports
+//!   `"{errstr}: option requires an argument"` and ends.
+//! * `'#'`: an attached rest-of-word starting with a digit is the
+//!   argument; an attached non-digit yields the option with no
+//!   argument and NO error; else the next word is taken when it
+//!   exists and is a valid number, else `"{errstr}: numeric
+//!   argument required"` is reported and scanning ends.
+//!
+//! `Grammar` / `NoScan` rows are never scanned: the first `next()`
+//! returns `End` with all words as operands (their `--help`
+//! behaviour, if any, is the `CHECK_HELPOPT` first-word check the
+//! dispatcher performs per the row's `help_entry` bit — Phase 1).
+
+use super::builtin_diag::{valid_number, Diag, DiagKind, EX_USAGE};
+use super::builtin_table::{BuiltinRow, OptSpec};
+
+/// One step of the option scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptEvent<'a> {
+    /// An option character with no argument.
+    Opt(u8),
+    /// An option character with its argument.
+    OptArg(u8, &'a str),
+    /// `--help` in option position (`GETOPT_HELP`).
+    Help,
+    /// Scanning is over: `--` was consumed, the first non-option
+    /// word arrived, the words ran out, or an error was reported
+    /// (status `EX_USAGE` then). `operands()` gives the rest.
+    End,
+}
+
+/// How an option character takes its argument, from the spec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgKind {
+    None,
+    Required,
+    Optional,
+    Numeric,
+}
+
+/// The option scanner for one builtin call.
+///
+/// Two lifetimes, deliberately: `'a` is the words/row/sink region
+/// (everything the events and the `Diag` borrow), `'d` is the
+/// borrow of the `Diag` itself. A single lifetime ties the diag
+/// borrow's duration to the sink's, so a test (or a future caller)
+/// that reads the `Diag`'s status after the scan cannot borrow it —
+/// the borrow would last until the sink's last use. Splitting `'d`
+/// lets the machine be dropped (or simply go dead) and the `Diag`
+/// be read afterwards.
+pub struct BuiltinOpt<'a, 'd> {
+    row: &'a BuiltinRow,
+    words: &'a [String],
+    diag: &'d mut Diag<'a>,
+    /// The parsed spec: (option byte, argument kind) pairs, plus
+    /// whether the spec opens with `'+'` (plus mode).
+    spec: Vec<(u8, ArgKind)>,
+    plus: bool,
+    /// Index of the word being scanned.
+    index: usize,
+    /// Byte offset within the current word (1 = just past the sign).
+    sp: usize,
+    /// Whether the scan has finished (an `End` was returned).
+    done: bool,
+    /// Whether the row is scanned at all (`Getopt` rows only).
+    scannable: bool,
+    /// The POSIX-mode context bit (project ②'s hook; no effect in
+    /// Phase 0 — `bashgetopt.c` has no POSIX branch).
+    #[allow(dead_code)]
+    posix: bool,
+}
+
+impl<'a, 'd> BuiltinOpt<'a, 'd> {
+    pub fn new(
+        row: &'a BuiltinRow,
+        words: &'a [String],
+        diag: &'d mut Diag<'a>,
+        posix: bool,
+    ) -> Self {
+        let (spec, plus, scannable) = match row.opt_spec {
+            OptSpec::Getopt(spec) => (parse_spec(spec), spec.starts_with('+'), true),
+            OptSpec::Grammar | OptSpec::NoScan => (Vec::new(), false, false),
+        };
+        BuiltinOpt {
+            row,
+            words,
+            diag,
+            spec,
+            plus,
+            index: 0,
+            sp: 1,
+            done: false,
+            scannable,
+            posix,
+        }
+    }
+
+    /// The row this machine scans for.
+    pub fn row(&self) -> &'a BuiltinRow {
+        self.row
+    }
+
+    /// The words after the scan point (`loptend`): the operands.
+    /// After `Help`, the `--help` word itself is included (GNU's
+    /// `loptend = lcurrent` on the help path); after an error, the
+    /// word holding the error is skipped.
+    pub fn operands(&self) -> &'a [String] {
+        &self.words[self.index.min(self.words.len())..]
+    }
+
+    /// The next scan step. Illegal characters, missing arguments
+    /// and bad numeric arguments are reported through the `Diag`
+    /// (status `EX_USAGE`) and yield `End`.
+    pub fn next(&mut self) -> OptEvent<'a> {
+        if self.done || !self.scannable {
+            self.done = true;
+            return OptEvent::End;
+        }
+        if self.index >= self.words.len() {
+            self.done = true;
+            return OptEvent::End;
+        }
+        let word = &self.words[self.index];
+        if self.sp == 1 {
+            // At a word boundary: decide whether this word is an
+            // option word at all.
+            if !is_option_word(word.as_bytes(), self.plus) {
+                self.done = true;
+                return OptEvent::End;
+            }
+            if word == "--help" {
+                // ISHELP: the help word itself stays in operands().
+                self.done = true;
+                return OptEvent::Help;
+            }
+            if word == "--" {
+                self.index += 1;
+                self.sp = 1;
+                self.done = true;
+                return OptEvent::End;
+            }
+        }
+        let bytes = word.as_bytes();
+        let sign = bytes[0];
+        let c = bytes[self.sp];
+        // An option character of ':' is always invalid, whatever
+        // the spec says (bashgetopt.c:99).
+        let kind = if c == b':' {
+            None
+        } else {
+            self.spec.iter().find(|(b, _)| *b == c).map(|(_, k)| *k)
+        };
+        let Some(kind) = kind else {
+            // Invalid: errstr is the sign + the one character.
+            let errstr = format!("{}{}", sign as char, c as char);
+            self.diag.error(DiagKind::InvalidOpt(errstr));
+            debug_assert_eq!(self.diag.status(), EX_USAGE);
+            self.advance_past_bad_char();
+            self.done = true;
+            return OptEvent::End;
+        };
+        match kind {
+            ArgKind::None => {
+                self.advance_sp();
+                OptEvent::Opt(c)
+            }
+            ArgKind::Required | ArgKind::Optional => {
+                // Attached rest-of-word is the argument.
+                if self.sp + 1 < bytes.len() {
+                    let arg = &word[self.sp + 1..];
+                    self.index += 1;
+                    self.sp = 1;
+                    return OptEvent::OptArg(c, arg);
+                }
+                // Else the next word, when it exists (for ':'
+                // always; for ';' only when it is not an option).
+                let take_next = match self.words.get(self.index + 1) {
+                    Some(next) => {
+                        kind == ArgKind::Required || !is_option_word(next.as_bytes(), self.plus)
+                    }
+                    None => false,
+                };
+                if take_next {
+                    let arg = &self.words[self.index + 1];
+                    self.index += 2;
+                    self.sp = 1;
+                    return OptEvent::OptArg(c, arg);
+                }
+                if kind == ArgKind::Optional {
+                    self.index += 1;
+                    self.sp = 1;
+                    return OptEvent::Opt(c);
+                }
+                let errstr = format!("{}{}", sign as char, c as char);
+                self.diag.error(DiagKind::NeedArg(errstr));
+                debug_assert_eq!(self.diag.status(), EX_USAGE);
+                self.sp = 1;
+                self.done = true;
+                OptEvent::End
+            }
+            ArgKind::Numeric => {
+                if self.sp + 1 < bytes.len() {
+                    // Attached rest: a leading digit takes it as
+                    // the argument; a non-digit yields no argument
+                    // and no error (bashgetopt.c:145-153).
+                    if bytes[self.sp + 1].is_ascii_digit() {
+                        let arg = &word[self.sp + 1..];
+                        self.index += 1;
+                        self.sp = 1;
+                        return OptEvent::OptArg(c, arg);
+                    }
+                    self.index += 1;
+                    self.sp = 1;
+                    return OptEvent::Opt(c);
+                }
+                match self.words.get(self.index + 1) {
+                    Some(next) if valid_number(next).is_some() => {
+                        let arg = &self.words[self.index + 1];
+                        self.index += 2;
+                        self.sp = 1;
+                        OptEvent::OptArg(c, arg)
+                    }
+                    _ => {
+                        let errstr = format!("{}{}", sign as char, c as char);
+                        self.diag.error(DiagKind::NeedNumArg(errstr));
+                        debug_assert_eq!(self.diag.status(), EX_USAGE);
+                        self.sp = 1;
+                        self.done = true;
+                        OptEvent::End
+                    }
+                }
+            }
+        }
+    }
+
+    /// Advance one character; at the end of the word move to the
+    /// next word.
+    fn advance_sp(&mut self) {
+        let word = &self.words[self.index];
+        self.sp += 1;
+        if self.sp >= word.len() {
+            self.index += 1;
+            self.sp = 1;
+        }
+    }
+
+    /// Advance past a bad option character (`bashgetopt.c:99-105`).
+    /// The operands then start after the error word (GNU's
+    /// `loptend` after an error points one word further when the
+    /// bad character ended the word — unobservable, since the
+    /// builtin returns `EX_USAGE` without consulting it — so the
+    /// machine takes the uniform "after the error word" reading).
+    fn advance_past_bad_char(&mut self) {
+        self.index += 1;
+        self.sp = 1;
+    }
+}
+
+/// `ISOPT` / `NOTOPT` (`bashgetopt.c:36-37`): a word is an option
+/// word when it starts with `-` (or `+` in plus mode) and has a
+/// second character. A bare `-` / `+` is an operand.
+fn is_option_word(word: &[u8], plus: bool) -> bool {
+    if word.len() < 2 {
+        return false;
+    }
+    word[0] == b'-' || (plus && word[0] == b'+')
+}
+
+/// Parse a spec string into (option byte, argument kind) pairs.
+/// A leading `'+'` enables plus mode and is not an option. The
+/// `':'` / `';'` / `'#'` after a letter sets its argument kind;
+/// a leading `':'` in the spec (fc's `":e:lnrs"`) is inert.
+fn parse_spec(spec: &str) -> Vec<(u8, ArgKind)> {
+    let bytes = spec.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    if bytes.first() == Some(&b'+') {
+        i = 1;
+    }
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b':' {
+            // A ':' where an option letter is expected (only the
+            // leading one, in practice) is not an option.
+            i += 1;
+            continue;
+        }
+        let kind = match bytes.get(i + 1) {
+            Some(b':') => {
+                i += 1;
+                ArgKind::Required
+            }
+            Some(b';') => {
+                i += 1;
+                ArgKind::Optional
+            }
+            Some(b'#') => {
+                i += 1;
+                ArgKind::Numeric
+            }
+            _ => ArgKind::None,
+        };
+        out.push((c, kind));
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::builtin_diag::Prolog;
+    use super::super::builtin_table::{
+        builtin_table_row, BuiltinFlags, BuiltinRow, DocId, HandlerSlot,
+    };
+    // `Introspection` is `pub(crate)` in the registry but only
+    // privately imported by the table module — import it here
+    // directly (E0603 if taken through the table).
+    use super::super::command_registry::Introspection;
+    use super::*;
+
+    fn diag_for<'a>(name: &str, sink: &'a mut Vec<u8>) -> Diag<'a> {
+        let prolog = Prolog {
+            interactive: false,
+            shell_basename: "bash".to_string(),
+            error_name: "bash".to_string(),
+            script_file: Some("t.sh".to_string()),
+            line: Some("1".to_string()),
+        };
+        Diag::new(prolog, builtin_table_row(name).unwrap(), sink)
+    }
+
+    fn words(ss: &[&str]) -> Vec<String> {
+        ss.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn drain<'a, 'd>(opt: &mut BuiltinOpt<'a, 'd>) -> Vec<OptEvent<'a>> {
+        let mut events = Vec::new();
+        loop {
+            let ev = opt.next();
+            let end = ev == OptEvent::End;
+            events.push(ev);
+            if end {
+                break;
+            }
+        }
+        events
+    }
+
+    #[test]
+    fn scans_plain_and_clustered_options() {
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["-L", "-P"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::Opt(b'L'), OptEvent::Opt(b'P'), OptEvent::End]
+        );
+        assert!(opt.operands().is_empty());
+        assert!(sink.is_empty());
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["-LP", "dir"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::Opt(b'L'), OptEvent::Opt(b'P'), OptEvent::End]
+        );
+        assert_eq!(opt.operands(), ["dir"]);
+    }
+
+    fn cd_row() -> &'static BuiltinRow {
+        builtin_table_row("cd").unwrap()
+    }
+
+    #[test]
+    fn required_arg_attached_separate_and_missing() {
+        // wait -p VAR / -pVAR / -p (missing).
+        let mut sink = Vec::new();
+        let mut diag = diag_for("wait", &mut sink);
+        let w = words(&["-p", "VAR"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("wait").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'p', "VAR"), OptEvent::End]
+        );
+        assert!(sink.is_empty());
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("wait", &mut sink);
+        let w = words(&["-pVAR"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("wait").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'p', "VAR"), OptEvent::End]
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("wait", &mut sink);
+        let w = words(&["-p"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("wait").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        // Canonical order: the machine is dead before the Diag is
+        // read, and the sink is read (moved) only after the Diag's
+        // last use — the sink is borrowed by the Diag until then.
+        drop(opt);
+        assert_eq!(diag.status(), EX_USAGE);
+        assert_eq!(
+            String::from_utf8(sink).unwrap(),
+            "t.sh: line 1: wait: -p: option requires an argument\n"
+        );
+    }
+
+    #[test]
+    fn required_arg_takes_an_option_looking_word() {
+        // ':' takes the next word whatever it looks like.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("wait", &mut sink);
+        let w = words(&["-p", "-x"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("wait").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'p', "-x"), OptEvent::End]
+        );
+        assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn optional_arg_rules() {
+        // set -o (optional arg): "-o" + non-option word takes it;
+        // "-o" + option word takes nothing and keeps scanning.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-o", "vi"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'o', "vi"), OptEvent::End]
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-o", "-x"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::Opt(b'o'), OptEvent::Opt(b'x'), OptEvent::End]
+        );
+        assert!(sink.is_empty());
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-o"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::Opt(b'o'), OptEvent::End]);
+        assert!(sink.is_empty(), "';' with no arg is silent");
+    }
+
+    #[test]
+    fn numeric_arg_rules() {
+        // The `#` (numeric-argument) spec kind has NO row in the
+        // table — ulimit's `n` is Optional `;`, not `#` (its
+        // `-nX` takes "X" as the attached argument; that shape is
+        // pinned by `optional_arg_rules`). So the `#` path is
+        // pinned with a synthetic row carrying the `n#` spec.
+        // Cases: attached digit, attached non-digit (silent, no
+        // argument), separate valid number, separate invalid word,
+        // separate negative number.
+        let row = BuiltinRow {
+            name: "synthetic-numeric",
+            handler: HandlerSlot::Ulimit,
+            flags: BuiltinFlags::DISABLEABLE,
+            opt_spec: OptSpec::Getopt("n#"),
+            doc: DocId::Topic("ulimit"),
+            introspection: Introspection::Builtin,
+            help_entry: true,
+        };
+        let mut sink = Vec::new();
+        let mut diag = diag_for("ulimit", &mut sink);
+        let w = words(&["-n1024"]);
+        let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'n', "1024"), OptEvent::End]
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("ulimit", &mut sink);
+        let w = words(&["-nX"]);
+        let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::Opt(b'n'), OptEvent::End]);
+        assert!(sink.is_empty(), "attached non-digit is silent");
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("ulimit", &mut sink);
+        let w = words(&["-n", "42"]);
+        let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'n', "42"), OptEvent::End]
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("ulimit", &mut sink);
+        let w = words(&["-n", "xyz"]);
+        let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(
+            String::from_utf8(sink).unwrap(),
+            "t.sh: line 1: ulimit: -n: numeric argument required\n"
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("ulimit", &mut sink);
+        let w = words(&["-n", "-1"]);
+        let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'n', "-1"), OptEvent::End]
+        );
+    }
+
+    #[test]
+    fn invalid_option_reports_once_and_ends() {
+        // B6-F3: `cd -zx` reports only -z (the .def loop's default
+        // arm returns EX_USAGE on the first '?').
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["-zx"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert!(opt.operands().is_empty());
+        // Canonical order (see the wait missing-arg case above).
+        drop(opt);
+        assert_eq!(diag.status(), EX_USAGE);
+        assert_eq!(
+            String::from_utf8(sink).unwrap(),
+            "t.sh: line 1: cd: -z: invalid option\n"
+        );
+    }
+
+    #[test]
+    fn plus_mode_scans_plus_words_and_keeps_the_sign() {
+        // shopt has no plus mode (spec "psuoq" opens with no '+'):
+        // "+z" is an operand, and the machine reports nothing —
+        // the "invalid shell option name" comes from shopt's own
+        // operand handling (verified byte-identical on the oracle:
+        // `shopt +z` -> "shopt: +z: invalid shell option name",
+        // rc 1, on both shells). declare +a scans as an option.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("shopt", &mut sink);
+        let w = words(&["+z"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("shopt").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.operands(), ["+z"]);
+        assert!(sink.is_empty(), "the machine reports nothing here");
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("declare", &mut sink);
+        let w = words(&["+a", "-r"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("declare").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::Opt(b'a'), OptEvent::Opt(b'r'), OptEvent::End]
+        );
+        assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn plus_words_are_operands_without_plus_mode() {
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["+L"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.operands(), ["+L"]);
+    }
+
+    #[test]
+    fn help_and_dashdash_positions() {
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["--help"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        // Help ends the scan; the drain's next step is End.
+        assert_eq!(drain(&mut opt), [OptEvent::Help, OptEvent::End]);
+        assert_eq!(opt.operands(), ["--help"]);
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["-L", "--help"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::Opt(b'L'), OptEvent::Help, OptEvent::End]
+        );
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["--", "--help"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.operands(), ["--help"]);
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["dir", "--help"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.operands(), ["dir", "--help"]);
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w = words(&["-"]);
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.operands(), ["-"]);
+    }
+
+    #[test]
+    fn no_options_rows_reject_any_option_word() {
+        // times -z: no_options -> invalid + usage, EX_USAGE.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("times", &mut sink);
+        let w = words(&["-z"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("times").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(
+            String::from_utf8(sink).unwrap(),
+            "t.sh: line 1: times: -z: invalid option\n"
+        );
+    }
+
+    #[test]
+    fn grammar_and_noscan_rows_do_not_scan() {
+        for name in [
+            "test", "[", "kill", "let", "env", ":", "echo", "break", "exit",
+        ] {
+            let mut sink = Vec::new();
+            let mut diag = diag_for(name, &mut sink);
+            let w = words(&["-z", "--help", "x"]);
+            let mut opt = BuiltinOpt::new(builtin_table_row(name).unwrap(), &w, &mut diag, false);
+            assert_eq!(drain(&mut opt), [OptEvent::End], "row {name} scanned");
+            assert_eq!(opt.operands(), ["-z", "--help", "x"]);
+            assert!(sink.is_empty(), "row {name} reported");
+        }
+    }
+
+    #[test]
+    fn empty_words_end_immediately() {
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let w: Vec<String> = Vec::new();
+        let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert!(opt.operands().is_empty());
+    }
+
+    #[test]
+    fn posix_bit_changes_nothing_in_phase_0() {
+        // bashgetopt.c has no posixly_correct branch: the scan is
+        // identical with the bit on or off.
+        let row = cd_row();
+        let w = words(&["-L", "dir"]);
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let mut off = BuiltinOpt::new(row, &w, &mut diag, false);
+        let ev_off = drain(&mut off);
+        let ops_off = off.operands().to_vec();
+        let mut sink = Vec::new();
+        let mut diag = diag_for("cd", &mut sink);
+        let mut on = BuiltinOpt::new(row, &w, &mut diag, true);
+        let ev_on = drain(&mut on);
+        assert_eq!(ev_off, ev_on);
+        assert_eq!(ops_off, on.operands());
+    }
+
+    #[test]
+    fn fc_leading_colon_in_spec_is_inert() {
+        let mut sink = Vec::new();
+        let mut diag = diag_for("fc", &mut sink);
+        let w = words(&["-e", "vi"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("fc").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [OptEvent::OptArg(b'e', "vi"), OptEvent::End]
+        );
+        assert!(sink.is_empty());
+    }
+}

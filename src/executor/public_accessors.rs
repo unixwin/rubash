@@ -3215,6 +3215,30 @@ impl Executor {
         }
     }
 
+    /// Build the `Diag` prolog (Stage-2 ④ D3) for the current
+    /// execution state, from the same inputs `diagnostic_prefix`
+    /// reads: the interactive basename, the innermost script frame
+    /// (`current_error_file_name`), the line
+    /// (`__RUBASH_CURRENT_LINE`) and the `get_name_for_error` name.
+    /// The `Prolog` is a plain value — the dispatcher hands it to
+    /// `Diag::new` alongside the command's own stderr sink, so a
+    /// builtin's diagnostics can no longer be written to the wrong
+    /// stream (the A3-R1 shape becomes inexpressible in the type
+    /// system once the builtins migrate in Phase 4).
+    pub(crate) fn diagnostic_prolog(&self) -> super::builtin_diag::Prolog {
+        super::builtin_diag::Prolog {
+            interactive: self.invocation_interactive(),
+            shell_basename: Self::interactive_shell_basename(&self.shell_state.env_vars),
+            error_name: self.error_report_name(),
+            script_file: self.current_error_file_name(),
+            line: self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .cloned(),
+        }
+    }
+
     /// GNU error.c get_name_for_error: the diagnostic prolog name is
     /// the file of the code CURRENTLY EXECUTING — BASH_SOURCE[0], the
     /// innermost source frame (a function's definition file, a sourced
