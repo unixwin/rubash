@@ -1439,13 +1439,15 @@ pub const READLINE_VARIABLE_DEFAULTS: &[(&str, &str)] = &[
 /// - [`SetVariableOutcome::Applied`] — stored (booleans normalize
 ///   non-`on` values to `off` and numbers non-numeric text to `0`
 ///   silently, GNU probes: `set completion-ignore-case maybe` → `off`,
-///   `set keyseq-timeout abc` → `0`; `set keymap bogus` keeps the old
-///   keymap silently).
+///   `set keyseq-timeout abc` → `0`).
 /// - [`SetVariableOutcome::UnknownVariable`] — GNU prints
 ///   ``readline: NAME: unknown variable name`` (probe) and continues.
-/// - [`SetVariableOutcome::CouldNotSetValue`] — only `editing-mode`
-///   rejects values loudly: ``readline: editing-mode: could not set
-///   value to `bogus'`` (probe), variable unchanged.
+/// - [`SetVariableOutcome::CouldNotSetValue`] — the variables whose
+///   readline setter validates the value reject loudly:
+///   ``readline: NAME: could not set value to `bogus'`` (bind.c:2073),
+///   variable unchanged. Those are `editing-mode` (sv_editmode),
+///   `bell-style` (sv_bell_style, bind.c:2227) and `keymap`
+///   (sv_keymap, bind.c:2185) — rubash#2871.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetVariableOutcome {
     Applied,
@@ -1463,7 +1465,7 @@ pub fn apply_readline_variable(
     name: &str,
     value: &str,
 ) -> (SetVariableOutcome, Option<(&'static str, &'static str)>) {
-    let Some((_, kind)) = variable_kind(name) else {
+    let Some((canonical, kind)) = variable_kind(name) else {
         return (SetVariableOutcome::UnknownVariable, None);
     };
     match kind {
@@ -1477,7 +1479,7 @@ pub fn apply_readline_variable(
                 }
             };
             let keymap = if mode == "vi" { "vi-insert" } else { "emacs" };
-            store_variable(variables, name, mode);
+            store_variable(variables, canonical, mode);
             store_variable(variables, "keymap", keymap);
             (
                 SetVariableOutcome::Applied,
@@ -1485,15 +1487,49 @@ pub fn apply_readline_variable(
             )
         }
         VariableKind::Keymap => {
-            // A bad keymap name keeps the current value silently (GNU
-            // probe: `set keymap bogus` → keymap stays emacs, no message).
-            // A good one stores the map's canonical name: the variable
-            // reads back as rl_get_keymap_name(_rl_keymap), the first
-            // name registered for the map (see
+            // sv_keymap (lib/readline/bind.c:2185): the value must
+            // resolve through rl_get_keymap_by_name over the names at
+            // bind.c:2404, matched case-insensitively
+            // (_rl_get_keymap_by_name, bind.c:2424). An unknown name
+            // makes the setter return 1, so rl_variable_bind reports
+            // the value (bind.c:2073) and the current map stays
+            // (rubash#2871). A good name stores the map's canonical
+            // name: the variable reads back as
+            // rl_get_keymap_name(_rl_keymap), the first name
+            // registered for the map (see
             // [`canonical_keymap_variable_value`]).
-            if crate::shell::bind_registry::KEYMAP_NAMES.contains(&value) {
-                store_variable(variables, name, canonical_keymap_variable_value(value));
+            let lowered = value.to_ascii_lowercase();
+            if !crate::shell::bind_registry::KEYMAP_NAMES.contains(&lowered.as_str()) {
+                return (SetVariableOutcome::CouldNotSetValue, None);
             }
+            store_variable(
+                variables,
+                canonical,
+                canonical_keymap_variable_value(&lowered),
+            );
+            (SetVariableOutcome::Applied, None)
+        }
+        VariableKind::BellStyle => {
+            // sv_bell_style (lib/readline/bind.c:2227-2240): the value
+            // names a bell preference — none/off, audible/on, visible,
+            // empty resets to audible — matched case-insensitively
+            // (_rl_stricmp). Anything else returns 1 and
+            // rl_variable_bind reports the value (rubash#2871). The
+            // variable reads back as the preference's own name, so
+            // the synonyms collapse (`on` → audible, `off` → none).
+            let canonical_value = if value.is_empty()
+                || value.eq_ignore_ascii_case("audible")
+                || value.eq_ignore_ascii_case("on")
+            {
+                "audible"
+            } else if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("off") {
+                "none"
+            } else if value.eq_ignore_ascii_case("visible") {
+                "visible"
+            } else {
+                return (SetVariableOutcome::CouldNotSetValue, None);
+            };
+            store_variable(variables, canonical, canonical_value);
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::Boolean => {
@@ -1502,16 +1538,16 @@ pub fn apply_readline_variable(
             } else {
                 "off"
             };
-            store_variable(variables, name, normalized);
+            store_variable(variables, canonical, normalized);
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::Number => {
             let normalized = strtol_i64(value);
-            store_variable(variables, name, &normalized.to_string());
+            store_variable(variables, canonical, &normalized.to_string());
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::String => {
-            store_variable(variables, name, value);
+            store_variable(variables, canonical, value);
             (SetVariableOutcome::Applied, None)
         }
     }
@@ -1541,12 +1577,18 @@ enum VariableKind {
     String,
     EditingMode,
     Keymap,
+    BellStyle,
 }
 
+/// Variable-name resolution (find_boolean_var / find_string_var,
+/// lib/readline/bind.c): the name match is CASE-INSENSITIVE
+/// (_rl_stricmp), so `set BELL-STYLE …` finds `bell-style`; the
+/// caller reports the name as typed but stores under the canonical
+/// table name returned here (rubash#2871).
 fn variable_kind(name: &str) -> Option<(&'static str, VariableKind)> {
     READLINE_VARIABLE_DEFAULTS
         .iter()
-        .find(|(candidate, _)| *candidate == name)
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(candidate, _)| (*candidate, kind_of(candidate)))
 }
 
@@ -1554,8 +1596,10 @@ fn kind_of(name: &str) -> VariableKind {
     match name {
         "editing-mode" => VariableKind::EditingMode,
         "keymap" => VariableKind::Keymap,
-        "bell-style" | "comment-begin" | "emacs-mode-string" | "vi-cmd-mode-string"
-        | "vi-ins-mode-string" => VariableKind::String,
+        "bell-style" => VariableKind::BellStyle,
+        "comment-begin" | "emacs-mode-string" | "vi-cmd-mode-string" | "vi-ins-mode-string" => {
+            VariableKind::String
+        }
         "completion-display-width"
         | "completion-prefix-display-length"
         | "completion-query-items"
@@ -1889,6 +1933,52 @@ pub fn unescape_macro_text(text: &str) -> String {
     out
 }
 
+/// The listing form of a stored macro / `bind -x` command value:
+/// _rl_untranslate_macro_value (lib/readline/bind.c:722) with
+/// use_escapes = 0, which is how rl_macro_dumper (bind.c:2842) and
+/// print_unix_command_map (bashline.c:4729, through the same dumper)
+/// print values. Meta bytes become `\M-` + the unmeta'd character,
+/// ESC becomes `\e`, other control characters become `\C-x` (the
+/// lowercased UNCTRL character), DEL becomes `\C-?`, and `\` / `"`
+/// are backslash-escaped — a listing line never carries a raw
+/// control byte and re-parses to the stored value (rubash#2872,
+/// rubash#2874). Stored text is char-oriented in rubash; characters
+/// above U+00FF (only reachable as literal text, never from escape
+/// translation) pass through untouched.
+pub fn untranslate_macro_value(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        let mut c = ch as u32;
+        if c > 0xff {
+            out.push(ch);
+            continue;
+        }
+        // META_CHAR: print \M- and continue with the unmeta'd char.
+        if c & 0x80 != 0 {
+            out.push_str("\\M-");
+            c &= 0x7f;
+        }
+        if c == 0x1b {
+            // ESC prints as \e, ahead of the generic control arm.
+            out.push('\\');
+            c = 'e' as u32;
+        } else if c < 0x20 {
+            // CTRL_CHAR: \C- + _rl_to_lower (UNCTRL (c)).
+            out.push_str("\\C-");
+            c = char::from((c + 0x40) as u8).to_ascii_lowercase() as u32;
+        } else if c == 0x7f {
+            // RUBOUT prints as \C-?.
+            out.push_str("\\C-");
+            c = '?' as u32;
+        }
+        if c == '\\' as u32 || c == '"' as u32 {
+            out.push('\\');
+        }
+        out.push(char::from_u32(c).unwrap_or(ch));
+    }
+    out
+}
+
 /// Parse a `bind -x` argument: `"keyseq"[:|ws]["']command["']`
 /// (bashline.c:4850 bind_keyseq_to_unix_command). The keyseq MUST be
 /// double-quoted; colon or whitespace separates it from the command.
@@ -1935,8 +2025,9 @@ pub fn parse_unix_command_spec(line: &str) -> Result<(String, String), BindSpecE
 ///
 /// Failures carry `readline_message` (see [`BindSpecError`]): GNU shapes
 /// from the wt100-era probes — ``"\C-t: no closing `"' in key binding``,
-/// `"\C-t": no key sequence terminator`, ``'ins: missing closing quote
-/// for macro`` — printed after `readline: ` with no effect on status.
+/// `"\C-t": no key sequence terminator`, `` `'ins': missing closing
+/// quote for macro `` — printed after `readline: ` with no effect on
+/// status.
 pub fn parse_binding_line(line: &str) -> Option<Result<ParsedBinding, BindSpecError>> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('"') {
@@ -1977,8 +2068,12 @@ pub fn parse_binding_line(line: &str) -> Option<Result<ParsedBinding, BindSpecEr
             Ok(parsed) => parsed,
             Err(err) => {
                 let readline_message = if err.delimiter.is_some() {
+                    // bind.c:1731: `` `%s': missing closing quote for
+                    // macro `` — %s is the function text from its
+                    // opening quote (rubash#2873: the backtick /
+                    // apostrophe frame was missing here).
                     Some(format!(
-                        "{}: missing closing quote for macro",
+                        "`{}': missing closing quote for macro",
                         line[macro_text_start..].trim_end()
                     ))
                 } else {
@@ -2038,20 +2133,24 @@ where
 }
 
 /// `bind -X` line: `"\C-g" "command"` (print_unix_command,
-/// bashline.c:4720-4727, readable form).
+/// bashline.c:4720-4727, readable form). The command value is
+/// untranslated first — print_unix_command_map prints through
+/// rl_macro_dumper, whose values pass _rl_untranslate_macro_value
+/// (rubash#2874).
 pub fn format_unix_command_readable(keyseq: &str, command: &str) -> String {
-    format!("\"{keyseq}\" \"{command}\"")
+    format!("\"{keyseq}\" \"{}\"", untranslate_macro_value(command))
 }
 
-/// `bind -s` line: `"\C-t": "ins-macro"` (rl_macro_dumper readable).
+/// `bind -s` line: `"\C-t": "ins-macro"` (rl_macro_dumper readable;
+/// the value is untranslated, rubash#2872).
 pub fn format_macro_readable(keyseq: &str, text: &str) -> String {
-    format!("\"{keyseq}\": \"{text}\"")
+    format!("\"{keyseq}\": \"{}\"", untranslate_macro_value(text))
 }
 
 /// `bind -S` line: `\C-t outputs ins-macro` (GNU probe; rl_macro_dumper
-/// plain form).
+/// plain form; the value is untranslated, rubash#2872).
 pub fn format_macro_plain(keyseq: &str, text: &str) -> String {
-    format!("{keyseq} outputs {text}")
+    format!("{keyseq} outputs {}", untranslate_macro_value(text))
 }
 
 /// `bind -p` line: `"\C-a": beginning-of-line` (rl_function_dumper(1)).
@@ -2137,6 +2236,41 @@ pub fn format_invalid_keymap(name: &str) -> String {
 /// `bind: FILE: cannot read: ERRNO` (bind.def:274-276).
 pub fn format_cannot_read(file: &str, reason: &str) -> String {
     format!("{file}: cannot read: {reason}")
+}
+
+/// rl_parse_and_bind's diagnostics for a NON-quoted, non-`set`
+/// positional spec (lib/readline/bind.c:1594): the core text after
+/// `readline: ` when GNU reports the spec instead of silently
+/// dropping it, `None` for the shapes GNU absorbs without a word
+/// (rubash#2873).
+///
+/// GNU scans the spec for a `:`, space or tab separator (bind.c:1632):
+/// - a spec whose first character IS the separator has no key
+///   sequence at all (the scan stops at index 0):
+///   `` `<spec>': invalid key binding: missing key sequence ``
+///   (bind.c:1637);
+/// - a spec with no separator anywhere never reaches a value
+///   (foundsep == 0): `<spec>: no key sequence terminator`
+///   (bind.c:1754).
+///
+/// Anything else — empty text, a `#` comment, or a separator-carrying
+/// old-style spec (`bind 'ls -l'`) — parses on without a diagnostic.
+/// Leading whitespace is skipped before all of this (bind.c:1599),
+/// so the diagnostic names the stripped spec.
+pub fn unquoted_spec_diagnostic(arg: &str) -> Option<String> {
+    let stripped = arg.trim_start();
+    if stripped.is_empty() || stripped.starts_with('#') {
+        return None;
+    }
+    if stripped.starts_with(':') {
+        return Some(format!(
+            "`{stripped}': invalid key binding: missing key sequence"
+        ));
+    }
+    if !stripped.contains([':', ' ', '\t']) {
+        return Some(format!("{stripped}: no key sequence terminator"));
+    }
+    None
 }
 
 /// Parse one positional binding argument. `bind -x` values arrive through
@@ -2578,6 +2712,22 @@ mod tests {
     }
 
     #[test]
+    fn untranslate_macro_value_matches_rl_untranslate() {
+        // _rl_untranslate_macro_value (bind.c:722), use_escapes = 0,
+        // byte shapes from the GNU 5.3.20 probes (rubash#2872/#2874).
+        assert_eq!(untranslate_macro_value("echo hi\n"), "echo hi\\C-j");
+        assert_eq!(untranslate_macro_value("a\tb"), "a\\C-ib");
+        assert_eq!(untranslate_macro_value("a\x1bb"), "a\\eb");
+        assert_eq!(untranslate_macro_value("a\x18b"), "a\\C-xb");
+        assert_eq!(untranslate_macro_value("a\x7fb"), "a\\C-?b");
+        assert_eq!(untranslate_macro_value("a\\b\"c"), "a\\\\b\\\"c");
+        assert_eq!(untranslate_macro_value("plain"), "plain");
+        // A meta byte prints \M- plus the unmeta'd character's own
+        // rendering (0x9b = meta + ESC → \M-\e).
+        assert_eq!(untranslate_macro_value("\u{9b}"), "\\M-\\e");
+    }
+
+    #[test]
     fn query_truncates_at_five_with_ellipsis() {
         let seqs: Vec<String> = (0..7).map(|i| format!("\\C-{i}")).collect();
         let out = format_query("self-insert", &seqs);
@@ -2752,12 +2902,47 @@ mod tests {
         assert_eq!(registry.variable_value("editing-mode"), Some("vi"));
         assert_eq!(registry.variable_value("keymap"), Some("vi-insert"));
         assert_eq!(registry.editing_mode.as_deref(), Some("vi"));
-        // Bad keymap keeps the old value silently.
+        // Bad keymap is rejected loudly (sv_keymap returns 1 →
+        // rl_variable_bind reports it, bind.c:2073), value unchanged
+        // (rubash#2871; the earlier "silent" pin came from a probe
+        // that never captured stderr).
         assert_eq!(
             registry.set_readline_variable("keymap", "bogus"),
-            SetVariableOutcome::Applied
+            SetVariableOutcome::CouldNotSetValue
         );
         assert_eq!(registry.variable_value("keymap"), Some("vi-insert"));
+        // Keymap names match case-insensitively and read back
+        // canonically (bind.c:2424, rl_get_keymap_name).
+        assert_eq!(
+            registry.set_readline_variable("keymap", "VI"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("keymap"), Some("vi"));
+        // sv_bell_style (bind.c:2227): bogus is rejected loudly, the
+        // synonyms collapse to the preference's name, empty resets
+        // to audible (rubash#2871).
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "bogus"),
+            SetVariableOutcome::CouldNotSetValue
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("audible"));
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "on"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("audible"));
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "OFF"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("none"));
+        // Variable names match case-insensitively (find_string_var's
+        // _rl_stricmp) and store under the canonical name.
+        assert_eq!(
+            registry.set_readline_variable("BELL-STYLE", "visible"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("visible"));
     }
 
     #[test]
@@ -2778,13 +2963,14 @@ mod tests {
             err.readline_message.as_deref(),
             Some("\"\\C-t\": no key sequence terminator")
         );
-        // Unclosed macro quote.
+        // Unclosed macro quote: bind.c:1731 frames the function text
+        // in backtick/apostrophe (rubash#2873).
         let err = parse_binding_line(r#""\C-t": 'ins"#)
             .expect("this form")
             .expect_err("rejected");
         assert_eq!(
             err.readline_message.as_deref(),
-            Some("'ins: missing closing quote for macro")
+            Some("`'ins': missing closing quote for macro")
         );
         // -x errors stay in the `bind:` channel (rc 1 there).
         let err = parse_unix_command_spec("noquotes").expect_err("rejected");
