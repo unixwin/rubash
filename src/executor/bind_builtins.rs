@@ -120,8 +120,15 @@ impl Executor {
 
         // -m: install the keymap for the duration of this command
         // (bind.def:246-257). An invalid name fails the whole command.
+        // The name resolves through rl_get_keymap_by_name, whose
+        // match is case-insensitive (_rl_get_keymap_by_name,
+        // lib/readline/bind.c:2424) — the same rule the `set keymap`
+        // variable channel applies (rubash#2871) — so the membership
+        // test runs on the lowered name; the diagnostic keeps the
+        // name as typed (rubash#2916).
         if let Some(name) = &flags.keymap {
-            if !crate::shell::bind_registry::KEYMAP_NAMES.contains(&name.as_str()) {
+            let lowered = name.to_ascii_lowercase();
+            if !crate::shell::bind_registry::KEYMAP_NAMES.contains(&lowered.as_str()) {
                 let _ = writeln!(
                     stderr,
                     "{prefix}bind: {}",
@@ -143,7 +150,10 @@ impl Executor {
         // unconditionally, so a vi-mode shell's `bind -p` dumped the
         // emacs factory table).
         let keymap = Some(match &flags.keymap {
-            Some(name) => crate::shell::bind_registry::normalize_keymap_name(name).to_string(),
+            Some(name) => {
+                crate::shell::bind_registry::normalize_keymap_name(&name.to_ascii_lowercase())
+                    .to_string()
+            }
             None => crate::shell::bind_registry::normalize_keymap_name(
                 self.bind_readline_variable("keymap")
                     .as_deref()
@@ -422,12 +432,15 @@ impl Executor {
         //   ``readline: NAME: unknown variable name`` /
         //   ```readline: NAME: could not set value to `V'``` and keep
         //   going.
-        // - non-quote, non-set text with a separator is absorbed
-        //   silently (`bind 'ls -l'` → rc 0, no output), but a
-        //   malformed spec is reported, not swallowed: a bare token
-        //   with no separator gets `no key sequence terminator` and a
+        // - non-quote, non-set text goes through the old-style
+        //   keyname arm: a separator-carrying spec binds its key
+        //   with no output (`bind 'ls -l'` → rc 0, silent;
+        //   `bind 'Control-t: undo'` rebinds), while a malformed
+        //   spec is reported, not swallowed: a bare token with no
+        //   separator gets `no key sequence terminator` and a
         //   separator-first spec gets `missing key sequence`
-        //   (rl_parse_and_bind, bind.c:1637/1754; rubash#2873).
+        //   (rl_parse_and_bind, bind.c:1637/1754/1803;
+        //   rubash#2873, rubash#2914).
         // - parse failures print `readline: …` and do NOT fail the
         //   command (bind.def:304-333 ignores rl_parse_and_bind's return;
         //   probe: `bind '"\C-t'` → rc 0).
@@ -470,27 +483,30 @@ impl Executor {
                 continue;
             }
             if !arg.trim_start().starts_with('"') {
-                // A non-quoted spec still goes through
-                // rl_parse_and_bind's validation before the old-style
-                // path absorbs it (rubash#2873).
-                if let Some(diagnostic) = crate::builtins::bind::unquoted_spec_diagnostic(&arg) {
-                    let _ = writeln!(stderr, "readline: {diagnostic}");
+                // A non-quoted spec goes through rl_parse_and_bind's
+                // old-style keyname arm (bind.c:1803): malformed
+                // shapes print their diagnostic (rubash#2873) and a
+                // well-formed spec BINDS (rubash#2914).
+                match crate::builtins::bind::parse_old_style_binding(&arg) {
+                    crate::builtins::bind::OldStyleSpec::Diagnostic(diagnostic) => {
+                        let _ = writeln!(stderr, "readline: {diagnostic}");
+                    }
+                    crate::builtins::bind::OldStyleSpec::Bind(parsed) => {
+                        self.register_bind_entry(BindEntry {
+                            keyseq: parsed.keyseq,
+                            kind: bind_kind_of(parsed.spec),
+                            keymap: keymap.clone(),
+                        });
+                    }
+                    crate::builtins::bind::OldStyleSpec::Silent => {}
                 }
                 continue;
             }
             match crate::builtins::bind::parse_positional_binding(&arg) {
                 Ok(parsed) => {
-                    let kind = match parsed.spec {
-                        crate::builtins::bind::BindingSpec::Function { name } => {
-                            BindKind::Function { name }
-                        }
-                        crate::builtins::bind::BindingSpec::Macro { text } => {
-                            BindKind::Macro { text }
-                        }
-                    };
                     self.register_bind_entry(BindEntry {
                         keyseq: parsed.keyseq,
-                        kind,
+                        kind: bind_kind_of(parsed.spec),
                         keymap: keymap.clone(),
                     });
                 }
@@ -812,6 +828,16 @@ impl Executor {
             .bind_registry
             .borrow_mut()
             .unbind_function_for_keymap(name, keymap);
+    }
+}
+
+/// BindingSpec → BindKind: both rl_parse_and_bind channels (the
+/// new-style quoted spec and the old-style keyname arm) store the
+/// same two kinds.
+fn bind_kind_of(spec: crate::builtins::bind::BindingSpec) -> BindKind {
+    match spec {
+        crate::builtins::bind::BindingSpec::Function { name } => BindKind::Function { name },
+        crate::builtins::bind::BindingSpec::Macro { text } => BindKind::Macro { text },
     }
 }
 

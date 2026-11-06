@@ -2283,18 +2283,248 @@ pub fn parse_positional_binding(arg: &str) -> Result<ParsedBinding, BindSpecErro
     }
 }
 
-/// Strip a case-insensitive `set` keyword with its separating whitespace
-/// (readline matches the keyword case-insensitively); `None` when the
-/// line is not a variable assignment.
-pub fn strip_set_keyword(line: &str) -> Option<&str> {
-    let trimmed = line.trim_start();
-    if trimmed.len() >= 3 && trimmed[..3].eq_ignore_ascii_case("set") {
-        let rest = &trimmed[3..];
-        if rest.starts_with(char::is_whitespace) {
-            return Some(rest);
+/// What rl_parse_and_bind does with one non-quoted, non-`set`
+/// positional spec — the old-style keyname arm (lib/readline/
+/// bind.c:1594). The quoted form is [`parse_binding_line`]'s; this
+/// covers everything else that reaches the arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OldStyleSpec {
+    /// Absorbed without a word: empty text, a `#` comment, or an
+    /// equivalency (`key:=value` — bind.c:1759 returns at once).
+    Silent,
+    /// The core text GNU reports after `readline: `; the builtin
+    /// still succeeds (bind.def:308-312 ignores the return value).
+    Diagnostic(String),
+    /// A binding to register in the current keymap.
+    Bind(ParsedBinding),
+}
+
+/// glean_key_from_name (lib/readline/bind.c:2387): the name_key_alist
+/// names (bind.c:2371) match case-insensitively; anything else
+/// gleans as its first byte (an empty name gleans as NUL).
+fn glean_key_from_name(kname: &str) -> u32 {
+    const NAME_KEY_ALIST: [(&str, u32); 11] = [
+        ("DEL", 0x7f),
+        ("ESC", 0x1b),
+        ("Escape", 0x1b),
+        ("LFD", 0x0a),
+        ("Newline", 0x0a),
+        ("RET", 0x0d),
+        ("Return", 0x0d),
+        ("Rubout", 0x7f),
+        ("SPC", 0x20),
+        ("Space", 0x20),
+        ("Tab", 0x09),
+    ];
+    for (name, value) in NAME_KEY_ALIST {
+        if kname.eq_ignore_ascii_case(name) {
+            return value;
         }
     }
+    kname.as_bytes().first().map_or(0, |byte| u32::from(*byte))
+}
+
+/// substring_member_of_array (lib/readline/bind.c:3087): any member
+/// found in the string by _rl_strindex, which compares
+/// case-insensitively (lib/readline/util.c:274).
+fn substring_member_of_array(string: &str, array: &[&str]) -> bool {
+    let haystack = string.to_ascii_lowercase();
+    array
+        .iter()
+        .any(|member| haystack.contains(&member.to_ascii_lowercase()))
+}
+
+/// _rl_skip_to_delim (lib/readline/bind.c:1562): the index of the
+/// delimiter, with backslash quoting the next character; `None`
+/// when the string ends first.
+fn skip_to_delim(bytes: &[u8], start: usize, delim: u8) -> Option<usize> {
+    let mut i = start;
+    let mut passc = false;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if passc {
+            passc = false;
+        } else if c == b'\\' {
+            passc = true;
+        } else if c == delim {
+            return Some(i);
+        }
+        i += 1;
+    }
     None
+}
+
+/// The stored (written) sequence for one old-style key value.
+/// rl_bind_key (lib/readline/bind.c:140) routes a META key into the
+/// ESC prefix map, so a meta binding's sequence is `\e` plus the
+/// unmeta'd key's spelling; a plain key spells itself. Single-key
+/// spellings follow the default tables' conventions: `\C-t`,
+/// `\C-?` for DEL, `\e` for ESC, `\\` and `\"` escaped.
+fn old_style_keyseq(key: u32) -> String {
+    if key & 0x80 != 0 {
+        let mut seq = String::from("\\e");
+        seq.push_str(&old_style_single_keyseq(key & 0x7f));
+        seq
+    } else {
+        old_style_single_keyseq(key)
+    }
+}
+
+fn old_style_single_keyseq(key: u32) -> String {
+    match key {
+        0x1b => "\\e".to_string(),
+        0x00..=0x1f => {
+            // \C- + the UNCTRL character, lowercased — the
+            // untranslate convention of bind.c:722 (rubash#2872).
+            let unctrl = char::from((key + 0x40) as u8).to_ascii_lowercase();
+            format!("\\C-{unctrl}")
+        }
+        0x7f => "\\C-?".to_string(),
+        _ => match char::from_u32(key) {
+            Some('\\') => "\\\\".to_string(),
+            Some('"') => "\\\"".to_string(),
+            Some(ch) => ch.to_string(),
+            None => String::new(),
+        },
+    }
+}
+
+/// rl_parse_and_bind for a non-quoted, non-`set` spec: the
+/// separator scan and value isolation of bind.c:1632-1752, then the
+/// old-style arm of bind.c:1803-1856 (rubash#2914 — this arm was
+/// missing, so `bind 'Control-t: undo'` was silently dropped and
+/// `bind 'backward-char '` never diagnosed). The separator-scan
+/// diagnostics (missing key sequence / no key sequence terminator)
+/// are classified by [`unquoted_spec_diagnostic`]; the `set` arm is
+/// the caller's ([`strip_set_keyword`]).
+pub fn parse_old_style_binding(arg: &str) -> OldStyleSpec {
+    if let Some(diagnostic) = unquoted_spec_diagnostic(arg) {
+        return OldStyleSpec::Diagnostic(diagnostic);
+    }
+    let stripped = arg.trim_start();
+    if stripped.is_empty() || stripped.starts_with('#') || stripped.starts_with('"') {
+        // `"`-leading specs are the new-style branch's
+        // (parse_binding_line); the caller routes them there.
+        return OldStyleSpec::Silent;
+    }
+    let bytes = stripped.as_bytes();
+    // Separator scan (bind.c:1637): guaranteed to stop in bounds —
+    // the diagnostic stage has already reported the specs with no
+    // separator and the ones starting with one.
+    let mut sep = 0;
+    while bytes[sep] != b':' && bytes[sep] != b' ' && bytes[sep] != b'\t' {
+        sep += 1;
+    }
+    let token = &stripped[..sep];
+    let equivalency = bytes[sep] == b':' && bytes.get(sep + 1) == Some(&b'=');
+    let mut i = sep + 1;
+    if equivalency {
+        i += 1;
+    }
+    // Isolate the value (bind.c:1715-1752): skip whitespace; a
+    // quoted value is a macro, skipped to its closing delimiter.
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    let funname_start = i;
+    let quoted_value = matches!(bytes.get(i), Some(b'\'') | Some(b'"'));
+    let funname_end = if quoted_value {
+        match skip_to_delim(bytes, i + 1, bytes[i]) {
+            Some(close) => close + 1,
+            None => {
+                return OldStyleSpec::Diagnostic(format!(
+                    "`{}': missing closing quote for macro",
+                    stripped[funname_start..].trim_end()
+                ));
+            }
+        }
+    } else {
+        let mut end = i;
+        while end < bytes.len() && bytes[end] != b' ' && bytes[end] != b'\t' {
+            end += 1;
+        }
+        end
+    };
+    let funname = &stripped[funname_start..funname_end];
+    if equivalency {
+        return OldStyleSpec::Silent;
+    }
+    // The old-style arm (bind.c:1803-1856): the keyname is the part
+    // of the token after its last `-`.
+    let kname = match token.rfind('-') {
+        Some(at) => &token[at + 1..],
+        None => token,
+    };
+    let mut key = glean_key_from_name(kname);
+    let mut foundmod = false;
+    if substring_member_of_array(token, &["Control-", "C-", "CTRL-"]) {
+        // key = CTRL (_rl_to_upper (key)) — chardefs.h:60.
+        if (b'a' as u32..=b'z' as u32).contains(&key) {
+            key -= 32;
+        }
+        key &= 0x1f;
+        foundmod = true;
+    }
+    if substring_member_of_array(token, &["Meta", "M-"]) {
+        key |= 0x80; // META (key) — chardefs.h:61.
+        foundmod = true;
+    }
+    if !foundmod && kname != token {
+        return OldStyleSpec::Diagnostic(format!("{token}: unknown key modifier"));
+    }
+    let keyseq = old_style_keyseq(key);
+    if quoted_value {
+        // rl_macro_bind (bind.c:1834-1843): strip the delimiters —
+        // the closing one only when it matches the opening — and
+        // translate the text's escapes, as the new-style macro path
+        // stores them.
+        let delim = funname.as_bytes()[0];
+        let mut interior = &funname[1..];
+        if interior.as_bytes().last() == Some(&delim) {
+            interior = &interior[..interior.len() - 1];
+        }
+        return OldStyleSpec::Bind(ParsedBinding {
+            keyseq,
+            spec: BindingSpec::Macro {
+                text: unescape_macro_text(interior),
+            },
+        });
+    }
+    // rl_bind_key (key, rl_named_function (funname)) (bind.c:1856):
+    // an unknown name binds a NULL slot, which the registry
+    // reproduces by storing the name verbatim — it shadows the
+    // key's default binding and is never listed. The one name the C
+    // intercepts, `prefix-meta` (bind.c:1845, PREFIX_META_HACK),
+    // binds the key to the emacs-meta keymap; the registry is a flat
+    // sequence table with no keymap-valued kind, so the name is
+    // stored verbatim like any other and the slot is occupied the
+    // same way.
+    OldStyleSpec::Bind(ParsedBinding {
+        keyseq,
+        spec: BindingSpec::Function {
+            name: funname.to_string(),
+        },
+    })
+}
+
+/// Strip the `set` keyword of a variable-assignment line; `None` when
+/// the line is not one. rl_parse_and_bind scans the first token up to
+/// a `:`, space or tab (lib/readline/bind.c:1637) and compares it
+/// against `set` case-insensitively (bind.c:1658), so the token may
+/// be terminated by a colon as well as by whitespace —
+/// `set: completion-ignore-case on` is a variable assignment whose
+/// variable is the next word, exactly like the spaced form
+/// (rubash#2915). Returns the text after the separator; a bare `set`
+/// with no separator at all is not an assignment here (the caller
+/// reports its empty variable name itself).
+pub fn strip_set_keyword(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    let sep = trimmed.find([':', ' ', '\t'])?;
+    if trimmed[..sep].eq_ignore_ascii_case("set") {
+        Some(&trimmed[sep + 1..])
+    } else {
+        None
+    }
 }
 
 /// The environment an inputrc file's conditionals evaluate against:
