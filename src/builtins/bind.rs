@@ -1439,13 +1439,15 @@ pub const READLINE_VARIABLE_DEFAULTS: &[(&str, &str)] = &[
 /// - [`SetVariableOutcome::Applied`] — stored (booleans normalize
 ///   non-`on` values to `off` and numbers non-numeric text to `0`
 ///   silently, GNU probes: `set completion-ignore-case maybe` → `off`,
-///   `set keyseq-timeout abc` → `0`; `set keymap bogus` keeps the old
-///   keymap silently).
+///   `set keyseq-timeout abc` → `0`).
 /// - [`SetVariableOutcome::UnknownVariable`] — GNU prints
 ///   ``readline: NAME: unknown variable name`` (probe) and continues.
-/// - [`SetVariableOutcome::CouldNotSetValue`] — only `editing-mode`
-///   rejects values loudly: ``readline: editing-mode: could not set
-///   value to `bogus'`` (probe), variable unchanged.
+/// - [`SetVariableOutcome::CouldNotSetValue`] — the variables whose
+///   readline setter validates the value reject loudly:
+///   ``readline: NAME: could not set value to `bogus'`` (bind.c:2073),
+///   variable unchanged. Those are `editing-mode` (sv_editmode),
+///   `bell-style` (sv_bell_style, bind.c:2227) and `keymap`
+///   (sv_keymap, bind.c:2185) — rubash#2871.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetVariableOutcome {
     Applied,
@@ -1463,7 +1465,7 @@ pub fn apply_readline_variable(
     name: &str,
     value: &str,
 ) -> (SetVariableOutcome, Option<(&'static str, &'static str)>) {
-    let Some((_, kind)) = variable_kind(name) else {
+    let Some((canonical, kind)) = variable_kind(name) else {
         return (SetVariableOutcome::UnknownVariable, None);
     };
     match kind {
@@ -1477,7 +1479,7 @@ pub fn apply_readline_variable(
                 }
             };
             let keymap = if mode == "vi" { "vi-insert" } else { "emacs" };
-            store_variable(variables, name, mode);
+            store_variable(variables, canonical, mode);
             store_variable(variables, "keymap", keymap);
             (
                 SetVariableOutcome::Applied,
@@ -1485,15 +1487,49 @@ pub fn apply_readline_variable(
             )
         }
         VariableKind::Keymap => {
-            // A bad keymap name keeps the current value silently (GNU
-            // probe: `set keymap bogus` → keymap stays emacs, no message).
-            // A good one stores the map's canonical name: the variable
-            // reads back as rl_get_keymap_name(_rl_keymap), the first
-            // name registered for the map (see
+            // sv_keymap (lib/readline/bind.c:2185): the value must
+            // resolve through rl_get_keymap_by_name over the names at
+            // bind.c:2404, matched case-insensitively
+            // (_rl_get_keymap_by_name, bind.c:2424). An unknown name
+            // makes the setter return 1, so rl_variable_bind reports
+            // the value (bind.c:2073) and the current map stays
+            // (rubash#2871). A good name stores the map's canonical
+            // name: the variable reads back as
+            // rl_get_keymap_name(_rl_keymap), the first name
+            // registered for the map (see
             // [`canonical_keymap_variable_value`]).
-            if crate::shell::bind_registry::KEYMAP_NAMES.contains(&value) {
-                store_variable(variables, name, canonical_keymap_variable_value(value));
+            let lowered = value.to_ascii_lowercase();
+            if !crate::shell::bind_registry::KEYMAP_NAMES.contains(&lowered.as_str()) {
+                return (SetVariableOutcome::CouldNotSetValue, None);
             }
+            store_variable(
+                variables,
+                canonical,
+                canonical_keymap_variable_value(&lowered),
+            );
+            (SetVariableOutcome::Applied, None)
+        }
+        VariableKind::BellStyle => {
+            // sv_bell_style (lib/readline/bind.c:2227-2240): the value
+            // names a bell preference — none/off, audible/on, visible,
+            // empty resets to audible — matched case-insensitively
+            // (_rl_stricmp). Anything else returns 1 and
+            // rl_variable_bind reports the value (rubash#2871). The
+            // variable reads back as the preference's own name, so
+            // the synonyms collapse (`on` → audible, `off` → none).
+            let canonical_value = if value.is_empty()
+                || value.eq_ignore_ascii_case("audible")
+                || value.eq_ignore_ascii_case("on")
+            {
+                "audible"
+            } else if value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("off") {
+                "none"
+            } else if value.eq_ignore_ascii_case("visible") {
+                "visible"
+            } else {
+                return (SetVariableOutcome::CouldNotSetValue, None);
+            };
+            store_variable(variables, canonical, canonical_value);
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::Boolean => {
@@ -1502,16 +1538,16 @@ pub fn apply_readline_variable(
             } else {
                 "off"
             };
-            store_variable(variables, name, normalized);
+            store_variable(variables, canonical, normalized);
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::Number => {
             let normalized = strtol_i64(value);
-            store_variable(variables, name, &normalized.to_string());
+            store_variable(variables, canonical, &normalized.to_string());
             (SetVariableOutcome::Applied, None)
         }
         VariableKind::String => {
-            store_variable(variables, name, value);
+            store_variable(variables, canonical, value);
             (SetVariableOutcome::Applied, None)
         }
     }
@@ -1541,12 +1577,18 @@ enum VariableKind {
     String,
     EditingMode,
     Keymap,
+    BellStyle,
 }
 
+/// Variable-name resolution (find_boolean_var / find_string_var,
+/// lib/readline/bind.c): the name match is CASE-INSENSITIVE
+/// (_rl_stricmp), so `set BELL-STYLE …` finds `bell-style`; the
+/// caller reports the name as typed but stores under the canonical
+/// table name returned here (rubash#2871).
 fn variable_kind(name: &str) -> Option<(&'static str, VariableKind)> {
     READLINE_VARIABLE_DEFAULTS
         .iter()
-        .find(|(candidate, _)| *candidate == name)
+        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
         .map(|(candidate, _)| (*candidate, kind_of(candidate)))
 }
 
@@ -1554,8 +1596,10 @@ fn kind_of(name: &str) -> VariableKind {
     match name {
         "editing-mode" => VariableKind::EditingMode,
         "keymap" => VariableKind::Keymap,
-        "bell-style" | "comment-begin" | "emacs-mode-string" | "vi-cmd-mode-string"
-        | "vi-ins-mode-string" => VariableKind::String,
+        "bell-style" => VariableKind::BellStyle,
+        "comment-begin" | "emacs-mode-string" | "vi-cmd-mode-string" | "vi-ins-mode-string" => {
+            VariableKind::String
+        }
         "completion-display-width"
         | "completion-prefix-display-length"
         | "completion-query-items"
@@ -2752,12 +2796,47 @@ mod tests {
         assert_eq!(registry.variable_value("editing-mode"), Some("vi"));
         assert_eq!(registry.variable_value("keymap"), Some("vi-insert"));
         assert_eq!(registry.editing_mode.as_deref(), Some("vi"));
-        // Bad keymap keeps the old value silently.
+        // Bad keymap is rejected loudly (sv_keymap returns 1 →
+        // rl_variable_bind reports it, bind.c:2073), value unchanged
+        // (rubash#2871; the earlier "silent" pin came from a probe
+        // that never captured stderr).
         assert_eq!(
             registry.set_readline_variable("keymap", "bogus"),
-            SetVariableOutcome::Applied
+            SetVariableOutcome::CouldNotSetValue
         );
         assert_eq!(registry.variable_value("keymap"), Some("vi-insert"));
+        // Keymap names match case-insensitively and read back
+        // canonically (bind.c:2424, rl_get_keymap_name).
+        assert_eq!(
+            registry.set_readline_variable("keymap", "VI"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("keymap"), Some("vi"));
+        // sv_bell_style (bind.c:2227): bogus is rejected loudly, the
+        // synonyms collapse to the preference's name, empty resets
+        // to audible (rubash#2871).
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "bogus"),
+            SetVariableOutcome::CouldNotSetValue
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("audible"));
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "on"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("audible"));
+        assert_eq!(
+            registry.set_readline_variable("bell-style", "OFF"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("none"));
+        // Variable names match case-insensitively (find_string_var's
+        // _rl_stricmp) and store under the canonical name.
+        assert_eq!(
+            registry.set_readline_variable("BELL-STYLE", "visible"),
+            SetVariableOutcome::Applied
+        );
+        assert_eq!(registry.variable_value("bell-style"), Some("visible"));
     }
 
     #[test]
