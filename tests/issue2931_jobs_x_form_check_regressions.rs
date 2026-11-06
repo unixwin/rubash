@@ -62,7 +62,11 @@ fn jobs_l_before_x_is_an_error() {
 fn jobs_l_word_before_x_command_is_an_error() {
     let run = run_script("jobs -l -x echo hi\n");
     assert_eq!(run.status, 1, "stderr: {}", run.stderr);
-    assert!(run.stdout.is_empty(), "stdout must not print hi: {}", run.stdout);
+    assert!(
+        run.stdout.is_empty(),
+        "stdout must not print hi: {}",
+        run.stdout
+    );
     assert!(
         run.stderr.contains(NO_OTHER_OPTIONS),
         "stderr: {}",
