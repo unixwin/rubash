@@ -258,6 +258,27 @@ pub struct ShellState {
     /// (execute_cmd.c:1642, Posix interp 842), so those boundaries leave
     /// this at 0 (rubash#1064, rubash#1065).
     pub(crate) inherited_loop_depth: usize,
+    /// rubash#2851: loop depth banked across subshell boundaries for
+    /// the SIGTSTP stop-unwind. GNU jobs.c:4341-4343 sets `breaking =
+    /// loop_level` in the WAITING shell — the loop owner's level, read
+    /// across the fork — but execute_in_subshell resets the child's own
+    /// loop_level to 0 (execute_cmd.c:1641-1642), so a wait inside a
+    /// subshell sees depth 0. Each subshell entry accumulates `live
+    /// loop_depth + 1` here (the +1 is the boundary itself: the forked
+    /// child's own frame, which the unwind must cross); the stop arms
+    /// read `subshell_saved_loop_depth + live loop_depth` as the count,
+    /// and each subshell boundary consumes one level on close.
+    /// Function/trap entries never touch this: they reset only the live
+    /// depth, so a stop inside a function body's subshell still carries
+    /// the enclosing loops (the parent's wait verdict), while a stop
+    /// inside a plain function body reads 0 + 0 and the loop continues
+    /// (execute_cmd.c:5359). NOT compat-gated: the parent's wait verdict
+    /// needs the depth at any compat level — the compat gate governs
+    /// only break/continue INSIDE the child (inherited_loop_depth).
+    /// The boundary save/restore (clone at entry, wholesale restore at
+    /// close) reverts this to the enclosing frame's value, so a closed
+    /// boundary never leaks budget outward.
+    pub(crate) subshell_saved_loop_depth: usize,
     /// rubash#817 read-unit identity for the executor-level alias same-read
     /// guard (arithmetic_aliases.rs alias_defined_on_current_line). GNU
     /// expands an alias use only when the definition was consumed by an
@@ -846,6 +867,7 @@ impl Clone for ShellState {
             expanding_aliases: self.expanding_aliases.clone(),
             loop_depth: self.loop_depth,
             inherited_loop_depth: self.inherited_loop_depth,
+            subshell_saved_loop_depth: self.subshell_saved_loop_depth,
             read_generation: self.read_generation,
             read_generation_ceiling: self.read_generation_ceiling,
             command_number: self.command_number,

@@ -4672,16 +4672,17 @@ impl Executor {
                 entry.background = true;
             }
         }
-        // rubash#2838: breaking = loop_level on SIGTSTP; the subshell
-        // arm (slice 4, mirroring the single-child wait) sets one level
-        // when the stop landed in an in-process subshell, where
-        // loop_depth is 0 and no loop owns the count.
+        // rubash#2851: breaking = loop_level on SIGTSTP, read across
+        // the fork as `subshell_saved_loop_depth + live loop_depth`
+        // (see the single-child wait above) — the live depth alone is
+        // 0 inside a subshell, so the enclosing loops come from the
+        // bank each subshell entry accumulates. A stop at top level
+        // (0 + 0) sets nothing: the plain list continues, per the
+        // oracle.
         if stop_signal == libc::SIGTSTP {
-            let depth = self.shell_state.loop_depth;
+            let depth = self.shell_state.subshell_saved_loop_depth + self.shell_state.loop_depth;
             if depth > 0 {
                 self.stopped_loop_breaking = depth;
-            } else if self.shell_state.subshell_depth.get() > 0 {
-                self.stopped_loop_breaking = 1;
             }
         }
         // The stop notice prints here, as the wait completes

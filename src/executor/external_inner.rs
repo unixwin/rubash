@@ -1774,34 +1774,30 @@ impl Executor {
                         entry.background = true;
                     }
                 }
-                // rubash#2838: GNU jobs.c:4335-4343
+                // rubash#2851: GNU jobs.c:4335-4343
                 // set_job_status_and_cleanup — a job stopped by SIGTSTP
                 // with loop_level > 0 sets `breaking = loop_level`.
-                // Only SIGTSTP sets it (SIGTTIN/SIGTTOU never do);
-                // loop_depth is already 0 inside functions and
-                // subshells (GNU execute_cmd.c:5359/:1642), so the
-                // depth read here is the live loop level. The count is
-                // consumed one level per enclosing loop driver; the
-                // list walker suppresses further commands while it
-                // stands (GNU execute_cmd.c:635).
+                // Only SIGTSTP sets it (SIGTTIN/SIGTTOU never do).
+                // The wait reads the WAITING shell's level across the
+                // fork: loop_depth is already 0 inside functions and
+                // subshells (GNU execute_cmd.c:5359/:1642), so the live
+                // depth alone undercounts a stop inside a subshell in a
+                // loop — the enclosing loops are banked in
+                // subshell_saved_loop_depth (live + 1 per boundary,
+                // accumulated at each subshell entry). The count is
+                // consumed one level per enclosing loop driver and one
+                // per subshell boundary crossed; the list walker
+                // suppresses further commands while it stands (GNU
+                // execute_cmd.c:635). A stop at top level (0 + 0) sets
+                // nothing: the plain list continues, per the oracle. A
+                // stop inside a plain function body also reads 0 — the
+                // function frame reset the live depth and banked
+                // nothing — so the loop continues (r70 boundary).
                 if stop_signal == libc::SIGTSTP {
-                    let depth = self.shell_state.loop_depth;
+                    let depth =
+                        self.shell_state.subshell_saved_loop_depth + self.shell_state.loop_depth;
                     if depth > 0 {
                         self.stopped_loop_breaking = depth;
-                    } else if self.shell_state.subshell_depth.get() > 0 {
-                        // rubash#2836 slice 4: the stop landed in an
-                        // in-process subshell, where loop_depth is 0
-                        // and no loop owns the count — but the subshell
-                        // body must still abandon: GNU's forked subshell
-                        // stops as a unit, so its remaining body cannot
-                        // run while the child is parked. Set one level;
-                        // the subshell boundary consumes it (and skips
-                        // the subshell's EXIT trap — a stopped subshell
-                        // has not exited) so the parent list is
-                        // unaffected. A stop at top level (depth 0,
-                        // subshell_depth 0) sets nothing: the plain
-                        // list continues, per the oracle.
-                        self.stopped_loop_breaking = 1;
                     }
                 }
                 // The stop notice prints here, as the wait completes

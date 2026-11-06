@@ -390,6 +390,15 @@ impl Executor {
                     self.evalerror_line.set(None);
                     if let Some(saved_state) = subshell_state.take() {
                         self.restore_flat_subshell(saved_state);
+                        // rubash#2851: the flat boundary consumes one
+                        // stop-unwind level, like the node boundary
+                        // (compound_exec.rs) — the entry banked +1 for
+                        // this region. Without it a stop inside a
+                        // function subshell body would leak its level
+                        // into an enclosing loop (GNU continues there:
+                        // the function frame's loop_level is 0).
+                        // Saturating: a no-op when no stop is in flight.
+                        self.consume_stopped_loop_breaking();
                         if let Some(saved) = subshell_fd_table.take() {
                             self.fd_table = saved;
                         }
@@ -518,11 +527,35 @@ impl Executor {
             // this list consumes one level post-body (or the while/until
             // test-side exit) and abandons the loop. Return Ok with the
             // stopped job's 148 status already in exit_code — the driver
-            // reads it as the body's status. The count can only be set
-            // while subshell_depth == 0 (the job-control gate), so no
-            // flat `( )` region is open in this frame and there is no
-            // region state to restore on this early return.
+            // reads it as the body's status.
+            //
+            // rubash#2851: the count CAN be set with a flat `( )`
+            // region open in this frame — the subshell job-control gate
+            // requires subshell_depth > 0 (the slice-4 arm) — so the
+            // early return must cross that boundary here: restore the
+            // parent state the entry saved (else the region's
+            // loop_depth/subshell_depth/job_control leak into the
+            // parent) and consume one level for it (the entry banked
+            // +1). The node-form boundary closes in its own function
+            // after the nested walk returns, so this arm only fires for
+            // a flat region open HERE; a stop in the region's closing
+            // command instead reaches the normal/macro close below.
+            // No ERR adjudication: a stopped subshell has not completed
+            // (like the node boundary skipping its EXIT trap).
             if self.stopped_loop_breaking > 0 {
+                if let Some(saved_state) = subshell_state.take() {
+                    self.restore_flat_subshell(saved_state);
+                    self.consume_stopped_loop_breaking();
+                    if let Some(saved) = subshell_fd_table.take() {
+                        self.fd_table = saved;
+                    }
+                    if let Some(saved) = subshell_timed_stdin.take() {
+                        self.timed_stdin = saved;
+                    }
+                    if let Some(saved) = saved_fork_collapse.take() {
+                        self.subshell_fork_collapse.set(saved);
+                    }
+                }
                 return Ok(());
             }
             let command = &commands[index];
@@ -997,6 +1030,17 @@ impl Executor {
                 subshell_state = Some(self.shell_state.clone_for_child_save());
                 subshell_fd_table = Some(self.fd_table.clone());
                 subshell_timed_stdin = Some(self.timed_stdin.clone());
+                // rubash#2851: bank the enclosing loop depth across
+                // the boundary (see the field doc on ShellState): the
+                // stop-unwind count is `saved + live`, and this
+                // boundary consumes one level on close, so the entry
+                // banks `live + 1`. Accumulated AFTER the saved clone
+                // (the restore reverts it to the enclosing frame's
+                // value) and BEFORE the compat-gated reset below; NOT
+                // compat-gated — the parent's wait verdict
+                // (jobs.c:4341-4343) needs the depth at any compat
+                // level.
+                self.shell_state.subshell_saved_loop_depth += self.shell_state.loop_depth + 1;
                 // GNU execute_cmd.c:1641-1642 (execute_in_subshell): the
                 // loop_level reset is compat-gated — `if
                 // (shell_compatibility_level > 44) loop_level = 0;`. At
@@ -2592,6 +2636,10 @@ impl Executor {
                 self.evalerror_line.set(None);
                 if let Some(saved_state) = subshell_state.take() {
                     self.restore_flat_subshell(saved_state);
+                    // rubash#2851: the flat boundary consumes one
+                    // stop-unwind level (see the close macro above).
+                    // Saturating: a no-op when no stop is in flight.
+                    self.consume_stopped_loop_breaking();
                     if let Some(saved) = subshell_fd_table.take() {
                         self.fd_table = saved;
                     }
