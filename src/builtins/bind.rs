@@ -2025,8 +2025,9 @@ pub fn parse_unix_command_spec(line: &str) -> Result<(String, String), BindSpecE
 ///
 /// Failures carry `readline_message` (see [`BindSpecError`]): GNU shapes
 /// from the wt100-era probes — ``"\C-t: no closing `"' in key binding``,
-/// `"\C-t": no key sequence terminator`, ``'ins: missing closing quote
-/// for macro`` — printed after `readline: ` with no effect on status.
+/// `"\C-t": no key sequence terminator`, `` `'ins': missing closing
+/// quote for macro `` — printed after `readline: ` with no effect on
+/// status.
 pub fn parse_binding_line(line: &str) -> Option<Result<ParsedBinding, BindSpecError>> {
     let trimmed = line.trim_start();
     if !trimmed.starts_with('"') {
@@ -2067,8 +2068,12 @@ pub fn parse_binding_line(line: &str) -> Option<Result<ParsedBinding, BindSpecEr
             Ok(parsed) => parsed,
             Err(err) => {
                 let readline_message = if err.delimiter.is_some() {
+                    // bind.c:1731: `` `%s': missing closing quote for
+                    // macro `` — %s is the function text from its
+                    // opening quote (rubash#2873: the backtick /
+                    // apostrophe frame was missing here).
                     Some(format!(
-                        "{}: missing closing quote for macro",
+                        "`{}': missing closing quote for macro",
                         line[macro_text_start..].trim_end()
                     ))
                 } else {
@@ -2231,6 +2236,41 @@ pub fn format_invalid_keymap(name: &str) -> String {
 /// `bind: FILE: cannot read: ERRNO` (bind.def:274-276).
 pub fn format_cannot_read(file: &str, reason: &str) -> String {
     format!("{file}: cannot read: {reason}")
+}
+
+/// rl_parse_and_bind's diagnostics for a NON-quoted, non-`set`
+/// positional spec (lib/readline/bind.c:1594): the core text after
+/// `readline: ` when GNU reports the spec instead of silently
+/// dropping it, `None` for the shapes GNU absorbs without a word
+/// (rubash#2873).
+///
+/// GNU scans the spec for a `:`, space or tab separator (bind.c:1632):
+/// - a spec whose first character IS the separator has no key
+///   sequence at all (the scan stops at index 0):
+///   `` `<spec>': invalid key binding: missing key sequence ``
+///   (bind.c:1637);
+/// - a spec with no separator anywhere never reaches a value
+///   (foundsep == 0): `<spec>: no key sequence terminator`
+///   (bind.c:1754).
+///
+/// Anything else — empty text, a `#` comment, or a separator-carrying
+/// old-style spec (`bind 'ls -l'`) — parses on without a diagnostic.
+/// Leading whitespace is skipped before all of this (bind.c:1599),
+/// so the diagnostic names the stripped spec.
+pub fn unquoted_spec_diagnostic(arg: &str) -> Option<String> {
+    let stripped = arg.trim_start();
+    if stripped.is_empty() || stripped.starts_with('#') {
+        return None;
+    }
+    if stripped.starts_with(':') {
+        return Some(format!(
+            "`{stripped}': invalid key binding: missing key sequence"
+        ));
+    }
+    if !stripped.contains([':', ' ', '\t']) {
+        return Some(format!("{stripped}: no key sequence terminator"));
+    }
+    None
 }
 
 /// Parse one positional binding argument. `bind -x` values arrive through
@@ -2923,13 +2963,14 @@ mod tests {
             err.readline_message.as_deref(),
             Some("\"\\C-t\": no key sequence terminator")
         );
-        // Unclosed macro quote.
+        // Unclosed macro quote: bind.c:1731 frames the function text
+        // in backtick/apostrophe (rubash#2873).
         let err = parse_binding_line(r#""\C-t": 'ins"#)
             .expect("this form")
             .expect_err("rejected");
         assert_eq!(
             err.readline_message.as_deref(),
-            Some("'ins: missing closing quote for macro")
+            Some("`'ins': missing closing quote for macro")
         );
         // -x errors stay in the `bind:` channel (rc 1 there).
         let err = parse_unix_command_spec("noquotes").expect_err("rejected");
