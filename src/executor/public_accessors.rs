@@ -1386,6 +1386,42 @@ impl Executor {
         .is_some()
     }
 
+    /// The number of background jobs the host prompt segment reports
+    /// (rubash#2859, GAP queue): table entries with `background == true`
+    /// and state in {Running, Stopped} after the `cleanup_dead_jobs`
+    /// liveness pass — exactly the set bare `jobs` lists (GNU
+    /// builtins/jobs.def:83 `list_all_jobs`, jobs.c:2254-2257: cleanup
+    /// first, then print all; P-J1 verified the set against GNU 5.3.20:
+    /// two background Running list 2, a ^Z-stopped foreground job
+    /// lists 1, reaped / disowned / killed jobs list 0). A ^Z-stopped
+    /// foreground job counts: the stop path flips it to
+    /// `background = true`. Process-substitution children are not
+    /// table entries (GNU keeps them off `jobs`, jobs.c procsub_add)
+    /// and never count. A completed job never counts whether or not
+    /// the cleanup below has deleted it yet, so the count cannot
+    /// flicker on unreaped corpses. `&mut self` because the read runs
+    /// the cleanup pass, mirroring the listing path — it does NOT run
+    /// a reap/refresh; the per-command refresh owns that.
+    pub fn background_job_count(&mut self) -> usize {
+        // GNU jobs.c:2254 list_all_jobs calls cleanup_dead_jobs first,
+        // so dead jobs already notified are gone before a line is
+        // printed; the face mirrors the listing's read path.
+        self.shell_state.job_table.cleanup_dead_jobs();
+        self.shell_state
+            .job_table
+            .jobs
+            .values()
+            .filter(|job| {
+                job.background
+                    && matches!(
+                        job.state,
+                        crate::jobs::table::ProcessState::Running
+                            | crate::jobs::table::ProcessState::Stopped
+                    )
+            })
+            .count()
+    }
+
     /// The session's open fd numbers, ascending: every fd-table entry
     /// holding a live read or write endpoint. This is the table the
     /// `/dev/fd/N` spellings resolve against (the special-path
