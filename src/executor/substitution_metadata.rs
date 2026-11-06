@@ -456,10 +456,24 @@ pub(crate) fn shell_text_prefix_for_raw_len(text: &str, raw_len: usize) -> usize
 /// internal transport marker pair — the previous behavior leaked the PUA
 /// pair (U+E000 U+E0CE) verbatim into the child command line, which ANSI
 /// children then re-encoded through the system codepage as GBK mojibake.
+///
+/// The LITERAL_CHAR_ESCAPE pair folds to its payload char, exactly as in
+/// [`decode_raw_byte_markers`]: the pair is internal transport for a
+/// typed registry-zone char, and the boundary carries the raw char
+/// itself (rubash#2881).
 pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            // E400 + c is the literal-char escape: emit c verbatim.
+            // A trailing E400 is user data and stays E400.
+            match chars.next() {
+                Some(next) => output.push(next),
+                None => output.push(ch),
+            }
+            continue;
+        }
         if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
             output.push(ch);
             continue;
