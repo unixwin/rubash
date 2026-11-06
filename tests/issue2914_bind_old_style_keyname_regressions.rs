@@ -49,7 +49,7 @@ fn run(script: &str) -> Run {
 
 #[test]
 fn issue2914_control_prefix_binds_the_key() {
-    let r = run("bind 'Control-t: undo'; bind -p | grep -F '\"\\C-t\"'; bind -p | grep transpose");
+    let r = run("bind 'Control-t: undo'; bind -p | grep -F '\"\\C-t\"'; bind -p | grep -F 'transpose-chars'");
     assert_eq!(r.stdout, "\"\\C-t\": undo\n# transpose-chars (not bound)\n");
     assert_eq!(r.stderr, "");
 }
@@ -109,7 +109,7 @@ fn issue2914_unknown_function_binds_a_null_slot() {
     // rl_named_function fails, rl_bind_key stores a NULL function:
     // the default binding of the key is gone, nothing lists it.
     let r =
-        run("bind 'Control-t: ins-macro'; bind -p | grep transpose; bind -p | grep -F '\"\\C-t\"'");
+        run("bind 'Control-t: ins-macro'; bind -p | grep -F 'transpose-chars'; bind -p | grep -F '\"\\C-t\"'");
     assert_eq!(r.stdout, "# transpose-chars (not bound)\n");
     assert_eq!(r.stderr, "");
 }
@@ -143,10 +143,11 @@ fn issue2914_unterminated_macro_reports_missing_closing_quote() {
 #[test]
 fn issue2914_separator_carrying_absorbed_spec_still_binds_its_key() {
     // `bind 'ls -l'` is silent (rubash#2873) — but rl_parse_and_bind
-    // still runs it through the old-style arm: key `l` (the part
-    // after the last `-`... here the keyname is `ls`, gleaned to
-    // `l`) bound to rl_named_function("-l") == NULL, so the default
-    // self-insert slot for `l` is gone from the dump.
+    // still runs it through the old-style arm: the token is `ls`
+    // (no `-` in it, so the keyname is the whole token), gleaned to
+    // its first byte `l`, and `-l` is not a function name, so the
+    // key's slot becomes NULL and the default self-insert listing
+    // for `l` is gone from the dump.
     let r = run("bind 'ls -l'; bind -p | grep -F '\"l\":'; echo done");
     assert_eq!(r.stdout, "done\n");
     assert_eq!(r.stderr, "");
