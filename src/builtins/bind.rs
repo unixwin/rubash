@@ -1933,6 +1933,52 @@ pub fn unescape_macro_text(text: &str) -> String {
     out
 }
 
+/// The listing form of a stored macro / `bind -x` command value:
+/// _rl_untranslate_macro_value (lib/readline/bind.c:722) with
+/// use_escapes = 0, which is how rl_macro_dumper (bind.c:2842) and
+/// print_unix_command_map (bashline.c:4729, through the same dumper)
+/// print values. Meta bytes become `\M-` + the unmeta'd character,
+/// ESC becomes `\e`, other control characters become `\C-x` (the
+/// lowercased UNCTRL character), DEL becomes `\C-?`, and `\` / `"`
+/// are backslash-escaped — a listing line never carries a raw
+/// control byte and re-parses to the stored value (rubash#2872,
+/// rubash#2874). Stored text is char-oriented in rubash; characters
+/// above U+00FF (only reachable as literal text, never from escape
+/// translation) pass through untouched.
+pub fn untranslate_macro_value(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for ch in text.chars() {
+        let mut c = ch as u32;
+        if c > 0xff {
+            out.push(ch);
+            continue;
+        }
+        // META_CHAR: print \M- and continue with the unmeta'd char.
+        if c & 0x80 != 0 {
+            out.push_str("\\M-");
+            c &= 0x7f;
+        }
+        if c == 0x1b {
+            // ESC prints as \e, ahead of the generic control arm.
+            out.push('\\');
+            c = 'e' as u32;
+        } else if c < 0x20 {
+            // CTRL_CHAR: \C- + _rl_to_lower (UNCTRL (c)).
+            out.push_str("\\C-");
+            c = ((c + 0x40) as u8 as char).to_ascii_lowercase() as u32;
+        } else if c == 0x7f {
+            // RUBOUT prints as \C-?.
+            out.push_str("\\C-");
+            c = '?' as u32;
+        }
+        if c == '\\' as u32 || c == '"' as u32 {
+            out.push('\\');
+        }
+        out.push(char::from_u32(c).unwrap_or(ch));
+    }
+    out
+}
+
 /// Parse a `bind -x` argument: `"keyseq"[:|ws]["']command["']`
 /// (bashline.c:4850 bind_keyseq_to_unix_command). The keyseq MUST be
 /// double-quoted; colon or whitespace separates it from the command.
@@ -2082,20 +2128,24 @@ where
 }
 
 /// `bind -X` line: `"\C-g" "command"` (print_unix_command,
-/// bashline.c:4720-4727, readable form).
+/// bashline.c:4720-4727, readable form). The command value is
+/// untranslated first — print_unix_command_map prints through
+/// rl_macro_dumper, whose values pass _rl_untranslate_macro_value
+/// (rubash#2874).
 pub fn format_unix_command_readable(keyseq: &str, command: &str) -> String {
-    format!("\"{keyseq}\" \"{command}\"")
+    format!("\"{keyseq}\" \"{}\"", untranslate_macro_value(command))
 }
 
-/// `bind -s` line: `"\C-t": "ins-macro"` (rl_macro_dumper readable).
+/// `bind -s` line: `"\C-t": "ins-macro"` (rl_macro_dumper readable;
+/// the value is untranslated, rubash#2872).
 pub fn format_macro_readable(keyseq: &str, text: &str) -> String {
-    format!("\"{keyseq}\": \"{text}\"")
+    format!("\"{keyseq}\": \"{}\"", untranslate_macro_value(text))
 }
 
 /// `bind -S` line: `\C-t outputs ins-macro` (GNU probe; rl_macro_dumper
-/// plain form).
+/// plain form; the value is untranslated, rubash#2872).
 pub fn format_macro_plain(keyseq: &str, text: &str) -> String {
-    format!("{keyseq} outputs {text}")
+    format!("{keyseq} outputs {}", untranslate_macro_value(text))
 }
 
 /// `bind -p` line: `"\C-a": beginning-of-line` (rl_function_dumper(1)).
@@ -2619,6 +2669,22 @@ mod tests {
             format_query_unbound("vi-editing-mode"),
             "vi-editing-mode is not bound to any keys."
         );
+    }
+
+    #[test]
+    fn untranslate_macro_value_matches_rl_untranslate() {
+        // _rl_untranslate_macro_value (bind.c:722), use_escapes = 0,
+        // byte shapes from the GNU 5.3.20 probes (rubash#2872/#2874).
+        assert_eq!(untranslate_macro_value("echo hi\n"), "echo hi\\C-j");
+        assert_eq!(untranslate_macro_value("a\tb"), "a\\C-ib");
+        assert_eq!(untranslate_macro_value("a\x1bb"), "a\\eb");
+        assert_eq!(untranslate_macro_value("a\x18b"), "a\\C-xb");
+        assert_eq!(untranslate_macro_value("a\x7fb"), "a\\C-?b");
+        assert_eq!(untranslate_macro_value("a\\b\"c"), "a\\\\b\\\"c");
+        assert_eq!(untranslate_macro_value("plain"), "plain");
+        // A meta byte prints \M- plus the unmeta'd character's own
+        // rendering (0x9b = meta + ESC → \M-\e).
+        assert_eq!(untranslate_macro_value("\u{9b}"), "\\M-\\e");
     }
 
     #[test]
