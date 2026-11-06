@@ -518,13 +518,27 @@ impl Session {
             let diagnostics = self.drain_run_diagnostics(source_name.as_deref());
             (status, flow, classification, diagnostics)
         } else {
+            // rubash#2860: the driver's last parameter is its
+            // DIAGNOSTIC TEXT — the input the parse's offending-line
+            // echo reads (GNU parse.y:6814 print_offending_line,
+            // called from report_syntax_error at parse.y:6833,
+            // echoes the verbatim line of the shell's INPUT, never
+            // the input's name). This call used to pass the source
+            // NAME there, so a run whose options (or the session's
+            // argv0 seed) named its source echoed the name itself
+            // for a one-line input (`` `bash' `` for `echo a;;`) and
+            // a space-joined token reconstruction for a later line —
+            // while unnamed runs fell back to the input text and
+            // echoed verbatim. The name keeps its own jobs (the
+            // diagnostic values' source_name, the event record);
+            // the parse receives the input text explicitly.
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
                 source,
                 options.interactive,
                 options.line_offset,
                 None,
-                source_name.as_deref(),
+                Some(source),
             );
             let outcome = self.outcome_after_driver(status, source_name.as_deref());
             (

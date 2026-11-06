@@ -1981,6 +1981,129 @@ fn issue863_gap2_parse_error_under_errexit_still_reports() {
     assert_eq!(outcome.diagnostics[0].kind, DiagnosticKind::Parse);
 }
 
+/// rubash#2860: one echo scenario, run inside the re-executed
+/// child process of the two pins below (the issue2084 pattern —
+/// the offending-line echo is part of the run's TEXT report on
+/// fd 2, not of its diagnostic values, so only a child process's
+/// captured stderr can pin it). Asserts the value surface here;
+/// the parent asserts the rendered text.
+///
+/// The shapes pair a stray close with (a) a one-line input, (b) a
+/// complete earlier line, (c) a complete command sharing the
+/// offending line, (d) a subshell list. GNU's reader unit is the
+/// line (parse.y:6814 print_offending_line echoes the offending
+/// line verbatim; the unit voiding of rubash#1138): the earlier
+/// line runs, the offending line's own commands never do.
+fn issue2860_echo_scenario(session: &mut Session, options: &RunOptions) {
+    let cases: [(&str, &str, usize); 4] = [
+        ("echo a;;", "syntax error near unexpected token `;;'", 1),
+        (
+            "echo ok\necho )bad",
+            "syntax error near unexpected token `)'",
+            2,
+        ),
+        (
+            "echo one\necho two; echo )bad",
+            "syntax error near unexpected token `)'",
+            2,
+        ),
+        (
+            "(printf a; printf b);)",
+            "syntax error near unexpected token `)'",
+            1,
+        ),
+    ];
+    for (source, message, line) in cases {
+        let outcome = session.run(source, options).expect("run");
+        assert_eq!(outcome.status, 2, "{source}");
+        assert!(outcome.classification.parse_error, "{source}");
+        assert_eq!(outcome.diagnostics.len(), 1, "{source}");
+        assert_eq!(outcome.diagnostics[0].message, message, "{source}");
+        assert_eq!(outcome.diagnostics[0].line, Some(line), "{source}");
+    }
+}
+
+/// Parent half of the #2860 echo pins: re-execute `test_name`
+/// in a child process gated by `gate`, then assert on the
+/// child's captured streams — every offending line echoed
+/// VERBATIM, the name never echoed as a line, no token
+/// reconstruction, and the voided subshell list never ran.
+fn issue2860_echo_parent(test_name: &str, gate: &str, name: &str) {
+    let exe = std::env::current_exe().expect("test exe");
+    let output = std::process::Command::new(exe)
+        .args(["--exact", test_name, "--nocapture"])
+        .env(gate, "1")
+        .output()
+        .expect("child test process spawns");
+    assert!(
+        output.status.success(),
+        "child scenario failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for verbatim in [
+        "`echo a;;'",
+        "`echo )bad'",
+        "`echo two; echo )bad'",
+        "`(printf a; printf b);)'",
+    ] {
+        assert!(stderr.contains(verbatim), "missing {verbatim} in: {stderr}");
+    }
+    assert!(
+        !stderr.contains(&format!("`{name}'")),
+        "the source name was echoed as the offending line: {stderr}"
+    );
+    for reconstruction in ["echo ) bad", "echo two ; echo"] {
+        assert!(
+            !stderr.contains(reconstruction),
+            "token reconstruction leaked: {stderr}"
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ok"), "earlier line must run: {stdout}");
+    assert!(stdout.contains("one"), "earlier line must run: {stdout}");
+    assert!(
+        !stdout.contains("ab"),
+        "the voided subshell list must not run: {stdout}"
+    );
+}
+
+#[test]
+fn issue2860_named_source_echoes_the_input_line_not_the_name() {
+    if std::env::var_os("ISSUE2860_NAMED_CHILD").is_none() {
+        issue2860_echo_parent(
+            "api::consumer_tests::issue2860_named_source_echoes_the_input_line_not_the_name",
+            "ISSUE2860_NAMED_CHILD",
+            "bash",
+        );
+        return;
+    }
+    let mut options = RunOptions::new();
+    options.source_name = Some("bash".to_string());
+    let mut session = Session::builder().build().expect("session builds");
+    issue2860_echo_scenario(&mut session, &options);
+}
+
+#[test]
+fn issue2860_argv0_seeded_session_echoes_the_input_line_not_the_name() {
+    // The host shape: niubash seeds the builder's argv0 with the
+    // script name, and `run` falls back to it for the source
+    // name. The echo must still be the input's line.
+    if std::env::var_os("ISSUE2860_ARGV0_CHILD").is_none() {
+        issue2860_echo_parent(
+            "api::consumer_tests::issue2860_argv0_seeded_session_echoes_the_input_line_not_the_name",
+            "ISSUE2860_ARGV0_CHILD",
+            "gap2860.sh",
+        );
+        return;
+    }
+    let mut session = Session::builder()
+        .argv0("gap2860.sh")
+        .build()
+        .expect("session builds");
+    issue2860_echo_scenario(&mut session, &RunOptions::new());
+}
+
 #[test]
 fn issue863_gap2_exit_jump_raw_discriminates_the_unwind_classes() {
     // A real exit arms the pending and stands as a jump on
