@@ -1976,6 +1976,7 @@ impl Executor {
             inside_compound_condition: Cell::new(false),
             inside_assignment_rhs: Cell::new(false),
             background_children: HashMap::new(),
+            subshell_process_saves: Vec::new(),
             procsub_feed_handles: Vec::new(),
             procsub_stream_children: HashMap::new(),
             pending_job_completions: Vec::new(),
