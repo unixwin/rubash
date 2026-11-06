@@ -290,6 +290,14 @@ MIT — 详见 [`LICENSE`](LICENSE)。
 
 欢迎提交 issue、兼容性复现、focused regression tests 和实现补丁。贡献前请阅读 [`AGENTS.md`](AGENTS.md)。
 
+## 贡献者
+
+感谢每一位提交代码、兼容性复现与修复的贡献者：
+
+<a href="https://github.com/unixwin/rubash/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=unixwin/rubash" alt="rubash 贡献者" />
+</a>
+
 ## 致谢
 
 - GNU Bash 团队 — 参考实现，其可观测行为定义了我们的兼容性目标

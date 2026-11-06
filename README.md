@@ -335,6 +335,14 @@ MIT — see [`LICENSE`](LICENSE).
 
 Issues, compatibility reproductions, focused regression tests, and implementation patches welcome. Read [`AGENTS.md`](AGENTS.md) before compatibility work.
 
+## Contributors
+
+Thanks to everyone who has contributed code, compatibility reproductions, and fixes:
+
+<a href="https://github.com/unixwin/rubash/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=unixwin/rubash" alt="rubash contributors" />
+</a>
+
 ## Acknowledgements
 
 - GNU Bash team — the reference implementation whose observable behavior defines our compatibility target
