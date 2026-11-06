@@ -482,12 +482,27 @@ done
   echo "## Failures"
   echo
   awk -F '\t' 'NR > 1 && $2 == "FAIL" { printf "- `%s` exit `%s`, log `%s`, raw `%s`\n", $1, $3, $4, $5 }' "$RESULTS_TSV"
+  if [[ "$TIMEOUT_FAIL" -gt 0 ]]; then
+    echo
+    echo "## Timed out (warning, not a failure)"
+    echo
+    awk -F '\t' 'NR > 1 && $2 == "FAIL" && $3 == 124 { printf "- `%s` exit `%s`, log `%s`, raw `%s`\n", $1, $3, $4, $5 }' "$RESULTS_TSV"
+  fi
 } > "$SUMMARY_MD"
 
 cat "$SUMMARY_MD"
 
+# Timeouts are warnings, not failures (user ruling 2026-11-06): a suite
+# that exceeds its per-suite timeout marks this progress job yellow via
+# ::warning annotations and the summary's timed-out list, but does not
+# redden it — a permanently red progress job drowns real failures.
+# Under STRICT the historical behaviour is preserved (timeouts exit 1);
+# the Stage-3 hard-gate restoration runs under STRICT.
 if [[ "$TIMEOUT_FAIL" -gt 0 ]]; then
-  exit 1
+  awk -F '\t' 'NR > 1 && $2 == "FAIL" && $3 == 124 { printf "::warning title=Upstream suite timeout::%s timed out (exit 124), log %s\n", $1, $4 }' "$RESULTS_TSV"
+  if [[ "$STRICT" == "1" ]]; then
+    exit 1
+  fi
 fi
 
 if [[ "$STRICT" == "1" && "$FAIL" -gt 0 ]]; then
