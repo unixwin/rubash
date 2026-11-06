@@ -96,10 +96,10 @@ fn exported_typed_registry_char_reaches_child_env_raw() {
 /// word carrying a typed registry char arrives raw.
 #[test]
 fn typed_registry_char_reaches_child_argv_raw() {
-    let run = run("w=$'\\uE314'\n/usr/bin/printf '%s' \"$w\"\n");
-    assert_clean(&run, "c09 child argv");
+    let argv = run("w=$'\\uE314'\n/usr/bin/printf '%s' \"$w\"\n");
+    assert_clean(&argv, "c09 child argv");
     assert_eq!(
-        run.stdout,
+        argv.stdout,
         RAW_E314.to_vec(),
         "child argv must be the raw U+E314 bytes, not the escape pair"
     );
