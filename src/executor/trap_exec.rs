@@ -7523,7 +7523,16 @@ impl Executor {
                     let _ = source;
                 }
                 if redirect.kind != crate::parser::RedirectKind::Append {
-                    self.create_redirect_output(&target, redirect.clobber)?;
+                    // Validation only — never a throwaway real open
+                    // (rubash#2880: same pairing consumption as the
+                    // fixed-fd exec arm; probe_output_redirect is the
+                    // shared validation entry, set_fd_output_file's
+                    // open is the one real open).
+                    crate::executor::shell_options::probe_output_redirect(
+                        self,
+                        &target,
+                        redirect.clobber,
+                    )?;
                 }
                 self.set_fd_output_file(
                     fd,

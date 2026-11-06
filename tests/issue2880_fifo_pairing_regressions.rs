@@ -7,7 +7,10 @@
 //! rendezvous pairing: the background reader takes EOF in the
 //! zero-writer gap and exits, and the second open blocks forever
 //! (~20–30% of attempts under load; strace: open #1 O_WRONLY pairs with
-//! the reader, the reader exits, open #2 never returns).
+//! the reader, the reader exits, open #2 never returns). The
+//! dynamic-fd arm (`exec {fd}>fifo`, `execute_dynamic_fd_var_redirect`)
+//! carried the identical create-drop-reopen sequence and is pinned by
+//! the dynfd tests below.
 //!
 //! Expectations verified against GNU bash 5.3.20 (script files).
 #![cfg(unix)]
@@ -149,6 +152,81 @@ fn issue2880_fifo_dance_loop_pairs_reliably() {
     );
     assert!(
         out.stdout.ends_with("DANCE-LOOP-DONE\n"),
+        "missing completion marker; stdout: {:?}",
+        out.stdout
+    );
+    assert_eq!(out.code, Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The dynamic-fd face of the same mechanism: `exec {wfd}>fifo` runs
+/// through `execute_dynamic_fd_var_redirect`, whose Output arm carried
+/// the identical throwaway validation open (create, drop, re-open in
+/// `set_fd_output_file`). The pairing must hold there too, and bytes
+/// written through the variable fd must reach the reader.
+#[test]
+fn issue2880_dynamic_fd_fifo_pairs_and_delivers() {
+    let dir = tempdir("dynfd");
+    let script = format!(
+        "TMPDIR='{}'\n\
+         mkfifo $TMPDIR/pipe\n\
+         cat < $TMPDIR/pipe > $TMPDIR/out &\n\
+         exec {{wfd}}>$TMPDIR/pipe\n\
+         test -p /dev/fd/$wfd || {{ echo \"NOTFIFO fd=$wfd\"; exit 1; }}\n\
+         echo hello-fifo >&$wfd\n\
+         exec {{wfd}}>&-\n\
+         wait\n\
+         echo \"out=[$(cat $TMPDIR/out)]\"\n",
+        dir.display()
+    );
+    let out = run_bounded(&dir, &script, Duration::from_secs(30));
+    assert!(
+        !out.timed_out,
+        "dynamic-fd fifo shape hung (pairing deadlock regressed); partial stdout: {:?}",
+        out.stdout
+    );
+    assert_eq!(out.stdout, "out=[hello-fifo]\n");
+    assert_eq!(out.code, Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The dynamic-fd dance in a loop: same escape-probability argument as
+/// the fixed-fd loop — 30 consecutive pairings through the `{wfd}`
+/// arm must all succeed.
+#[test]
+fn issue2880_dynamic_fd_fifo_dance_loop() {
+    let dir = tempdir("dynloop");
+    let script = format!(
+        "TMPDIR='{}'\n\
+         i=0\n\
+         while [ $i -lt 30 ]; do\n\
+         rm -f $TMPDIR/pipe\n\
+         mkfifo $TMPDIR/pipe\n\
+         cat < $TMPDIR/pipe &\n\
+         exec {{wfd}}>$TMPDIR/pipe\n\
+         test -p /dev/fd/$wfd || {{ echo \"ROUND $i NOTFIFO\"; exit 1; }}\n\
+         exec {{wfd}}>&-\n\
+         kill $! 2>/dev/null\n\
+         wait $! 2>/dev/null\n\
+         i=$((i+1))\n\
+         echo \"round $i ok\"\n\
+         done\n\
+         echo DYNFD-LOOP-DONE\n",
+        dir.display()
+    );
+    let out = run_bounded(&dir, &script, Duration::from_secs(120));
+    assert!(
+        !out.timed_out,
+        "dynamic-fd fifo dance loop hung (pairing deadlock regressed); partial stdout: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("round 30 ok\n"),
+        "missing final round marker; stdout: {:?}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.ends_with("DYNFD-LOOP-DONE\n"),
         "missing completion marker; stdout: {:?}",
         out.stdout
     );
