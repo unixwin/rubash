@@ -66,6 +66,19 @@ src/executor/arithmetic/lvalue.rs::(is_shell_name_char\(ch as char\)|peek\(\)\? 
 src/executor/arithmetic/mod.rs::(pair\[[0-9]+\] as char|as_bytes\(\)\[\*index\] as char|\(c as char\))
 src/executor/arithmetic/value.rs::is_shell_name_char\(bytes\[end\] as char\)
 src/executor/arrays/storage.rs::(out\.push\(byte as char\)|b'0' \+ .*as char)
+# builtin_matrix.rs: the widened bytes are option letters from
+# `spec_letters()` over the BUILTIN_TABLE Getopt spec literals, all
+# ASCII (no non-ASCII byte in any `OptSpec::Getopt("...")` literal)
+# — ASCII by construction. If a spec ever carried a non-ASCII
+# letter, only the generated matrix slug would render Latin-1.
+src/executor/builtin_matrix.rs::noarg\[[0-9]+\] as char
+src/executor/builtin_matrix.rs::let l = \*?letter as char;
+# builtin_opt.rs: `sign` is bytes[0] of a word that passed
+# `is_option_word`, which admits only b'-' (or b'+' in plus mode)
+# as word[0] — ASCII by construction. (The `c` half of the same
+# diagnostic is NOT allowlisted: it comes from user argv and is
+# rendered via `diagnostic_byte`, see builtin_opt.rs.)
+src/executor/builtin_opt.rs::sign as char
 src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
 src/executor/conditional.rs::is_shell_name_char\(bytes\[name_start - 1\] as char\)
 src/executor/conditional.rs::is_shell_name_start\(bytes\[name_start\] as char\)
