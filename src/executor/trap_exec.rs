@@ -4875,7 +4875,15 @@ impl Executor {
                     {
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
                         if !is_null_device(&path) {
-                            self.create_redirect_output(&path, redirect.clobber)?;
+                            // Validation only — never a throwaway real
+                            // open (rubash#2880: see the plain-file arm
+                            // below; a dropped open of a FIFO consumes
+                            // the rendezvous pairing).
+                            crate::executor::shell_options::probe_output_redirect(
+                                self,
+                                &path,
+                                redirect.clobber,
+                            )?;
                         }
                         self.flush_persistent_output_process_substitution(1)?;
                         self.set_fd_output_file(1, path.clone(), false, false)?;
@@ -4927,9 +4935,28 @@ impl Executor {
                             | crate::parser::RedirectKind::CombinedAppend
                     );
                     if !is_null_device(&target) && !append {
-                        // noclobber/existing-file diagnostics live here;
-                        // the real handle open in set_fd_output_file follows.
-                        self.create_redirect_output(&target, redirect.clobber)?;
+                        // Validation only — never a throwaway real open.
+                        // GNU opens a redirect target exactly once
+                        // (redir.c do_redirection_internal); a FIFO
+                        // opened here and dropped consumes the rendezvous
+                        // pairing, the reader takes EOF in the
+                        // zero-writer gap and exits, and the real open in
+                        // set_fd_output_file below then blocks forever
+                        // (rubash#2880 — the same consumption the
+                        // rubash#1820 / #1868 carve-outs removed from the
+                        // builtin faces). probe_output_redirect is the
+                        // shared validation entry: create/truncate side
+                        // effect and noclobber diagnostics for regular
+                        // files, access-only for FIFOs (GNU
+                        // noclobber_open, redir.c:676, refuses only
+                        // regular files), resolution-only for net
+                        // targets; the bind open below is the one real
+                        // open.
+                        crate::executor::shell_options::probe_output_redirect(
+                            self,
+                            &target,
+                            redirect.clobber,
+                        )?;
                     }
                     // Rebinding closes the descriptor's previous
                     // description first in GNU; run a pending process
@@ -4978,7 +5005,15 @@ impl Executor {
                         // translation (see above).
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
                         if !is_null_device(&path) {
-                            self.create_redirect_output(&path, redirect.clobber)?;
+                            // Validation only — never a throwaway real
+                            // open (rubash#2880: see the plain-file arm
+                            // above; a dropped open of a FIFO consumes
+                            // the rendezvous pairing).
+                            crate::executor::shell_options::probe_output_redirect(
+                                self,
+                                &path,
+                                redirect.clobber,
+                            )?;
                         }
                         self.flush_persistent_output_process_substitution(1)?;
                         self.set_fd_output_file(1, path.clone(), false, false)?;
