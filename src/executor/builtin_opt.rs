@@ -190,7 +190,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         };
         let Some(kind) = kind else {
             // Invalid: errstr is the sign + the one character.
-            let errstr = format!("{}{}", sign as char, c as char);
+            let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
             self.diag.error(DiagKind::InvalidOpt(errstr));
             debug_assert_eq!(self.diag.status(), EX_USAGE);
             self.advance_past_bad_char();
@@ -229,7 +229,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
                     self.sp = 1;
                     return OptEvent::Opt(c);
                 }
-                let errstr = format!("{}{}", sign as char, c as char);
+                let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
                 self.diag.error(DiagKind::NeedArg(errstr));
                 debug_assert_eq!(self.diag.status(), EX_USAGE);
                 self.sp = 1;
@@ -259,7 +259,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
                         OptEvent::OptArg(c, arg)
                     }
                     _ => {
-                        let errstr = format!("{}{}", sign as char, c as char);
+                        let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
                         self.diag.error(DiagKind::NeedNumArg(errstr));
                         debug_assert_eq!(self.diag.status(), EX_USAGE);
                         self.sp = 1;
@@ -292,6 +292,22 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         self.index += 1;
         self.sp = 1;
     }
+}
+
+/// Render one option byte for a diagnostic string. The byte comes
+/// from user argv, so it can be a UTF-8 continuation byte (>= 0x80)
+/// and must never be widened with `as char` — that Latin-1 widening
+/// is exactly what `scripts/check-utf8-boundary-hygiene.sh` guards.
+/// ASCII bytes render as themselves (so every covered diagnostic is
+/// byte-identical to the `as char` form); a non-ASCII byte degrades
+/// to U+FFFD, the codebase's standard lossy rendering for arbitrary
+/// bytes in a `String` (cf. `command_substitution.rs`, `identity.rs`).
+/// (GNU echoes the raw byte here — `enable -$'\xa0'` prints the
+/// 0xA0 byte — so a non-ASCII invalid-option byte is a pre-existing
+/// diagnostic corner either way, not something this helper newly
+/// diverges on.)
+fn diagnostic_byte(byte: u8) -> String {
+    String::from_utf8_lossy(&[byte]).into_owned()
 }
 
 /// `ISOPT` / `NOTOPT` (`bashgetopt.c:36-37`): a word is an option
