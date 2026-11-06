@@ -62,12 +62,13 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::times::execute_with_io(
-            cmd.words[1..].iter().map(String::as_str),
-            &self.diagnostic_prefix(),
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let status = {
+            let row = super::builtin_table::builtin_table_row("times")
+                .expect("times row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::times::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
@@ -123,15 +124,18 @@ impl Executor {
         // family (rubash#2053).
         let _ = self.apply_pending_job_completions(true, false);
         self.flush_pending_coproc_retirements();
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action = crate::builtins::jobs::execute_with_io(
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            &mut stderr,
-        )?;
+        let action = {
+            let row =
+                super::builtin_table::builtin_table_row("jobs").expect("jobs row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::jobs::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
         match action {
             crate::builtins::jobs::JobsAction::Complete(status) => {
-                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 Ok(status)
             }
             crate::builtins::jobs::JobsAction::List { options, jobs } => {
@@ -396,27 +400,107 @@ impl Executor {
         // keeps that answer for this wait even if SIGCONT/death
         // reports are already pending.
         self.refresh_background_jobs_observed_for_wait()?;
-        // GNU wait.def wait_builtin() internal_getopt "fnp:": a dangling
-        // `-p` (no joined text, no next word) is a getopt error, reported
-        // before any validation or waiting, and returns EX_USAGE
-        // (rubash#1156).
-        if wait_p_argument_missing(&cmd.words[1..]) {
-            let mut stderr = Vec::new();
-            writeln!(
-                stderr,
-                "{}wait: -p: option requires an argument",
-                self.diagnostic_prefix()
-            )?;
-            writeln!(stderr, "wait: usage: wait [-fn] [-p var] [id ...]")?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            return Ok(2);
+        // GNU wait.def wait_builtin() internal_getopt "fnp:"
+        // (wait.def:126-152): ONE scan decides the whole option
+        // layer — scan errors (invalid option, dangling `-p`,
+        // rubash#1156) and `--help` are reported HERE, before `-p`
+        // validation and before the pending-trap check, which is
+        // the GNU order. The last `-p` wins (rubash#2933).
+        let row =
+            super::builtin_table::builtin_table_row("wait").expect("wait row in BUILTIN_TABLE");
+        let words: &[String] = &cmd.words[1..];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let (force, wait_any, assign_var, assign_var_index, help, operands, scan_status) = {
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            let (force, wait_any, assign_var, assign_var_index, help, operands) = {
+                let mut opt = super::builtin_opt::BuiltinOpt::new(row, words, &mut diag, false);
+                let mut force = false;
+                let mut wait_any = false;
+                let mut assign_var: Option<String> = None;
+                let mut assign_var_index: Option<usize> = None;
+                let mut help = false;
+                loop {
+                    match opt.next() {
+                        super::builtin_opt::OptEvent::Opt(b'f') => force = true,
+                        super::builtin_opt::OptEvent::Opt(b'n') => wait_any = true,
+                        super::builtin_opt::OptEvent::OptArg(b'p', name) => {
+                            // Last `-p` wins: overwrite on each event.
+                            // The name word is the word the scan just
+                            // consumed — `operands()` right after the
+                            // event starts one past it, in both the
+                            // joined and the separate form.
+                            let name_index = words.len() - opt.operands().len() - 1;
+                            assign_var = Some(
+                                crate::builtins::arrayref::take_arrayref_flag(name)
+                                    .1
+                                    .to_string(),
+                            );
+                            assign_var_index = Some(name_index);
+                        }
+                        super::builtin_opt::OptEvent::Help => {
+                            help = true;
+                            break;
+                        }
+                        super::builtin_opt::OptEvent::End => break,
+                        super::builtin_opt::OptEvent::Opt(_)
+                        | super::builtin_opt::OptEvent::OptArg(_, _) => {
+                            unreachable!("wait spec is \"fnp:\"")
+                        }
+                    }
+                }
+                let operands = opt.operands().to_vec();
+                (
+                    force,
+                    wait_any,
+                    assign_var,
+                    assign_var_index,
+                    help,
+                    operands,
+                )
+            };
+            if !help && diag.status() != 0 {
+                diag.usage();
+            }
+            let scan_status = diag.status();
+            (
+                force,
+                wait_any,
+                assign_var,
+                assign_var_index,
+                help,
+                operands,
+                scan_status,
+            )
+        };
+        if help {
+            crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
+            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+            return Ok(super::builtin_diag::EX_USAGE);
         }
+        if scan_status != 0 {
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            return Ok(scan_status);
+        }
+        // Operands with the in-band W_ARRAYREF flag stripped, for the
+        // job-table sites (resolve + wait_for + the `%` fallback
+        // loop); the final pure-builtin fallback below keeps the raw
+        // operands, as builtins/wait.rs did.
+        let bg_operands: Vec<String> = operands
+            .iter()
+            .map(|word| {
+                crate::builtins::arrayref::take_arrayref_flag(word)
+                    .1
+                    .to_string()
+            })
+            .collect();
         // GNU wait.def:139-152: a `-p name` option is validated and the
         // variable unbound before any waiting happens, in every wait form —
         // an invalid identifier or a readonly name fails immediately, and a
         // name that never gets bound stays unset.
 
-        if let Some((name, name_index)) = wait_assign_var(&cmd.words[1..]) {
+        if let Some((name, name_index)) = assign_var.clone().zip(assign_var_index) {
             let expand_once = crate::builtins::shopt::option_enabled(
                 &self.shell_state.env_vars,
                 "array_expand_once",
@@ -546,8 +630,8 @@ impl Executor {
         }
         // rubash#2579: `wait -f` (JWAIT_FORCE, wait.def:134-136) threads
         // through every wait form below.
-        let wait_force = wait_force_requested(&cmd.words[1..]);
-        if let Some(request) = wait_any_request(&cmd.words[1..]) {
+        let wait_force = force;
+        if wait_any {
             // GNU builtins/wait.def:209-246 + jobs.c:3456 wait_for_any_job:
             // `wait -n` returns the first unnotified dead job in slot order,
             // restricted to the operand waitlist when operands are given
@@ -558,7 +642,7 @@ impl Executor {
             // already models.
             let mut stderr = Vec::new();
             let mut candidates: Vec<u32> = Vec::new();
-            for operand in &request.operands {
+            for operand in &operands {
                 match self.resolve_background_job_operand(operand) {
                     JobOperandResolution::Pid(pid) => {
                         if !candidates.contains(&pid) {
@@ -607,7 +691,7 @@ impl Executor {
                     }
                 }
             }
-            if !request.operands.is_empty() && candidates.is_empty() {
+            if !operands.is_empty() && candidates.is_empty() {
                 // set_waitlist counted no waitable jobs: every operand
                 // failed and wait -n returns 127.
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
@@ -631,7 +715,7 @@ impl Executor {
                         .job_table
                         .remove_job_by_pid_preserve_status(pid);
                     self.forget_background_runtime(pid);
-                    if let Some(wait_var) = &request.assign_var {
+                    if let Some(wait_var) = &assign_var {
                         let arrayref = self.wait_var_arrayref();
                         self.bind_wait_variable(wait_var, pid.to_string(), arrayref);
                     }
@@ -664,10 +748,7 @@ impl Executor {
             }
         }
 
-        if (cmd.words.len() == 1
-            || (wait_force
-                && wait_background_operands(&cmd.words[1..])
-                    .is_some_and(|operands| operands.is_empty())))
+        if (cmd.words.len() == 1 || (wait_force && operands.is_empty()))
             && self
                 .shell_state
                 .job_table
@@ -745,26 +826,25 @@ impl Executor {
             return Ok(0);
         }
 
-        if let Some(operands) = wait_background_operands(&cmd.words[1..]) {
-            if !operands.is_empty()
-                && operands
-                    .iter()
-                    .any(|operand| self.resolve_background_job(operand).is_some())
-            {
-                // GNU wait.def:338-339: -p binds the pid of the LAST operand
-                // waited for (pstat.pid; NO_PID when the last operand
-                // failed, leaving the pre-unbound variable unset).
-                let wait_var = wait_assign_var(&cmd.words[1..])
-                    .map(|(name, _index)| (name, self.wait_var_arrayref()));
+        if !bg_operands.is_empty()
+            && bg_operands
+                .iter()
+                .any(|operand| self.resolve_background_job(operand).is_some())
+        {
+            // GNU wait.def:338-339: -p binds the pid of the LAST operand
+            // waited for (pstat.pid; NO_PID when the last operand
+            // failed, leaving the pre-unbound variable unset).
+            let wait_var = assign_var
+                .clone()
+                .map(|name| (name, self.wait_var_arrayref()));
 
-                let status = self.wait_for_background_operands(
-                    &operands,
-                    cmd,
-                    wait_var.as_ref(),
-                    wait_force,
-                )?;
-                return Ok(status);
-            }
+            let status = self.wait_for_background_operands(
+                &bg_operands,
+                cmd,
+                wait_var.as_ref(),
+                wait_force,
+            )?;
+            return Ok(status);
         }
 
         if cmd.words.len() == 2 {
@@ -843,43 +923,41 @@ impl Executor {
         // That path cannot see the job table, so ambiguous `%`-specs are
         // diagnosed here — in operand order, mirroring builtins/wait.rs —
         // before it reports the rest (wait.def:294-311 per-operand).
-        if let Some(operands) = wait_background_operands(&cmd.words[1..]) {
-            if operands.iter().any(|operand| operand.starts_with('%')) {
-                let mut stderr = Vec::new();
-                let mut status = 0;
-                for operand in &operands {
-                    status = match self.resolve_background_job_operand(operand) {
-                        JobOperandResolution::Ambiguous => {
-                            writeln!(
-                                stderr,
-                                "{}wait: {}: ambiguous job spec",
-                                self.diagnostic_prefix(),
-                                jobspec_match_name(operand)
-                            )?;
-                            127
-                        }
-                        JobOperandResolution::Pid(_) | JobOperandResolution::NoMatch => {
-                            write_wait_operand_error(
-                                operand,
-                                false,
-                                &self.diagnostic_prefix(),
-                                &self.error_prefix(),
-                                &mut stderr,
-                            )?
-                        }
-                    };
-                    // rubash#2898: wait.def:285-291 WAIT_RETURNs on a
-                    // digit operand outside pid_t range — later
-                    // operands are never diagnosed.
-                    if let crate::builtins::wait::WaitPidClass::BadPid =
-                        crate::builtins::wait::classify_wait_pid_operand(operand)
-                    {
-                        break;
+        if bg_operands.iter().any(|operand| operand.starts_with('%')) {
+            let mut stderr = Vec::new();
+            let mut status = 0;
+            for operand in &bg_operands {
+                status = match self.resolve_background_job_operand(operand) {
+                    JobOperandResolution::Ambiguous => {
+                        writeln!(
+                            stderr,
+                            "{}wait: {}: ambiguous job spec",
+                            self.diagnostic_prefix(),
+                            jobspec_match_name(operand)
+                        )?;
+                        127
                     }
+                    JobOperandResolution::Pid(_) | JobOperandResolution::NoMatch => {
+                        write_wait_operand_error(
+                            operand,
+                            false,
+                            &self.diagnostic_prefix(),
+                            &self.error_prefix(),
+                            &mut stderr,
+                        )?
+                    }
+                };
+                // rubash#2898: wait.def:285-291 WAIT_RETURNs on a
+                // digit operand outside pid_t range — later
+                // operands are never diagnosed.
+                if let crate::builtins::wait::WaitPidClass::BadPid =
+                    crate::builtins::wait::classify_wait_pid_operand(operand)
+                {
+                    break;
                 }
-                self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-                return Ok(status);
             }
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            return Ok(status);
         }
 
         // rubash#2560: a bare wait that reached here (no background
@@ -902,13 +980,30 @@ impl Executor {
             self.shell_state.job_table.clear_completed_statuses();
         }
 
+        // The pure-builtin fallback: no operand resolved, so the
+        // operands are diagnosed in order, exactly as
+        // builtins/wait.rs did — the raw scan operands (a `%` operand
+        // was already handled above, so only the pid/badpid arms can
+        // fire here, plus the empty-operand success).
         let mut stderr = Vec::new();
-        let status = crate::builtins::wait::execute_with_io(
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            &self.error_prefix(),
-            &mut stderr,
-        )?;
+        let mut status = 0;
+        for operand in &operands {
+            status = write_wait_operand_error(
+                operand,
+                false,
+                &self.diagnostic_prefix(),
+                &self.error_prefix(),
+                &mut stderr,
+            )?;
+            // rubash#2898: wait.def:285-291 WAIT_RETURNs on a digit
+            // operand outside pid_t range — later operands are never
+            // diagnosed.
+            if let crate::builtins::wait::WaitPidClass::BadPid =
+                crate::builtins::wait::classify_wait_pid_operand(operand)
+            {
+                break;
+            }
+        }
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         Ok(status)
     }
@@ -2829,12 +2924,15 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action = crate::builtins::disown::execute_with_io(
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            &mut stderr,
-        )?;
+        let action = {
+            let row = super::builtin_table::builtin_table_row("disown")
+                .expect("disown row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::disown::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
         let status = match action {
             crate::builtins::disown::DisownAction::Complete(status) => status,
             crate::builtins::disown::DisownAction::All {
@@ -3039,7 +3137,7 @@ impl Executor {
                 status
             }
         };
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
 
@@ -3238,12 +3336,17 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action = crate::builtins::fg_bg::execute_with_io(
-            builtin,
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            &mut stderr,
-        )?;
+        let action = {
+            let row_name = match builtin {
+                crate::builtins::fg_bg::JobControlBuiltin::Fg => "fg",
+                crate::builtins::fg_bg::JobControlBuiltin::Bg => "bg",
+            };
+            let row = super::builtin_table::builtin_table_row(row_name)
+                .expect("fg/bg row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::fg_bg::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+        };
         // GNU fg_bg.def:108-113 — `job_control == 0` (the monitor option,
         // off by default in non-interactive shells) reports "no job
         // control" before any operand processing, regardless of whether
@@ -3252,6 +3355,10 @@ impl Executor {
         let has_job_control =
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
         let status = match action {
+            // `--help` bypasses the job-control gate (fg_bg.def
+            // CHECK_HELPOPT runs before the `job_control == 0`
+            // check).
+            crate::builtins::fg_bg::FgBgAction::Help => super::builtin_diag::EX_USAGE,
             // Bash reports the non-interactive job-control failure before
             // validating fg/bg operands or options when no jobs exist.
             crate::builtins::fg_bg::FgBgAction::Complete(_status) if !has_job_control => {
@@ -3713,14 +3820,22 @@ impl Executor {
         // fork does not, subst.c:7143).
         let job_control = self.shell_state.job_control.get();
         let login_shell = self.invocation_login() && !self.shell_state.subshell_login_cleared.get();
-        let (status, too_many_arguments) = crate::builtins::suspend::execute_with_io(
-            &cmd.words[1..],
-            &self.diagnostic_prefix(),
-            job_control,
-            login_shell,
-            &mut stderr,
-        )?;
-        self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+        let mut stdout = Vec::new();
+        let (status, too_many_arguments) = {
+            let row = super::builtin_table::builtin_table_row("suspend")
+                .expect("suspend row in BUILTIN_TABLE");
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            crate::builtins::suspend::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+                job_control,
+                login_shell,
+            )?
+        };
+        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         if too_many_arguments {
             // GNU builtins/common.c no_args (the `exit 1 2` class,
             // rubash#705): the diagnostic is out, $? is EX_BADUSAGE (2),
@@ -5431,219 +5546,6 @@ impl Executor {
             crate::executor::local_helpers::mirror_env_remove(name);
         }
     }
-}
-
-/// GNU wait.def wait_builtin(): options are scanned with
-/// internal_getopt "fnp:"; a `-p` at the end of a cluster with no joined
-/// text consumes the NEXT word as its argument. When no next word exists,
-/// getopt reports `-p: option requires an argument` and the builtin falls
-/// into its default case: usage + EX_USAGE (2). Returns true when the word
-/// list has such a dangling `-p` (rubash#1156 — the operand scanners below
-/// used to walk one word past the end and panic on the slice).
-fn wait_p_argument_missing(words: &[String]) -> bool {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
-        if word == "--" || !word.starts_with('-') || word == "-" {
-            break;
-        }
-        for (offset, option) in word[1..].char_indices() {
-            match option {
-                'n' | 'f' => {}
-                'p' => {
-                    let value_start = 1 + offset + option.len_utf8();
-                    if value_start < word.len() {
-                        // Joined form `-pNAME`: argument is in this word;
-                        // `-p` ends the cluster either way.
-                        break;
-                    }
-                    return words.get(index + 1).is_none();
-                }
-                _ => return false,
-            }
-        }
-        index += 1;
-    }
-    false
-}
-
-struct WaitAnyRequest {
-    operands: Vec<String>,
-    assign_var: Option<String>,
-    assign_var_index: Option<usize>,
-    force: bool,
-}
-
-fn wait_any_request(words: &[String]) -> Option<WaitAnyRequest> {
-    let mut index = 0;
-    let mut wait_any = false;
-    let mut force = false;
-    let mut assign_var = None;
-    let mut assign_var_index = None;
-    while let Some(word) = words.get(index) {
-        if word == "--" {
-            index += 1;
-            break;
-        }
-        if !word.starts_with('-') || word == "-" {
-            break;
-        }
-
-        for (offset, option) in word[1..].char_indices() {
-            match option {
-                'n' => wait_any = true,
-                'f' => force = true,
-                'p' => {
-                    let value_start = 1 + offset + option.len_utf8();
-                    let (name, name_index) = if value_start < word.len() {
-                        (&word[value_start..], index)
-                    } else {
-                        index += 1;
-                        (words.get(index)?.as_str(), index)
-                    };
-
-                    // GNU wait.def:156-157: validity is decided downstream
-                    // by valid_identifier/valid_array_reference under
-                    // SET_VFLAGS — array-subscript names are legal and must
-                    // reach the execute path for the real check. The in-band
-                    // ARRAYREF_FLAG prefix is W_ARRAYREF's carrier
-                    // (execute_cmd.c:4366), consumed by wait_var_arrayref —
-                    // strip it so `A` never becomes the bound base name.
-
-                    assign_var = Some(
-                        crate::builtins::arrayref::take_arrayref_flag(name)
-                            .1
-                            .to_string(),
-                    );
-                    assign_var_index = Some(name_index);
-                    break;
-                }
-                _ => return None,
-            }
-        }
-        index += 1;
-    }
-
-    wait_any.then(|| WaitAnyRequest {
-        operands: words[index..].to_vec(),
-        assign_var,
-        assign_var_index,
-        force,
-    })
-}
-
-/// Whether the wait command carries `-f` (GNU builtins/wait.def:134-136:
-/// `case 'f': wflags |= JWAIT_FORCE`). Same internal_getopt "fnp:" walk
-/// as the sibling scanners: `-p` consumes its argument, scanning stops
-/// at the first operand or `--`.
-fn wait_force_requested(words: &[String]) -> bool {
-    let mut index = 0;
-    let mut force = false;
-    while let Some(word) = words.get(index) {
-        if word == "--" || !word.starts_with('-') || word == "-" {
-            break;
-        }
-        for (offset, option) in word[1..].char_indices() {
-            match option {
-                'f' => force = true,
-                'n' => {}
-                'p' => {
-                    if offset + 2 >= word.len() {
-                        index += 1;
-                    }
-                    break;
-                }
-                _ => return false,
-            }
-        }
-        index += 1;
-    }
-    force
-}
-
-fn wait_background_operands(words: &[String]) -> Option<Vec<String>> {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
-        if word == "--" {
-            index += 1;
-            break;
-        }
-        if !word.starts_with('-') || word == "-" {
-            break;
-        }
-
-        // GNU internal_getopt "fnp:": -p consumes the rest of the word or
-        // the next word as its variable-name argument, so it must not leak
-        // into the operand list.
-        for (offset, option) in word[1..].char_indices() {
-            match option {
-                'f' => {}
-                'n' => return None,
-                'p' => {
-                    if offset + 2 >= word.len() {
-                        index += 1;
-                    }
-                    break;
-                }
-                _ => return None,
-            }
-        }
-        index += 1;
-    }
-
-    // Jobspec operands keep no W_ARRAYREF consumer — strip the in-band
-    // flag so `wait: A[]]: ...` diagnostics print clean text. A dangling
-    // `-p` walks `index` one past the end (its argument word is counted,
-    // then the option word itself); saturate instead of slicing past the
-    // end (rubash#1156).
-    Some(
-        words[index.min(words.len())..]
-            .iter()
-            .map(|word| {
-                crate::builtins::arrayref::take_arrayref_flag(word)
-                    .1
-                    .to_string()
-            })
-            .collect(),
-    )
-}
-
-/// The `-p` variable name from a wait command's option cluster, mirroring
-/// GNU internal_getopt "fnp:" argument consumption (wait.def:120-137).
-/// Returns (name, operand_word_index) — the index of the word that carries
-/// the name inside `words` (the `-pNAME` word itself for the joined form),
-/// so the caller can consult its raw token for W_ARRAYREF.
-fn wait_assign_var(words: &[String]) -> Option<(String, usize)> {
-    let mut index = 0;
-    while let Some(word) = words.get(index) {
-        if word == "--" || !word.starts_with('-') || word == "-" {
-            break;
-        }
-        for (offset, option) in word[1..].char_indices() {
-            match option {
-                'n' | 'f' => {}
-                'p' => {
-                    let value_start = 1 + offset + option.len_utf8();
-                    if value_start < word.len() {
-                        return Some((word[value_start..].to_string(), index));
-                    }
-                    // wait.def:156 SET_VFLAGS consumes W_ARRAYREF off the
-                    // raw word; the in-band ARRAYREF_FLAG prefix is a word
-                    // flag, never operand text (execute_cmd.c:4366).
-                    return words.get(index + 1).map(|name| {
-                        (
-                            crate::builtins::arrayref::take_arrayref_flag(name)
-                                .1
-                                .to_string(),
-                            index + 1,
-                        )
-                    });
-                }
-                _ => return None,
-            }
-        }
-        index += 1;
-    }
-    None
 }
 
 fn write_wait_operand_error<E>(

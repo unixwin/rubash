@@ -5,11 +5,14 @@
 //!   guards below in source order, then `killpg (shell_pgrp, SIGSTOP)`
 //!   and EXECUTION_SUCCESS)
 
-use std::io::{self, Write};
+use std::io;
+
+use crate::executor::builtin_diag::{Diag, DiagKind, EX_USAGE};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
-const EX_USAGE: i32 = 2;
 
 /// Returns the builtin status plus a `too_many_arguments` flag. GNU
 /// suspend.def reports an operand with `suspend: too many arguments` —
@@ -17,44 +20,52 @@ const EX_USAGE: i32 = 2;
 /// rubash#705) the Executor arms when it sees the flag: the rest of the
 /// current list is abandoned with $?=2, and under `-c` the shell exits 1.
 /// A bad OPTION is different: plain EX_USAGE and the shell continues.
-pub fn execute_with_io<E>(
-    args: &[String],
-    diagnostic_prefix: &str,
+///
+/// The scan is one `BuiltinOpt` pass over the table row (`"f"`,
+/// suspend.def:86): `--help` in option position prints the long help
+/// (status 2); any other option word is an invalid option (usage +
+/// `EX_USAGE`).
+pub fn execute_with_io<'a>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
+    diag: &mut Diag<'a>,
+    stdout: &mut Vec<u8>,
     job_control: bool,
     login_shell: bool,
-    stderr: &mut E,
-) -> io::Result<(i32, bool)>
-where
-    E: Write,
-{
-    let mut force = false;
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            break;
-        }
-        for option in arg[1..].chars() {
-            match option {
-                'f' => force = true,
-                other => {
-                    writeln!(
-                        stderr,
-                        "{diagnostic_prefix}suspend: -{other}: invalid option"
-                    )?;
-                    writeln!(stderr, "suspend: usage: suspend [-f]")?;
-                    return Ok((EX_USAGE, false));
+) -> io::Result<(i32, bool)> {
+    let (force, help, operands) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut force = false;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b'f') => force = true,
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is `"f"`: no other option character
+                // (and no argument-taking option) can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("suspend spec is \"f\"")
                 }
             }
         }
-        index += 1;
+        let operands = opt.operands().to_vec();
+        (force, help, operands)
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok((EX_USAGE, false));
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok((diag.status(), false));
     }
 
-    if index < args.len() {
-        writeln!(stderr, "{diagnostic_prefix}suspend: too many arguments")?;
+    if !operands.is_empty() {
+        diag.report(DiagKind::TooManyArgs);
         return Ok((EX_USAGE, true));
     }
 
@@ -66,17 +77,11 @@ where
     // login-shell refusal. With -f both guards are skipped.
     if !force {
         if !job_control {
-            writeln!(
-                stderr,
-                "{diagnostic_prefix}suspend: cannot suspend: no job control"
-            )?;
+            diag.free(format_args!("cannot suspend: no job control"));
             return Ok((EXECUTION_FAILURE, false));
         }
         if login_shell {
-            writeln!(
-                stderr,
-                "{diagnostic_prefix}suspend: cannot suspend a login shell"
-            )?;
+            diag.free(format_args!("cannot suspend a login shell"));
             return Ok((EXECUTION_FAILURE, false));
         }
     }

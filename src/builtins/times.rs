@@ -5,60 +5,55 @@
 
 use std::io::{self, Write};
 
+use crate::executor::builtin_diag::{Diag, EX_USAGE};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
+
 const EXECUTION_SUCCESS: i32 = 0;
-const EX_USAGE: i32 = 2;
 
-/// Execute `times` with arguments after the command name.
-pub fn execute(args: &[String]) -> io::Result<i32> {
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    execute_with_io(
-        args.iter().map(String::as_str),
-        &diagnostic_prefix(),
-        &mut stdout,
-        &mut stderr,
-    )
-}
-
-/// The fallback diagnostic prefix for the stdio entry point, following the
-/// same pattern as builtins/alias.rs: the executor-dispatched path passes
-/// `Executor::diagnostic_prefix()` explicitly instead.
-fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        std::env::var("__RUBASH_SCRIPT_NAME"),
-        std::env::var("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
-}
-
-pub(crate) fn execute_with_io<'a, I, W, E>(
-    args: I,
-    diagnostic_prefix: &str,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> io::Result<i32>
-where
-    I: IntoIterator<Item = &'a str>,
-    W: Write,
-    E: Write,
-{
-    if let Some(arg) = args.into_iter().next() {
-        if arg != "--" && arg.starts_with('-') {
-            let option = arg.chars().nth(1).unwrap_or('-');
-            // GNU builtins/common.c builtin_error: the diagnostic carries
-            // the shell's diagnostic prefix (`bash: line 1: times: ...`),
-            // never a hardcoded program name (deep-audit B6-F2).
-            writeln!(
-                stderr,
-                "{diagnostic_prefix}times: -{}: invalid option",
-                option
-            )?;
-            writeln!(stderr, "times: usage: times")?;
-            return Ok(EX_USAGE);
+/// Execute `times` on the triple: one `BuiltinOpt` scan over the
+/// table row (`no_options`, `builtins/common.c:157-175`), diagnostics
+/// through `Diag`. GNU `builtins/times.def:72` runs `no_options`:
+/// `--help` in option position prints the long help (status 2); any
+/// other option word is an invalid option (usage + `EX_USAGE`); a
+/// bare `-` is an operand, and every operand is ignored.
+///
+/// The two time lines stay the stub zeros (rubash#2932 tracks the
+/// real `getrusage` values); this phase migrates the scan only.
+pub fn execute_with_io<'a>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
+    diag: &mut Diag<'a>,
+    stdout: &mut Vec<u8>,
+) -> io::Result<i32> {
+    let help = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is empty: no option character is ever
+                // valid, so an `Opt`/`OptArg` event is unreachable by
+                // construction (an option word ends the scan with an
+                // `InvalidOpt` report instead).
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("times has an empty getopt spec")
+                }
+            }
         }
+        help
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(EX_USAGE);
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(diag.status());
     }
 
     writeln!(stdout, "0m0.000s 0m0.000s")?;
@@ -69,18 +64,25 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::builtin_diag::Prolog;
+    use crate::executor::builtin_table::builtin_table_row;
 
     fn run(args: &[&str]) -> (i32, String, String) {
+        let row = builtin_table_row("times").unwrap();
+        let prolog = Prolog {
+            interactive: false,
+            shell_basename: "bash".to_string(),
+            error_name: "bash".to_string(),
+            script_file: None,
+            line: Some("1".to_string()),
+        };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = execute_with_io(
-            args.iter().copied(),
-            "bash: line 1: ",
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-
+        let status = {
+            let mut diag = Diag::new(prolog, row, &mut stderr);
+            let words: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            execute_with_io(row, &words, &mut diag, &mut stdout).unwrap()
+        };
         (
             status,
             String::from_utf8(stdout).unwrap(),
@@ -130,5 +132,24 @@ mod tests {
         assert_eq!(status, EXECUTION_SUCCESS);
         assert_eq!(stdout, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
         assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn bare_dash_is_an_operand() {
+        let (status, stdout, stderr) = run(&["-"]);
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(stdout, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn help_prints_long_help() {
+        let (status, stdout, stderr) = run(&["--help"]);
+
+        assert_eq!(status, EX_USAGE);
+        assert!(stderr.is_empty());
+        assert!(stdout.starts_with("times: times\n"));
+        assert!(stdout.contains("Display process times."));
     }
 }
