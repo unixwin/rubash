@@ -141,7 +141,7 @@ pub(super) fn parse_pushd_operand<'a>(
                 num = offset as i64 - num;
             }
             if num > offset as i64 || num < 0 {
-                super::pushd_error("pushd", offset, arg, diag);
+                super::pushd_error(offset, arg, diag);
                 return ParseOutcome::Failed;
             }
             rotate = Some((num as usize, arg.to_string()));
@@ -248,7 +248,7 @@ pub(super) fn parse_popd_operand<'a>(
     // ±N word was seen) to pushd_error. `which` is the raw digits,
     // always >= 0, so the `which < -offset` arm is dead in practice.
     if which > offset as i64 || (offset == 0 && which == 0) {
-        super::pushd_error("popd", offset, which_word.unwrap_or(""), diag);
+        super::pushd_error(offset, which_word.unwrap_or(""), diag);
         return ParseOutcome::Failed;
     }
 

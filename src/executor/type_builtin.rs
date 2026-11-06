@@ -47,13 +47,20 @@ impl Executor {
         E: Write,
     {
         // The parse is only a predicate here: its Diag is a discard
-        // sink — a missing mode, an invalid option, or `--help` all
-        // return None and the caller falls through to the builtin's
-        // own scan, which reports them.
+        // sink over a throwaway buffer — a missing mode, an invalid
+        // option, or `--help` all return None and the caller falls
+        // through to the builtin's own scan, which reports them. The
+        // sink MUST be throwaway: the predicate's BuiltinOpt reports
+        // an invalid option through its Diag, and writing that into
+        // the real stderr would print the diagnostic TWICE (once here,
+        // once in the builtin's own scan — caught by the E1 after-run,
+        // 2026-11-07: `command -z` printed the error twice).
+        let mut discard: Vec<u8> = Vec::new();
         let Some((mode, use_standard_path, first_name)) = ({
             let row = super::builtin_table::builtin_table_row("command")
                 .expect("command row in BUILTIN_TABLE");
-            let mut diag = super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, stderr);
+            let mut diag =
+                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut discard);
             parse_command_describe_args(args, &mut diag)
         }) else {
             return Ok(false);

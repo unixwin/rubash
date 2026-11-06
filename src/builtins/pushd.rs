@@ -162,7 +162,7 @@ where
                 };
                 return match desired {
                     DirsIndex::OutOfRange => {
-                        pushd_error("dirs", stack.len() - 1, w, diag);
+                        pushd_error(stack.len() - 1, w, diag);
                         Ok(EXECUTION_FAILURE)
                     }
                     DirsIndex::Cwd => {
@@ -570,13 +570,16 @@ fn dirs_display_index(digits: i64, plus: bool, len: usize) -> DirsIndex {
 /// pushd.def:382/:414 via which_word for popd), never a trailing
 /// option word. `dirs` hands the digits part `w` instead (the loop
 /// assigns `w = word + 1` before calling it).
-pub(super) fn pushd_error(builtin: &str, offset: usize, word: &str, diag: &mut Diag<'_>) {
+/// GNU pushd.def:540-546 `pushd_error`: "directory stack empty" when the
+/// offset is 0, "`{word}`: directory stack index out of range" otherwise.
+/// The builtin name is NOT in the body: `Diag::free` already renders
+/// `{prolog}{row.name}: {body}` (D3), so repeating it here doubled the
+/// name (`dirs: dirs: 4: ...` — caught by the E1 after-run, 2026-11-07).
+pub(super) fn pushd_error(offset: usize, word: &str, diag: &mut Diag<'_>) {
     if offset == 0 {
-        diag.free(format_args!("{builtin}: directory stack empty"));
+        diag.free(format_args!("directory stack empty"));
     } else {
-        diag.free(format_args!(
-            "{builtin}: {word}: directory stack index out of range"
-        ));
+        diag.free(format_args!("{word}: directory stack index out of range"));
     }
 }
 
