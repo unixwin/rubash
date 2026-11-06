@@ -190,6 +190,57 @@ fn eval_shopt_toggle_inside_eval_persists() {
 }
 
 #[test]
+fn eval_compound_assignment_word_internal_constructs() {
+    // The eval-string shape scan (lexer::unclosed_comsub_eof_shape)
+    // used to treat EVERY `(` inside a compound-assignment list as
+    // the parse.y:7173-7179 token error, so constructs read_token_word
+    // consumes into the element word — command substitution,
+    // arithmetic expansion, process substitution, a `${...}` body's
+    // parens — were rejected through eval exactly like the extglob
+    // group. GNU accepts all of them; only a BARE `(` (or one whose
+    // opener char is backslash-escaped) is the token error. Verified
+    // against GNU bash 5.3.20 as one composite, diagnostics included.
+    let (stdout, _, code) = rubash(
+        "shopt -s extglob\n\
+         eval 'x=($(echo hi))'; echo \"comsub rc=$? x=${x[0]}\"\n\
+         eval 'x=($((1+2)))'; echo \"arith rc=$? x=${x[0]}\"\n\
+         eval 'x=(a $(echo hi) b)'; echo \"mixed rc=$? x=${x[*]}\"\n\
+         eval 'x=(${y:-(a)})'; echo \"brace rc=$? x=${x[0]}\"\n\
+         eval 'x=(${y:-$(echo hi)})'; echo \"brace-comsub rc=$? x=${x[0]}\"\n\
+         eval 'x=(<(echo hi))'; echo \"procsub rc=$? nonempty=$([[ -n ${x[0]} ]] && echo yes || echo no)\"\n\
+         eval 'x=((1+2))' 2>&1; echo \"bare-arith rc=$?\"\n\
+         eval 'x=(a (b))' 2>&1; echo \"bare-paren rc=$?\"\n\
+         eval 'x=(a\\!(b))' 2>&1; echo \"escaped-op rc=$?\"\n\
+         eval 'x=(\\$(a))' 2>&1; echo \"escaped-dollar rc=$?\"",
+    );
+    for line in [
+        "comsub rc=0 x=hi\n",
+        "arith rc=0 x=3\n",
+        "mixed rc=0 x=a hi b\n",
+        "brace rc=0 x=(a)\n",
+        "brace-comsub rc=0 x=hi\n",
+        "procsub rc=0 nonempty=yes\n",
+        "bare-arith rc=1\n",
+        "bare-paren rc=1\n",
+        "escaped-op rc=1\n",
+        "escaped-dollar rc=1\n",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "missing {line:?} in stdout: {stdout}"
+        );
+    }
+    assert_eq!(
+        stdout
+            .matches("syntax error near unexpected token `('")
+            .count(),
+        4,
+        "stdout: {stdout}"
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
 fn eval_compound_assignment_in_function_and_comsub() {
     let (stdout, stderr, code) = rubash(
         "shopt -s extglob\n\
