@@ -172,7 +172,13 @@ where
             }
         } else {
             let disabled = disabled_builtins(env_vars);
-            for name in crate::executor::command_registry::introspection_builtin_names() {
+            // Stage-2 ④ Phase 0: the listing now walks the one
+            // declaration table (D1) instead of the registry ledger.
+            // The two sets are pinned equal by the table's unit
+            // tests (`builtin_table::tests::names_match_builtin_names`
+            // and `introspection_matches_registry`); the dynamic-load
+            // dedup below still consults the registry, unchanged.
+            for name in crate::executor::builtin_table::table_builtin_names() {
                 if disabled.iter().any(|disabled| disabled == name) {
                     if list_all {
                         writeln!(stdout, "enable -n {name}")?;

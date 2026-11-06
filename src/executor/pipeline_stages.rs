@@ -144,6 +144,51 @@ impl Executor {
         ))
     }
 
+    /// rubash#2895: a coproc in LAST pipeline position is set up in
+    /// the CURRENT shell. GNU execute_pipeline (execute_cmd.c:2620)
+    /// sends every element through execute_command_internal, whose
+    /// cm_coproc dispatch (execute_cmd.c:667-669) calls execute_coproc
+    /// in the parent shell itself — no element subshell — so the
+    /// coproc's job registration and COPROC bindings land in the
+    /// parent, and the element's pipe_in is closed unread
+    /// (execute_cmd.c:2574 close_pipes): the coproc's stdin is its own
+    /// pipe, never the pipeline's. The generic compound-stage route
+    /// runs the element on a throwaway clone, which discarded the
+    /// registration and left COPROC unset in the parent (and the
+    /// orphaned child's writes died on a closed pipe). Run the
+    /// command on this executor instead, under the stage's captures;
+    /// the element produces no pipeline output (its stdout is the
+    /// coproc pipe), so the returned streams are whatever the setup
+    /// itself printed.
+    pub(in crate::executor) fn execute_coproc_pipeline_tail(
+        &mut self,
+        command: &CommandNode,
+    ) -> Result<(String, String, i32), ExecuteError> {
+        let saved_stdout_capture = self.stdout_capture.take();
+        let saved_stderr_capture = self.stderr_capture.take();
+        self.stdout_capture = Some(Vec::new());
+        self.stderr_capture = Some(Vec::new());
+        let (thread_captured, result) =
+            crate::executor::shell_options::capture_stdout(|| self.execute_command(command));
+        let mut output = self.stdout_capture.take().unwrap_or_default();
+        output.extend_from_slice(&thread_captured);
+        let stderr = self.stderr_capture.take().unwrap_or_default();
+        self.stdout_capture = saved_stdout_capture;
+        self.stderr_capture = saved_stderr_capture;
+        match result {
+            Ok(()) => {}
+            Err(ExecuteError::ExitCode(code)) => {
+                self.exit_code = code;
+            }
+            Err(error) => return Err(error),
+        }
+        Ok((
+            crate::executor::substitution_metadata::bytes_to_shell_text(&output),
+            crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),
+            self.last_exit_code(),
+        ))
+    }
+
     pub(in crate::executor) fn execute_compound_pipeline_stage(
         &mut self,
         command: &CommandNode,

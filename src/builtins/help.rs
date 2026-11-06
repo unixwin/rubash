@@ -177,6 +177,13 @@ fn find_topic(name: &str) -> Option<&'static HelpTopic> {
     HELP_TOPICS_TABLE.iter().find(|topic| topic.name == name)
 }
 
+/// The short documentation line for a builtin's help topic, for the
+/// declaration table's `DocId` resolution (Stage-2 ④ Phase 0).
+/// `None` when the name has no topic (rubash's own `env`).
+pub(crate) fn builtin_short_doc(name: &str) -> Option<&'static str> {
+    find_topic(name).map(|topic| topic.short_doc)
+}
+
 // help.def:172: `name: short_doc'.
 fn print_topic_synopsis<W>(topic: &HelpTopic, stdout: &mut W) -> io::Result<()>
 where

@@ -2158,10 +2158,44 @@ impl Executor {
     /// diffs the child's env_vars against the saved map. The cwd needs no
     /// separate resync since G-02: it is a ShellState field and rides the
     /// wholesale swap.
+    /// rubash#2897: set the parent's child-process state aside for an
+    /// in-place `( )` region (see SubshellProcessSave): the region
+    /// starts with an empty child world — no parent handles to reap,
+    /// no pending completions to apply — mirroring the fork, where
+    /// the parent's children are simply not the child's. The caller
+    /// clears the job table alongside (JobTable::clear_for_subshell,
+    /// the delete_all_jobs(0) half of without_job_control,
+    /// jobs.c:5363). `depth_outside` is the subshell_depth the region
+    /// was entered from (the depth in the entry's saved state), which
+    /// tags the save so restore_flat_subshell can recognize its own
+    /// boundary among its other callers.
+    pub(in crate::executor) fn push_subshell_process_save(&mut self, depth_outside: usize) {
+        let save = super::SubshellProcessSave {
+            depth: depth_outside,
+            background_children: std::mem::take(&mut self.background_children),
+            pending_job_completions: std::mem::take(&mut self.pending_job_completions),
+            pending_coproc_retirements: std::mem::take(&mut self.pending_coproc_retirements),
+            procsub_stream_children: std::mem::take(&mut self.procsub_stream_children),
+        };
+        self.subshell_process_saves.push(save);
+    }
+
     pub(in crate::executor) fn restore_flat_subshell(
         &mut self,
         saved_state: crate::shell::ShellState,
     ) {
+        // rubash#2897: the depth this restore returns to — an in-place
+        // `( )` region's process save is tagged with exactly it.
+        let saved_depth = saved_state.subshell_depth.get();
+        let process_save = if self
+            .subshell_process_saves
+            .last()
+            .is_some_and(|save| save.depth == saved_depth)
+        {
+            self.subshell_process_saves.pop()
+        } else {
+            None
+        };
         // Every caller is a fork boundary (flat `( )` regions and
         // command-substitution children): the region's descriptor copies
         // close here, so run the deferred bodies of the output process
@@ -2189,6 +2223,10 @@ impl Executor {
             .cloned()
             .collect();
         let stopped_current = self.shell_state.job_table.current_job();
+        let stopped_pids: Vec<u32> = stopped_jobs
+            .iter()
+            .flat_map(|job| job.pids.iter().copied())
+            .collect();
         // A stopped pipeline can hold members that already exited
         // before the stop; their recorded statuses live in
         // completed_statuses, which the restore would also wipe.
@@ -2239,6 +2277,26 @@ impl Executor {
             if self.shell_state.job_table.jobs.contains_key(&id) {
                 self.shell_state.job_table.set_current_job(id);
             }
+        }
+        // rubash#2897: hand back the child-process state an in-place
+        // `( )` region set aside at its entry. The region's own
+        // leftover state dies with the region, as the forked child's
+        // jobs die with it: its pending completions, retirements and
+        // stream-child marks are dropped, and its child handles drop
+        // too — except the handles of the stopped jobs just carried
+        // into the parent's table above, whose waits resume from the
+        // parent's map.
+        if let Some(save) = process_save {
+            let mut restored_children = save.background_children;
+            for pid in &stopped_pids {
+                if let Some(child) = self.background_children.remove(pid) {
+                    restored_children.insert(*pid, child);
+                }
+            }
+            self.background_children = restored_children;
+            self.pending_job_completions = save.pending_job_completions;
+            self.pending_coproc_retirements = save.pending_coproc_retirements;
+            self.procsub_stream_children = save.procsub_stream_children;
         }
     }
 
@@ -3212,6 +3270,30 @@ impl Executor {
                 // base_pathname(shell_name) (error_report_name).
                 format!("{}: ", self.error_report_name())
             }
+        }
+    }
+
+    /// Build the `Diag` prolog (Stage-2 ④ D3) for the current
+    /// execution state, from the same inputs `diagnostic_prefix`
+    /// reads: the interactive basename, the innermost script frame
+    /// (`current_error_file_name`), the line
+    /// (`__RUBASH_CURRENT_LINE`) and the `get_name_for_error` name.
+    /// The `Prolog` is a plain value — the dispatcher hands it to
+    /// `Diag::new` alongside the command's own stderr sink, so a
+    /// builtin's diagnostics can no longer be written to the wrong
+    /// stream (the A3-R1 shape becomes inexpressible in the type
+    /// system once the builtins migrate in Phase 4).
+    pub(crate) fn diagnostic_prolog(&self) -> super::builtin_diag::Prolog {
+        super::builtin_diag::Prolog {
+            interactive: self.invocation_interactive(),
+            shell_basename: Self::interactive_shell_basename(&self.shell_state.env_vars),
+            error_name: self.error_report_name(),
+            script_file: self.current_error_file_name(),
+            line: self
+                .shell_state
+                .env_vars
+                .get("__RUBASH_CURRENT_LINE")
+                .cloned(),
         }
     }
 

@@ -190,6 +190,14 @@ mod alias_helpers;
 pub(crate) mod assignment_helpers;
 mod ast_exec;
 mod builtin_names;
+// Stage-2 project ④ Phase 0 (立柱): the one declaration table (D1),
+// the single option machine (D2), the diagnostic handle (D3) and the
+// differential-matrix generator (D5). Pure additive posts: no existing
+// call site is re-routed in this phase.
+pub(crate) mod builtin_diag;
+pub(crate) mod builtin_matrix;
+pub(crate) mod builtin_opt;
+pub(crate) mod builtin_table;
 #[allow(dead_code)]
 // rubash#2036: consumers landed through S4 (introspection, dispatch,
 // pipeline and comsub projections); a few registration-only fields
@@ -553,6 +561,31 @@ pub(crate) struct RunDiagnostic {
     pub(crate) line: Option<usize>,
 }
 
+/// rubash#2897: the process-side child state an in-place `( )` region
+/// sets aside at its fork boundary. GNU's subshell child is a real
+/// fork: execute_in_subshell calls without_job_control (jobs.c:5356),
+/// whose delete_all_jobs(0) gives the child an EMPTY job list, and the
+/// parent's children are not the child's to reap — a `wait` inside
+/// `( )` answers "not a child of this shell" for every parent pid and
+/// a bare `wait` there is a no-op. Rubash runs the region in place on
+/// the parent's executor, so the parent's child handles and pending
+/// reap bookkeeping are swapped out for the body's duration (the body
+/// starts with an empty map, like the clone executors get) and
+/// restored by restore_flat_subshell; handles the body leaves behind
+/// are dropped with the region, except the ones belonging to jobs the
+/// restore carries across as stopped (rubash#2836). `depth` is the
+/// subshell_depth OUTSIDE the region (the saved state's depth), which
+/// is how the restore recognizes its own boundary among the other
+/// restore_flat_subshell callers.
+#[derive(Debug)]
+pub(in crate::executor) struct SubshellProcessSave {
+    pub(in crate::executor) depth: usize,
+    pub(in crate::executor) background_children: HashMap<u32, crate::fd::SpawnedChild>,
+    pub(in crate::executor) pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    pub(in crate::executor) pending_coproc_retirements: Vec<u32>,
+    pub(in crate::executor) procsub_stream_children: HashMap<u32, bool>,
+}
+
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
@@ -658,6 +691,11 @@ pub struct Executor {
     /// executors keep the restore.
     is_process_exit_executor: bool,
     background_children: HashMap<u32, crate::fd::SpawnedChild>,
+    /// rubash#2897: stack of child-process state set aside by nested
+    /// in-place `( )` regions (see SubshellProcessSave). Pushed at the
+    /// region entries, popped by restore_flat_subshell when the saved
+    /// state's depth matches the top entry's tag.
+    subshell_process_saves: Vec<SubshellProcessSave>,
     /// rubash#2179: writer threads feeding output process-substitution
     /// consumers (external_setup::spawn_output_process_substitution_child).
     /// The feed is the shell's half of the substitution rendezvous: in
