@@ -1,0 +1,171 @@
+{
+  "projectName": "rubash",
+  "projectOwner": "unixwin",
+  "repoType": "github",
+  "repoHost": "https://github.com",
+  "files": [
+    "README.md",
+    "README.zh-CN.md"
+  ],
+  "badgeTemplate": "[![All Contributors](https://img.shields.io/badge/all_contributors-<%= contributors.length %>-orange.svg?style=flat-square)](#contributors)",
+  "imageSize": 100,
+  "commit": false,
+  "contributorsPerLine": 7,
+  "skipCi": true,
+  "contributors": [
+    {
+      "login": "caomengxuan666",
+      "name": "caomengxuan666",
+      "avatar_url": "https://avatars.githubusercontent.com/u/114896873?v=4",
+      "profile": "https://github.com/caomengxuan666",
+      "contributions": [
+        "code",
+        "maintenance"
+      ]
+    },
+    {
+      "login": "a-rookie-of-C-language",
+      "name": "a-rookie-of-C-language",
+      "avatar_url": "https://avatars.githubusercontent.com/u/186315048?v=4",
+      "profile": "https://github.com/a-rookie-of-C-language",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "devin-ai-integration[bot]",
+      "name": "devin-ai-integration[bot]",
+      "avatar_url": "https://avatars.githubusercontent.com/u/158243242?v=4",
+      "profile": "https://github.com/apps/devin-ai-integration",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "daiaji",
+      "name": "daiaji",
+      "avatar_url": "https://avatars.githubusercontent.com/u/25875791?v=4",
+      "profile": "https://github.com/daiaji",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Catapult291",
+      "name": "Catapult291",
+      "avatar_url": "https://avatars.githubusercontent.com/u/200960228?v=4",
+      "profile": "https://github.com/Catapult291",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "cognition-team",
+      "name": "cognition-team",
+      "avatar_url": "https://avatars.githubusercontent.com/u/167951170?v=4",
+      "profile": "https://github.com/cognition-team",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "SpookyWaste",
+      "name": "SpookyWaste",
+      "avatar_url": "https://avatars.githubusercontent.com/u/17810462?v=4",
+      "profile": "https://github.com/SpookyWaste",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "SuperYogurt",
+      "name": "SuperYogurt",
+      "avatar_url": "https://avatars.githubusercontent.com/u/43920641?v=4",
+      "profile": "https://github.com/SuperYogurt",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "jhermelink",
+      "name": "jhermelink",
+      "avatar_url": "https://avatars.githubusercontent.com/u/32125320?v=4",
+      "profile": "https://github.com/jhermelink",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "iwantobelieve",
+      "name": "iwantobelieve",
+      "avatar_url": "https://avatars.githubusercontent.com/u/206045291?v=4",
+      "profile": "https://github.com/iwantobelieve",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Muse-Spark",
+      "name": "Muse-Spark",
+      "avatar_url": "https://avatars.githubusercontent.com/u/72873513?v=4",
+      "profile": "https://github.com/Muse-Spark",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "Uarz",
+      "name": "Uarz",
+      "avatar_url": "https://avatars.githubusercontent.com/u/149165079?v=4",
+      "profile": "https://github.com/Uarz",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "bbvdf",
+      "name": "bbvdf",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5507755?v=4",
+      "profile": "https://github.com/bbvdf",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "deepperf",
+      "name": "deepperf",
+      "avatar_url": "https://avatars.githubusercontent.com/u/46986112?v=4",
+      "profile": "https://github.com/deepperf",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "audit-bot",
+      "name": "audit-bot",
+      "avatar_url": "https://avatars.githubusercontent.com/u/72415544?v=4",
+      "profile": "https://github.com/audit-bot",
+      "contributions": [
+        "tool"
+      ]
+    },
+    {
+      "login": "claude",
+      "name": "claude",
+      "avatar_url": "https://avatars.githubusercontent.com/u/81847?v=4",
+      "profile": "https://github.com/claude",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "github-actions[bot]",
+      "name": "github-actions[bot]",
+      "avatar_url": "https://avatars.githubusercontent.com/u/41898282?v=4",
+      "profile": "https://github.com/apps/github-actions",
+      "contributions": [
+        "tool"
+      ]
+    }
+  ]
+}
