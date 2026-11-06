@@ -105,12 +105,12 @@ fn typed_registry_char_reaches_child_argv_raw() {
     );
 
     // Controls: raw-byte values already crossed correctly before the fix.
-    let run = run("v=$'\\x1cZ'\n/usr/bin/printf '%s' \"$v\"\n");
-    assert_clean(&run, "c09 control 1");
-    assert_eq!(run.stdout, vec![0x1c, b'Z']);
-    let run = run("z=$'\\x01\\x02'\n/usr/bin/printf '%s' \"$z\"\n");
-    assert_clean(&run, "c09 control 2");
-    assert_eq!(run.stdout, vec![0x01, 0x02]);
+    let ctl1 = run("v=$'\\x1cZ'\n/usr/bin/printf '%s' \"$v\"\n");
+    assert_clean(&ctl1, "c09 control 1");
+    assert_eq!(ctl1.stdout, vec![0x1c, b'Z']);
+    let ctl2 = run("z=$'\\x01\\x02'\n/usr/bin/printf '%s' \"$z\"\n");
+    assert_clean(&ctl2, "c09 control 2");
+    assert_eq!(ctl2.stdout, vec![0x01, 0x02]);
 }
 
 /// The `env` builtin boundary (`apply_env_command_environment` caller):
