@@ -1139,6 +1139,7 @@ impl Executor {
             session_set_umask: None,
             is_process_exit_executor: process_exit,
             background_children: HashMap::new(),
+            subshell_process_saves: Vec::new(),
             procsub_feed_handles: Vec::new(),
             procsub_stream_children: HashMap::new(),
             pending_job_completions: Vec::new(),
