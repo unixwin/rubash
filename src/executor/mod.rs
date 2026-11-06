@@ -1018,7 +1018,9 @@ pub struct Executor {
     /// SIGINT is a separate arm (jobs.c:3316-3336). Set only by the
     /// job-control foreground wait; `loop_depth` is already 0 inside
     /// functions and subshells (GNU execute_cmd.c:5359/:1642), so the
-    /// depth read at the wait is the live loop level. The list walker
+    /// depth read at the wait is `subshell_saved_loop_depth + live
+    /// loop_depth` — the loops banked at each subshell entry plus the
+    /// live level (rubash#2851). The list walker
     /// treats a standing count like GNU execute_cmd.c:635
     /// execute_command_internal (no further command executes until a
     /// loop driver consumes it); loop drivers always consume it, so it

@@ -678,9 +678,14 @@ impl Executor {
         // loop_depth==0 to be command-list-local) and kills the child's
         // remaining commands instead of just skipping the line.
         let saved_loop_depth = self.shell_state.loop_depth;
+        // rubash#2851: the fresh child is a process boundary like the
+        // loop depth — a stop inside the child script's loop must not
+        // leak banked budget into the parent.
+        let saved_subshell_saved_loop_depth = self.shell_state.subshell_saved_loop_depth;
         let saved_function_depth = self.shell_state.function_depth;
         let saved_inside_compound_condition = self.inside_compound_condition.get();
         self.shell_state.loop_depth = 0;
+        self.shell_state.subshell_saved_loop_depth = 0;
         self.shell_state.function_depth = 0;
         self.inside_compound_condition.set(false);
         // The child is a separate process in GNU: an evalerror/DISCARD
@@ -1232,6 +1237,7 @@ impl Executor {
         self.shell_state.bash_argv_stack = saved_bash_argv_stack;
         self.shell_state.subshell_depth.set(saved_depth);
         self.shell_state.loop_depth = saved_loop_depth;
+        self.shell_state.subshell_saved_loop_depth = saved_subshell_saved_loop_depth;
         self.shell_state.function_depth = saved_function_depth;
         self.inside_compound_condition
             .set(saved_inside_compound_condition);

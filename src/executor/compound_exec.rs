@@ -4088,6 +4088,12 @@ impl Executor {
         // (variables.c:1418-1423 get_random_number); saved_state keeps
         // the parent's sequence for the wholesale restore.
         self.shell_state.random_state.reseed_fresh();
+        // rubash#2851: bank the enclosing loop depth across the
+        // boundary — see the flat-region entry (ast_exec.rs) and the
+        // field doc on ShellState. Accumulated AFTER the saved clone
+        // above (the wholesale restore reverts it) and BEFORE the
+        // compat-gated reset below; NOT compat-gated.
+        self.shell_state.subshell_saved_loop_depth += self.shell_state.loop_depth + 1;
         // GNU execute_cmd.c:1641-1642 (execute_in_subshell): the
         // loop_level reset is compat-gated — `if
         // (shell_compatibility_level > 44) loop_level = 0;`. At compat44
@@ -4302,15 +4308,20 @@ impl Executor {
                         trap_result = None;
                         return Ok(());
                     }
-                    // rubash#2836 slice 4: the stop-unwind's subshell arm.
-                    // A child stopped by SIGTSTP inside this subshell set
-                    // `stopped_loop_breaking = 1` (the single-child and
-                    // pipeline job-control waits); the body has abandoned
-                    // its remaining commands, and the subshell itself has
-                    // NOT exited — so its EXIT trap must not run (GNU: a
-                    // stopped subshell has not exited). Consume exactly
-                    // one level here so the parent list is unaffected
-                    // (same-line commands run, oracle-verified).
+                    // rubash#2836 slice 4 (count shape rubash#2851):
+                    // the stop-unwind's subshell arm. A child stopped by
+                    // SIGTSTP inside this subshell set
+                    // `stopped_loop_breaking = saved + live` (the
+                    // single-child and pipeline job-control waits); the
+                    // body has abandoned its remaining commands, and the
+                    // subshell itself has NOT exited — so its EXIT trap
+                    // must not run (GNU: a stopped subshell has not
+                    // exited). Consume exactly one level here — the
+                    // entry banked +1 for this boundary — so the parent
+                    // list is unaffected unless an enclosing loop owns
+                    // the remaining levels (same-line commands run,
+                    // oracle-verified; a stop inside a subshell in a
+                    // loop abandons the loop, jobs.c:4341-4343).
                     if executor.consume_stopped_loop_breaking() {
                         trap_result = None;
                         return Ok(());

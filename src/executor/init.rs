@@ -1053,6 +1053,7 @@ impl Executor {
                 expanding_aliases: Vec::new(),
                 loop_depth: 0,
                 inherited_loop_depth: 0,
+                subshell_saved_loop_depth: 0,
                 read_generation: 0,
                 read_generation_ceiling: 0,
                 command_number: 1,
