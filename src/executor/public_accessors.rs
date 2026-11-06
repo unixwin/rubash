@@ -106,7 +106,11 @@ impl Executor {
         } else {
             decoded
         };
-        super::prompt_expansion::strip_prompt_ignore_markers(&decoded)
+        // Strip the width markers first: a raw-byte pair decoding to
+        // 0x01/0x02 is command-output DATA and must survive (GNU emits it);
+        // only the template's own \[ \] markers are stripped.
+        let decoded = super::prompt_expansion::strip_prompt_ignore_markers(&decoded);
+        super::prompt_expansion::decode_prompt_transport(&decoded)
     }
 
     pub fn expand_prompt_string_mut(&mut self, value: &str) -> String {
@@ -173,6 +177,7 @@ impl Executor {
             decoded
         };
         let rendered = super::prompt_expansion::strip_prompt_ignore_markers(&rendered);
+        let rendered = super::prompt_expansion::decode_prompt_transport(&rendered);
         self.exit_code = saved_exit_code;
         self.shell_state.pipestatus = saved_pipestatus;
         self.last_command_substitution_status

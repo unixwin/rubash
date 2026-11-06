@@ -892,6 +892,9 @@ impl Executor {
         let expanded = self.expand_embedded_parameters(&decoded);
         self.shell_state.xtrace_suspended.set(suspended);
         let expanded = strip_prompt_ignore_markers(&expanded);
+        // Decode the transport pairs before the indirection repeat so the
+        // repeated first character is the same byte GNU would repeat.
+        let expanded = decode_prompt_transport(&expanded);
         // GNU print_cmd.c:445-510 indirection_level_string: expand PS4
         // (decode_prompt_string), then repeat its FIRST CHARACTER once per
         // indirection_level and append the rest of the string. The base
@@ -1321,6 +1324,22 @@ where
     }
     let text: String = window.iter().collect();
     PromptOctal::Value(u32::from_str_radix(&text, 8).unwrap_or(0))
+}
+
+/// Post-expansion transport decode for prompt channels. The template half
+/// of a prompt string is decoded inside `decode_prompt_string`, but the
+/// expansion pass (parameter expansion, command substitution) runs AFTER
+/// it and its results carry control bytes as raw-byte marker pairs
+/// (E000+payload) — GNU inserts command-substitution output verbatim
+/// (subst.c command_substitute → the prompt string bytes), so a PS0 like
+/// `$(printf '\033]3008;…\033\\')` must reach the terminal as real ESC
+/// bytes, not U+E000/U+E01C PUA pairs that render as `]3008;…` text.
+pub(in crate::executor) fn decode_prompt_transport(text: &str) -> String {
+    if !text.contains(char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).unwrap()) {
+        return text.to_string();
+    }
+    let decoded = crate::executor::substitution_metadata::decode_raw_byte_markers(text.as_bytes());
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 /// readline display.c:437-463 (expand_prompt): the `\[`/`\]` prompt-ignore

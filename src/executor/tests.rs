@@ -374,6 +374,27 @@ mod unit_tests {
     }
 
     #[test]
+    fn prompt_expansion_restores_control_bytes_from_expansion_results() {
+        // GNU inserts command-substitution/parameter-expansion output
+        // verbatim into the prompt (subst.c command_substitute → prompt
+        // bytes): control bytes arrive at the terminal as themselves, not
+        // as E000-pair transport markers. systemd's OSC 3008 profile hook
+        // (`PS0='$(__systemd_osc_context_ps0)…'`) rendered `]3008;…` as
+        // literal text on terminals because the pairs leaked through.
+        let mut executor = Executor::new();
+        assert_eq!(
+            executor.expand_prompt_string_mut("X$(printf 'P\\033Q')Y"),
+            "XP\x1bQY"
+        );
+        // A stored value's transport pairs decode the same way.
+        executor
+            .shell_state
+            .env_vars
+            .insert("W".to_string(), "A\u{e000}\u{e01c}B".to_string());
+        assert_eq!(executor.expand_prompt_string("<$W>"), "<A\x1bB>");
+    }
+
+    #[test]
     fn shell_identity_is_used_for_default_dollar_zero() {
         let mut executor = Executor::new();
         executor.set_env("__RUBASH_SHELL_NAME", "niu");
