@@ -920,6 +920,20 @@ impl Session {
         self.executor.has_compspec_at(line, cursor)
     }
 
+    /// The number of background jobs the host prompt segment reports
+    /// (rubash#2859, GAP queue): table entries with `background == true`
+    /// and state in {Running, Stopped} after the `cleanup_dead_jobs`
+    /// liveness pass — exactly the set bare `jobs` lists (GNU
+    /// builtins/jobs.def:83 `list_all_jobs`, jobs.c:2254-2257). A
+    /// ^Z-stopped foreground job counts (the stop path flips it to
+    /// `background = true`); process-substitution children are not
+    /// table entries and never count; a completed job never counts.
+    /// `&mut self` because the read runs the cleanup pass, mirroring
+    /// the listing path. `JobCandidate` stays engine-internal (Q-D).
+    pub fn background_job_count(&mut self) -> usize {
+        self.executor.background_job_count()
+    }
+
     /// Open one completion attempt as an explicit object
     /// (unixwin/niubash#863 GAP-7): the contract replacement
     /// for the host's thread-local shell lend. The host opens

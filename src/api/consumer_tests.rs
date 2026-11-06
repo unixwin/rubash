@@ -3199,6 +3199,111 @@ fn issue2856_b511_session_gate_d_only_never_governs_command_word() {
     assert!(!session.has_compspec_at("   ", 3));
 }
 
+/// Best-effort cleanup for the #2859 pins: kill every background job
+/// this pin started and reap it, so no `sleep 30` outlives the pin.
+/// The result is ignored — a missing jobspec errors harmlessly.
+fn issue2859_jobs_face_cleanup(session: &mut Session) {
+    let _ = session.run(
+        "kill %1 %2 %3 2>/dev/null; wait 2>/dev/null",
+        &RunOptions::new(),
+    );
+}
+
+/// rubash#2859 Q-B rule (a), background Running: one `sleep 30 &`
+/// counts 1; after `kill` + `wait` it counts 0 (P-J1 j1a/j1e).
+#[test]
+fn issue2859_jobs_face_background_running_counts() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "sleep 30 &");
+    assert_eq!(session.background_job_count(), 1);
+    issue2859_jobs_face_cleanup(&mut session);
+    assert_eq!(
+        session.background_job_count(),
+        0,
+        "killed + reaped job leaves the count"
+    );
+}
+
+/// Two background Running jobs count 2 (P-J1 j1a).
+#[test]
+fn issue2859_jobs_face_two_background_jobs_count() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "sleep 30 &");
+    issue863_gap6_run(&mut session, "sleep 31 &");
+    assert_eq!(session.background_job_count(), 2);
+    issue2859_jobs_face_cleanup(&mut session);
+    assert_eq!(session.background_job_count(), 0);
+}
+
+/// A reaped job does not count (P-J1 j1c), and repeated reads do not
+/// flicker (P-J3): `sleep 0.1 &` dies while the foreground `sleep 0.5`
+/// runs; the `:` boundary refresh reaps it, so the face reads 0 and
+/// stays 0 — a completed job never counts whether or not the cleanup
+/// below has deleted its entry yet.
+#[test]
+fn issue2859_jobs_face_reaped_job_does_not_count() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "sleep 0.1 &");
+    issue863_gap6_run(&mut session, "sleep 0.5");
+    // The boundary refresh runs at the start of the next top-level
+    // command, so one no-op line forces the reap before the read.
+    issue863_gap6_run(&mut session, ":");
+    assert_eq!(session.background_job_count(), 0);
+    assert_eq!(session.background_job_count(), 0);
+    assert_eq!(session.background_job_count(), 0);
+}
+
+/// A disowned job does not count (P-J1 j1d): `disown` deletes the
+/// table entry (GNU jobs.c delete_job).
+#[test]
+fn issue2859_jobs_face_disowned_job_does_not_count() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "sleep 30 &");
+    assert_eq!(session.background_job_count(), 1);
+    issue863_gap6_run(&mut session, "disown");
+    assert_eq!(session.background_job_count(), 0);
+}
+
+/// A ^Z-stopped job counts (P-J1 j1b): the stop path flips the job
+/// to `background = true`, so rule (a) includes it while Stopped
+/// and while Running again after CONT.
+#[test]
+fn issue2859_jobs_face_stopped_job_counts() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(&mut session, "sleep 30 &");
+    assert_eq!(session.background_job_count(), 1);
+    issue863_gap6_run(&mut session, "kill -STOP %1");
+    // The intervening builtin is the observation event that applies
+    // the deferred Stopped mark (rubash#1494).
+    issue863_gap6_run(&mut session, ":");
+    assert_eq!(
+        session.background_job_count(),
+        1,
+        "stopped background job still counts"
+    );
+    issue863_gap6_run(&mut session, "kill -CONT %1");
+    issue863_gap6_run(&mut session, ":");
+    assert_eq!(session.background_job_count(), 1);
+    issue2859_jobs_face_cleanup(&mut session);
+    assert_eq!(session.background_job_count(), 0);
+}
+
+/// A process-substitution child never counts: it lives in
+/// `background_children` only (GNU keeps procsub children off `jobs`,
+/// jobs.c procsub_add), so rule (a) — table entries only — excludes
+/// it. This pins the rejection of rule (b).
+#[test]
+fn issue2859_jobs_face_procsub_child_does_not_count() {
+    let mut session = issue863_gap6_session();
+    assert_eq!(session.background_job_count(), 0);
+    issue863_gap6_run(&mut session, ": <(true)");
+    assert_eq!(
+        session.background_job_count(),
+        0,
+        "procsub child is not a table entry"
+    );
+}
+
 /// Sequential attempts through one guard share live state:
 /// the inner attempt resolves a compspec the outer
 /// attempt's function registered; after the guard drops, the
