@@ -456,24 +456,10 @@ pub(crate) fn shell_text_prefix_for_raw_len(text: &str, raw_len: usize) -> usize
 /// internal transport marker pair — the previous behavior leaked the PUA
 /// pair (U+E000 U+E0CE) verbatim into the child command line, which ANSI
 /// children then re-encoded through the system codepage as GBK mojibake.
-///
-/// The LITERAL_CHAR_ESCAPE pair folds to its payload char, exactly as in
-/// [`decode_raw_byte_markers`]: the pair is internal transport for a
-/// typed registry-zone char, and the boundary carries the raw char
-/// itself (rubash#2881).
 pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
-            // E400 + c is the literal-char escape: emit c verbatim.
-            // A trailing E400 is user data and stays E400.
-            match chars.next() {
-                Some(next) => output.push(next),
-                None => output.push(ch),
-            }
-            continue;
-        }
         if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
             output.push(ch);
             continue;
@@ -1772,106 +1758,5 @@ mod tests {
             shell_text_to_raw_bytes(&bytes_to_shell_text(&invalid)),
             invalid
         );
-    }
-
-    #[test]
-    fn issue2881_byte_char_decoder_folds_typed_registry_char() {
-        // #2881 (sweep F1/E1, battery c08/c09 seed): a typed U+E314 is
-        // stored behind the LITERAL_CHAR_ESCAPE pair; the boundary
-        // decoder must hand the child the raw char, not the pair.
-        let esc = crate::executor::markers::LITERAL_CHAR_ESCAPE;
-        let stored = format!("{esc}\u{e314}");
-        assert_eq!(decode_raw_byte_markers_to_byte_chars(&stored), "\u{e314}");
-        assert_eq!(
-            String::from_utf8(decode_raw_byte_markers(stored.as_bytes())).unwrap(),
-            "\u{e314}"
-        );
-    }
-
-    #[test]
-    fn issue2881_raw_byte_decoders_agree_on_registry_inputs() {
-        // #2881 parity (sweep item E1): the two raw-byte decoders share
-        // one unit grammar; they differ only in output domain — the
-        // sibling renders raw bytes, the boundary decoder renders byte
-        // chars (byte value == code point) for verbatim chars it keeps.
-        // Walk each input once, render the expected decode in both
-        // domains, and require both decoders to match.
-        fn expected_decodes(input: &str) -> (Vec<u8>, String) {
-            let esc = crate::executor::markers::LITERAL_CHAR_ESCAPE;
-            let mut bytes = Vec::new();
-            let mut text = String::new();
-            let mut push_char = |bytes: &mut Vec<u8>, text: &mut String, c: char| {
-                let mut buf = [0u8; 4];
-                bytes.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                text.push(c);
-            };
-            let mut chars = input.chars().peekable();
-            while let Some(ch) = chars.next() {
-                if ch == esc {
-                    // E400 + c is the literal-char escape: emit c
-                    // verbatim; a trailing E400 stays E400.
-                    let emit = chars.next().unwrap_or(esc);
-                    push_char(&mut bytes, &mut text, emit);
-                } else if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
-                    match chars.peek().copied() {
-                        Some(next) if next as u32 == RAW_BYTE_MARKER_ESCAPE => {
-                            chars.next();
-                            push_char(&mut bytes, &mut text, ch);
-                        }
-                        Some(next)
-                            if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST)
-                                .contains(&(next as u32)) =>
-                        {
-                            chars.next();
-                            let byte = (next as u32 - RAW_BYTE_MARKER_FIRST) as u8;
-                            bytes.push(byte);
-                            text.push(byte as char);
-                        }
-                        _ => push_char(&mut bytes, &mut text, ch),
-                    }
-                } else {
-                    push_char(&mut bytes, &mut text, ch);
-                }
-            }
-            (bytes, text)
-        }
-
-        let esc = crate::executor::markers::LITERAL_CHAR_ESCAPE;
-        let raw = char::from_u32(RAW_BYTE_MARKER_ESCAPE).unwrap();
-        let mut inputs: Vec<String> = vec![
-            String::new(),
-            "plain text".to_string(),
-            esc.to_string(),
-            raw.to_string(),
-            format!("{raw}{raw}"),
-            format!("{raw}x"),
-            format!("{esc}{esc}"),
-            format!("a{esc}\u{e314}b{raw}{}c", char::from_u32(0xE0CD).unwrap()),
-        ];
-        for info in crate::executor::markers::MARKERS {
-            let Some(c) = char::from_u32(info.code) else {
-                continue;
-            };
-            inputs.push(c.to_string());
-            inputs.push(format!("{esc}{c}"));
-            inputs.push(format!("x{esc}{c}y"));
-        }
-        for payload in RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST {
-            let p = char::from_u32(payload).unwrap();
-            inputs.push(format!("{raw}{p}"));
-        }
-        for input in &inputs {
-            let (want_bytes, want_text) = expected_decodes(input);
-            assert_eq!(
-                decode_raw_byte_markers(input.as_bytes()),
-                want_bytes,
-                "sibling decoder disagrees on {input:?}"
-            );
-            assert_eq!(
-                decode_raw_byte_markers_to_byte_chars(input),
-                want_text,
-                "boundary decoder disagrees on {input:?}"
-            );
-        }
     }
 }
