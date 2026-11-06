@@ -1627,12 +1627,10 @@ impl Executor {
         let mut bytes = Vec::new();
         let mut consumed_chars = 0usize;
         let mut ended = false;
-        // True only when the pipe itself reported EOF (empty read or a
-        // read error): a deadline break or a SIGINT abort leaves the
-        // descriptor open in GNU (read.def keeps the fd across builtin
-        // calls), so it must not fall into the EOF close below
-        // (rubash#1624).
-        let mut hit_eof = false;
+        // rubash#2892: EOF (empty read or a read error) ends the loop
+        // exactly like a deadline break — in no case does the read
+        // close the descriptor (read.def keeps the fd across builtin
+        // calls; see the note at the end of this function).
         // rubash#1300: escaped bytes never terminate the record.
         let mut escapes = crate::executor::fd_table::ReadEscapeTracker::new(escape_aware);
         // Post-escape counting state for the char limit (rubash#1328).
@@ -1654,7 +1652,6 @@ impl Executor {
             match crate::fd::read_some(pipe.handle, 1) {
                 Ok(buf) if buf.is_empty() => {
                     ended = true;
-                    hit_eof = true;
                     break;
                 }
                 Ok(buf) => {
@@ -1687,7 +1684,6 @@ impl Executor {
                 }
                 Err(_) => {
                     ended = true;
-                    hit_eof = true;
                     break;
                 }
             }
@@ -1710,16 +1706,15 @@ impl Executor {
                     .any(|byte| delimiter_byte_matches(*byte, delimiter))
             };
         }
-        if hit_eof
-            && matches!(
-                self.fd_table.read_endpoint(fd),
-                Some(FdReadEndpoint::CoprocStdout { .. })
-            )
-        {
-            // EOF closes this shell-owned read capability. Job reaping remains
-            // separate so wait can still consume the child's final status.
-            self.fd_table.close_input(fd);
-        }
+        // rubash#2892: EOF on a coproc read end does NOT close the
+        // descriptor — GNU's read builtin (builtins/read.def) never
+        // closes its input fd at EOF, so a repeated `read <&N` after
+        // the child closed its stdout simply reports EOF again
+        // (status 1, no diagnostic) while the child still lives. The
+        // endpoint is disposed only when the coproc is reaped
+        // (coproc_dispose, execute_cmd.c:2166). (An earlier arm closed
+        // the input here, so the second read failed with
+        // "Bad file descriptor".)
         // EOF before any byte: no record. A delimiter-only record (empty
         // line) IS a record — served as the empty string (niubash#275).
         if bytes.is_empty() && !delimiter_found {
