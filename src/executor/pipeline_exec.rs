@@ -1675,7 +1675,25 @@ impl Executor {
             // stage's reads can be judged against real arrival times.
             self.timed_stdin = input_timing.clone();
             let stage_timing = super::shell_options::begin_capture_timing();
-            let Some((mut next_input, mut next_stderr, mut next_status)) = (if pipeline_inverted {
+            // rubash#2895: a coproc (optionally time-wrapped) in last
+            // position is set up in the current shell, not on the
+            // stage clone (see execute_coproc_pipeline_tail).
+            let stage_is_coproc_tail = last_stage
+                && (stage.coproc_command.is_some()
+                    || stage
+                        .time_command
+                        .as_ref()
+                        .is_some_and(|time| time.command.coproc_command.is_some()));
+            let Some((mut next_input, mut next_stderr, mut next_status)) = (if stage_is_coproc_tail
+            {
+                if pipeline_inverted {
+                    self.with_errexit_suppressed(|executor| {
+                        executor.execute_coproc_pipeline_tail(stage).map(Some)
+                    })?
+                } else {
+                    Some(self.execute_coproc_pipeline_tail(stage)?)
+                }
+            } else if pipeline_inverted {
                 self.with_errexit_suppressed(|executor| {
                     if last_stage && executor.lastpipe_enabled() {
                         executor.execute_lastpipe_stage(stage, &input).map(Some)
@@ -3986,6 +4004,19 @@ impl Executor {
             return Ok(None);
         }
         let shell_command = commands[shell_index];
+        // rubash#2895: a coproc is not a stream-transforming shell
+        // stage. As the last element GNU sets it up in the current
+        // shell (execute_pipeline dispatches cm_coproc to
+        // execute_coproc in the parent, execute_cmd.c:667-669); in
+        // any other position the forked element's registration dies
+        // with the element. This path's in-process stage runner
+        // models neither, so a coproc shell stage keeps the
+        // sequential stage loop, whose tail arm performs the parent
+        // setup (a time-wrapped coproc declines just below via the
+        // time_command check).
+        if shell_command.coproc_command.is_some() {
+            return Ok(None);
+        }
         // The shell stage must be plain: the pipes are its only stream
         // claims. Its own redirects/tempenv/heredoc/procsubs keep the
         // shell-aware sequential machine.
