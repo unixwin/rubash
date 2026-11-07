@@ -1,24 +1,33 @@
 //! rubash#2982 regressions: the background wrapper child's `-c` source
-//! re-defines the parent's functions from a textual prelude, but under
-//! functrace/errtrace (`set -eET`, as bats-exec-test runs) the child
-//! inherited the DEBUG and ERR traps LIVE — so they fired before the
-//! prelude's function definitions had been evaluated, while the
-//! handler functions did not exist yet (GNU's forked async child never
-//! has this window: execute_cmd.c:1576 execute_in_subshell copies the
-//! table whole, and trap.c:1467 reset_or_restore_signal_handlers /
-//! trap.c:1526 reset_signal_handlers keep DEBUG only under functrace,
-//! ERR only under errtrace). The failure was nondeterministic — the
-//! prelude order is HashMap-random — surfacing as `bats_debug_trap:
-//! command not found`, `bats_error_trap: command not found`,
-//! `bats_check_status_from_trap: command not found`, or
-//! `bats_normalize_windows_dir_path: command not found`, each time
-//! killing the background child (rc=127) and, in the bats shape,
-//! leaving the test's `kill -SIGINT -- -$PID` with no such process
-//! (rubash#2983). The same prelude rendering also dropped a quoted
-//! empty word: `[[ $1 == "" ]]` (bats' bats_sort) rendered as
-//! `[[ $1 ==  ]]`, a parse error that killed the child outright
-//! (rc=2) — GNU print_cmd.c command_print_word_list prints each word's
-//! text as lexed, quotes intact.
+//! re-defines the parent's functions from a textual prelude. The three
+//! tests below pin the prelude RENDERING regressions — a quoted empty
+//! word dropped from a `[[ ]]` comparison (`[[ $1 == "" ]]` rendered
+//! as `[[ $1 ==  ]]`, a parse error that killed the child outright,
+//! rc=2) and a STORAGE_WORD_PREFIX carrier leaked into `for` word
+//! lists (the respawned child re-lexed `for p in \x1d${arr[@]}` and
+//! lost the first element). Both rendering defects were fixed by
+//! merged #2990 (commit fb96e741, respawn serializers render words
+//! via the raw contract); the tests below are that fix's regression
+//! coverage, kept on this branch because this lane found them — they
+//! fail on the pre-#2990 base (89e18a92) and pass on any tree that
+//! contains #2990. GNU print_cmd.c command_print_word_list prints each
+//! word's text as lexed, quotes intact.
+//!
+//! This PR's own change (C2) is separate: `reset_traps_for_background_wrapper`
+//! + `background_trap_rearm_source` reset the functrace/errtrace-kept
+//! DEBUG and ERR traps while the wrapper child evaluates its prelude
+//! and re-arm them before the body, closing the window the textual
+//! respawn creates (GNU's forked async child never has it:
+//! execute_cmd.c:1576 execute_in_subshell copies the table whole).
+//! Honesty note: no independently fail-first probe shape for C2 alone
+//! was found — function definitions skip the DEBUG trap (verified on
+//! GNU and rubash: a trap installed before three definitions fires
+//! only for the following command), the wrapper child reads no startup
+//! file ($BASH_ENV is not sourced by the respawned child, probed), and
+//! the prelude is definitions-only, so no trap can fire while the
+//! table is incomplete; the observed trap errors were downstream of the
+//! C1 parse truncation (see REPORT §C2 honesty note). C2 is therefore
+//! defense-in-depth, verified behavior-preserving, not pin-proven.
 //!
 //! Expectations verified byte-for-byte against GNU Bash 5.3.20
 //! script-file probes (self-compiled oracle).
