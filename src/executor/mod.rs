@@ -914,6 +914,18 @@ pub struct Executor {
     /// reads — is never mutated (rubash#1047).
     standard_path_scope: Option<String>,
     debug_trap_running: bool,
+    /// rubash#2969: true only while the DEBUG trap ACTION's own AST
+    /// executes (the execute_ast call in run_debug_trap). Distinct from
+    /// debug_trap_running, which also covers debugger consults whose
+    /// evaluations rely on the re-entrancy flag: a break/continue
+    /// defers to the pending loop-control flags only when it is part
+    /// of the action itself (GNU assigns `breaking`/`continuing` for
+    /// the action's commands); debugger-typed evaluations and
+    /// breakpoint conditions are a separate principal whose
+    /// break/continue keeps the unwind channel (debugger design 5.3:
+    /// a condition that unwinds is a failed condition; a typed
+    /// `break 1` preempts the pending command like script text).
+    debug_action_running: bool,
     /// rubash#375: parse-once cache for the DEBUG trap action. GNU parses a
     /// trap action once at `trap` invocation (trap.c read_trap_action) and
     /// runs the cached parse per firing; re-tokenizing + re-parsing the same

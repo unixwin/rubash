@@ -176,7 +176,7 @@ impl Executor {
                 // `until false; do break; done` must leave $? = 0, and
                 // `until (exit 7); do break; done` must not leak the 7.
                 self.exit_code = 0;
-                if self.debug_trap_running && own_loop_depth > 0 {
+                if self.debug_action_running && own_loop_depth > 0 {
                     // rubash#2969: inside a DEBUG trap action the builtin
                     // must not unwind — the firing site is not this loop's
                     // frame (a for head's frame is not even entered when
@@ -250,7 +250,7 @@ impl Executor {
                 // cases return Break.
                 self.break_failure_status.set(Some(1));
                 self.exit_code = 1;
-                if self.debug_trap_running && own_loop_depth > 0 {
+                if self.debug_action_running && own_loop_depth > 0 {
                     // rubash#2969: GNU break.def:88 still assigns
                     // `breaking = loop_level` on the range failure; the
                     // parked failure status above rides to the consuming

@@ -1172,6 +1172,7 @@ impl Executor {
             builtin_wrapper_depth: 0,
             standard_path_scope: None,
             debug_trap_running: false,
+            debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
             debug_driver: None,
             debug_syntax_unit_file: None,

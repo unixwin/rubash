@@ -2029,6 +2029,7 @@ impl Executor {
             builtin_wrapper_depth: self.builtin_wrapper_depth,
             standard_path_scope: self.standard_path_scope.clone(),
             debug_trap_running: false,
+            debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
             // WP-3: a command-substitution child never inherits the
             // debug session (DE-12: its frames are synthesized in a
