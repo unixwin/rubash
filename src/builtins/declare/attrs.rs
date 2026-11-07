@@ -1,12 +1,12 @@
 use std::env;
-use std::io::{self, Write};
+use std::io;
 
-use super::diagnostic::diagnostic_prefix;
 use super::marks::{mark_array, mark_assoc, mark_exported, mark_typed, unmark_typed};
 use super::{
     ARRAY_VARS, ASSOC_128_VARS, ASSOC_VARS, CAPCASE_VARS, EXECUTION_FAILURE, EXPORTED_VARS,
     INTEGER_VARS, LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, TRACE_VARS, UPPERCASE_VARS,
 };
+use crate::executor::builtin_diag::DiagKind;
 use crate::executor::local_helpers::sync_shell_assignment_process_env;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
@@ -34,7 +34,7 @@ pub(super) struct DeclareOptions {
     pub(super) unset_trace: bool,
 }
 
-pub(super) fn apply_declare_attrs<W>(
+pub(super) fn apply_declare_attrs(
     command_name: &str,
     names: &[&str],
     variables: &mut crate::shell::var_table::VarTable,
@@ -43,11 +43,9 @@ pub(super) fn apply_declare_attrs<W>(
     deleted_names: &std::collections::HashSet<String>,
     preexisting_vars: &std::collections::HashSet<String>,
     in_function: bool,
-    stderr: &mut W,
-) -> io::Result<i32>
-where
-    W: Write,
-{
+    diag: &mut crate::executor::builtin_diag::Diag<'_>,
+    prolog: &crate::executor::builtin_diag::Prolog,
+) -> io::Result<i32> {
     // GNU declare.def:1031-1034 delete_var: names deleted by a failed
     // created-var assignment must not be resurrected by attribute marking.
     let names: Vec<&str> = if deleted_names.is_empty() {
@@ -165,12 +163,7 @@ where
             let name = name.split_once('=').map(|(name, _)| name).unwrap_or(name);
             let name = name.strip_suffix('+').unwrap_or(name);
             if unset_readonly && variables.is_marked(READONLY_VARS, name) {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: readonly variable",
-                    diagnostic_prefix(variables),
-                    name
-                )?;
+                diag.error(DiagKind::Readonly(name.to_string()));
                 attr_status = EXECUTION_FAILURE;
                 // GNU declare.def refuses ALL attribute removal from a
                 // readonly variable (nameref17.sub: typeset +r foo1 keeps
@@ -181,12 +174,9 @@ where
             if (unset_array && variables.is_marked(ARRAY_VARS, name))
                 || (unset_assoc && variables.is_marked(ASSOC_VARS, name))
             {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: cannot destroy array variables in this way",
-                    diagnostic_prefix(variables),
-                    name
-                )?;
+                diag.free(format_args!(
+                    "{name}: cannot destroy array variables in this way"
+                ));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -222,12 +212,7 @@ where
                 if variables.is_marked(READONLY_VARS, name)
                     && variables.get(name).map_or(false, |cell| !cell.is_empty())
                 {
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: {}: readonly variable",
-                        diagnostic_prefix(variables),
-                        name
-                    )?;
+                    diag.error(DiagKind::Readonly(name.to_string()));
                     attr_status = EXECUTION_FAILURE;
                     continue;
                 }

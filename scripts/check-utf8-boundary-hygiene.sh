@@ -83,6 +83,12 @@ src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
 src/executor/conditional.rs::is_shell_name_char\(bytes\[name_start - 1\] as char\)
 src/executor/conditional.rs::is_shell_name_start\(bytes\[name_start\] as char\)
 src/executor/declare_local.rs::is_shell_name_(start|char)\(c as char\)
+# declare_local.rs: `Opt(c)` only fires for a byte found in the row's
+# spec ("+acfgilnprtuxAFGI", all ASCII), so the widened byte is ASCII
+# by construction, never a UTF-8 continuation byte. (The `optopt`
+# half of the same scan is NOT allowlisted: it comes from user argv
+# and is rendered lossy, see declare_option_scan.)
+src/executor/declare_local.rs::Opt\(c\) => letters\.push\(\(c as char
 src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_case.rs::\} as char\);

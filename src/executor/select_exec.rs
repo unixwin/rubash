@@ -224,7 +224,7 @@ impl Executor {
             // empty string on clean EOF and the partial line on an
             // unterminated tail.
             let reply = unescape_read_backslashes(&input);
-            if !self.apply_shell_assignment("REPLY", reply.clone()) {
+            if !self.apply_shell_assignment("REPLY", reply.clone(), None) {
                 // GNU: the read_builtin bind failure fails the query —
                 // stdout newline, no body, status failure (rubash#1018
                 // probe: `readonly REPLY` prints `REPLY: readonly
@@ -273,7 +273,7 @@ impl Executor {
             // assignment semantics (empty-cell nameref stores the cell,
             // invalid values report `` `x': not a valid identifier `` —
             // nameref11.sub `select r in /` on `declare -n r`).
-            if !self.apply_shell_assignment(&select_command.variable, selected.clone()) {
+            if !self.apply_shell_assignment(&select_command.variable, selected.clone(), None) {
                 self.exit_code = 1;
                 // POSIX-mode notes item 37 covers select alongside for: a
                 // readonly select variable exits the non-interactive POSIX

@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{self, Write};
 
 use super::attrs::DeclareOptions;
-use super::diagnostic::diagnostic_prefix;
+
 use super::marks::{exported_vars, marked_vars};
 use super::names::valid_identifier;
 use super::output::{
@@ -14,7 +14,7 @@ use super::{
     LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
 };
 
-pub(super) fn print_declare_names<W, E>(
+pub(super) fn print_declare_names<W>(
     command_name: &str,
     names: &[&str],
     variables: &crate::shell::var_table::VarTable,
@@ -24,11 +24,11 @@ pub(super) fn print_declare_names<W, E>(
     dynamic_views: &[DynamicDeclarationView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     stdout: &mut W,
-    stderr: &mut E,
+    diag: &mut crate::executor::builtin_diag::Diag<'_>,
+    prolog: &crate::executor::builtin_diag::Prolog,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     // rubash#1569: the underlay applies to LISTINGS only. An explicit
     // `declare -p name` lookup goes through find_variable, which sees
@@ -134,13 +134,10 @@ where
         listed.sort();
         listed
     } else {
-        names
-            .iter()
-            .copied()
-            .map(|name| name.split_once('=').map(|(name, _)| name).unwrap_or(name))
-            .map(|name| name.strip_suffix('+').unwrap_or(name))
-            .map(str::to_string)
-            .collect()
+        // GNU declare.def:389-406: the -p branch looks each operand up
+        // verbatim — a valued operand is a name (`declare -p dv=6`
+        // reports `dv=6: not found`), never a bind of its base.
+        names.iter().copied().map(str::to_string).collect()
     };
     // rubash#1569: for names the current command's own tempenv frame
     // bound, the per-name attributes come from the pre-frame snapshot,
@@ -211,12 +208,7 @@ where
         {
             print_unset_declaration(&name, attrs, stdout)?;
         } else {
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: not found",
-                diagnostic_prefix(variables),
-                name
-            )?;
+            diag.free(format_args!("{name}: not found"));
             status = EXECUTION_FAILURE;
         }
     }

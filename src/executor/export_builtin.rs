@@ -297,40 +297,45 @@ impl Executor {
         W: Write,
         E: Write,
     {
+        // The -f face speaks through the export row (Stage-2 ④
+        // Phase 4): the invalid-option diagnostic + usage come from
+        // the Diag, and the flush runs before the buffered stderr is
+        // read by the caller.
+        let row = crate::executor::builtin_table::builtin_table_row("export").expect("export row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
+        let prolog = self.diagnostic_prolog();
         let mut unset = false;
         let mut print = false;
-        let mut index = 0;
-        while let Some(arg) = args.get(index) {
-            if arg == "--" {
-                index += 1;
-                break;
-            }
-            if !arg.starts_with('-') || arg == "-" {
-                break;
-            }
-            for option in arg[1..].chars() {
-                match option {
-                    'f' => {}
-                    'n' => unset = true,
-                    'p' => print = true,
-                    other => {
-                        writeln!(
-                            stderr,
-                            "{}export: -{other}: invalid option",
-                            self.diagnostic_prefix()
-                        )?;
-                        writeln!(
-                            stderr,
-                            "export: usage: export [-fn] [name[=value] ...] or export -p [-f]"
-                        )?;
+        let operands: Vec<&str> = {
+            let mut opt =
+                crate::executor::builtin_opt::BuiltinOpt::new(row, args, &mut diag, false);
+            loop {
+                match opt.next() {
+                    crate::executor::builtin_opt::OptEvent::Help => {
+                        crate::builtins::help::print_builtin_help(row.name, stdout)?;
                         return Ok(2);
                     }
+                    crate::executor::builtin_opt::OptEvent::End => break,
+                    crate::executor::builtin_opt::OptEvent::Opt(c) => match c {
+                        b'f' => {}
+                        b'n' => unset = true,
+                        b'p' => print = true,
+                        _ => {}
+                    },
+                    crate::executor::builtin_opt::OptEvent::OptArg(_, _) => {}
                 }
             }
-            index += 1;
-        }
+            let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+            drop(opt);
+            if diag.status() != 0 {
+                diag.usage();
+                diag.flush_with(|| prolog.clone());
+                return Ok(diag.status());
+            }
+            operands
+        };
 
-        if print && index >= args.len() {
+        if print && operands.is_empty() {
             let mut names = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
             names.sort();
             for name in names {
@@ -342,22 +347,17 @@ impl Executor {
         }
 
         let mut status = 0;
-        for name in &args[index..] {
+        for name in operands.iter().copied() {
+            // Whole-word function lookup (setattr.def:184): the
+            // operand is looked up as written — `export -f f=x`
+            // reports `f=x: not a function`, never a split name.
             if !self.shell_state.functions.contains_key(name) {
-                writeln!(
-                    stderr,
-                    "{}export: {name}: not a function",
-                    self.diagnostic_prefix()
-                )?;
+                diag.free(format_args!("{name}: not a function"));
                 status = 1;
                 continue;
             }
             if !unset && !is_exportable_function_name(name) {
-                writeln!(
-                    stderr,
-                    "{}export: {name}: cannot export",
-                    self.diagnostic_prefix()
-                )?;
+                diag.free(format_args!("{name}: cannot export"));
                 status = 1;
                 continue;
             }
@@ -367,6 +367,7 @@ impl Executor {
                 mark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
+        diag.flush_with(|| prolog.clone());
 
         Ok(status)
     }

@@ -1,5 +1,3 @@
-use std::env;
-
 use super::COMPOUND_ASSIGNMENT_MARKER;
 use super::{ARRAY_VARS, ASSOC_VARS, INTEGER_VARS};
 use crate::builtins::declare::storage::{append_array_value, append_assoc_value};
@@ -169,35 +167,6 @@ pub(super) fn format_array_value(value: &str) -> String {
         .and_then(|value| value.strip_suffix(')'))
         .unwrap_or(value);
     format!("([0]=\"{}\")", quote_export_value(inner))
-}
-
-pub(super) fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        env::var("__RUBASH_SCRIPT_NAME"),
-        env::var("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
-}
-
-/// GNU error.c:453 err_readonly (report_error family): the bare
-/// `name: readonly variable` bind diagnostic honors gnu_errfmt
-/// (rubash#1038), unlike the sh_readonly builtin_error lines sharing the
-/// callers.
-pub(super) fn readonly_error_prefix(env_vars: &crate::shell::var_table::VarTable) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{script}:{line}: ");
-        }
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
 }
 
 pub(crate) fn split_assignment(arg: &str) -> (&str, bool, Option<&str>) {

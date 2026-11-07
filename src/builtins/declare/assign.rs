@@ -1,6 +1,6 @@
-use std::io::{self, Write};
+use std::io;
 
-use super::diagnostic::diagnostic_prefix;
+use super::bare_diag_line;
 use super::marks::{mark_typed, unmark_typed};
 use super::names::valid_nameref_value;
 use super::storage::{
@@ -15,11 +15,12 @@ use super::{
     NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
 };
 use crate::executor::arithmetic::eval_conditional_arith_value;
+use crate::executor::builtin_diag::DiagKind;
 use crate::executor::local_helpers::sync_shell_assignment_process_env;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
 
-pub(super) fn assign_declare_names<W>(
+pub(super) fn assign_declare_names(
     command_name: &str,
     names: &[&str],
     variables: &mut crate::shell::var_table::VarTable,
@@ -31,13 +32,11 @@ pub(super) fn assign_declare_names<W>(
     integer: bool,
     mark_unset_declarations: bool,
     deleted_names: &mut std::collections::HashSet<String>,
-    stderr: &mut W,
+    diag: &mut crate::executor::builtin_diag::Diag<'_>,
+    prolog: &crate::executor::builtin_diag::Prolog,
     oob_word: &mut Option<String>,
     written_hints: &mut super::WrittenOperandHints,
-) -> io::Result<i32>
-where
-    W: Write,
-{
+) -> io::Result<i32> {
     let mut status = EXECUTION_SUCCESS;
     // GNU variables.c:5760 { "BASH_COMPAT", sv_shcompat }: a declare-family
     // operand rebinding BASH_COMPAT re-syncs the compatNN shopt flags (the
@@ -119,11 +118,7 @@ where
             if let Err(pattern) =
                 append_array_value("()", &expanded_value, integer, variables, oob_word)
             {
-                writeln!(
-                    stderr,
-                    "{}no match: {pattern}",
-                    diagnostic_prefix(variables)
-                )?;
+                bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
                 status = EXECUTION_FAILURE;
                 deleted_names.insert(raw_target.to_string());
                 continue;
@@ -134,11 +129,11 @@ where
             if oob_word.is_some() {
                 return Ok(EXECUTION_FAILURE);
             }
-            writeln!(
-                stderr,
-                "{}{raw_target}: cannot assign list to array member",
-                diagnostic_prefix(variables)
-            )?;
+            bare_diag_line(
+                diag,
+                prolog,
+                &format!("{raw_target}: cannot assign list to array member"),
+            );
             status = EXECUTION_FAILURE;
             if !assoc && !variables.is_marked(ASSOC_VARS, base) {
                 mark_typed(variables, ARRAY_VARS, base);
@@ -163,13 +158,9 @@ where
                 let expanded_value = expand_compound_array_value(value, variables);
                 if assoc || variables.is_marked(ASSOC_VARS, base) {
                     if let Some(bare) = assoc_bare_element(&expanded_value) {
-                        writeln!(
-                            stderr,
-                            "{}declare: {}: {}: must use subscript when assigning associative array",
-                            diagnostic_prefix(variables),
-                            base,
-                            bare
-                        )?;
+                        diag.free(format_args!(
+                            "{base}: {bare}: must use subscript when assigning associative array"
+                        ));
                         status = EXECUTION_FAILURE;
                         continue;
                     }
@@ -188,11 +179,7 @@ where
                             mark_typed(variables, ARRAY_VARS, base);
                         }
                         Err(pattern) => {
-                            writeln!(
-                                stderr,
-                                "{}no match: {pattern}",
-                                diagnostic_prefix(variables)
-                            )?;
+                            bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
                             status = EXECUTION_FAILURE;
                             deleted_names.insert(raw_target.to_string());
                         }
@@ -211,20 +198,15 @@ where
                     v.starts_with(STORAGE_WORD_PREFIX) || (v.starts_with('(') && v.ends_with(')'))
                 })
             {
-                writeln!(
-                    stderr,
-                    "{}warning: {name}: quoted compound array assignment deprecated",
-                    diagnostic_prefix(variables)
-                )?;
+                bare_diag_line(
+                    diag,
+                    prolog,
+                    &format!("warning: {name}: quoted compound array assignment deprecated"),
+                );
             }
             if assoc || variables.is_marked(ASSOC_VARS, base) {
                 if variables.is_marked(READONLY_VARS, base) {
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: {}: readonly variable",
-                        diagnostic_prefix(variables),
-                        base
-                    )?;
+                    diag.error(DiagKind::Readonly(base.to_string()));
                     status = EXECUTION_FAILURE;
                 } else {
                     let current = variables
@@ -273,11 +255,11 @@ where
                 // removes the attribute with a warning and drops the cell --
                 // it never becomes element 0 (nameref15.sub).
                 if variables.is_marked(NAMEREF_VARS, base) {
-                    writeln!(
-                        stderr,
-                        "{}warning: {base}: removing nameref attribute",
-                        diagnostic_prefix(variables)
-                    )?;
+                    bare_diag_line(
+                        diag,
+                        prolog,
+                        &format!("warning: {base}: removing nameref attribute"),
+                    );
                     unmark_typed(variables, NAMEREF_VARS, base);
                     // Removing the cell entirely keeps the scalar-to-array
                     // conversion below from seeding it at element 0.
@@ -333,12 +315,7 @@ where
                         });
                         if wrapped.is_none() {
                             let word = written_element_word(name, written_hints);
-                            writeln!(
-                                stderr,
-                                "{}{}: bad array subscript",
-                                diagnostic_prefix(variables),
-                                word
-                            )?;
+                            bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
                         }
                         wrapped
                     }
@@ -448,19 +425,9 @@ where
             // fail earlier through the builtin_error path, which keeps the
             // `declare:` command prefix.
             if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-                writeln!(
-                    stderr,
-                    "{}{}: readonly variable",
-                    diagnostic_prefix(variables),
-                    var_name
-                )?;
+                diag.err_readonly(&prolog.render(), var_name);
             } else {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: readonly variable",
-                    diagnostic_prefix(variables),
-                    var_name
-                )?;
+                diag.error(DiagKind::Readonly(var_name.to_string()));
             }
             status = EXECUTION_FAILURE;
             continue;
@@ -487,19 +454,13 @@ where
                     // reference` -- and the variable survives (nameref13.sub:
                     // `typeset -n foo; typeset foo=12345` keeps foo).
                     if frame_locals.iter().any(|local| local == var_name) {
-                        writeln!(
-                            stderr,
-                            "{}{command_name}: `{value}': invalid variable name for name reference",
-                            diagnostic_prefix(variables)
-                        )?;
+                        diag.free(format_args!(
+                            "`{value}': invalid variable name for name reference"
+                        ));
                         status = EXECUTION_FAILURE;
                         continue;
                     }
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: `{value}': not a valid identifier",
-                        diagnostic_prefix(variables)
-                    )?;
+                    diag.error(DiagKind::InvalidId(value.to_string()));
                     status = EXECUTION_FAILURE;
                     // GNU declare.def:1031-1034: when the variable was
                     // created by THIS declare invocation — an unusable-cell
@@ -532,12 +493,7 @@ where
                 // sv_locale watcher fires on it (variables.c:6272).
                 if let Some(warning) = crate::locale::locale_assignment_warning(var_name, variables)
                 {
-                    writeln!(
-                        stderr,
-                        "{}warning: {}",
-                        diagnostic_prefix(variables),
-                        warning
-                    )?;
+                    bare_diag_line(diag, prolog, &format!("warning: {warning}"));
                 }
                 unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
                 continue;
@@ -588,13 +544,7 @@ where
             if assoc || variables.is_marked(ASSOC_VARS, var_name) {
                 if value.starts_with('(') && value.ends_with(')') {
                     if let Some(bare) = assoc_bare_element(value) {
-                        writeln!(
-                            stderr,
-                            "{}declare: {}: {}: must use subscript when assigning associative array",
-                            diagnostic_prefix(variables),
-                            var_name,
-                            bare
-                        )?;
+                        diag.free(format_args!("{var_name}: {bare}: must use subscript when assigning associative array"));
                         status = EXECUTION_FAILURE;
                         continue;
                     }
@@ -604,12 +554,7 @@ where
                 // bad array subscript` but does NOT set any_failed — the
                 // pair is skipped and the assignment still succeeds.
                 for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
-                    writeln!(
-                        stderr,
-                        "{}{}: bad array subscript",
-                        diagnostic_prefix(variables),
-                        word
-                    )?;
+                    bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
                 }
                 if value.starts_with('(') && value.ends_with(')') {
                     append_assoc_value(&current, value, integer, variables)
@@ -641,11 +586,7 @@ where
                 match append_array_value(&baseline, value, integer, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
-                        writeln!(
-                            stderr,
-                            "{}no match: {pattern}",
-                            diagnostic_prefix(variables)
-                        )?;
+                        bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
                         status = EXECUTION_FAILURE;
                         deleted_names.insert(var_name.to_string());
                         continue;
@@ -672,25 +613,16 @@ where
             // array compound assignment must use the [key]=value form. A bare
             // word (no subscript) is rejected with the must-use-subscript error.
             if let Some(bare) = assoc_bare_element(value) {
-                writeln!(
-                    stderr,
-                    "{}declare: {}: {}: must use subscript when assigning associative array",
-                    diagnostic_prefix(variables),
-                    var_name,
-                    bare
-                )?;
+                diag.free(format_args!(
+                    "{var_name}: {bare}: must use subscript when assigning associative array"
+                ));
                 status = EXECUTION_FAILURE;
                 continue;
             }
             // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): same
             // kvpair empty-key diagnostic as the append path above.
             for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
-                writeln!(
-                    stderr,
-                    "{}{}: bad array subscript",
-                    diagnostic_prefix(variables),
-                    word
-                )?;
+                bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
             }
             append_assoc_value("()", value, integer, variables)
         } else if integer {
@@ -698,11 +630,7 @@ where
                 match append_array_value("()", value, true, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
-                        writeln!(
-                            stderr,
-                            "{}no match: {pattern}",
-                            diagnostic_prefix(variables)
-                        )?;
+                        bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
                         status = EXECUTION_FAILURE;
                         deleted_names.insert(var_name.to_string());
                         continue;
@@ -733,11 +661,7 @@ where
             match append_array_value("()", &expanded_value, false, variables, oob_word) {
                 Ok(storage) => storage,
                 Err(pattern) => {
-                    writeln!(
-                        stderr,
-                        "{}no match: {pattern}",
-                        diagnostic_prefix(variables)
-                    )?;
+                    bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
                     status = EXECUTION_FAILURE;
                     deleted_names.insert(var_name.to_string());
                     continue;
@@ -781,20 +705,17 @@ where
             && (value == var_name
                 || declare_indexed_element(&value).is_some_and(|(base, _)| base == var_name))
         {
-            let line = if in_function {
-                format!(
-                    "{}warning: {var_name}: circular name reference
-",
-                    diagnostic_prefix(variables)
-                )
+            // The two arms differ in shape (declare.def:562-573):
+            // function scope warns through error.c's unqualified
+            // `warning:` voice; global scope errors with the variable
+            // name but no builtin name. Both keep the single trailing
+            // newline the old `write!` carried.
+            let text = if in_function {
+                format!("warning: {var_name}: circular name reference")
             } else {
-                format!(
-                    "{}{var_name}: nameref variable self references not allowed
-",
-                    diagnostic_prefix(variables)
-                )
+                format!("{var_name}: nameref variable self references not allowed")
             };
-            write!(stderr, "{line}")?;
+            bare_diag_line(diag, prolog, &text);
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -815,12 +736,7 @@ where
         // rubash#1692: same sv_locale bind hook as the nameref path
         // above (variables.c:6272).
         if let Some(warning) = crate::locale::locale_assignment_warning(var_name, variables) {
-            writeln!(
-                stderr,
-                "{}warning: {}",
-                diagnostic_prefix(variables),
-                warning
-            )?;
+            bare_diag_line(diag, prolog, &format!("warning: {warning}"));
         }
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
         if compound_operand && !assoc && !variables.is_marked(ASSOC_VARS, var_name) {
@@ -842,7 +758,7 @@ where
         if let Err(diagnostic) =
             crate::builtins::shopt::sync_compat_flags_from_bash_compat(variables)
         {
-            writeln!(stderr, "{}{diagnostic}", diagnostic_prefix(variables),)?;
+            bare_diag_line(diag, prolog, &diagnostic);
         }
     }
     Ok(status)

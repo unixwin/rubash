@@ -7,7 +7,6 @@ use std::io::{self, Write};
 
 mod assign;
 mod attrs;
-mod diagnostic;
 mod marks;
 mod names;
 mod output;
@@ -35,10 +34,12 @@ pub(crate) struct DynamicDeclarationView {
     pub array: bool,
 }
 
+use crate::executor::builtin_diag::{Diag, DiagKind, Prolog};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::builtin_table_row;
 use crate::shell::VariableStore;
 use assign::assign_declare_names;
 use attrs::{apply_declare_attrs, DeclareOptions};
-use diagnostic::diagnostic_prefix;
 use marks::unmark_typed;
 use names::{
     check_selfref, declare_base_name, valid_array_reference, valid_declare_name, valid_identifier,
@@ -92,6 +93,44 @@ const DECLARED_UNSET_VARS: &str = "__RUBASH_DECLARED_UNSET_VARS";
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
 const EX_USAGE: i32 = 2;
+
+/// The flush prolog for this family's `Diag` handles, built from the
+/// same env cells the deleted `diagnostic::diagnostic_prefix` read
+/// (executor map first, process environment as fallback — nested
+/// in-process executions strip the markers from the process env, so
+/// the map wins). Mirrors `set.rs`'s `prolog_for_env`; the executor
+/// callers build their own via `Executor::diagnostic_prolog` and hand
+/// it in, so every line of one call carries one prolog.
+pub(super) fn diag_prolog(variables: &crate::shell::var_table::VarTable) -> Prolog {
+    Prolog {
+        interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
+        shell_basename: variables
+            .get("__RUBASH_SHELL_NAME")
+            .cloned()
+            .unwrap_or_else(|| "rubash".to_string()),
+        error_name: "rubash".to_string(),
+        script_file: variables
+            .get("__RUBASH_SCRIPT_NAME")
+            .cloned()
+            .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+        line: variables
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned()
+            .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
+    }
+}
+
+/// A diagnostic line that carries the prolog but NO builtin name —
+/// the `error.c` report family (`err_badarraysub`, the unqualified
+/// `warning:` lines). GNU writes these through `error.c`'s own
+/// prefix, not `builtin_error`. Recorded diagnostics are flushed
+/// first so the line keeps its position relative to the standard
+/// `{prolog}{name}:` skeleton lines queued on the same handle.
+pub(super) fn bare_diag_line(diag: &mut Diag, prolog: &Prolog, text: &str) {
+    diag.flush_with(|| prolog.clone());
+    let head = prolog.render();
+    diag.sink().write_str(&format!("{head}{text}\n"));
+}
 
 /// Written spellings of declare operands whose subscripts the executor's
 /// declare pass already evaluated, keyed by the operand's REWRITTEN
@@ -510,12 +549,19 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_named_in_context(
+    // The Diag's sink binds here, at the family's dispatch point, to
+    // the stderr the caller supplied (Stage-2 ④ Phase 4).
+    let row = builtin_table_row(command_name)
+        .unwrap_or_else(|| builtin_table_row("declare").expect("declare row exists"));
+    let prolog = diag_prolog(variables);
+    let mut diag = Diag::new(row, stderr);
+    let status = execute_with_io_named_in_context(
         command_name,
         args,
         variables,
         stdout,
-        stderr,
+        &mut diag,
+        &prolog,
         false,
         &[],
         &[],
@@ -523,7 +569,9 @@ where
         &crate::shell::var_table::TempenvListingUnderlay::new(),
         oob_word,
         &mut WrittenOperandHints::default(),
-    )
+    )?;
+    diag.flush_with(|| prolog);
+    Ok(status)
 }
 
 /// GNU builtins/declare.def decides between the global-scope self-reference
@@ -531,12 +579,13 @@ where
 /// `variable_context` (declare.def:565). Rubash threads the executor's
 /// function depth through here so `typeset -n` inside a function warns and
 /// continues instead of erroring.
-pub(crate) fn execute_with_io_named_in_context<W, E>(
+pub(crate) fn execute_with_io_named_in_context<'a, W>(
     command_name: &str,
-    args: &[String],
+    args: &'a [String],
     variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
-    stderr: &mut E,
+    diag: &mut Diag<'a>,
+    prolog: &Prolog,
     in_function: bool,
     frame_locals: &[String],
     dynamic_views: &[DynamicDeclarationView],
@@ -547,7 +596,6 @@ pub(crate) fn execute_with_io_named_in_context<W, E>(
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     let mut print = false;
     let mut export = false;
@@ -570,103 +618,127 @@ where
     let mut unset_capcase = false;
     let mut unset_nameref = false;
     let mut unset_readonly = false;
-    let mut names = Vec::new();
-
-    let mut parse_options = true;
-    for arg in args {
-        if parse_options && arg == "--" {
-            parse_options = false;
-            continue;
-        }
-        if parse_options
-            && (arg.starts_with('-') || arg.starts_with('+'))
-            && arg != "-"
-            && arg != "+"
-        {
-            let set_attr = arg.starts_with('-');
-            for option in arg[1..].chars() {
-                match option {
-                    'p' => print = true,
-                    'x' if set_attr => export = true,
-                    'x' => unset_export = true,
-                    'a' if set_attr => array = true,
-                    'a' => unset_array = true,
-                    'A' if set_attr => assoc = true,
-                    'A' => unset_assoc = true,
-                    'i' if set_attr => integer = true,
-                    'i' => unset_integer = true,
-                    // GNU builtins/declare.def:341-356: each case option
-                    // sets its own bit in flags_on AND (only when setting,
-                    // i.e. flags == &flags_on) adds the other two case
-                    // attributes to flags_off. The bits accumulate across
-                    // the whole option scan — `declare -lu` therefore ends
-                    // with on={lower,upper} and off={upper,capcase,lower,
-                    // capcase}, and the later VSETATTR(flags_on) +
-                    // VUNSETATTR(flags_off) application (declare.def:
-                    // 525-527) leaves NO case attribute at all, instead of
-                    // the last option winning (rubash#1458).
-                    'u' => {
-                        if set_attr {
-                            uppercase = true;
-                            unset_lowercase = true;
-                            unset_capcase = true;
-                        } else {
-                            unset_uppercase = true;
+    // GNU builtins/declare.def:273-274 + bashgetopt.c: the option scan
+    // is internal_getopt over DECLARE_OPTS "+acfgilnprtuxAFGI"
+    // (declare.def:145) — it stops at the first non-option word, so an
+    // option letter after an operand is an operand name, and `--help`
+    // in option position prints the long help (CASE_HELPOPT). The
+    // single BuiltinOpt machine replaces the hand scan here (Stage-2
+    // ④ Phase 4); the row's spec IS the table (D1), so `typeset`
+    // diagnostics carry the invoked name instead of "declare".
+    let mut function = false;
+    let mut names: Vec<&str> = {
+        let row = diag.row();
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    crate::builtins::help::print_builtin_help(row.name, stdout)?;
+                    return Ok(EX_USAGE);
+                }
+                OptEvent::End => break,
+                OptEvent::Opt(c) => {
+                    let set_attr = opt.opttype() == b'-';
+                    match c {
+                        b'p' => print = true,
+                        b'x' if set_attr => export = true,
+                        b'x' => unset_export = true,
+                        b'a' if set_attr => array = true,
+                        b'a' => unset_array = true,
+                        b'A' if set_attr => assoc = true,
+                        b'A' => unset_assoc = true,
+                        b'i' if set_attr => integer = true,
+                        b'i' => unset_integer = true,
+                        // GNU builtins/declare.def:341-356: each case option
+                        // sets its own bit in flags_on AND (only when setting,
+                        // i.e. flags == &flags_on) adds the other two case
+                        // attributes to flags_off. The bits accumulate across
+                        // the whole option scan — `declare -lu` therefore ends
+                        // with on={lower,upper} and off={upper,capcase,lower,
+                        // capcase}, and the later VSETATTR(flags_on) +
+                        // VUNSETATTR(flags_off) application (declare.def:
+                        // 525-527) leaves NO case attribute at all, instead of
+                        // the last option winning (rubash#1458).
+                        b'u' => {
+                            if set_attr {
+                                uppercase = true;
+                                unset_lowercase = true;
+                                unset_capcase = true;
+                            } else {
+                                unset_uppercase = true;
+                            }
                         }
-                    }
-                    'l' => {
-                        if set_attr {
-                            lowercase = true;
+                        b'l' => {
+                            if set_attr {
+                                lowercase = true;
+                                unset_uppercase = true;
+                                unset_capcase = true;
+                            } else {
+                                unset_lowercase = true;
+                            }
+                        }
+                        b'c' if set_attr => {
+                            capcase = true;
                             unset_uppercase = true;
-                            unset_capcase = true;
-                        } else {
                             unset_lowercase = true;
                         }
-                    }
-                    'c' if set_attr => {
-                        capcase = true;
-                        unset_uppercase = true;
-                        unset_lowercase = true;
-                    }
-                    'c' => unset_capcase = true,
-                    'n' if set_attr => nameref = true,
-                    'n' => unset_nameref = true,
-                    'r' if set_attr => readonly = true,
-                    'r' => unset_readonly = true,
-                    // GNU declare.def option string "aAfFgiIlnrtux":
-                    // -t sets att_trace (printed by declare -p); +t
-                    // clears it.
-                    't' if set_attr => trace = true,
-                    't' => unset_trace = true,
-                    'g' | 'G' | 'I' => {
-                        // TODO(variables.c/builtins/declare.def): `-g` forces
-                        // global scope inside functions. Rubash has one
-                        // variable table for now. `-I` is a local inheritance
-                        // attribute; outside local it is accepted but does not
-                        // add a printable variable attribute.
-                    }
-                    // rubash#2582: `f`/`F` never reach this scanner —
-                    // both entry routes (execute_declare_command for
-                    // declare/typeset, execute_local for local) consult
-                    // the single GNU letter table in
-                    // executor::declare_local::DECLARE_OPTION_LETTERS
-                    // (declare.def:145) via scan_declare_options and
-                    // divert f/F to execute_declare_functions first.
-                    _ => {
-                        writeln!(
-                            stderr,
-                            "{}{command_name}: -{option}: invalid option",
-                            diagnostic_prefix(variables),
-                        )?;
-                        print_declare_usage(command_name, stderr)?;
-                        return Ok(EX_USAGE);
+                        b'c' => unset_capcase = true,
+                        b'n' if set_attr => nameref = true,
+                        b'n' => unset_nameref = true,
+                        b'r' if set_attr => readonly = true,
+                        b'r' => unset_readonly = true,
+                        // GNU declare.def option string "aAfFgiIlnrtux":
+                        // -t sets att_trace (printed by declare -p); +t
+                        // clears it.
+                        b't' if set_attr => trace = true,
+                        b't' => unset_trace = true,
+                        b'g' | b'G' | b'I' => {
+                            // TODO(variables.c/builtins/declare.def): `-g` forces
+                            // global scope inside functions. Rubash has one
+                            // variable table for now. `-I` is a local inheritance
+                            // attribute; outside local it is accepted but does not
+                            // add a printable variable attribute.
+                        }
+                        // declare.def:145: -f/-F set att_function (the
+                        // function face owns the listing/definition work;
+                        // a valued operand errors in the name loop below,
+                        // declare.def:465-476). +f/+F clear att_function —
+                        // VUNSETATTR on a variable is a no-op.
+                        b'f' if set_attr => function = true,
+                        b'f' => {}
+                        // -F also sets att_function; the nodefs bit only
+                        // shapes function LISTING, which the function face
+                        // owns — the core keeps just the function flag.
+                        b'F' if set_attr => function = true,
+                        b'F' => {}
+                        // Every other spec letter is covered above; the
+                        // machine only yields spec letters.
+                        _ => {}
                     }
                 }
+                // No spec letter takes an argument.
+                OptEvent::OptArg(_, _) => {}
             }
-        } else {
-            names.push(arg.as_str());
         }
-    }
+        // operands() borrows the args slice ('a), not the machine, so
+        // the names outlive it; drop the machine first to release the
+        // &mut Diag borrow before reading the scan status.
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        drop(opt);
+        if diag.status() != 0 {
+            diag.usage();
+            return Ok(diag.status());
+        }
+        operands
+    };
+
+    // GNU declare.def:389-406: the -p branch prints the operand words
+    // verbatim (show_name_attributes(list->word->word)) — a valued
+    // operand is a name to look up, never a bind (`declare -p dv=6`
+    // reports `dv=6: not found`, E1). The attr pipeline below rewrites
+    // operands (base split, subscript strip), so snapshot the raw
+    // words here for the print call.
+    let print_names: Vec<&str> = names.clone();
 
     let had_name_args = !names.is_empty();
     // GNU builtins/declare.def:222 declare_invalid_opts (bash 5.3): `-a'
@@ -692,12 +764,34 @@ where
             None
         };
         if let Some(option) = conflict {
-            writeln!(
-                stderr,
-                "{}{command_name}: -{option}: invalid option",
-                diagnostic_prefix(variables)
-            )?;
+            diag.error(DiagKind::InvalidOpt(format!("-{option}")));
+            diag.flush_with(|| prolog.clone());
             return Ok(EX_USAGE);
+        }
+        // GNU declare.def:222 declare_invalid_opts, first branch:
+        // att_function together with att_array/att_assoc/att_integer/
+        // att_nameref is a usage error naming the conflicting letter
+        // (priority -n, -i, -A, -a) with EXECUTION_FAILURE and NO usage
+        // text. The function face owns the binary path, so this arm
+        // only fires on direct core entries (lib/test) — it keeps the
+        // core honest when -f reaches it.
+        if function {
+            let conflict: Option<char> = if nameref {
+                Some('n')
+            } else if integer {
+                Some('i')
+            } else if assoc {
+                Some('A')
+            } else if array {
+                Some('a')
+            } else {
+                None
+            };
+            if let Some(option) = conflict {
+                diag.error(DiagKind::InvalidOpt(format!("-{option}")));
+                diag.flush_with(|| prolog.clone());
+                return Ok(EXECUTION_FAILURE);
+            }
         }
     }
     // GNU declare.def: an operand name[subscript] without = declares or
@@ -726,6 +820,16 @@ where
     // bit off.
     let mut nameref_marks = nameref;
     for name in &names {
+        // GNU declare.def:465-476: a valued operand with att_function
+        // cannot make a function — one diagnostic, and the command
+        // stops here (later operands are discarded). The binary path
+        // never reaches this arm (the executor's function face owns
+        // -f); it fires only on direct core entries.
+        if function && name.contains('=') {
+            diag.free(format_args!("cannot use `-f' to make functions"));
+            diag.flush_with(|| prolog.clone());
+            return Ok(EXECUTION_FAILURE);
+        }
         // GNU builtins/declare.def:549-580 runs the nameref-specific lexical
         // checks on the LHS and RHS before the generic identifier check, and
         // reports with the invoked builtin name (declare or typeset).
@@ -757,12 +861,7 @@ where
         // (nameref22.sub:74 `declare -n array=(one two three)` errors yet
         // leaves `declare -a array=([0]="one" ...)`).
         if nameref && value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: reference variable cannot be an array",
-                diagnostic_prefix(variables),
-                lhs
-            )?;
+            diag.free(format_args!("{lhs}: reference variable cannot be an array"));
             attr_status = EXECUTION_FAILURE;
             drop_nameref_attrs.push(lhs.to_string());
             assign_names.push(*name);
@@ -772,12 +871,7 @@ where
             // declare.def:554: a nameref cannot be declared as an array
             // reference name (x[3]).
             if valid_array_reference(lhs) {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: reference variable cannot be an array",
-                    diagnostic_prefix(variables),
-                    lhs
-                )?;
+                diag.free(format_args!("{lhs}: reference variable cannot be an array"));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -785,29 +879,20 @@ where
             // warn at function scope and continue creating the nameref.
             if check_selfref(lhs, value) {
                 if in_function {
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: warning: {}: circular name reference",
-                        diagnostic_prefix(variables),
-                        lhs
-                    )?;
+                    diag.free(format_args!("warning: {lhs}: circular name reference"));
                     // bind_variable_value's ASS_NAMEREF check_selfref
                     // (variables.c:3324) reports the same self-reference via
                     // internal_warning — a second, unqualified diagnostic —
                     // then still stores the cell.
-                    writeln!(
-                        stderr,
-                        "{}warning: {}: circular name reference",
-                        diagnostic_prefix(variables),
-                        lhs
-                    )?;
+                    bare_diag_line(
+                        diag,
+                        prolog,
+                        &format!("warning: {lhs}: circular name reference"),
+                    );
                 } else {
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: {}: nameref variable self references not allowed",
-                        diagnostic_prefix(variables),
-                        lhs
-                    )?;
+                    diag.free(format_args!(
+                        "{lhs}: nameref variable self references not allowed"
+                    ));
                     attr_status = EXECUTION_FAILURE;
                     continue;
                 }
@@ -847,11 +932,9 @@ where
                     } else {
                         value.to_string()
                     };
-                writeln!(
-                    stderr,
-                    "{}{command_name}: `{display}': invalid variable name for name reference",
-                    diagnostic_prefix(variables)
-                )?;
+                diag.free(format_args!(
+                    "`{display}': invalid variable name for name reference"
+                ));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -877,11 +960,9 @@ where
                 })
             {
                 let current = variables.get(lhs).cloned().unwrap_or_default();
-                writeln!(
-                    stderr,
-                    "{}{command_name}: `{current}': invalid variable name for name reference",
-                    diagnostic_prefix(variables)
-                )?;
+                diag.free(format_args!(
+                    "`{current}': invalid variable name for name reference"
+                ));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -895,12 +976,7 @@ where
                     && value.is_empty()
                     && !variables.contains_key(lhs))
             {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: reference variable cannot be an array",
-                    diagnostic_prefix(variables),
-                    lhs
-                )?;
+                diag.free(format_args!("{lhs}: reference variable cannot be an array"));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -911,21 +987,12 @@ where
             // created, and an existing nameref keeps its cell
             // (nameref24.sub:24 `declare -n name3=`).
             if !append && name.contains('=') && value.is_empty() {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: `': not a valid identifier",
-                    diagnostic_prefix(variables)
-                )?;
+                diag.error(DiagKind::InvalidId(String::new()));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
             if variables.is_marked(READONLY_VARS, lhs) {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: readonly variable",
-                    diagnostic_prefix(variables),
-                    lhs
-                )?;
+                diag.error(DiagKind::Readonly(lhs.to_string()));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
@@ -938,12 +1005,7 @@ where
             // (declare.def:841 fires after the local was materialized).
             if array || assoc {
                 if in_function {
-                    writeln!(
-                        stderr,
-                        "{}{command_name}: {}: reference variable cannot be an array",
-                        diagnostic_prefix(variables),
-                        lhs
-                    )?;
+                    diag.free(format_args!("{lhs}: reference variable cannot be an array"));
                     attr_status = EXECUTION_FAILURE;
                 }
                 nameref_marks = false;
@@ -975,39 +1037,28 @@ where
             let assignment_with_valid_attrs =
                 name.contains('=') && (export || trace || unset_export || unset_trace);
             if invalid_attrs || assignment_with_valid_attrs {
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: readonly variable",
-                    diagnostic_prefix(variables),
-                    lhs
-                )?;
+                diag.error(DiagKind::Readonly(lhs.to_string()));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
         }
         if !valid_declare_name(name) {
-            if print && !name.contains('=') {
+            // GNU declare.def:389-406: with -p the operand is a NAME to
+            // print, `=` included — `declare -p dv=6` reports `dv=6: not
+            // found` and assigns nothing, so the `=` carve-out here is
+            // dropped (Stage-2 ④ Phase 4, E1).
+            if print {
                 // GNU declare.def: -p is display-only; the identifier check
                 // gates attribute changes, not display, so an invalid name
                 // reaches find_variable and reports "not found" — never the
                 // full listing fallback (niubash issue #102 probe: bash 5.3.0
                 // prints `declare: X(BR): not found` for `declare -p X(BR)`,
                 // `not a valid identifier` only without -p).
-                writeln!(
-                    stderr,
-                    "{}{command_name}: {}: not found",
-                    diagnostic_prefix(variables),
-                    name
-                )?;
+                diag.free(format_args!("{name}: not found"));
                 attr_status = EXECUTION_FAILURE;
                 continue;
             }
-            let diagnostic = format!(
-                "{}{command_name}: `{}': not a valid identifier\n",
-                diagnostic_prefix(variables),
-                name
-            );
-            stderr.write_all(diagnostic.as_bytes())?;
+            diag.error(DiagKind::InvalidId(name.to_string()));
             attr_status = EXECUTION_FAILURE;
             continue;
         }
@@ -1037,11 +1088,11 @@ where
                 // WITH a subscript removes the nameref attribute (with an
                 // internal warning) and applies the array declaration to the
                 // name itself (nameref15.sub: declare -a xref[1]=one).
-                writeln!(
-                    stderr,
-                    "{}warning: {var_name}: removing nameref attribute",
-                    diagnostic_prefix(variables)
-                )?;
+                bare_diag_line(
+                    diag,
+                    prolog,
+                    &format!("warning: {var_name}: removing nameref attribute"),
+                );
                 unmark_typed(variables, NAMEREF_VARS, var_name);
                 variables.remove(var_name);
             } else if nameref {
@@ -1071,12 +1122,9 @@ where
             && variables.is_marked(ARRAY_VARS, var_name)
             && !variables.is_marked(ASSOC_VARS, var_name)
         {
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: cannot convert indexed to associative array",
-                diagnostic_prefix(variables),
-                var_name
-            )?;
+            diag.free(format_args!(
+                "{var_name}: cannot convert indexed to associative array"
+            ));
             attr_status = EXECUTION_FAILURE;
             continue;
         }
@@ -1088,12 +1136,9 @@ where
             // errors and the variable keeps its assoc value untouched —
             // clearing it would print `declare -A m` where GNU still shows
             // the elements (varenv14.sub declare -a assoc case).
-            writeln!(
-                stderr,
-                "{}{command_name}: {}: cannot convert associative to indexed array",
-                diagnostic_prefix(variables),
-                var_name
-            )?;
+            diag.free(format_args!(
+                "{var_name}: cannot convert associative to indexed array"
+            ));
             attr_status = EXECUTION_FAILURE;
             continue;
         }
@@ -1139,12 +1184,7 @@ where
                             || variables.is_marked(ARRAY_VARS, cell_base)
                             || variables.is_marked(ASSOC_VARS, cell_base);
                         if target_exists {
-                            writeln!(
-                                stderr,
-                                "{}{command_name}: {}: readonly variable",
-                                diagnostic_prefix(variables),
-                                last_nameref
-                            )?;
+                            diag.error(DiagKind::Readonly(last_nameref.clone()));
                             attr_status = EXECUTION_FAILURE;
                         }
                         continue;
@@ -1176,11 +1216,11 @@ where
                     let compound_value =
                         value.is_some_and(|v| v.starts_with(COMPOUND_ASSIGNMENT_MARKER));
                     if compound_value && !valid_identifier(&target) {
-                        writeln!(
-                            stderr,
-                            "{}`{target}': not a valid identifier",
-                            diagnostic_prefix(variables)
-                        )?;
+                        bare_diag_line(
+                            diag,
+                            prolog,
+                            &format!("`{target}': not a valid identifier"),
+                        );
                         attr_status = EXECUTION_FAILURE;
                         continue;
                     }
@@ -1234,22 +1274,28 @@ where
         })
         .filter(|base| variables.contains_key(base) || frame_locals.iter().any(|n| n == base))
         .collect();
-    if assign_declare_names(
-        command_name,
-        &attr_names,
-        variables,
-        frame_locals,
-        nameref_marks,
-        in_function,
-        array,
-        assoc,
-        integer,
-        !print,
-        &mut deleted_names,
-        stderr,
-        oob_word,
-        written_hints,
-    )? != EXECUTION_SUCCESS
+    // GNU declare.def:389-406: with -p the builtin is display-only —
+    // the pflag branch runs before all making-variables machinery, so a
+    // valued print operand is never bound (`declare -p dv=6` reports
+    // `dv=6: not found`, E1). The assign stage is skipped outright.
+    if !print
+        && assign_declare_names(
+            command_name,
+            &attr_names,
+            variables,
+            frame_locals,
+            nameref_marks,
+            in_function,
+            array,
+            assoc,
+            integer,
+            true,
+            &mut deleted_names,
+            diag,
+            prolog,
+            oob_word,
+            written_hints,
+        )? != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
     }
@@ -1306,7 +1352,8 @@ where
             &deleted_names,
             &preexisting_vars,
             in_function,
-            stderr,
+            diag,
+            prolog,
         )?;
         // declare.def:978-981: array/compound operands drop the deferred -n.
         for name in &drop_nameref_attrs {
@@ -1369,7 +1416,7 @@ where
 
     print::print_declare_names(
         command_name,
-        &names,
+        &print_names,
         variables,
         options,
         plain,
@@ -1377,25 +1424,9 @@ where
         dynamic_views,
         underlay,
         stdout,
-        stderr,
+        diag,
+        prolog,
     )
-}
-
-fn print_declare_usage<W>(command_name: &str, stderr: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    if command_name == "typeset" {
-        writeln!(
-            stderr,
-            "typeset: usage: typeset [-aAfFgiIlnrtux] name[=value] ... or typeset -p [-aAfFilnrtux] [name ...]"
-        )
-    } else {
-        writeln!(
-            stderr,
-            "declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
-        )
-    }
 }
 
 #[cfg(test)]

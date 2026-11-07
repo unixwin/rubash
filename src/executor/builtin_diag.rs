@@ -218,6 +218,17 @@ impl<'a> Diag<'a> {
             return;
         }
         let head = prolog().render();
+        self.flush_with_head(&head);
+    }
+
+    /// Render pending diagnostics with an already-rendered prolog
+    /// head. The immediate writers (`err_readonly`, the declare
+    /// layer's `bare_diag_line`) flush through here first so a
+    /// diagnostic recorded earlier in the same call still precedes
+    /// a later immediate line in the byte stream — without it the
+    /// pending line would land after the immediate one at flush
+    /// time (Stage-2 ④ Phase 4).
+    pub fn flush_with_head(&mut self, head: &str) {
         for (with_prolog, body) in self.pending.drain(..) {
             if with_prolog {
                 self.sink.write_str(&format!("{head}{body}"));
@@ -380,6 +391,22 @@ impl<'a> Diag<'a> {
         let text = crate::posix_errors::message(err);
         let line = format!("{}: {ctx}: {text}\n", self.row.name);
         self.pending.push((true, line));
+    }
+
+    /// `err_readonly` (`error.c:453`): the bind-layer diagnostic
+    /// `{prefix}VAR: readonly variable` with no builtin name and a
+    /// gnu_errfmt-aware prefix of its own. Written immediately to
+    /// the sink like `sink()` lines — the caller supplies the
+    /// already-rendered prefix (the assignment machinery's
+    /// `error_prefix`, the declare layer's flush prolog) and must
+    /// flush pending diagnostics first when order matters (see
+    /// `bare_diag_line` in `builtins::declare`).
+    pub fn err_readonly(&mut self, error_prefix: &str, name: &str) {
+        // Flush first: this line writes immediately, so a diagnostic
+        // recorded earlier in the same call must precede it.
+        self.flush_with_head(error_prefix);
+        let line = format!("{error_prefix}{name}: readonly variable\n");
+        self.sink.write_str(&line);
     }
 
     /// A non-standard diagnostic body through the same prolog and
