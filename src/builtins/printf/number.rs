@@ -207,7 +207,7 @@ fn printf_char_constant(value: &str) -> Option<u32> {
 /// watcher (variables.c sv_lc_all) at the moment the builtin runs, so
 /// an in-script `LC_ALL=C` assignment flips the answer at once.
 fn char_constant_multibyte() -> bool {
-    crate::locale::locale_name_selects_utf8(&crate::locale::active_locale_name())
+    crate::locale::is_multi_byte_active()
 }
 
 /// One strtoimax/strtoumax subject scan (printf.def:1437 getintmax and
