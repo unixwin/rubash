@@ -406,6 +406,20 @@ enum LoopControlKind {
     Continue,
 }
 
+/// rubash#2969: one loop driver's verdict after consuming a pending
+/// DEBUG-trap loop-control flag (see ShellState::loop_breaking). Mirrors
+/// the three shapes of GNU's post-body flag checks (execute_cmd.c:
+/// 3108-3118 for, 3840-3850 while/until): nothing pending, the consumed
+/// level ends this loop (a break, or a continue whose remaining levels
+/// target an outer loop — the flag stays standing for that driver), or
+/// a continue consumed at its target level so the driver advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControlFlow {
+    None,
+    BreakLoop,
+    NextIteration,
+}
+
 pub(crate) type FunctionBody = Rc<Ast>;
 
 /// Print/roundtrip metadata for a defined function that the body AST alone

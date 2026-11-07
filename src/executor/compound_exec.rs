@@ -3537,6 +3537,15 @@ impl Executor {
             // `breaking`; consume one level and abandon the loop,
             // before the test-outcome break (a false test must not
             // let the count leak to an enclosing loop).
+            // rubash#2969: a pending DEBUG-trap flag banked by the init
+            // or step expression's firing is consumed at this same
+            // checkpoint (GNU execute_cmd.c:3252-3262 reads the flags
+            // once per iteration): a break ends the loop; a continue
+            // drained to zero falls through to the test and body.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration | LoopControlFlow::None => {}
+            }
             if self.consume_stopped_loop_breaking() {
                 break;
             }
@@ -3622,9 +3631,19 @@ impl Executor {
                 // then escapes as a script-fatal error instead of
                 // discarding just this for command (rubash#1911).
                 Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
                     self.shell_state.loop_depth -= 1;
                     return Err(error);
                 }
+            }
+            // rubash#2969: GNU execute_cmd.c:3277-3290 — consume one
+            // pending DEBUG-trap flag level after the body, before the
+            // step: a break ends the loop; a continue drained to zero
+            // falls through to the step expression.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration | LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3277-3280
             // execute_arith_for_command — a SIGTSTP stop in the body set
@@ -4523,11 +4542,21 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
             }
             self.run_pending_signal_traps()?;
             let condition_matched = self.exit_code == 0;
             if condition_matched == loop_command.until {
+                // rubash#2969: GNU execute_cmd.c:3819-3831 — the
+                // test-side exit also decrements each pending DEBUG-trap
+                // flag once, so a level banked against this loop (the
+                // test's own trap action set it) does not leak into the
+                // enclosing list.
+                self.drain_pending_loop_control();
                 // rubash#2838: GNU execute_cmd.c:3819-3831
                 // execute_while_or_until — a stop in the test set
                 // `breaking`; the test-side exit consumes one level so
@@ -4567,7 +4596,25 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
+            }
+            // rubash#2969: GNU execute_cmd.c:3840-3850 — consume one
+            // pending DEBUG-trap flag level after the body: a break
+            // ends the loop (ended_by_break keeps the status the
+            // consumer settled, like the Break arm above); a continue
+            // re-tests, or — with levels remaining — ends this loop
+            // with the flag standing for the outer driver.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => {
+                    ended_by_break = true;
+                    break;
+                }
+                LoopControlFlow::NextIteration => continue,
+                LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3840-3843
             // execute_while_or_until — a SIGTSTP stop in the body set

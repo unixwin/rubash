@@ -1054,6 +1054,8 @@ impl Executor {
                 loop_depth: 0,
                 inherited_loop_depth: 0,
                 subshell_saved_loop_depth: 0,
+                loop_breaking: 0,
+                loop_continuing: 0,
                 read_generation: 0,
                 read_generation_ceiling: 0,
                 command_number: 1,
