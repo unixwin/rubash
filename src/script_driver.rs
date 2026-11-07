@@ -5242,6 +5242,16 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 && (!stdin_source_needs_more_posix(&pending, stdin_posix)
                     || interactive_pending_is_hard_syntax_error(&pending, stdin_posix));
             if group_complete {
+                // rubash#2849: a group was just accepted for
+                // execution — the read that produced it has returned,
+                // so any job death that landed while the reader was
+                // blocked (GNU's SIGCHLD handler records it mid-read,
+                // jobs.c:4036) must be claimed before this group's
+                // first consumer runs; the loop-top boundary alone
+                // races the kill (it fires immediately after the
+                // previous line, before the kernel has made the
+                // victim reapable under load).
+                executor.observe_jobs_at_reader_boundary();
                 // rubash#1214: PS0 (bashline.c/readline display of
                 // *ps0_prompt, decode_prompt_string) is expanded and
                 // written to stderr after a complete command has been
