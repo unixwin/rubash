@@ -42,6 +42,26 @@ fn declare_written_operand_hints(
 /// declare scanner).
 pub(crate) const DECLARE_OPTION_LETTERS: &str = "acfgilnprtuxAFGI";
 
+/// Whether a declare-family invocation carries NAME operands (as
+/// opposed to only option clusters): the walk mirrors
+/// scan_declare_options' stop rules — `--` ends the option run and
+/// every later word is an operand, a lone `-`/`+` is an operand, and
+/// any word that does not open an option cluster is an operand.
+fn declare_invocation_has_operands(args: &[String]) -> bool {
+    let mut options_open = true;
+    for arg in args {
+        if options_open && arg == "--" {
+            options_open = false;
+            continue;
+        }
+        if options_open && (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
     const VALID: &str = DECLARE_OPTION_LETTERS;
     let mut letters = Vec::new();
@@ -1889,6 +1909,12 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#2974: a nameless `local -F` renders the frame's
+        // locals with nodefs set (declare.def's local branch passes
+        // nodefs to show_local_var_attributes); the values are
+        // stripped from the rendered listing at the flush below.
+        let nodefs_listing = scan_declare_options(&cmd.words[1..]).0.contains(&'F')
+            && !declare_invocation_has_operands(&cmd.words[1..]);
         let (status, final_args) = if self.shell_state.function_depth == 0 {
             writeln!(
                 stderr,
@@ -1908,6 +1934,7 @@ impl Executor {
             .0
             .iter()
             .any(|letter| *letter == 'f' || *letter == 'F')
+            && declare_invocation_has_operands(&cmd.words[1..])
         {
             // rubash#2582: GNU's local is declare_internal in a local
             // context (declare.def), so `-f`/`-F` take the SAME
@@ -1917,6 +1944,11 @@ impl Executor {
             // scanner, whose letter table has no f/F (it never sees
             // them on the declare route), so `local -f g` was rejected
             // there after validate_local_options had accepted it.
+            // rubash#2974: the divert requires NAME operands — GNU's
+            // declare.def checks list_function_p only on the operand
+            // path; a NAMELESS `local -f`/`-F` takes the local-variable
+            // branch (show_local_var_attributes, nodefs for -F) and
+            // prints the frame's locals, never function definitions.
             let status =
                 self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
@@ -2392,6 +2424,32 @@ impl Executor {
                 &final_args,
                 declare_args_request_print(&final_args),
             );
+        }
+        // rubash#2974 (nodefs half): the builtin has no nodefs input
+        // for variables, so a nameless `local -F` listing loses its
+        // values here. Declaration lines are `declare <flags> NAME=…`
+        // — flags and names never contain '=', value-less lines and
+        // the `local -` line have none.
+        if nodefs_listing {
+            let text = String::from_utf8_lossy(&stdout).into_owned();
+            let mut stripped = String::with_capacity(text.len());
+            for line in text.split_inclusive('\n') {
+                let body = line.strip_suffix('\n').unwrap_or(line);
+                if body.starts_with("declare ") {
+                    match body.find('=') {
+                        Some(eq) => {
+                            stripped.push_str(&body[..eq]);
+                            if line.ends_with('\n') {
+                                stripped.push('\n');
+                            }
+                        }
+                        None => stripped.push_str(line),
+                    }
+                } else {
+                    stripped.push_str(line);
+                }
+            }
+            stdout = stripped.into_bytes();
         }
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
