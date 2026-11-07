@@ -524,6 +524,22 @@ pub(crate) fn table_builtin_names() -> &'static [&'static str] {
     &TABLE_BUILTIN_NAMES
 }
 
+/// Whether `name` is a static builtin — the table half of
+/// `command_registry::is_static_introspection_builtin` (the two sets
+/// are pinned equal by `table_covers_registry_builtins` below).
+pub(crate) fn is_table_builtin_name(name: &str) -> bool {
+    builtin_table_row(name).is_some()
+}
+
+/// Whether `name` is a POSIX special builtin — the table half of
+/// `command_registry::SPECIAL_BUILTINS` membership (pinned equal by
+/// `table_special_names_match_special_builtins`).
+pub(crate) fn is_table_special_builtin_name(name: &str) -> bool {
+    builtin_table_row(name)
+        .map(|row| row.flags.contains(BuiltinFlags::SPECIAL))
+        .unwrap_or(false)
+}
+
 /// The POSIX special builtins, projected from the table
 /// (`flags & SPECIAL`), in table order.
 pub(crate) fn table_special_builtin_names() -> Vec<&'static str> {
@@ -733,6 +749,23 @@ mod tests {
                 "introspection mismatch for {}",
                 row.name
             );
+        }
+    }
+
+    #[test]
+    fn table_covers_registry_builtins() {
+        // The reverse direction of `table_introspection_matches_registry_rows`:
+        // every registry row with `Introspection::Builtin` is a table row,
+        // so `is_table_builtin_name` is exactly
+        // `is_static_introspection_builtin`.
+        for row in command_registry::COMMAND_REGISTRY {
+            if row.introspection == command_registry::Introspection::Builtin {
+                assert!(
+                    builtin_table_row(row.name).is_some(),
+                    "registry builtin {} has no table row",
+                    row.name
+                );
+            }
         }
     }
 

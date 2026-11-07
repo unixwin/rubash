@@ -79,9 +79,11 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = {
-            let mut diag = Diag::new(prolog, row, &mut stderr);
+            let mut diag = Diag::new(row, &mut stderr);
             let words: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-            execute_with_io(row, &words, &mut diag, &mut stdout).unwrap()
+            let status = execute_with_io(row, &words, &mut diag, &mut stdout).unwrap();
+            diag.flush_with(|| prolog);
+            status
         };
         (
             status,

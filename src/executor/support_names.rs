@@ -914,41 +914,42 @@ pub(in crate::executor) fn executable_extensions() -> Vec<String> {
         .unwrap_or_else(|| vec!["exe".into(), "com".into(), "bat".into(), "cmd".into()])
 }
 
-pub(in crate::executor) fn normalize_type_option(option: &str) -> &str {
-    match option {
-        "-type" | "--type" => "-t",
-        "-path" | "--path" => "-p",
-        "-all" | "--all" => "-a",
-        other => other,
-    }
-}
-
-pub(in crate::executor) fn parse_command_describe_args(
-    args: &[String],
+/// The `command -v`/`-V` describe-argument parse, shared by the direct
+/// path and the command-substitution shortcut. Reimplemented on the
+/// (table row + `BuiltinOpt` + `Diag`) triple (Stage-2 ④ Phase 2):
+/// the scan is `internal_getopt (list, "pvV")`
+/// (builtins/command.def:74-75); a missing mode, an invalid option, or
+/// `--help` all return `None` (the caller falls through to the
+/// builtin's own scan, which reports them). The `Diag` is a discard
+/// sink where the parse is only a predicate — the full face re-reports
+/// on fall-through — so its status is never read here.
+pub(in crate::executor) fn parse_command_describe_args<'a>(
+    args: &'a [String],
+    diag: &mut super::builtin_diag::Diag<'a>,
 ) -> Option<(TypeDescribeMode, bool, usize)> {
+    let row =
+        super::builtin_table::builtin_table_row("command").expect("command row in BUILTIN_TABLE");
+    let mut opt = super::builtin_opt::BuiltinOpt::new(row, args, diag, false);
     let mut mode = None;
     let mut use_standard_path = false;
-    let mut index = 0;
-
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            break;
-        }
-
-        for option in arg[1..].chars() {
-            match option {
-                'p' => use_standard_path = true,
-                'v' => mode = Some(TypeDescribeMode::Reusable),
-                'V' => mode = Some(TypeDescribeMode::Verbose),
-                _ => return None,
+    loop {
+        match opt.next() {
+            super::builtin_opt::OptEvent::Opt(b'p') => use_standard_path = true,
+            super::builtin_opt::OptEvent::Opt(b'v') => mode = Some(TypeDescribeMode::Reusable),
+            super::builtin_opt::OptEvent::Opt(b'V') => mode = Some(TypeDescribeMode::Verbose),
+            super::builtin_opt::OptEvent::Help => return None,
+            super::builtin_opt::OptEvent::End => break,
+            // The row's spec is `"pvV"`: no other option character
+            // (and no argument-taking option) can ever arrive.
+            super::builtin_opt::OptEvent::Opt(_) | super::builtin_opt::OptEvent::OptArg(_, _) => {
+                unreachable!("command spec is \"pvV\"")
             }
         }
-        index += 1;
     }
-
-    mode.map(|mode| (mode, use_standard_path, index))
+    let first_name = args.len() - opt.operands().len();
+    drop(opt);
+    if diag.status() != 0 {
+        return None;
+    }
+    mode.map(|mode| (mode, use_standard_path, first_name))
 }

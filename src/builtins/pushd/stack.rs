@@ -7,13 +7,6 @@ use std::path::Path;
 
 const SEP: char = crate::executor::markers::DIR_STACK_FIELD_SEP;
 
-pub(super) fn is_stack_index(arg: &str) -> bool {
-    let Some(rest) = arg.strip_prefix('+').or_else(|| arg.strip_prefix('-')) else {
-        return false;
-    };
-    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
-}
-
 pub(crate) fn load_stack(env_vars: &HashMap<String, String>, cwd: &Path) -> Vec<String> {
     let carrier = load_stack_carrier(env_vars);
     if !carrier.is_empty() {
@@ -105,17 +98,6 @@ pub(crate) fn set_stack_value(env_vars: &mut VarTable, cwd: &Path, index: usize,
     }
 }
 
-pub(super) fn resolved_index(value: usize, from_right: bool, len: usize) -> Option<usize> {
-    if !from_right {
-        return (value < len).then_some(value);
-    }
-    if value < len {
-        Some(len - 1 - value)
-    } else {
-        None
-    }
-}
-
 pub(super) fn logical_dir_exists(dir: &str, env_vars: &HashMap<String, String>) -> bool {
     // The shell keeps POSIX-looking paths in PWD even on Windows.  Resolve
     // those paths before checking them, while allowing relative operands such
@@ -198,20 +180,4 @@ fn is_drive_absolute(path: &str) -> bool {
         && path.as_bytes()[1] == b':'
         && path.as_bytes()[0].is_ascii_alphabetic()
         && path.as_bytes()[2] == b'/'
-}
-
-pub(super) fn stack_index(arg: &str, len: usize) -> Option<usize> {
-    let value = arg[1..].parse::<usize>().ok()?;
-    if len == usize::MAX {
-        return Some(if arg.starts_with('+') {
-            value
-        } else {
-            usize::MAX
-        });
-    }
-    if arg.starts_with('+') {
-        (value < len).then_some(value)
-    } else {
-        resolved_index(value, true, len)
-    }
 }

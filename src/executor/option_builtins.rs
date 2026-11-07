@@ -14,13 +14,21 @@ impl Executor {
         let mut unhashable_names: std::collections::HashSet<String> =
             self.shell_state.functions.keys().cloned().collect();
         unhashable_names.extend(builtin_names().iter().map(|name| name.to_string()));
-        let status = crate::builtins::hash::execute_with_io_and_functions(
-            &cmd.words[1..],
-            &mut self.shell_state.env_vars,
-            &unhashable_names,
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let status = {
+            let row =
+                super::builtin_table::builtin_table_row("hash").expect("hash row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::hash::execute_with_io_and_functions(
+                row,
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &unhashable_names,
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
@@ -114,12 +122,20 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let umask_before = self.shell_state.env_vars.get("__RUBASH_UMASK").cloned();
-        let status = crate::builtins::umask::execute_with_io(
-            &cmd.words[1..],
-            &mut self.shell_state.env_vars,
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let status = {
+            let row = super::builtin_table::builtin_table_row("umask")
+                .expect("umask row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::umask::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
+        };
         // rubash#2084: journal a session-set umask so the root
         // executor's Drop can restore the host's birth value when the
         // process still carries this session's setting (the builtin

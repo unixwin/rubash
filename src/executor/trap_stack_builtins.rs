@@ -347,18 +347,29 @@ impl Executor {
         cmd: &CommandNode,
         builtin: crate::builtins::pushd::StackBuiltin,
     ) -> Result<i32, ExecuteError> {
-        let diagnostic_prefix = self.diagnostic_prefix();
+        let name = match builtin {
+            crate::builtins::pushd::StackBuiltin::Pushd => "pushd",
+            crate::builtins::pushd::StackBuiltin::Popd => "popd",
+            crate::builtins::pushd::StackBuiltin::Dirs => "dirs",
+        };
+        let row = super::builtin_table::builtin_table_row(name)
+            .unwrap_or_else(|| panic!("{name} row in BUILTIN_TABLE"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = crate::builtins::pushd::execute_with_io(
-            builtin,
-            cmd.words[1..].iter().map(String::as_str),
-            &mut self.shell_state.env_vars,
-            &mut self.shell_state.cwd,
-            &diagnostic_prefix,
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let status = {
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::pushd::execute_with_io(
+                row,
+                builtin,
+                cmd.words[1..].iter().map(String::as_str),
+                &mut self.shell_state.env_vars,
+                &mut self.shell_state.cwd,
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.sync_cd_variables();
         Ok(status)

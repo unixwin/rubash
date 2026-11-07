@@ -372,15 +372,20 @@ mod tests {
     use super::super::command_registry::Introspection;
     use super::*;
 
-    fn diag_for<'a>(name: &str, sink: &'a mut Vec<u8>) -> Diag<'a> {
-        let prolog = Prolog {
+    /// The prolog the flushed diagnostics render under
+    /// (`"t.sh: line 1: "`), for the sink assertions below.
+    fn test_prolog() -> Prolog {
+        Prolog {
             interactive: false,
             shell_basename: "bash".to_string(),
             error_name: "bash".to_string(),
             script_file: Some("t.sh".to_string()),
             line: Some("1".to_string()),
-        };
-        Diag::new(prolog, builtin_table_row(name).unwrap(), sink)
+        }
+    }
+
+    fn diag_for<'a>(name: &str, sink: &'a mut Vec<u8>) -> Diag<'a> {
+        Diag::new(builtin_table_row(name).unwrap(), sink)
     }
 
     fn words(ss: &[&str]) -> Vec<String> {
@@ -411,6 +416,8 @@ mod tests {
             [OptEvent::Opt(b'L'), OptEvent::Opt(b'P'), OptEvent::End]
         );
         assert!(opt.operands().is_empty());
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
 
         let mut sink = Vec::new();
@@ -439,6 +446,8 @@ mod tests {
             drain(&mut opt),
             [OptEvent::OptArg(b'p', "VAR"), OptEvent::End]
         );
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
 
         let mut sink = Vec::new();
@@ -460,6 +469,7 @@ mod tests {
         // last use — the sink is borrowed by the Diag until then.
         drop(opt);
         assert_eq!(diag.status(), EX_USAGE);
+        diag.flush_with(test_prolog);
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "t.sh: line 1: wait: -p: option requires an argument\n"
@@ -477,6 +487,8 @@ mod tests {
             drain(&mut opt),
             [OptEvent::OptArg(b'p', "-x"), OptEvent::End]
         );
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
     }
 
@@ -501,6 +513,8 @@ mod tests {
             drain(&mut opt),
             [OptEvent::Opt(b'o'), OptEvent::Opt(b'x'), OptEvent::End]
         );
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
 
         let mut sink = Vec::new();
@@ -508,6 +522,8 @@ mod tests {
         let w = words(&["-o"]);
         let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::Opt(b'o'), OptEvent::End]);
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty(), "';' with no arg is silent");
     }
 
@@ -544,6 +560,8 @@ mod tests {
         let w = words(&["-nX"]);
         let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::Opt(b'n'), OptEvent::End]);
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty(), "attached non-digit is silent");
 
         let mut sink = Vec::new();
@@ -560,6 +578,8 @@ mod tests {
         let w = words(&["-n", "xyz"]);
         let mut opt = BuiltinOpt::new(&row, &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::End]);
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "t.sh: line 1: ulimit: -n: numeric argument required\n"
@@ -588,6 +608,7 @@ mod tests {
         // Canonical order (see the wait missing-arg case above).
         drop(opt);
         assert_eq!(diag.status(), EX_USAGE);
+        diag.flush_with(test_prolog);
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "t.sh: line 1: cd: -z: invalid option\n"
@@ -608,6 +629,8 @@ mod tests {
         let mut opt = BuiltinOpt::new(builtin_table_row("shopt").unwrap(), &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::End]);
         assert_eq!(opt.operands(), ["+z"]);
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty(), "the machine reports nothing here");
 
         let mut sink = Vec::new();
@@ -618,6 +641,8 @@ mod tests {
             drain(&mut opt),
             [OptEvent::Opt(b'a'), OptEvent::Opt(b'r'), OptEvent::End]
         );
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
     }
 
@@ -680,6 +705,8 @@ mod tests {
         let w = words(&["-z"]);
         let mut opt = BuiltinOpt::new(builtin_table_row("times").unwrap(), &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::End]);
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "t.sh: line 1: times: -z: invalid option\n"
@@ -697,6 +724,8 @@ mod tests {
             let mut opt = BuiltinOpt::new(builtin_table_row(name).unwrap(), &w, &mut diag, false);
             assert_eq!(drain(&mut opt), [OptEvent::End], "row {name} scanned");
             assert_eq!(opt.operands(), ["-z", "--help", "x"]);
+            drop(opt);
+            diag.flush_with(test_prolog);
             assert!(sink.is_empty(), "row {name} reported");
         }
     }
@@ -740,6 +769,8 @@ mod tests {
             drain(&mut opt),
             [OptEvent::OptArg(b'e', "vi"), OptEvent::End]
         );
+        drop(opt);
+        diag.flush_with(test_prolog);
         assert!(sink.is_empty());
     }
 }

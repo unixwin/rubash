@@ -3,6 +3,9 @@
 //! GNU Bash source ownership:
 //! - builtins/umask.def (`umask_builtin`)
 
+use crate::executor::builtin_diag::Diag;
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -11,90 +14,59 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
-/// GNU builtins/common.c:83-94 builtin_error_prolog: the shell name, the
-/// executing line for scripts, then the builtin name. Reads the executor env
-/// map (same sources as Executor::diagnostic_prefix).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
-
-pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
-    let mut stdout = io::stdout().lock();
-    let mut stderr = io::stderr().lock();
-    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
-}
-
-pub(crate) fn execute_with_io<W, E>(
-    args: &[String],
+/// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
+/// `Diag`) triple (`internal_getopt (list, "Sp")`,
+/// builtins/umask.def:82-83); every diagnostic speaks through `diag`.
+pub(crate) fn execute_with_io<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     // TODO(builtins/umask.def): GNU Bash reads and mutates the process umask.
     // This internal shell value preserves shell semantics without changing the
     // host process mask.
-    let mut symbolic = false;
-    let mut reusable = false;
-    let mut mode = None;
-    // GNU builtins/umask.def:83 `internal_getopt (list, "Sp")`: option
-    // parsing stops at the first mode operand, so a trailing `-S`/`-p` is an
-    // ignored extra operand, not a flag (rubash#1381). A bare `--` is the
-    // getopt end-of-options marker: it is consumed, sets nothing by itself,
-    // and the operand after it is the mode (rubash#1292). Extra operands
-    // after the first are ignored — the FIRST mode wins (rubash#1292).
-    let mut parsing_options = true;
-
-    for arg in args {
-        match arg.as_str() {
-            value if parsing_options && value == "--" => {
-                parsing_options = false;
-            }
-            value if parsing_options && value.starts_with('-') && value != "-" => {
-                for option in value[1..].chars() {
-                    match option {
-                        'S' => symbolic = true,
-                        'p' => reusable = true,
-                        _ => {
-                            writeln!(
-                                stderr,
-                                "{}umask: -{option}: invalid option",
-                                diagnostic_prefix(env_vars)
-                            )?;
-                            writeln!(stderr, "umask: usage: umask [-p] [-S] [mode]")?;
-                            return Ok(EX_USAGE);
-                        }
-                    }
+    let (symbolic, reusable, help, mode) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut symbolic = false;
+        let mut reusable = false;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b'S') => symbolic = true,
+                OptEvent::Opt(b'p') => reusable = true,
+                OptEvent::Help => {
+                    help = true;
+                    break;
                 }
-            }
-            value if parsing_options && value.starts_with('-') => {
-                writeln!(
-                    stderr,
-                    "{}umask: {value}: invalid option",
-                    diagnostic_prefix(env_vars)
-                )?;
-                writeln!(stderr, "umask: usage: umask [-p] [-S] [mode]")?;
-                return Ok(EX_USAGE);
-            }
-            value => {
-                parsing_options = false;
-                // Dash-words after the mode are ignored operands (#1381);
-                // plain extra operands are likewise ignored — the first
-                // mode operand wins (rubash#1292).
-                if !value.starts_with('-') && mode.is_none() {
-                    mode = Some(value);
+                OptEvent::End => break,
+                // The row's spec is `"Sp"`: no other option character
+                // (and no argument-taking option) can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("umask spec is \"Sp\"")
                 }
             }
         }
+        // GNU builtins/umask.def umask_builtin takes the first word after
+        // getopt as the mode, whatever it looks like: a bare `-` is a
+        // symbolic mode, and words after `--` are modes too (a `-S` there
+        // reaches the symbolic parser, not the flag set). Extra operands
+        // after the first are ignored — the FIRST mode wins
+        // (rubash#1292, #1381).
+        let mode = opt.operands().first().map(String::as_str);
+        (symbolic, reusable, help, mode)
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(EX_USAGE);
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(diag.status());
     }
 
     if let Some(mode) = mode {
@@ -109,11 +81,7 @@ where
                 // (GNU probe: 10000/12345 rejected, state unchanged).
                 Some(mask) if mask <= 0o7777 => mask & 0o777,
                 _ => {
-                    writeln!(
-                        stderr,
-                        "{}umask: {mode}: octal number out of range",
-                        diagnostic_prefix(env_vars)
-                    )?;
+                    diag.free(format_args!("{mode}: octal number out of range"));
                     return Ok(EXECUTION_FAILURE);
                 }
             }
@@ -121,19 +89,11 @@ where
             match parse_symbolic_mask(mode, current_mask(env_vars)) {
                 Ok(mask) => mask,
                 Err(SymbolicModeError::Operator(ch)) => {
-                    writeln!(
-                        stderr,
-                        "{}umask: `{ch}': invalid symbolic mode operator",
-                        diagnostic_prefix(env_vars)
-                    )?;
+                    diag.free(format_args!("`{ch}': invalid symbolic mode operator"));
                     return Ok(EXECUTION_FAILURE);
                 }
                 Err(SymbolicModeError::Character(ch)) => {
-                    writeln!(
-                        stderr,
-                        "{}umask: `{ch}': invalid symbolic mode character",
-                        diagnostic_prefix(env_vars)
-                    )?;
+                    diag.free(format_args!("`{ch}': invalid symbolic mode character"));
                     return Ok(EXECUTION_FAILURE);
                 }
             }
@@ -395,6 +355,7 @@ fn class_permissions(bits: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::builtin_diag::{Diag, Prolog};
 
     /// Restores the process umask on drop. The `umask <mode>` builtin
     /// changes the REAL process mask (GNU behavior); lib tests share one
@@ -428,6 +389,39 @@ mod tests {
         }
     }
 
+    /// A `Diag` over the test stderr sink, plus the prolog its
+    /// flushed diagnostics render under (`"rubash: "`), so the
+    /// existing stderr assertions stay valid.
+    fn diag_for<'a>(sink: &'a mut Vec<u8>) -> (Diag<'a>, Prolog) {
+        let prolog = Prolog {
+            interactive: false,
+            shell_basename: "rubash".to_string(),
+            error_name: "rubash".to_string(),
+            script_file: None,
+            line: None,
+        };
+        (
+            Diag::new(
+                crate::executor::builtin_table::builtin_table_row("umask").unwrap(),
+                sink,
+            ),
+            prolog,
+        )
+    }
+
+    fn run_args(
+        args: &[String],
+        env: &mut VarTable,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let row = crate::executor::builtin_table::builtin_table_row("umask").unwrap();
+        let (mut diag, prolog) = diag_for(stderr);
+        let status = execute_with_io(row, args, env, &mut diag, stdout).unwrap();
+        diag.flush_with(|| prolog);
+        status
+    }
+
     fn run(mode: &str, initial: &str) -> (i32, String, String) {
         let _guard = UmaskGuard::take();
         let mut env = VarTable::from(HashMap::from([(
@@ -438,13 +432,12 @@ mod tests {
         let mut stderr = Vec::new();
         // GNU: flags must precede the mode operand (rubash#1381: trailing
         // flags after the mode are ignored, not parsed).
-        let status = execute_with_io(
+        let status = run_args(
             &vec!["-S".to_string(), mode.to_string()],
             &mut env,
             &mut stdout,
             &mut stderr,
-        )
-        .unwrap();
+        );
         (
             status,
             String::from_utf8(stdout).unwrap(),
@@ -537,25 +530,23 @@ mod tests {
         )]));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = execute_with_io(
+        let status = run_args(
             &["022".to_string(), "033".to_string()],
             &mut env,
             &mut stdout,
             &mut stderr,
-        )
-        .unwrap();
+        );
         assert_eq!(status, EXECUTION_SUCCESS);
         assert_eq!(env.get("__RUBASH_UMASK").map(String::as_str), Some("0022"));
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = execute_with_io(
+        let status = run_args(
             &["--".to_string(), "027".to_string()],
             &mut env,
             &mut stdout,
             &mut stderr,
-        )
-        .unwrap();
+        );
         assert_eq!(status, EXECUTION_SUCCESS);
         assert!(stderr.is_empty());
         assert_eq!(env.get("__RUBASH_UMASK").map(String::as_str), Some("0027"));
@@ -563,8 +554,7 @@ mod tests {
         // Bare `--` alone: no mode, prints the current mask, rc 0.
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status =
-            execute_with_io(&["--".to_string()], &mut env, &mut stdout, &mut stderr).unwrap();
+        let status = run_args(&["--".to_string()], &mut env, &mut stdout, &mut stderr);
         assert_eq!(status, EXECUTION_SUCCESS);
         assert_eq!(String::from_utf8(stdout).unwrap(), "0027\n");
     }
@@ -574,8 +564,7 @@ mod tests {
         let mut env = VarTable::default();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status =
-            execute_with_io(&["-Z".to_string()], &mut env, &mut stdout, &mut stderr).unwrap();
+        let status = run_args(&["-Z".to_string()], &mut env, &mut stdout, &mut stderr);
         assert_eq!(status, 2);
         assert_eq!(
             String::from_utf8(stderr).unwrap(),
@@ -599,8 +588,7 @@ mod tests {
         ] {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            let status =
-                execute_with_io(&[mode.to_string()], &mut env, &mut stdout, &mut stderr).unwrap();
+            let status = run_args(&[mode.to_string()], &mut env, &mut stdout, &mut stderr);
             assert_eq!(status, EXECUTION_FAILURE);
             assert_eq!(String::from_utf8(stderr).unwrap(), expected);
         }

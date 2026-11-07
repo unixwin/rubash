@@ -3,6 +3,9 @@
 //! GNU Bash source ownership:
 // - builtins/hash.def
 
+use crate::executor::builtin_diag::{Diag, DiagKind};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
@@ -13,160 +16,95 @@ const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 const HASH_TABLE: &str = "__RUBASH_HASH_TABLE";
 
-pub fn execute(args: &[String], env_vars: &mut VarTable) -> io::Result<i32> {
-    let mut stdout = io::stdout();
-    let mut stderr = io::stderr();
-    execute_with_io(args, env_vars, &mut stdout, &mut stderr)
-}
-
-pub(crate) fn execute_with_io<W, E>(
-    args: &[String],
-    env_vars: &mut VarTable,
-    stdout: &mut W,
-    stderr: &mut E,
-) -> io::Result<i32>
-where
-    W: Write,
-    E: Write,
-{
-    execute_with_io_and_functions(
-        args,
-        env_vars,
-        &std::collections::HashSet::new(),
-        stdout,
-        stderr,
-    )
-}
-
-/// Same as [`execute_with_io`], with the names GNU hash.def never
-/// hashes — shell builtins and shell functions — supplied by the
+/// Same as [`execute_with_io_and_functions`], with the names GNU hash.def
+/// never hashes — shell builtins and shell functions — supplied by the
 /// executor: the bare builtin cannot see either set from the variable
 /// table alone (rubash#1215).
-pub(crate) fn execute_with_io_and_functions<W, E>(
-    args: &[String],
+///
+/// Stage-2 ④ Phase 2: the option scan is the (table row + `BuiltinOpt` +
+/// `Diag`) triple (`internal_getopt (list, "dlp:rt")`,
+/// builtins/hash.def:95); every diagnostic speaks through `diag`.
+pub(crate) fn execute_with_io_and_functions<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut VarTable,
     unhashable_names: &std::collections::HashSet<String>,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     // GNU builtins/hash.def:86-90: when hashing is disabled (set +h), the
     // entire `hash` builtin refuses with "hash: hashing disabled" and
     // returns failure, before any option parsing.
     if !crate::builtins::set::shell_option_enabled(env_vars, "hashall") {
-        writeln!(stderr, "{}hash: hashing disabled", script_prefix(env_vars))?;
+        diag.free(format_args!("hashing disabled"));
         return Ok(EXECUTION_FAILURE);
     }
 
-    let mut delete = false;
-    let mut reset = false;
-    let mut pathname: Option<&str> = None;
-    let mut translate = false;
-    let mut reusable = false;
-    let mut names: Vec<&str> = Vec::new();
-    let mut index = 0;
-    // GNU builtins/bashgetopt.c:76 (NOTOPT) and :84-89: option parsing ends
-    // at the first non-option word or at a bare `--` (consumed, not an
-    // operand); everything from there on is a name. Mirrors
-    // `internal_getopt (list, "dlp:rt")` in builtins/hash.def:95.
-    // (rubash#1375 `hash -- ls`, #1389 trailing `--`, #1382 `-p` name tail.)
-    let mut parsing_options = true;
-
-    while let Some(arg) = args.get(index) {
-        if parsing_options && arg == "--" {
-            parsing_options = false;
-            index += 1;
-            continue;
-        }
-        // GNU hash.def's getopt table maps --help to CASE_HELPOPT: long
-        // help to stdout, EX_USAGE status (rubash#1229). Only while still
-        // parsing options — after `--` it is a name to look up.
-        if parsing_options && arg == "--help" {
-            crate::builtins::help::print_builtin_help("hash", stdout)?;
-            return Ok(EX_USAGE);
-        }
-        if parsing_options && arg.starts_with('-') && *arg != "-" {
-            let mut chars = arg[1..].char_indices();
-            while let Some((offset, option)) = chars.next() {
-                match option {
-                    'r' => {
-                        // GNU builtins/hash.def:107-109: `-r` only SETS
-                        // expunge_hash_table — option parsing continues and
-                        // any operands are processed AFTER the flush
-                        // (hash.def:150-151 phash_flush, then the name loop
-                        // rehashes each name). Returning here made
-                        // `hash -r name` silently delete just that entry
-                        // with rc 0; GNU clears the table, then rehashes
-                        // the name and reports `hash: name: not found`
-                        // (rc 1) when it does not resolve (rubash#1489).
-                        // The flush itself is applied below, after the
-                        // needarg/usage checks, so `hash -r ls` still
-                        // hashes `ls` and `hash -r -d` still reports the
-                        // -d needarg error (rubash#1382).
-                        reset = true;
-                    }
-                    'd' => delete = true,
-                    't' => translate = true,
-                    'l' => {
-                        reusable = true;
-                    }
-                    'p' => {
-                        // GNU: `-p` takes the rest of the word or the next
-                        // word as its pathname argument (bashgetopt.c).
-                        let value_start = 1 + offset + option.len_utf8();
-                        if value_start < arg.len() {
-                            pathname = Some(&arg[value_start..]);
-                        } else {
-                            let Some(value) = args.get(index + 1).map(String::as_str) else {
-                                writeln!(
-                                    stderr,
-                                    "{}hash: -p: option requires an argument",
-                                    script_prefix(env_vars)
-                                )?;
-                                writeln!(
-                                    stderr,
-                                    "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
-                                )?;
-                                return Ok(EX_USAGE);
-                            };
-                            index += 1;
-                            pathname = Some(value);
-                        }
-                        break;
-                    }
-                    other => {
-                        writeln!(
-                            stderr,
-                            "{}hash: -{other}: invalid option",
-                            script_prefix(env_vars)
-                        )?;
-                        writeln!(
-                            stderr,
-                            "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
-                        )?;
-                        return Ok(EX_USAGE);
-                    }
+    let (delete, reset, pathname, translate, reusable, help, names) = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        let mut delete = false;
+        let mut reset = false;
+        let mut pathname: Option<&str> = None;
+        let mut translate = false;
+        let mut reusable = false;
+        let mut help = false;
+        loop {
+            match opt.next() {
+                // GNU builtins/hash.def:107-109: `-r` only SETS
+                // expunge_hash_table — option parsing continues and
+                // any operands are processed AFTER the flush
+                // (hash.def:150-151 phash_flush, then the name loop
+                // rehashes each name). Returning here made
+                // `hash -r name` silently delete just that entry
+                // with rc 0; GNU clears the table, then rehashes
+                // the name and reports `hash: name: not found`
+                // (rc 1) when it does not resolve (rubash#1489).
+                // The flush itself is applied below, after the
+                // needarg/usage checks, so `hash -r ls` still
+                // hashes `ls` and `hash -r -d` still reports the
+                // -d needarg error (rubash#1382).
+                OptEvent::Opt(b'r') => reset = true,
+                OptEvent::Opt(b'd') => delete = true,
+                OptEvent::Opt(b't') => translate = true,
+                OptEvent::Opt(b'l') => reusable = true,
+                // GNU: `-p` takes the rest of the word or the next
+                // word as its pathname argument (bashgetopt.c).
+                OptEvent::OptArg(b'p', value) => pathname = Some(value),
+                OptEvent::Help => {
+                    help = true;
+                    break;
+                }
+                OptEvent::End => break,
+                // The row's spec is `"dlp:rt"`: no other option
+                // character (and no other argument-taking option)
+                // can ever arrive.
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("hash spec is \"dlp:rt\"")
                 }
             }
-        } else {
-            parsing_options = false;
-            names.push(arg.as_str());
         }
-        index += 1;
+        let names: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        (delete, reset, pathname, translate, reusable, help, names)
+    };
+    if help {
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
+        return Ok(EX_USAGE);
+    }
+    if diag.status() != 0 {
+        diag.usage();
+        return Ok(diag.status());
     }
 
     // GNU builtins/hash.def:124-128: hash -d/-t with no arguments reports
-    // "hash: -d: option requires an argument" via sh_needarg.
+    // "hash: -d: option requires an argument" via sh_needarg — rc 1, NO
+    // usage line (the diagnostic is reported, not errored, so the status
+    // stays EXECUTION_FAILURE).
     if names.is_empty() && (delete || translate) {
         let opt = if delete { "-d" } else { "-t" };
-        writeln!(
-            stderr,
-            "{}hash: {opt}: option requires an argument",
-            script_prefix(env_vars)
-        )?;
+        diag.report(DiagKind::NeedArg(opt.to_string()));
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -177,10 +115,7 @@ where
     // it also precedes the restricted-shell pathname checks, matching
     // hash_builtin's order (rubash#1382).
     if pathname.is_some() && names.is_empty() {
-        writeln!(
-            stderr,
-            "hash: usage: hash [-lr] [-p pathname] [-dt] [name ...]"
-        )?;
+        diag.usage();
         return Ok(EX_USAGE);
     }
 
@@ -233,12 +168,12 @@ where
                         }
                     }
                     None => {
-                        writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
+                        diag.free(format_args!("{name}: not found"));
                         status = EXECUTION_FAILURE;
                     }
                 }
             } else {
-                writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
+                diag.free(format_args!("{name}: not found"));
                 status = EXECUTION_FAILURE;
             }
         }
@@ -253,19 +188,11 @@ where
         // (sh_notfound -> "hash: <name>: not found"); both fail the builtin.
         if crate::builtins::set::shell_option_enabled(env_vars, "restricted") {
             if pathname.contains('/') || pathname.contains('\\') {
-                writeln!(
-                    stderr,
-                    "{}hash: {pathname}: restricted",
-                    script_prefix(env_vars)
-                )?;
+                diag.free(format_args!("{pathname}: restricted"));
                 return Ok(EXECUTION_FAILURE);
             }
             if crate::executor::path::find_user_command(pathname, env_vars).is_none() {
-                writeln!(
-                    stderr,
-                    "{}hash: {pathname}: not found",
-                    script_prefix(env_vars)
-                )?;
+                diag.free(format_args!("{pathname}: not found"));
                 return Ok(EXECUTION_FAILURE);
             }
         }
@@ -295,11 +222,7 @@ where
                 continue;
             }
             if std::path::Path::new(pathname).is_dir() {
-                writeln!(
-                    stderr,
-                    "{}hash: {pathname}: Is a directory",
-                    script_prefix(env_vars)
-                )?;
+                diag.free(format_args!("{pathname}: Is a directory"));
                 status = EXECUTION_FAILURE;
                 continue;
             }
@@ -326,7 +249,7 @@ where
                 continue;
             }
             if table.remove(name).is_none() {
-                writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
+                diag.free(format_args!("{name}: not found"));
                 status = EXECUTION_FAILURE;
             } else {
                 // GNU hash.def `hash -d NAME`: phash_remove(w) drops the entry
@@ -433,7 +356,7 @@ where
                 }
                 None => {
                     table.remove(name);
-                    writeln!(stderr, "{}hash: {name}: not found", script_prefix(env_vars))?;
+                    diag.free(format_args!("{name}: not found"));
                     status = EXECUTION_FAILURE;
                 }
             }
@@ -661,14 +584,4 @@ pub(crate) fn record_command_resolution(env_vars: &mut VarTable, name: &str, she
         );
     }
     store_hash_table(env_vars, &table);
-}
-
-fn script_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
 }

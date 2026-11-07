@@ -65,9 +65,15 @@ impl Executor {
         let status = {
             let row = super::builtin_table::builtin_table_row("times")
                 .expect("times row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::times::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::times::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
@@ -129,9 +135,15 @@ impl Executor {
         let action = {
             let row =
                 super::builtin_table::builtin_table_row("jobs").expect("jobs row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::jobs::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::jobs::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
         };
         match action {
             crate::builtins::jobs::JobsAction::Complete(status) => {
@@ -412,8 +424,7 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let (force, wait_any, assign_var, assign_var_index, help, operands, scan_status) = {
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
             let (force, wait_any, assign_var, assign_var_index, help, operands) = {
                 let mut opt = super::builtin_opt::BuiltinOpt::new(row, words, &mut diag, false);
                 let mut force = false;
@@ -464,6 +475,7 @@ impl Executor {
                 diag.usage();
             }
             let scan_status = diag.status();
+            diag.flush_with(|| self.diagnostic_prolog());
             (
                 force,
                 wait_any,
@@ -2929,9 +2941,15 @@ impl Executor {
         let action = {
             let row = super::builtin_table::builtin_table_row("disown")
                 .expect("disown row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::disown::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::disown::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
         };
         let status = match action {
             crate::builtins::disown::DisownAction::Complete(status) => status,
@@ -3343,9 +3361,15 @@ impl Executor {
             };
             let row = super::builtin_table::builtin_table_row(row_name)
                 .expect("fg/bg row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::fg_bg::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::fg_bg::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
         };
         // GNU fg_bg.def:108-113 — `job_control == 0` (the monitor option,
         // off by default in non-interactive shells) reports "no job
@@ -3824,16 +3848,17 @@ impl Executor {
         let (status, too_many_arguments) = {
             let row = super::builtin_table::builtin_table_row("suspend")
                 .expect("suspend row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::suspend::execute_with_io(
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::suspend::execute_with_io(
                 row,
                 &cmd.words[1..],
                 &mut diag,
                 &mut stdout,
                 job_control,
                 login_shell,
-            )?
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         if too_many_arguments {

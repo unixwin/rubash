@@ -6,25 +6,71 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         let args = &cmd.words[1..];
-        // GNU builtins/builtin.def: internal_getopt maps a leading
-        // --help to CASE_HELPOPT (long help to stdout, EX_USAGE) before
-        // no_options() rejects the other options (rubash#1229). Checked
-        // before the `--` skip below: after a `--`, --help is the name
-        // of the builtin to run, not an option.
-        if args.first().map(String::as_str) == Some("--help") {
-            let mut stdout = Vec::new();
-            crate::builtins::help::print_builtin_help("builtin", &mut stdout)?;
+        // Stage-2 ④ Phase 2: the option scan is the (table row +
+        // `BuiltinOpt` + `Diag`) triple. GNU builtins/builtin.def:
+        // `no_options()` (empty option string) with the leading
+        // `--help` mapped to CASE_HELPOPT by internal_getopt
+        // (rubash#1229); a bare `--` ends option parsing and is
+        // skipped, so `builtin -- CMD` runs CMD (rubash#1376) and —
+        // critically — a word AFTER `--` is a NAME, never an option:
+        // `builtin -- --help` is `builtin: --help: not a shell
+        // builtin`, rc 1 (rubash#2939), not an invalid-option error.
+        // `BuiltinOpt` on the row's empty spec produces exactly that
+        // shape: `--help` in option position → Help, `--` → End with
+        // the rest as operands, `-x` → InvalidOpt, `--badflag` →
+        // InvalidOpt("--") (bashgetopt.c:99, rubash#1259).
+        let row = super::builtin_table::builtin_table_row("builtin")
+            .expect("builtin row in BUILTIN_TABLE");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+        let (help, operands) = {
+            let mut opt = super::builtin_opt::BuiltinOpt::new(row, args, &mut diag, false);
+            let mut help = false;
+            loop {
+                match opt.next() {
+                    super::builtin_opt::OptEvent::Help => {
+                        help = true;
+                        break;
+                    }
+                    super::builtin_opt::OptEvent::End => break,
+                    // The row's spec is `""`: no option character
+                    // (and no argument-taking option) can ever arrive.
+                    super::builtin_opt::OptEvent::Opt(_)
+                    | super::builtin_opt::OptEvent::OptArg(_, _) => {
+                        unreachable!("builtin spec is \"\"")
+                    }
+                }
+            }
+            let operands: Vec<String> = opt.operands().iter().map(|s| s.to_string()).collect();
+            (help, operands)
+        };
+        if help {
+            crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
+            // The scan records nothing on the help path, but flush
+            // anyway: a `Diag` dropped with pending diagnostics
+            // loses them, and the cost here is one `is_empty`.
+            diag.flush_with(|| self.diagnostic_prolog());
             self.write_buffered_builtin_output(cmd, &stdout, &[])?;
             self.exit_code = 2;
             return Ok(());
         }
-        // GNU builtins/builtin.def: no_options() + `list = loptend`: a bare
-        // `--` ends option parsing and is skipped, so `builtin -- CMD` runs
-        // CMD (rubash#1376); a lone `--` is a silent success.
-        let args: &[String] = match args.first().map(String::as_str) {
-            Some("--") => &args[1..],
-            _ => args,
-        };
+        if diag.status() != 0 {
+            diag.usage();
+            diag.flush_with(|| self.diagnostic_prolog());
+            let status = diag.status();
+            drop(diag);
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            self.exit_code = status;
+            return Ok(());
+        }
+        // Flush before the dispatch drops the handle: the scan
+        // records nothing on the clean path, but the flush is the
+        // only render point — dropping first would lose a message
+        // the scan ever recorded without setting a status.
+        diag.flush_with(|| self.diagnostic_prolog());
+        drop(diag);
+        let args: &[String] = &operands;
         let Some(name) = args.first().map(String::as_str) else {
             // rubash#1643: a bare `builtin` runs no builtin, but GNU still
             // performs the invocation's own redirections first (redir.c
@@ -36,30 +82,6 @@ impl Executor {
             self.exit_code = i32::from(redirect_failed);
             return Ok(());
         };
-
-        // GNU builtins/builtin.def:64-66: no_options() rejects any option
-        // (empty option string). internal_getopt (bashgetopt.c:99) calls
-        // sh_invalidopt for the bad option, then no_options calls
-        // builtin_usage.
-        if name.starts_with('-') && name != "--" && name != "-" {
-            let mut stderr = Vec::new();
-            // GNU bashgetopt sh_invalidopt names `-` plus the first
-            // invalid option character, not the whole word (rubash#1259:
-            // `builtin --badflag` reports `--`, not `--badflag`).
-            let option = name.chars().nth(1).unwrap_or('-');
-            writeln!(
-                &mut stderr,
-                "{}builtin: -{option}: invalid option",
-                self.diagnostic_prefix()
-            )?;
-            writeln!(
-                &mut stderr,
-                "builtin: usage: builtin [shell-builtin [arg ...]]"
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 2;
-            return Ok(());
-        }
 
         let mut builtin_cmd = cmd.clone();
         builtin_cmd.words = args.to_vec();

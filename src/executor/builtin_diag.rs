@@ -7,7 +7,9 @@
 //! A3-R1 escape closes structurally (Phase 4): a downstream machine
 //! that takes `&mut Diag` cannot write to the wrong sink, because
 //! the sink is bound once, at the dispatch point, to the command's
-//! own stderr.
+//! own stderr. Diagnostics are recorded in order and rendered by
+//! `flush_with` after the call, with the prolog supplied there —
+//! so a diagnostic-free call never builds one (E4, Phase 2).
 //!
 //! The rendering rules are ports of the GNU originals (behavior
 //! ported, not code translated):
@@ -60,8 +62,10 @@ pub const EX_BADUSAGE: i32 = 2;
 
 /// The diagnostic prolog: the shell name + the line segment, in
 /// the shape `Executor::diagnostic_prefix()` already renders. The
-/// data is captured up front so the handle does not borrow the
-/// executor.
+/// dispatcher builds one at flush time (`Diag::flush_with`) and
+/// hands it to the handle then — never at `Diag` construction,
+/// so the handle itself does not borrow the executor and a
+/// diagnostic-free call never pays the ~7µs build cost (E4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prolog {
     /// Whether the shell is interactive (no line segment then).
@@ -159,20 +163,33 @@ pub enum NumericFatal {
 }
 
 /// The single diagnostic voice for one builtin call.
+///
+/// A `Diag` records diagnostics in order and renders them when
+/// the dispatcher flushes it (`flush_with`, after the call):
+/// the prolog is supplied there, by the dispatcher, so a call
+/// that emits no diagnostic never pays for one — building a
+/// prolog costs ~7µs per call in a debug build (~11 HashMap
+/// lookups + string clones), which the E4 gate cannot absorb on
+/// the fast builtins (Stage-2 ④ Phase 2). The sink is bound
+/// once, at the dispatch point, to the command's own stderr.
 pub struct Diag<'a> {
-    prolog: Prolog,
     row: &'a BuiltinRow,
     sink: &'a mut dyn DiagSink,
     status: i32,
+    /// Diagnostics recorded but not yet rendered, in order: the
+    /// line body without the prolog (`{name}: {body}\n`), plus
+    /// whether the prolog prefixes it — `usage()` lines never
+    /// carry one (`builtin_usage` has no prolog, common.c:128).
+    pending: Vec<(bool, String)>,
 }
 
 impl<'a> Diag<'a> {
-    pub fn new(prolog: Prolog, row: &'a BuiltinRow, sink: &'a mut dyn DiagSink) -> Self {
+    pub fn new(row: &'a BuiltinRow, sink: &'a mut dyn DiagSink) -> Self {
         Diag {
-            prolog,
             row,
             sink,
             status: 0,
+            pending: Vec::new(),
         }
     }
 
@@ -182,15 +199,66 @@ impl<'a> Diag<'a> {
         self.status
     }
 
+    /// Whether any diagnostic is recorded and unflushed.
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Render every recorded diagnostic into the sink, in order,
+    /// each prefixed with the prolog — except `usage()` lines,
+    /// which never carry one. The prolog is built by the caller
+    /// and supplied here, exactly once per flush; when nothing is
+    /// pending the closure is never called, so a diagnostic-free
+    /// call costs one `is_empty` check and nothing more. The
+    /// dispatcher must call this after the call and before the
+    /// sink is read; a `Diag` dropped with pending diagnostics
+    /// loses them (the discard-sink predicates rely on that).
+    pub fn flush_with(&mut self, prolog: impl FnOnce() -> Prolog) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let head = prolog().render();
+        for (with_prolog, body) in self.pending.drain(..) {
+            if with_prolog {
+                self.sink.write_str(&format!("{head}{body}"));
+            } else {
+                self.sink.write_str(&body);
+            }
+        }
+    }
+
     /// The row this handle speaks for.
     pub fn row(&self) -> &'a BuiltinRow {
         self.row
     }
 
+    /// The raw diagnostic sink, for diagnostics that carry their own
+    /// prefix and cannot speak through the standard `{prolog}{name}:`
+    /// skeleton — the readonly-variable bind errors (`err_readonly`,
+    /// error.c:453), which are `{prefix}VAR: readonly variable` with
+    /// no builtin name and a gnu_errfmt-aware prefix of their own.
+    /// The caller must not write a standard builtin diagnostic
+    /// through this handle (that is what `free` is for).
+    ///
+    /// Direct sink writes bypass the pending queue: they land in
+    /// the buffer immediately, while recorded diagnostics land at
+    /// flush time. A caller that mixes the two in one call must
+    /// ensure no diagnostic is pending when it writes — in
+    /// practice the only user (`pushd`'s readonly bind errors)
+    /// runs only on paths where none can be: a failed scan
+    /// returns before any bind, and a failed `chdir` returns
+    /// before any bind, so the bind errors only ever fire on a
+    /// clean-scan success path with an empty queue.
+    pub fn sink(&mut self) -> &mut dyn DiagSink {
+        self.sink
+    }
+
     /// Render one standard skeleton: `{prolog}{name}: {body}\n`.
     /// The getopt family (`InvalidOpt` / `NeedArg` / `NeedNumArg`)
     /// also sets `EX_USAGE`, matching the `.def` loops' `default:`
-    /// arm (`builtin_usage(); return (EX_USAGE);`).
+    /// arm (`builtin_usage(); return (EX_USAGE);`). The line is
+    /// recorded, not written: `flush_with` renders it (with the
+    /// prolog) after the call, in order.
     pub fn error(&mut self, kind: DiagKind) {
         match kind {
             DiagKind::InvalidOpt(_) | DiagKind::NeedArg(_) | DiagKind::NeedNumArg(_) => {
@@ -239,17 +307,19 @@ impl<'a> Diag<'a> {
             DiagKind::TooManyArgs => "too many arguments".to_string(),
             DiagKind::NoArgs => "no arguments".to_string(),
         };
-        let line = format!("{}{}: {body}\n", self.prolog.render(), self.row.name);
-        self.sink.write_str(&line);
+        let line = format!("{}: {body}\n", self.row.name);
+        self.pending.push((true, line));
     }
 
     /// `builtin_usage` (`common.c:128-137`): `{name}: usage:
     /// {short_doc}` — with NO prolog. A row with no help topic
     /// (`env`) prints nothing: there is no short doc to print.
+    /// Recorded like any other line (in order); `flush_with`
+    /// renders it without the prolog.
     pub fn usage(&mut self) {
         if let Some(short) = self.row.doc.short_doc() {
             let line = format!("{}: usage: {short}\n", self.row.name);
-            self.sink.write_str(&line);
+            self.pending.push((false, line));
         }
     }
 
@@ -305,17 +375,19 @@ impl<'a> Diag<'a> {
     /// {ctx}: {strerror}\n`, with the canonical GNU strerror text
     /// (`posix_errors::message` — never `(os error N)`, never a
     /// localized message). The status is the caller's business.
+    /// Recorded, not written (see `error`).
     pub fn os_error(&mut self, ctx: &str, err: &io::Error) {
         let text = crate::posix_errors::message(err);
-        let line = format!("{}{}: {ctx}: {text}\n", self.prolog.render(), self.row.name);
-        self.sink.write_str(&line);
+        let line = format!("{}: {ctx}: {text}\n", self.row.name);
+        self.pending.push((true, line));
     }
 
     /// A non-standard diagnostic body through the same prolog and
-    /// sink: `{prolog}{name}: {message}\n`.
+    /// sink: `{prolog}{name}: {message}\n`. Recorded, not written
+    /// (see `error`).
     pub fn free(&mut self, args: fmt::Arguments<'_>) {
-        let line = format!("{}{}: {}\n", self.prolog.render(), self.row.name, args);
-        self.sink.write_str(&line);
+        let line = format!("{}: {}\n", self.row.name, args);
+        self.pending.push((true, line));
     }
 }
 
@@ -399,7 +471,7 @@ mod tests {
     #[test]
     fn error_renders_skeletons_and_sets_ex_usage() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_script(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         diag.error(DiagKind::InvalidOpt("-z".to_string()));
         diag.error(DiagKind::NeedArg("-p".to_string()));
         diag.error(DiagKind::NeedNumArg("-n".to_string()));
@@ -418,6 +490,7 @@ mod tests {
         diag.error(DiagKind::Restricted(Some("set".to_string())));
         diag.error(DiagKind::TooManyArgs);
         assert_eq!(diag.status(), EX_USAGE);
+        diag.flush_with(|| prolog_script());
         let out = String::from_utf8(sink).unwrap();
         let expected = concat!(
             "t.sh: line 1: cd: -z: invalid option\n",
@@ -441,12 +514,9 @@ mod tests {
     #[test]
     fn error_plus_sign_is_kept() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(
-            prolog_script(),
-            builtin_table_row("shopt").unwrap(),
-            &mut sink,
-        );
+        let mut diag = Diag::new(builtin_table_row("shopt").unwrap(), &mut sink);
         diag.error(DiagKind::InvalidOpt("+z".to_string()));
+        diag.flush_with(|| prolog_script());
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "t.sh: line 1: shopt: +z: invalid option\n"
@@ -456,19 +526,17 @@ mod tests {
     #[test]
     fn usage_has_no_prolog_and_env_prints_nothing() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_script(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         diag.usage();
+        diag.flush_with(|| prolog_script());
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "cd: usage: cd [-L|[-P [-e]]] [-@] [dir]\n"
         );
         let mut sink = Vec::new();
-        let mut diag = Diag::new(
-            prolog_script(),
-            builtin_table_row("env").unwrap(),
-            &mut sink,
-        );
+        let mut diag = Diag::new(builtin_table_row("env").unwrap(), &mut sink);
         diag.usage();
+        diag.flush_with(|| prolog_script());
         assert!(sink.is_empty(), "env has no short doc to print");
     }
 
@@ -476,11 +544,7 @@ mod tests {
     fn numeric_arg_ports_get_numeric_arg() {
         let w = |ss: &[&str]| ss.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut sink = Vec::new();
-        let mut diag = Diag::new(
-            prolog_script(),
-            builtin_table_row("break").unwrap(),
-            &mut sink,
-        );
+        let mut diag = Diag::new(builtin_table_row("break").unwrap(), &mut sink);
         assert_eq!(diag.numeric_arg(&[], NumericFatal::Soft), Some(1));
         assert_eq!(diag.numeric_arg(&w(&["3"]), NumericFatal::Soft), Some(3));
         assert_eq!(diag.numeric_arg(&w(&["-2"]), NumericFatal::Soft), Some(-2));
@@ -502,6 +566,7 @@ mod tests {
             None
         );
         assert_eq!(diag.numeric_arg(&w(&["2", "3"]), NumericFatal::Soft), None);
+        diag.flush_with(|| prolog_script());
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("break: 9999999999999999999999: numeric argument required\n"));
         assert!(out.contains("break: too many arguments\n"));
@@ -511,7 +576,7 @@ mod tests {
     fn numeric_arg_soft_leaves_status_clear() {
         let w = |ss: &[&str]| ss.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_script(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         assert_eq!(diag.numeric_arg(&w(&["xx"]), NumericFatal::Soft), None);
         assert_eq!(diag.status(), 0, "fatal==0 sets no status");
     }
@@ -519,13 +584,14 @@ mod tests {
     #[test]
     fn check_identifier_uses_valid_identifier() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_script(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         assert!(diag.check_identifier("HOME"));
         assert!(diag.check_identifier("_x1"));
         assert!(!diag.check_identifier("1x"));
         assert!(!diag.check_identifier(""));
         assert!(!diag.check_identifier("a-b"));
         assert!(!diag.check_identifier("é"));
+        diag.flush_with(|| prolog_script());
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             concat!(
@@ -540,8 +606,9 @@ mod tests {
     #[test]
     fn os_error_has_no_os_error_suffix() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_script(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         diag.os_error("/nonexistent", &io::Error::from_raw_os_error(2));
+        diag.flush_with(|| prolog_script());
         let out = String::from_utf8(sink).unwrap();
         assert_eq!(
             out,
@@ -553,8 +620,9 @@ mod tests {
     #[test]
     fn free_uses_the_same_prolog_and_sink() {
         let mut sink = Vec::new();
-        let mut diag = Diag::new(prolog_interactive(), cd_row(), &mut sink);
+        let mut diag = Diag::new(cd_row(), &mut sink);
         diag.free(format_args!("cannot cd to {}", "/tmp"));
+        diag.flush_with(|| prolog_interactive());
         assert_eq!(
             String::from_utf8(sink).unwrap(),
             "bash: cd: cannot cd to /tmp\n"
