@@ -77,8 +77,12 @@ fn run_pty_session(lines: &[&str]) -> String {
 }
 
 /// Bare `disown` removes the ^Z-stopped current job: the DEL_WARNSTOPPED
-/// warning prints, the second `jobs` is empty, and there is no
-/// "no such job" error. `\x1a` is ^Z.
+/// warning prints, the second `jobs` is empty, and `disown` itself
+/// reports no "no such job". The trailing `kill %1` probe MUST report
+/// "no such job" — that is the proof the job is gone (the fail-first
+/// draft asserted the phrase nowhere in the transcript, which the
+/// probe itself violates; the assertion is scoped to before the probe).
+/// `\x1a` is ^Z.
 #[test]
 fn bare_disown_removes_stopped_current_job() {
     let text = run_pty_session(&[
@@ -99,9 +103,14 @@ fn bare_disown_removes_stopped_current_job() {
         text.contains("warning: deleting stopped job 1 with process group"),
         "GNU prints the stopped-job warning on bare disown: {text:?}"
     );
+    let (before_kill, after_kill) = text.split_once("kill %1").unwrap_or((text.as_str(), ""));
     assert!(
-        !text.contains("no such job"),
+        !before_kill.contains("no such job"),
         "bare disown must not report 'no such job': {text:?}"
+    );
+    assert!(
+        after_kill.contains("no such job"),
+        "kill %1 after the disown must fail: the job is gone: {text:?}"
     );
     // "Stopped" appears exactly twice: the ^Z stop notice and the
     // first `jobs` listing. The second `jobs` (after disown) must

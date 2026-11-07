@@ -9,11 +9,14 @@
 //! gets no second pull (builtins/evalstring.c `parse_and_execute`
 //! checks string exhaustion before the next parse), so no notice;
 //! a `-c` string with a second line notifies with that line's number
-//! (`line 2`); a script file notifies at the EOF pull, stamped with
-//! the line past the last (`line 2` for a 1-line file, `line 4` for
-//! the 3-line multi-line seed). Rubash flushes the notice at every
-//! top-level command boundary (ast_exec.rs:952) and stamps the
-//! previous command's line — wrong on WHEN and on the STAMP.
+//! (`line 2`); a script file notifies at the first read after the
+//! death is recorded — `line 2` (the EOF pull) for a 1-line file,
+//! `line 3` for the 3-line seed (the death records during line 2's
+//! `sleep 0.5` foreground wait), `line 4` for the 4-line seed (the
+//! kill alone on line 2, recorded during line 3's sleep). Rubash
+//! flushed the notice at every top-level command boundary
+//! (ast_exec.rs:952) and stamped the previous command's line — wrong
+//! on WHEN and on the STAMP.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -103,17 +106,43 @@ fn script_file_single_line_notifies_with_line_2() {
     );
 }
 
-/// Script file, three lines: the notice fires at the EOF pull,
-/// stamped `line 4`.
+/// Script file, three lines: the death is recorded during line 2's
+/// `sleep 0.5` foreground wait, so the first read after the recording
+/// is line 3 (`echo done`) and the notice is stamped `line 3` — not
+/// the EOF pull. (The fail-first draft of this test expected `line 4`
+/// by extrapolating the 4-line shape below; GNU stamps `line 3` here,
+/// 3/3 runs, and rubash matches — the expectation was a test error,
+/// adjudicated against the oracle 2026-11-07.)
 #[test]
-fn script_file_multi_line_notifies_with_line_4() {
+fn script_file_multi_line_notifies_with_line_3() {
     let (stdout, stderr, rc) =
         run_script_file("sleep 3 & p=$!\nkill -KILL $p; sleep 0.5\necho done\n");
     assert_eq!(rc, Some(0));
     assert!(stdout.contains("done"), "seed must complete: {stdout:?}");
     assert!(
+        stderr.contains("line 3:"),
+        "notice should be stamped line 3 (the first read after the death is recorded): {stderr:?}"
+    );
+}
+
+/// Script file, four lines: the kill is alone on line 2, so the death
+/// is only recorded during line 3's `sleep 0.5` — the first read after
+/// the recording is line 4 (`echo done`), and the notice is stamped
+/// `line 4`. This is the shape that distinguishes the read-time
+/// stamp from the just-finished line.
+#[test]
+fn script_file_death_recorded_mid_stream_notifies_at_next_read() {
+    let (stdout, stderr, rc) =
+        run_script_file("sleep 3 & p=$!\nkill -KILL $p\nsleep 0.5\necho done\n");
+    assert_eq!(rc, Some(0));
+    assert!(stdout.contains("done"), "seed must complete: {stdout:?}");
+    assert!(
         stderr.contains("line 4:"),
-        "notice should be stamped line 4 (the EOF pull): {stderr:?}"
+        "notice should be stamped line 4 (the first read after the death is recorded): {stderr:?}"
+    );
+    assert!(
+        stderr.contains("Killed"),
+        "notice should name the signal: {stderr:?}"
     );
 }
 

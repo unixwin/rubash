@@ -15,6 +15,7 @@
 //!     barrier; everything else is CLOEXEC and disappears.
 
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::process::ExitStatusExt;
 
 pub type HANDLE = RawFd; // isize-compatible integer fd
 
@@ -692,30 +693,109 @@ pub struct WhitelistedSpawn {
 
 #[derive(Debug)]
 pub struct SpawnedChild {
-    inner: std::process::Child,
+    inner: SpawnedChildInner,
+}
+
+#[derive(Debug)]
+enum SpawnedChildInner {
+    Std(std::process::Child),
+    /// A child created by a raw `fork()` (rubash#2925: the direct async
+    /// spawn cannot use `Command::spawn`, whose error-pipe sync blocks
+    /// the parent until the child execs and loses the kill-before-ignore
+    /// race). Stable Rust cannot wrap a bare pid in a `Child`, so this
+    /// variant owns the pid plus the cached reap status — the same cache
+    /// `Child` keeps, so a second `try_wait`/`wait` returns the recorded
+    /// status instead of ECHILD (the multi-member wait's ECHILD arm
+    /// consults the handle's word exactly this way).
+    RawFork {
+        pid: u32,
+        status: Option<std::process::ExitStatus>,
+    },
 }
 
 impl SpawnedChild {
     pub fn id(&self) -> u32 {
-        self.inner.id()
+        match &self.inner {
+            SpawnedChildInner::Std(child) => child.id(),
+            SpawnedChildInner::RawFork { pid, .. } => *pid,
+        }
+    }
+
+    /// Construct from a bare pid (raw-fork spawn, rubash#2925).
+    pub fn from_pid(pid: u32) -> Self {
+        Self {
+            inner: SpawnedChildInner::RawFork { pid, status: None },
+        }
     }
 
     pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
-        self.inner.try_wait()
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.try_wait(),
+            SpawnedChildInner::RawFork { pid, status } => {
+                if let Some(done) = status {
+                    return Ok(Some(done.clone()));
+                }
+                let mut raw: libc::c_int = 0;
+                let reaped = unsafe { libc::waitpid(*pid as libc::pid_t, &mut raw, libc::WNOHANG) };
+                if reaped == *pid as libc::pid_t {
+                    let done = std::process::ExitStatus::from_raw(raw);
+                    *status = Some(done.clone());
+                    Ok(Some(done))
+                } else if reaped == 0 {
+                    Ok(None)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+        }
     }
 
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-        self.inner.wait()
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.wait(),
+            SpawnedChildInner::RawFork { pid, status } => {
+                if let Some(done) = status {
+                    return Ok(done.clone());
+                }
+                loop {
+                    let mut raw: libc::c_int = 0;
+                    let reaped = unsafe { libc::waitpid(*pid as libc::pid_t, &mut raw, 0) };
+                    if reaped == *pid as libc::pid_t {
+                        let done = std::process::ExitStatus::from_raw(raw);
+                        *status = Some(done.clone());
+                        return Ok(done);
+                    }
+                    if reaped < 0 {
+                        let error = std::io::Error::last_os_error();
+                        if error.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        return Err(error);
+                    }
+                }
+            }
+        }
     }
 
     pub fn kill(&mut self) -> std::io::Result<()> {
-        self.inner.kill()
+        match &mut self.inner {
+            SpawnedChildInner::Std(child) => child.kill(),
+            SpawnedChildInner::RawFork { pid, .. } => {
+                if unsafe { libc::kill(*pid as libc::pid_t, libc::SIGKILL) } == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            }
+        }
     }
 }
 
 impl From<std::process::Child> for SpawnedChild {
     fn from(child: std::process::Child) -> Self {
-        Self { inner: child }
+        Self {
+            inner: SpawnedChildInner::Std(child),
+        }
     }
 }
 
@@ -787,7 +867,9 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     // Parent side: the extras were dup2'd onto their own numbers in the
     // child by pre_exec; the parent's originals stay open (callers own them,
     // as on Windows).
-    Ok(SpawnedChild { inner: child })
+    Ok(SpawnedChild {
+        inner: SpawnedChildInner::Std(child),
+    })
 }
 
 fn dup_for_child(fd: HANDLE) -> std::io::Result<HANDLE> {
