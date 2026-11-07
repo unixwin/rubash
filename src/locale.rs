@@ -86,6 +86,13 @@ pub enum Encoding {
 // inside echo even though LC_ALL was never exported).
 thread_local! {
     static SHELL_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The LC_NUMERIC category's name from the same variable table.
+    /// GNU resolves each category on its own chain (locale.c:345
+    /// get_locale_var: LC_ALL > LC_<category> > LANG), so the numeric
+    /// face (printf's decimal point) cannot ride the LC_CTYPE-flavoured
+    /// resolution above: LC_ALL > LC_NUMERIC > LANG gets its own slot
+    /// (rubash#2979).
+    static SHELL_NUMERIC_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// RAII guard installing [`SHELL_LOCALE_OVERRIDE`] from a variable table.
@@ -96,13 +103,21 @@ thread_local! {
 /// when the inner builtin returns.
 pub struct ShellLocaleGuard {
     previous: Option<String>,
+    previous_numeric: Option<String>,
 }
 
 impl ShellLocaleGuard {
     pub fn new(env_vars: &std::collections::HashMap<String, String>) -> Self {
         let previous = SHELL_LOCALE_OVERRIDE
             .with(|cell| cell.borrow_mut().replace(locale_name_from_vars(env_vars)));
-        ShellLocaleGuard { previous }
+        let previous_numeric = SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
+            cell.borrow_mut()
+                .replace(locale_numeric_name_from_vars(env_vars))
+        });
+        ShellLocaleGuard {
+            previous,
+            previous_numeric,
+        }
     }
 }
 
@@ -112,7 +127,54 @@ impl Drop for ShellLocaleGuard {
         SHELL_LOCALE_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = previous;
         });
+        let previous_numeric = std::mem::replace(&mut self.previous_numeric, None);
+        SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = previous_numeric;
+        });
     }
+}
+
+/// The LC_NUMERIC category name from a variable table: LC_ALL >
+/// LC_NUMERIC > LANG, empty values skipped (GNU locale.c:345
+/// get_locale_var's chain for the numeric category).
+fn locale_numeric_name_from_vars(env_vars: &std::collections::HashMap<String, String>) -> String {
+    for name in ["LC_ALL", "LC_NUMERIC", "LANG"] {
+        if let Some(value) = env_vars.get(name) {
+            if !value.is_empty() {
+                return value.clone();
+            }
+        }
+    }
+    String::new()
+}
+
+/// The LC_NUMERIC category name a running builtin should observe: the
+/// executing shell's variable-table resolution when a guard is
+/// installed, the process environment (same chain) otherwise.
+pub(crate) fn active_numeric_locale_name() -> String {
+    match SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        Some(name) => name,
+        None => {
+            let locale_all = std::env::var("LC_ALL").unwrap_or_default();
+            let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
+            if !locale_all.is_empty() {
+                locale_all
+            } else if !numeric.is_empty() {
+                numeric
+            } else {
+                std::env::var("LANG").unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// The multibyte decision against the ACTIVE locale name — the
+/// guard-aware counterpart of [`is_multi_byte`]: a builtin executing
+/// under a [`ShellLocaleGuard`] observes the shell's variable-table
+/// locale, exactly as the printf character-constant face does
+/// (rubash#2965/#2979). Outside a guard this is [`is_multi_byte`].
+pub(crate) fn is_multi_byte_active() -> bool {
+    locale_name_selects_utf8(&active_locale_name())
 }
 
 /// Locale name from a variable table: LC_ALL > LC_CTYPE > LC_MESSAGES >
@@ -557,16 +619,14 @@ pub fn effective_length(s: &str) -> usize {
 /// must yield `1,0000` even when the host exports `LC_CTYPE=C.UTF-8` —
 /// LC_CTYPE belongs to the character-type category, not numeric). An unset
 /// or `C`/`POSIX` locale returns `.`.
+///
+/// The name is read through [`active_numeric_locale_name`], so under a
+/// [`ShellLocaleGuard`] the executing shell's variable table decides —
+/// a store-side assignment (e.g. `printf -v LC_ALL ...`) that never
+/// reached the process environment still flips the point, exactly as
+/// GNU's sv_locale watcher makes it (rubash#2979).
 pub fn decimal_point() -> char {
-    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
-    let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
-    let locale = if !locale_all.is_empty() {
-        locale_all
-    } else if !numeric.is_empty() {
-        numeric
-    } else {
-        std::env::var("LANG").unwrap_or_default()
-    };
+    let locale = active_numeric_locale_name();
     let lower = locale.to_lowercase();
     if lower.starts_with("de_de")
         || lower.starts_with("fr_fr")

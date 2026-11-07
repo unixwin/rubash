@@ -30,8 +30,7 @@ fn fixture_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("rubash-a3-r58b-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("bin")).expect("create bin dir");
-    std::fs::write(dir.join("bin").join("mycmd"), "#!/bin/sh\necho MYCMD\n")
-        .expect("write mycmd");
+    std::fs::write(dir.join("bin").join("mycmd"), "#!/bin/sh\necho MYCMD\n").expect("write mycmd");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -47,10 +46,7 @@ fn fixture_dir(tag: &str) -> PathBuf {
 #[test]
 fn type_slash_relative_names_stay_verbatim() {
     let dir = fixture_dir("verbatim");
-    let (stdout, _, code) = rubash_in(
-        &dir,
-        "type ./bin/mycmd; type bin/mycmd; echo rc=$?",
-    );
+    let (stdout, _, code) = rubash_in(&dir, "type ./bin/mycmd; type bin/mycmd; echo rc=$?");
     assert_eq!(code, Some(0));
     assert_eq!(
         stdout,

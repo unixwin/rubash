@@ -29,7 +29,11 @@ pub(super) fn format_value(
     //   * `%b`/`%q`/`%Q` go through printstr over the byte string, so
     //     their precision is a BYTE count as well.
     let wide = spec.wide || matches!(spec.specifier, 'S' | 'C');
-    let byte_mode = !(wide && crate::locale::is_multi_byte());
+    // rubash#2979: the multibyte question is asked of the ACTIVE locale
+    // (the dispatch funnel's ShellLocaleGuard), not the process env —
+    // GNU's printwidestr decision reads locale_mb_cur_max, which the
+    // sv_locale watchers keep equal to the shell's variable table.
+    let byte_mode = !(wide && crate::locale::is_multi_byte_active());
     // GNU printf.def:681-694: a %Q precision that overflows decodes to -1
     // (no truncation of the unquoted argument); the effective precision is
     // then re-derived from the quoted length in printstr.
