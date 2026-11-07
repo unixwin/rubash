@@ -1747,7 +1747,7 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, bound) {
+            if !self.apply_shell_assignment(name, bound, None) {
                 self.latch_parameter_assignment_failure(prev_status);
             }
             return;
@@ -1795,7 +1795,7 @@ impl Executor {
             if !is_shell_name(name) {
                 return;
             }
-            if !self.apply_shell_assignment(name, bound) {
+            if !self.apply_shell_assignment(name, bound, None) {
                 self.latch_parameter_assignment_failure(prev_status);
             }
         }
@@ -1828,7 +1828,7 @@ impl Executor {
             self.latch_parameter_assignment_failure(prev_status);
             return true;
         }
-        self.apply_shell_assignment(&target_name, value);
+        self.apply_shell_assignment(&target_name, value, None);
         true
     }
 }

@@ -657,8 +657,10 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str], env_vars: &mut crate::shell::var_table::VarTable) -> (i32, String) {
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = unset_with_stderr(args.iter().copied(), env_vars, &mut stderr).unwrap();
+        let status =
+            unset_with_stderr(args.iter().copied(), env_vars, &mut stdout, &mut stderr).unwrap();
         (status, String::from_utf8(stderr).unwrap())
     }
 

@@ -76,7 +76,7 @@ mod unit_tests {
         let mut executor = Executor::new();
         let name = "buffer_reuse_test";
         let initial = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        assert!(executor.apply_shell_assignment(name, initial.to_string()));
+        assert!(executor.apply_shell_assignment(name, initial.to_string(), None));
         let mirror_capacity = executor.shell_state.env_vars[name].capacity();
         let typed_capacity = match &executor.shell_state.variables.get(name).unwrap().value {
             crate::shell::ShellValue::Scalar(value) => value.capacity(),
@@ -84,7 +84,7 @@ mod unit_tests {
         };
 
         for expected in ["short", "", "different", initial] {
-            assert!(executor.apply_shell_assignment(name, expected.to_string()));
+            assert!(executor.apply_shell_assignment(name, expected.to_string(), None));
             assert_eq!(executor.get_env(name), Some(expected));
             assert_eq!(
                 executor.shell_state.env_vars[name].capacity(),

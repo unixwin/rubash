@@ -262,7 +262,7 @@ impl Executor {
                 // context-owned status maps to 127 under -c via
                 // shell.c:1471-1472 and stays 1 for scripts and contained
                 // subshells); default mode fails the command only.
-                if !self.apply_shell_assignment(&for_command.variable, value.clone()) {
+                if !self.apply_shell_assignment(&for_command.variable, value.clone(), None) {
                     self.exit_code = 1;
                     if self.posix_assignment_failure_is_fatal() {
                         let code = self.expansion_fatal_status();

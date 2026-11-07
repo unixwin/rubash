@@ -99,6 +99,94 @@ impl Prolog {
     }
 }
 
+/// The deferred form of a `Prolog`, for the declare family's
+/// in-context entry: the variable table is mutably borrowed for the
+/// whole call there, so the composed `Prolog` (which reads that
+/// same table) cannot be handed in by the dispatcher without paying
+/// its ~7µs build on every call — and a closure over the executor
+/// cannot build it either, since that borrow would coexist with
+/// the `&mut` table borrow for the call's duration. The two fields
+/// that do NOT derive from the table — the composed error file
+/// name (a `bash_source_stack` product) and the invocation shape —
+/// cross by value; every table-derived field is composed in
+/// `build`, which runs only at a diagnostic site, so a
+/// diagnostic-free declare/local call never pays for a prolog
+/// (E4, the Phase-2 lesson — see `Diag`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrologParts {
+    /// The executor flavor (`Executor::diagnostic_prolog`,
+    /// deferred): the fields are composed at the dispatch point.
+    Executor {
+        /// `current_error_file_name()` at the dispatch point.
+        script_file: Option<String>,
+        /// `invocation_interactive()` at the dispatch point.
+        interactive: bool,
+    },
+    /// The library flavor (the declare layer's own table-only
+    /// composition, for the non-executor entry).
+    Lib,
+}
+
+impl PrologParts {
+    /// Compose the `Prolog` from the variable table, exactly as
+    /// the eager builder of the same flavor composes it (the
+    /// table-derived fields — the argv0 chain, the shell basename,
+    /// the current line — are read here, at the diagnostic site;
+    /// the declare family never writes those cells itself).
+    pub fn build(&self, variables: &crate::shell::var_table::VarTable) -> Prolog {
+        match self {
+            PrologParts::Executor {
+                script_file,
+                interactive,
+            } => Prolog {
+                interactive: *interactive,
+                shell_basename: super::Executor::interactive_shell_basename(&**variables),
+                error_name: error_report_name(script_file, variables),
+                script_file: script_file.clone(),
+                line: variables.get("__RUBASH_CURRENT_LINE").cloned(),
+            },
+            PrologParts::Lib => Prolog {
+                interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
+                shell_basename: variables
+                    .get("__RUBASH_SHELL_NAME")
+                    .cloned()
+                    .unwrap_or_else(|| "rubash".to_string()),
+                error_name: "rubash".to_string(),
+                script_file: variables
+                    .get("__RUBASH_SCRIPT_NAME")
+                    .cloned()
+                    .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+                line: variables
+                    .get("__RUBASH_CURRENT_LINE")
+                    .cloned()
+                    .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
+            },
+        }
+    }
+}
+
+/// `Executor::error_report_name_with_file` over a variable table:
+/// the error file name when it names one, else the raw argv0 keys
+/// in order, else the shell basename.
+fn error_report_name(
+    file_name: &Option<String>,
+    variables: &crate::shell::var_table::VarTable,
+) -> String {
+    if let Some(name) = file_name.as_ref().filter(|name| !name.is_empty()) {
+        return name.clone();
+    }
+    for key in [
+        "BASH_ARGV0",
+        "__RUBASH_ARGV0_AFTER_UNSET",
+        "__RUBASH_TOP_LEVEL_NAME",
+    ] {
+        if let Some(value) = variables.get(key).filter(|value| !value.is_empty()) {
+            return value.clone();
+        }
+    }
+    super::Executor::interactive_shell_basename(&**variables)
+}
+
 /// The sink a `Diag` writes to: the command's own stderr (the
 /// redirection-applied IO context the dispatcher binds).
 pub trait DiagSink {
@@ -218,6 +306,17 @@ impl<'a> Diag<'a> {
             return;
         }
         let head = prolog().render();
+        self.flush_with_head(&head);
+    }
+
+    /// Render pending diagnostics with an already-rendered prolog
+    /// head. The immediate writers (`err_readonly`, the declare
+    /// layer's `bare_diag_line`) flush through here first so a
+    /// diagnostic recorded earlier in the same call still precedes
+    /// a later immediate line in the byte stream — without it the
+    /// pending line would land after the immediate one at flush
+    /// time (Stage-2 ④ Phase 4).
+    pub fn flush_with_head(&mut self, head: &str) {
         for (with_prolog, body) in self.pending.drain(..) {
             if with_prolog {
                 self.sink.write_str(&format!("{head}{body}"));
@@ -380,6 +479,22 @@ impl<'a> Diag<'a> {
         let text = crate::posix_errors::message(err);
         let line = format!("{}: {ctx}: {text}\n", self.row.name);
         self.pending.push((true, line));
+    }
+
+    /// `err_readonly` (`error.c:453`): the bind-layer diagnostic
+    /// `{prefix}VAR: readonly variable` with no builtin name and a
+    /// gnu_errfmt-aware prefix of its own. Written immediately to
+    /// the sink like `sink()` lines — the caller supplies the
+    /// already-rendered prefix (the assignment machinery's
+    /// `error_prefix`, the declare layer's flush prolog) and must
+    /// flush pending diagnostics first when order matters (see
+    /// `bare_diag_line` in `builtins::declare`).
+    pub fn err_readonly(&mut self, error_prefix: &str, name: &str) {
+        // Flush first: this line writes immediately, so a diagnostic
+        // recorded earlier in the same call must precede it.
+        self.flush_with_head(error_prefix);
+        let line = format!("{error_prefix}{name}: readonly variable\n");
+        self.sink.write_str(&line);
     }
 
     /// A non-standard diagnostic body through the same prolog and

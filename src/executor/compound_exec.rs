@@ -4165,7 +4165,7 @@ impl Executor {
         // reach the parser's subshell gate.
         for (name, value) in &cmd.assignments {
             let result = self.expand_assignment_value_result_with_raw(name, value, None);
-            if !self.apply_shell_assignment(name, result.value) {
+            if !self.apply_shell_assignment(name, result.value, None) {
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -5819,7 +5819,7 @@ impl Executor {
                         // `coproc ref` with ref_PID a nameref assigns through
                         // it and hits the resolved target's readonly check.
                         // err_readonly carries no builtin command segment.
-                        self.apply_shell_assignment(&pid_name, pid.to_string());
+                        self.apply_shell_assignment(&pid_name, pid.to_string(), None);
                     }
                     self.exit_code = 0;
                 }

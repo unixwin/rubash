@@ -1363,9 +1363,19 @@ impl Executor {
         // it (GNU's bind failure produces exactly one diagnostic line).
         self.shell_state.arithmetic_readonly_error.set(true);
         if !self.shell_state.arithmetic_expansion_error.replace(true) {
-            eprintln!("{}{}: readonly variable", self.error_prefix(), name);
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
+            // GNU error.c:453 err_readonly (report_error family):
+            // the diagnostic goes to fd 2 AS BOUND by the command's
+            // redirections — `(( a = 6 )) 2>&1` lands it on stdout,
+            // `2>f` in f. Route through arith_diag
+            // (write_diagnostic_fd2) like every sibling arithmetic
+            // diagnostic; the raw eprintln! here bypassed the
+            // binding and leaked to the shell's real stderr
+            // (rubash#2707, A3-R1).
+            self.arith_diag(&format!(
+                "{}{}: readonly variable\n",
+                self.error_prefix(),
+                name
+            ));
         }
     }
 

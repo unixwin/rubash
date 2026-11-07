@@ -2251,7 +2251,7 @@ impl Executor {
         // nameref resolution) so followup commands see it, then restore the
         // caller's binding when the group ends.
         let saved_value = self.shell_state.variables.get(name).cloned();
-        let _ = self.apply_shell_assignment_command("read", name, value.to_string());
+        let _ = self.apply_shell_assignment_command("read", name, value.to_string(), None);
         self.exit_code = status;
         let result = self
             .execute_pipeline_stage(command, "", false, false)

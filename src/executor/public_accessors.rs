@@ -3286,16 +3286,24 @@ impl Executor {
     /// migrate in Phase 4) and a diagnostic-free call never pays
     /// the ~7µs build cost (E4, Stage-2 ④ Phase 2).
     pub(crate) fn diagnostic_prolog(&self) -> super::builtin_diag::Prolog {
-        super::builtin_diag::Prolog {
-            interactive: self.invocation_interactive(),
-            shell_basename: Self::interactive_shell_basename(&self.shell_state.env_vars),
-            error_name: self.error_report_name(),
+        // `error_report_name` is `current_error_file_name` plus a
+        // fallback chain: compose the BASH_SOURCE view once and feed
+        // both fields from it (this handle is built per diagnostic
+        // flush, and the view composition is its dominant cost).
+        self.diagnostic_prolog_parts()
+            .build(&self.shell_state.env_vars)
+    }
+
+    /// The deferred form of `diagnostic_prolog` for the declare
+    /// family's in-context crossings (`builtin_diag::PrologParts`):
+    /// only the two fields that do not derive from the variable
+    /// table are composed here; the rest is composed at the
+    /// diagnostic site from the table, so a diagnostic-free
+    /// declare/local call pays nothing (E4).
+    pub(crate) fn diagnostic_prolog_parts(&self) -> super::builtin_diag::PrologParts {
+        super::builtin_diag::PrologParts::Executor {
             script_file: self.current_error_file_name(),
-            line: self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_CURRENT_LINE")
-                .cloned(),
+            interactive: self.invocation_interactive(),
         }
     }
 
@@ -3335,11 +3343,15 @@ impl Executor {
     /// has no brand fallback, it ends at base_pathname(shell_name)
     /// and the literal "bash".
     pub(in crate::executor) fn error_report_name(&self) -> String {
-        if let Some(name) = self
-            .current_error_file_name()
-            .filter(|name| !name.is_empty())
-        {
-            return name;
+        self.error_report_name_with_file(&self.current_error_file_name())
+    }
+
+    /// `error_report_name` with the error file name already composed
+    /// (the caller may hold it — `diagnostic_prolog` feeds both of its
+    /// fields from one composition).
+    fn error_report_name_with_file(&self, file_name: &Option<String>) -> String {
+        if let Some(name) = file_name.as_ref().filter(|name| !name.is_empty()) {
+            return name.clone();
         }
         for key in [
             "BASH_ARGV0",
