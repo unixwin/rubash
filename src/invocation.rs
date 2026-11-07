@@ -444,6 +444,24 @@ impl ShellInvocation {
             // (`shopt -s|-u name`).
             let _ = self.write_shopt_options_listing(executor, &mut std::io::stdout());
         }
+        if self.interactive {
+            // rubash#2948 face C: GNU runs initialize_job_control at
+            // startup for interactive shells (shell.c:1969, before
+            // run_startup_files), and jobs.c:4869 makes the monitor
+            // letter its result. A library one-shot form (a host's
+            // `-i -c` / `-i script` route) reaches no other
+            // establishment site — the binary's apply_startup_job_
+            // control is main.rs-only and the stdin reader never runs
+            // — so the establishment belongs to the invocation
+            // application itself: every host that applies an
+            // interactive invocation gets it. It runs AFTER the flag
+            // applications above on purpose: the funnel's decision
+            // overrides the raw -m/+m transports exactly as
+            // initialize_job_control overrides jobs_m_flag, and
+            // because this face is the before-startup phase, a
+            // startup file's `set ±m` still wins afterward.
+            crate::script_driver::establish_interactive_job_control(executor);
+        }
         // niu extension (GNU shell.c:255's `debugging` variable is
         // write-only in bash — nothing reads it — so the name carries no
         // observable GNU behavior to conflict with): --debug arms extdebug

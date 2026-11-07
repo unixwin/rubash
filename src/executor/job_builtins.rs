@@ -1418,9 +1418,10 @@ impl Executor {
     }
 
     /// Queue the stderr notice for a child that died by a signal
-    /// (rubash#229). The notice itself prints at the next reader-command
-    /// boundary (report_pending_signal_notices), mirroring GNU eval.c:355
-    /// notify_and_cleanup -> jobs.c:4543 notify_of_job_status.
+    /// (rubash#229). The notice itself prints at the next reader
+    /// boundary (report_pending_signal_notices), mirroring GNU
+    /// parse.y shell_getc -> notify_and_cleanup -> jobs.c:4543
+    /// notify_of_job_status.
     pub(crate) fn note_child_signal_death(
         &self,
         pid: u32,
@@ -1472,7 +1473,9 @@ impl Executor {
 
     /// Print queued signal-death notices to stderr (GNU jobs.c:4625-4652
     /// notify_of_job_status JDEAD handling, driven at the reader boundary by
-    /// eval.c:355 notify_and_cleanup). Shapes, with config-top.h defining
+    /// parse.y shell_getc — the notify fires when the reader pulls the
+    /// next list, never between the commands of one list).
+    /// Shapes, with config-top.h defining
     /// both DONT_REPORT_SIGPIPE and DONT_REPORT_SIGTERM:
     /// - untrapped, not INT/TERM/PIPE (branch 1): `name: line N: ` +
     ///   pretty_print_job(JLIST_NONINTERACTIVE) -> `%5ld pid`, one space,
@@ -1484,6 +1487,18 @@ impl Executor {
     /// - background TERM/INT/PIPE or trapped deaths: silent.
     pub(crate) fn report_pending_signal_notices(&mut self) -> Result<(), ExecuteError> {
         let notices = std::mem::take(&mut *self.pending_signal_notices.borrow_mut());
+        self.emit_signal_notices(notices)
+    }
+
+    /// Shared print/mark/cleanup/write core of the notice reports:
+    /// format, mark exactly the printed pids J_NOTIFIED (rubash#2698),
+    /// retire notified dead jobs (rubash#2896 — only a pass that
+    /// actually printed retires), and write through the shell's
+    /// current fd-2 binding (rubash#2929).
+    fn emit_signal_notices(
+        &mut self,
+        notices: Vec<(u32, i32, String, bool)>,
+    ) -> Result<(), ExecuteError> {
         let (out, printed_pids) = self.format_signal_notices(notices);
         // rubash#2698: record the notification on the job table —
         // notify_of_job_status marks J_NOTIFIED as it prints, and
@@ -1494,35 +1509,136 @@ impl Executor {
         for pid in &printed_pids {
             self.shell_state.job_table.mark_job_notified_by_pid(*pid);
         }
-        // rubash#2698 (second face): GNU's boundary step is
-        // notify_and_cleanup (jobs.c) — it deletes a notified dead job
-        // in the same pass that prints its notice, so a following
-        // `wait %1` resolves the jobspec against the live table and
-        // fails with "no such job" (127), while `wait <pid>` still
-        // finds the status through bgpids (completed_statuses, which
-        // cleanup_dead_jobs preserves). Marking without retiring left
-        // the jobspec resolvable and the late `wait %1` returned the
-        // death status a second time.
-        //
         // rubash#2896: the cleanup rides ONLY a pass that actually
         // printed a notice. GNU's notify_and_cleanup is driven by
-        // read_command — once per freshly read LIST (eval.c:355) —
+        // read_command — once per freshly read LIST (parse.y shell_getc) —
         // never between the commands of one list, so a job a `wait`
         // just consumed (marked J_NOTIFIED by wait_for_job,
         // jobs.c:3434-3437) survives the rest of the list and a
         // repeated `wait %1` in the same list still resolves it; its
         // entry is deleted inside the NEXT wait's own tail cleanup
-        // (jobs.c:3385) or at the next list boundary. This report runs
-        // at every command boundary, so an unconditional cleanup here
-        // retired the entry one command too early and the repeated
-        // jobspec wait reported "no such job".
+        // (jobs.c:3385) or at the next list boundary.
         if !printed_pids.is_empty() {
             self.shell_state.job_table.cleanup_dead_jobs();
         }
         if !out.is_empty() {
-            crate::executor::shell_options::write_stderr_bytes(out.as_bytes())?;
+            // rubash#2929: the notice is a SHELL diagnostic, not a
+            // command's output — it goes through the shell's current
+            // fd-2 binding (an `exec 2> file` redirect, `2>&1`, or a
+            // closed stderr), the way GNU's dup2'd process fd 2
+            // carries it. The previous raw-fd write bypassed the fd
+            // table and escaped every `exec 2>` redirect. Errors are
+            // swallowed (GNU ignores the failed fprintf).
+            self.write_diagnostic_fd2(out.as_bytes());
         }
         Ok(())
+    }
+
+    /// Print queued signal-death notices stamped with `line`
+    /// (rubash#2928): GNU's notify fires when the reader pulls the
+    /// next list, so the stamp is the line being read, not the line
+    /// that just finished. The current line is swapped for the flush
+    /// and restored after, so no later command sees the read line.
+    /// A no-op on an empty queue (no line churn).
+    pub(crate) fn report_pending_signal_notices_at_line(
+        &mut self,
+        line: usize,
+    ) -> Result<(), ExecuteError> {
+        if self.pending_signal_notices.borrow().is_empty() {
+            return Ok(());
+        }
+        let previous = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
+        self.set_current_line_value(line);
+        let result = self.report_pending_signal_notices();
+        match previous {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_CURRENT_LINE".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_LINE");
+            }
+        }
+        result
+    }
+
+    /// Take only the queued notices matching `foreground`, leaving the
+    /// rest queued (rubash#2928 stream-end stamp split: a foreground
+    /// death is stamped with the last command's line, a background
+    /// death with the EOF pull's line, one past it).
+    pub(crate) fn report_pending_signal_notices_foreground(
+        &mut self,
+        foreground: bool,
+    ) -> Result<(), ExecuteError> {
+        let matching: Vec<(u32, i32, String, bool)> = {
+            let mut queue = self.pending_signal_notices.borrow_mut();
+            let mut matching = Vec::new();
+            let mut index = 0;
+            while index < queue.len() {
+                if queue[index].3 == foreground {
+                    matching.push(queue.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            matching
+        };
+        self.emit_signal_notices(matching)
+    }
+
+    /// Stamped + foreground-filtered report (rubash#2928): the
+    /// stream-end flush prints foreground notices at `line` and
+    /// background notices at `line + 1`. A no-op when no notice of
+    /// that face is queued.
+    pub(crate) fn report_pending_signal_notices_at_line_foreground(
+        &mut self,
+        line: usize,
+        foreground: bool,
+    ) -> Result<(), ExecuteError> {
+        if !self
+            .pending_signal_notices
+            .borrow()
+            .iter()
+            .any(|notice| notice.3 == foreground)
+        {
+            return Ok(());
+        }
+        let previous = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
+        self.set_current_line_value(line);
+        let result = self.report_pending_signal_notices_foreground(foreground);
+        match previous {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_CURRENT_LINE".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_LINE");
+            }
+        }
+        result
+    }
+
+    /// Drop queued BACKGROUND signal-death notices (rubash#2928): a
+    /// `-c` string has no second read after its last list, so GNU
+    /// never prints them (parse.y shell_getc has no next pull).
+    /// Foreground notices stay: GNU reports those synchronously from
+    /// wait_for (jobs.c:3385). Called by the binary's `-c` driver
+    /// before finish_shell; library `Session::run` callers keep the
+    /// notices for the host's next read.
+    pub fn drop_pending_background_signal_notices(&mut self) {
+        self.pending_signal_notices
+            .borrow_mut()
+            .retain(|notice| notice.3);
     }
 
     /// Render the stop notice for a job the job-control wait just
@@ -1559,19 +1675,26 @@ impl Executor {
         ))
     }
 
-    /// End-of-stream notification step (rubash#1853). The per-command
-    /// boundary flush above only runs when a NEXT top-level command is
-    /// walked, so a signal death in the stream's LAST command — a
-    /// foreground child, or a background child reaped during that
-    /// command's foreground wait — never reached stderr before the
-    /// shell exited. GNU prints it without a following command:
-    /// wait_for calls notify_and_cleanup for the dead foreground job
-    /// as the wait completes (jobs.c:3385), and
+    /// End-of-stream notification step (rubash#1853). The reader-level
+    /// flush only runs when a NEXT list is pulled, so a signal death in
+    /// the stream's LAST command — a foreground child, or a background
+    /// child reaped during that command's foreground wait — never reached
+    /// stderr before the shell exited. GNU prints it without a following
+    /// command: wait_for calls notify_and_cleanup for the dead foreground
+    /// job as the wait completes (jobs.c:3385), and
     /// maybe_print_job_notifications prints whenever the shell is not
     /// interactive (jobs.c:4723-4728), background deaths included.
     /// The drivers' shared finish path therefore replays the reap +
     /// report half of the boundary step once at stream end, before
     /// the EXIT trap runs (GNU's notice precedes run_exit_trap).
+    /// rubash#2928: the two faces carry different stamps — a foreground
+    /// death is stamped with the last command's line (the wait's own
+    /// line), a background death with the EOF pull's line, one past it
+    /// (parse.y shell_getc). The `-c` shape drops its background
+    /// entries before finish_shell (no second pull exists there).
+    /// Order caveat: foreground notices print before background ones
+    /// here, so an interleaved multi-notice queue loses its
+    /// chronological order at stream end (unpinned corner).
     pub(crate) fn flush_job_notifications_at_stream_end(&mut self) -> Result<(), ExecuteError> {
         self.refresh_background_jobs()?;
         // Stream end is the final disposal point (GNU coproc_flush
@@ -1579,7 +1702,15 @@ impl Executor {
         // completions were recorded but never reached a disposal
         // point during the stream.
         self.flush_pending_coproc_retirements();
-        self.report_pending_signal_notices()
+        let line = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        self.report_pending_signal_notices_at_line_foreground(line, true)?;
+        self.report_pending_signal_notices_at_line_foreground(line + 1, false)?;
+        Ok(())
     }
 
     /// Format queued signal-death notices exactly as
@@ -2776,6 +2907,14 @@ impl Executor {
                 }
             }
             let output = self.render_background_jobs(options, selected);
+            // jobs.def:172 list_one_job branch: notify after the
+            // listing — a death the listing just reported prints its
+            // stderr notice here (marking it J_NOTIFIED), and the
+            // cleanup below retires it. Without the print the mark
+            // never lands and the entry survives for the next listing
+            // (rubash#2928: the per-command boundary flush that used
+            // to do this is gone — the notify now rides the read).
+            let _ = self.report_pending_signal_notices();
             // jobs.c:2231 list_one_job: explicit jobspec listing is followed
             // by cleanup_dead_jobs — a listed dead job leaves the table.
             self.shell_state.job_table.cleanup_dead_jobs();
@@ -2786,7 +2925,10 @@ impl Executor {
         // the listing, notify_and_cleanup removes the terminated jobs just
         // reported — the next `jobs`/`disown` must not see them. `-r`/`-s`
         // (JSTATE_RUNNING/JSTATE_STOPPED) skip this second cleanup.
+        // The notify prints first (rubash#2928): its J_NOTIFIED mark is
+        // what the cleanup below retires.
         if !options.running_only && !options.stopped_only {
+            let _ = self.report_pending_signal_notices();
             self.shell_state.job_table.cleanup_dead_jobs();
         }
         Ok((output, 0))
@@ -3051,22 +3193,23 @@ impl Executor {
                 }
             }
             crate::builtins::disown::DisownAction::Current { nohup_only } => {
-                let acted =
-                    if nohup_only {
-                        self.nohup_current_job()
-                    } else {
-                        // GNU disown with no spec deletes the current job
-                        // through the same delete_job (job, DEL_WARNSTOPPED)
-                        // as an explicit spec (builtins/jobs.def
-                        // disown_builtin), so a stopped current job is
-                        // reported before it leaves the table (rubash#2489).
-                        if let Some(job_id) = self.shell_state.last_background_pid.and_then(|pid| {
-                            self.shell_state.job_table.pid_to_job.get(&pid).copied()
-                        }) {
-                            self.warn_deleting_stopped_job(job_id, &mut stderr)?;
-                        }
-                        self.disown_current_job()
-                    };
+                let acted = if nohup_only {
+                    self.nohup_current_job()
+                } else {
+                    // GNU disown with no spec deletes the current job
+                    // through the same delete_job (job, DEL_WARNSTOPPED)
+                    // as an explicit spec (builtins/jobs.def
+                    // disown_builtin), so a stopped current job is
+                    // reported before it leaves the table (rubash#2489).
+                    // Resolve through the table's current marker, not
+                    // last_background_pid: a ^Z-stopped foreground job
+                    // is current but was never a background spawn
+                    // (rubash#2886).
+                    if let Some(job_id) = self.shell_state.job_table.current_job() {
+                        self.warn_deleting_stopped_job(job_id, &mut stderr)?;
+                    }
+                    self.disown_current_job()
+                };
                 if acted {
                     0
                 } else {
@@ -3176,19 +3319,29 @@ impl Executor {
     }
 
     fn disown_current_job(&mut self) -> bool {
-        let Some(pid) = self.shell_state.last_background_pid else {
+        // rubash#2886: bare `disown` resolves the CURRENT job — GNU
+        // builtins/jobs.def disown_builtin calls get_job_spec(list)
+        // with an empty list, and builtins/common.c:691 returns
+        // js.j_current for that. The previous code resolved through
+        // last_background_pid, which is set only for `&` spawns, so a
+        // ^Z-stopped FOREGROUND job — current in the table since
+        // mark_stopped (table.rs) calls set_current_job, jobs.c:4225 —
+        // reported "no such job".
+        let Some(job_id) = self.shell_state.job_table.current_job() else {
             return false;
         };
-        if !self.background_children.contains_key(&pid)
-            && !self.shell_state.job_table.pid_to_job.contains_key(&pid)
-        {
+        let Some(job) = self.shell_state.job_table.jobs.get(&job_id) else {
             return false;
+        };
+        let pids: Vec<u32> = job.pids.clone();
+        for pid in &pids {
+            self.background_children.remove(pid);
         }
-
-        self.background_children.remove(&pid);
         // rubash#2891: no coproc endpoint/fd teardown on disown
         // (jobs.c:1486 delete_job touches only the job slot).
-        self.disown_job_by_pid(pid);
+        if let Some(first) = pids.first() {
+            self.disown_job_by_pid(*first);
+        }
         true
     }
 

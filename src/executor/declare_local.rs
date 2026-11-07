@@ -63,6 +63,39 @@ fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
     (letters, None)
 }
 
+/// Whether a declare/typeset/local invocation's -a/-A attribute ends up
+/// SET. The last occurrence wins and `+a`/`+A` unset, so `declare +a s=1`
+/// binds a scalar (and marks under set -a) while `declare -a s=1` binds
+/// an array element (and does not). Walks the arguments with the same
+/// stop rules as scan_declare_options.
+fn declare_invocation_sets_array_attribute(args: &[String]) -> bool {
+    let mut sets = false;
+    for arg in args {
+        if arg == "--" {
+            break;
+        }
+        let (setting, rest) = if let Some(rest) = arg.strip_prefix('-') {
+            (true, rest)
+        } else if let Some(rest) = arg.strip_prefix('+') {
+            (false, rest)
+        } else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        for ch in rest.chars() {
+            if !DECLARE_OPTION_LETTERS.contains(ch) {
+                return sets;
+            }
+            if ch == 'a' || ch == 'A' {
+                sets = setting;
+            }
+        }
+    }
+    sets
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_declare_functions(
         &mut self,
@@ -1691,7 +1724,23 @@ impl Executor {
                 &mut self.shell_state.variables,
             );
             self.apply_posix_function_declare_unset_export(posix_function_export_unsets);
-            if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
+            // rubash#2945: an invocation whose -a/-A attribute ends up
+            // set creates its operands through make_new_array_variable /
+            // make_new_assoc_variable (variables.c:2798/2851), which never
+            // apply the mark_modified_vars mark — only scalar binds do.
+            // The allexport emulation below therefore stands down for the
+            // whole invocation (the -a/-A attribute governs every operand,
+            // e.g. `declare -a s=1` stores element 0, unmarked). The
+            // flagless form keeps the #538 behaviour: its valued word
+            // creates the name through bind_variable first, so GNU shows
+            // -ax for `declare arr=(1 2)` and the mark must stay.
+            let array_creation_invocation = declare_invocation_sets_array_attribute(&args);
+            if !array_creation_invocation
+                && crate::builtins::set::shell_option_enabled(
+                    &self.shell_state.env_vars,
+                    "allexport",
+                )
+            {
                 // set -a (allexport): a typeset/declare binding exports the
                 // variable (variables.c:3211 bind_variable marks every
                 // binding att_exported while mark_modified_vars is on), even
@@ -2220,6 +2269,45 @@ impl Executor {
                 &self.shell_state.env_vars,
                 &mut self.shell_state.variables,
             );
+            // rubash#2944: the execute_declare allexport post-pass above
+            // has no counterpart for local in GNU terms either — local IS
+            // declare_internal with the context forced (builtins/
+            // declare.def local_builtin), so a valued scalar operand binds
+            // through bind_variable_value (variables.c:3366-3367) and
+            // mark_modified_vars applies exactly as for declare. Mirror
+            // the declare pass with the bind shapes local actually
+            // performs: a VALUE is required (a valueless local is
+            // make_local_variable only — no bind, no mark), an -a/-A
+            // invocation creates through make_new_array_variable /
+            // make_new_assoc_variable (variables.c:2798/2851 — no mark),
+            // a subscript operand binds an element (assign_array_element
+            // — no mark), and a compound value converts through
+            // do_compound_assignment (subst.c:3441 — no mark).
+            if status == 0 {
+                let array_creation_invocation = declare_invocation_sets_array_attribute(&args);
+                if !array_creation_invocation
+                    && crate::builtins::set::shell_option_enabled(
+                        &self.shell_state.env_vars,
+                        "allexport",
+                    )
+                {
+                    for arg in &args {
+                        if arg.starts_with('-') || arg.starts_with('+') {
+                            continue;
+                        }
+                        let Some((raw_name, value)) = arg.split_once('=') else {
+                            continue;
+                        };
+                        if raw_name.contains('[') || value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+                            continue;
+                        }
+                        let (base, _) = assignment_name_and_append(raw_name);
+                        if is_shell_name(base) {
+                            self.mark_exported(base);
+                        }
+                    }
+                }
+            }
             // rubash#1471: restore the outer locals begin unshadowed —
             // the scope slots now hold the NEW global values (so a later
             // frame exit restores the globals as declare -g left them),

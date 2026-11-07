@@ -101,7 +101,6 @@ impl<'a> Lexer<'a> {
                     token_boundary = false;
                 }
                 '$' if self.peek() == Some('(') => {
-                    self.advance();
                     // GNU parse.y:4464-4473 (parse_comsub) + parse_matched_pair
                     // (count=1 nesting, parse.y:3898): word-level `$((` is
                     // arithmetic only when the second `('s balanced group
@@ -110,12 +109,23 @@ impl<'a> Lexer<'a> {
                     // substitution of a subshell-or-list (`$(( cmd ) || cmd)`,
                     // nvm.sh:1336) whose body ends at the GROUP match — a
                     // `))`-pair hunt here swallows the rest of the word.
-                    if self.peek() == Some('(')
+                    // The gate's text must start at the `((` opener (its
+                    // documented contract), so the verdict is taken BEFORE
+                    // consuming the first `(` — `self.position` still
+                    // indexes it here (the token-start site in scanner.rs
+                    // passes `start + 1` for the same reason). Evaluating
+                    // it on the text at the second `(` makes "arithmetic"
+                    // unreachable, and the command-substitution scan's
+                    // heredoc arm then misreads a shift `<<` in the body
+                    // as a here-document start (rubash#2930).
+                    if self.peek_after(1) == Some('(')
                         && dollar_double_paren_is_arithmetic(&self.input[self.position..])
                     {
                         self.advance();
+                        self.advance();
                         self.skip_arith_paren();
                     } else {
+                        self.advance();
                         self.skip_cmd_subst();
                     }
                     token_boundary = false;
@@ -336,18 +346,22 @@ impl<'a> Lexer<'a> {
                         self.skip_braced(true);
                     }
                     Some('(') => {
-                        self.advance();
                         // Same verdict as skip_cmd_subst's `$((` arm (GNU
                         // parse.y:4464-4473 + parse_arith_cmd parse.y:4970-4996):
                         // no `))`-pair hunt unless the construct closes as
                         // arithmetic — `$(( cmd ) || cmd)` inside dquotes must
                         // not swallow the closing quote and the rest of the word.
-                        if self.peek() == Some('(')
+                        // The verdict is taken before consuming the first `(`
+                        // so the gate sees the text at the `((` opener
+                        // (rubash#2930; see skip_cmd_subst's arm).
+                        if self.peek_after(1) == Some('(')
                             && dollar_double_paren_is_arithmetic(&self.input[self.position..])
                         {
                             self.advance();
+                            self.advance();
                             self.skip_arith_paren();
                         } else {
+                            self.advance();
                             self.skip_cmd_subst();
                         }
                     }
@@ -430,20 +444,25 @@ impl<'a> Lexer<'a> {
                                 self.skip_braced(false);
                             }
                             Some('(') => {
-                                self.advance();
                                 // Same verdict as skip_cmd_subst's `$((` arm
                                 // (GNU parse.y:4464-4473 + parse_arith_cmd
                                 // parse.y:4970-4996): a `$(( cmd ) || cmd)`
                                 // body is a command substitution, so the
                                 // braced-word scan must not hunt a `))` pair.
-                                if self.peek() == Some('(')
+                                // The verdict is taken before consuming the
+                                // first `(` so the gate sees the text at the
+                                // `((` opener (rubash#2930; see
+                                // skip_cmd_subst's arm).
+                                if self.peek_after(1) == Some('(')
                                     && dollar_double_paren_is_arithmetic(
                                         &self.input[self.position..],
                                     )
                                 {
                                     self.advance();
+                                    self.advance();
                                     self.skip_arith_paren();
                                 } else {
+                                    self.advance();
                                     self.skip_cmd_subst();
                                 }
                             }
@@ -549,17 +568,21 @@ impl<'a> Lexer<'a> {
                     depth += 1;
                 }
                 '$' if !single && self.peek() == Some('(') => {
-                    self.advance();
                     // Same verdict as skip_cmd_subst's `$((` arm (GNU
                     // parse.y:4464-4473 + parse_arith_cmd parse.y:4970-4996):
                     // non-arithmetic `$(( cmd ) || cmd)` must close at the
                     // balanced group, not swallow for a `))` pair.
-                    if self.peek() == Some('(')
+                    // The verdict is taken before consuming the first `(`
+                    // so the gate sees the text at the `((` opener
+                    // (rubash#2930; see skip_cmd_subst's arm).
+                    if self.peek_after(1) == Some('(')
                         && dollar_double_paren_is_arithmetic(&self.input[self.position..])
                     {
                         self.advance();
+                        self.advance();
                         self.skip_arith_paren();
                     } else {
+                        self.advance();
                         self.skip_cmd_subst();
                     }
                 }
@@ -973,17 +996,22 @@ impl<'a> Lexer<'a> {
                             self.skip_braced(false);
                         }
                         Some('(') => {
-                            self.advance();
                             // Same verdict as skip_cmd_subst's `$((` arm (GNU
                             // parse.y:4464-4473 + parse_arith_cmd
                             // parse.y:4970-4996): a `$(( cmd ) || cmd)` body
                             // closes at the balanced group, never a `))` hunt.
-                            if self.peek() == Some('(')
+                            // The verdict is taken before consuming the
+                            // first `(` so the gate sees the text at the
+                            // `((` opener (rubash#2930; see
+                            // skip_cmd_subst's arm).
+                            if self.peek_after(1) == Some('(')
                                 && dollar_double_paren_is_arithmetic(&self.input[self.position..])
                             {
                                 self.advance();
+                                self.advance();
                                 self.skip_arith_paren();
                             } else {
+                                self.advance();
                                 self.skip_cmd_subst();
                             }
                         }
@@ -1663,7 +1691,7 @@ fn command_substitution_reserved_word_allows_next(word: &str) -> bool {
 
 /// Scan a `$((...))` arithmetic substitution starting just after `$((`
 /// (i.e. at `start`), returning the index past the closing `))` or `None`.
-fn skip_arith_substitution_corrected(chars: &[char], mut index: usize) -> Option<usize> {
+pub(crate) fn skip_arith_substitution_corrected(chars: &[char], mut index: usize) -> Option<usize> {
     let mut depth = 0usize;
     let mut single = false;
     let mut double = false;
@@ -1708,7 +1736,7 @@ fn skip_arith_substitution_corrected(chars: &[char], mut index: usize) -> Option
 
 /// Scan a backtick command substitution starting at the opening backtick,
 /// returning the index past the closing backtick or `None`.
-fn skip_backtick_corrected(chars: &[char], mut index: usize) -> Option<usize> {
+pub(crate) fn skip_backtick_corrected(chars: &[char], mut index: usize) -> Option<usize> {
     index += 1;
     while index < chars.len() {
         if chars[index] == '\\' {
@@ -1963,7 +1991,25 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
             }
             '$' if chars.get(index + 1) == Some(&'(') => {
                 if chars.get(index + 2) == Some(&'(') {
-                    if let Some(end) = skip_arith_substitution_corrected(chars, index + 3) {
+                    // GNU parse.y:4463-4470 (parse_comsub peeks `$((` and
+                    // hands the WHOLE construct to the P_ARITH matched-pair
+                    // scan when parse_arith_cmd's verdict (parse.y:4970)
+                    // says arithmetic): a classified-arithmetic unit is
+                    // consumed by the arithmetic span scan only. The
+                    // unclassified unit scan below falls back to THIS scan
+                    // when the unit scan declines, and a `$((` re-entering
+                    // here as command text lets the unit scan's heredoc arm
+                    // read a shift `<<` as a here-document start and
+                    // swallow the closing `))` (rubash#2930).
+                    if super::dollar_double_paren_is_arithmetic(
+                        &chars[index + 1..].iter().collect::<String>(),
+                    ) {
+                        if let Some(end) = skip_arith_substitution_corrected(chars, index + 3) {
+                            index = end;
+                            token_boundary = false;
+                            continue;
+                        }
+                    } else if let Some(end) = skip_parenthesized_unit_corrected(chars, index + 1) {
                         index = end;
                         token_boundary = false;
                         continue;
@@ -2107,6 +2153,29 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
             return false;
         }
         if ch == '$' && !single && chars.get(index + 1) == Some(&'(') {
+            // GNU parse.y:4463-4470 (parse_comsub) + parse.y:4970
+            // (parse_arith_cmd): a `$((` whose second `(`'s group closes
+            // right before a `)` is ONE arithmetic unit (P_ARITH matched
+            // pair) — the unit skip must classify it BEFORE the generic
+            // command-substitution unit scan. That scan enters the body as
+            // command text, where its heredoc arm (skip_heredoc_in_chars_
+            // with_closure) reads a shift `<<` as a here-document start
+            // and swallows the closing `))`, so a nested arithmetic
+            // expansion read as unbalanced here (rubash#2930). The gate's
+            // text must start at the `((` opener (its documented
+            // contract); a subshell-or-list verdict falls through to the
+            // generic scan unchanged.
+            if chars.get(index + 2) == Some(&'(')
+                && super::dollar_double_paren_is_arithmetic(
+                    &chars[index + 1..].iter().collect::<String>(),
+                )
+            {
+                if let Some(end) = skip_arith_substitution_corrected(&chars, index + 3) {
+                    index = end;
+                    comment_start = false;
+                    continue;
+                }
+            }
             if let Some(end) = skip_parenthesized_unit_corrected(&chars, index + 1) {
                 index = end;
                 comment_start = false;

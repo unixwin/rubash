@@ -2088,6 +2088,30 @@ impl Executor {
                     }
                 },
                 '$' if rest[1..].starts_with('(') => {
+                    // GNU parse.y:4463-4470 + parse.y:4970 (rubash#2930):
+                    // a `$((` the arithmetic gate classifies as arithmetic
+                    // is an arithmetic expansion, not a command
+                    // substitution — its `<<` is a shift operator, so
+                    // there is no comsub span for the collector below to
+                    // delimit. Skip the whole unit; a subshell-or-list
+                    // verdict falls through to the collector unchanged.
+                    // `rest[1..]` begins at the `((` opener — exactly the
+                    // gate's documented contract.
+                    if rest[1..].starts_with("((")
+                        && crate::lexer::dollar_double_paren_is_arithmetic(&rest[1..])
+                    {
+                        let unit_chars: Vec<char> = rest.chars().collect();
+                        if let Some(end) =
+                            crate::lexer::skip_arith_substitution_corrected(&unit_chars, 3)
+                        {
+                            pos += rest
+                                .char_indices()
+                                .nth(end)
+                                .map(|(byte, _)| byte)
+                                .unwrap_or(rest.len());
+                            continue;
+                        }
+                    }
                     let mut iter = rest[2..].chars().peekable();
                     let (source, closed) =
                         super::embedded_mutations::collect_command_substitution_source_ex(

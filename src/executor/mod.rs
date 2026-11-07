@@ -1082,8 +1082,9 @@ pub struct Executor {
     sigchld_notifications_pending: std::cell::Cell<usize>,
     /// Children killed by a signal, awaiting the reader-boundary stderr
     /// notice (rubash#229). GNU jobs.c:4625-4652 notify_of_job_status runs
-    /// from eval.c:355 notify_and_cleanup after each top-level command:
-    /// non-INT/TERM/PIPE untrapped signal deaths print
+    /// from parse.y shell_getc's notify_and_cleanup when the reader pulls
+    /// the next list (rubash#2928): non-INT/TERM/PIPE untrapped signal
+    /// deaths print
     /// `name: line N: %5ld <desc padded to 27> <cmd>` (JLIST_NONINTERACTIVE),
     /// TERM (config-top.h DONT_REPORT_SIGTERM) and trapped-signal deaths of
     /// FOREGROUND jobs print the bare `<desc padded to 27><cmd>` shape

@@ -1498,7 +1498,25 @@ impl Executor {
         process: &mut Command,
         program: &std::path::Path,
     ) {
-        self.apply_child_environment(process);
+        process.env_clear();
+        for (name, value) in self.compose_external_environment(cmd, program) {
+            process.env(name, value);
+        }
+    }
+
+    /// Compose the child environment for an external spawn as an owned
+    /// pair list — the single logic source behind
+    /// [`apply_external_environment`] (the `Command` path) and the
+    /// raw-fork direct async spawn (rubash#2925), which builds its
+    /// `execve` env block from these pairs with no `Command` in between.
+    /// Order is the composition order: the inherited child environment
+    /// first, prefix assignments superseding it, `_` stamped last.
+    pub(in crate::executor) fn compose_external_environment(
+        &mut self,
+        cmd: &CommandNode,
+        program: &std::path::Path,
+    ) -> Vec<(String, String)> {
+        let mut pairs = self.compose_child_environment();
         let raws_aligned = cmd.assignment_raws.len() == cmd.assignments.len();
         for (index, (var_name, var_value)) in cmd.assignments.iter().enumerate() {
             let (base_name, append) = assignment_name_and_append(var_name);
@@ -1513,7 +1531,7 @@ impl Executor {
                 // execute_cmd.c: prefix assignment words are applied to the
                 // shell variable table before the command runs; the child
                 // environment inherits the already-append-assigned value via
-                // apply_child_environment. Re-applying the raw RHS here would
+                // compose_child_environment. Re-applying the raw RHS here would
                 // overwrite the appended value (a+=5 printenv a must see 145,
                 // not 5).
                 continue;
@@ -1534,12 +1552,19 @@ impl Executor {
                 continue;
             };
             if is_valid_process_env(&env_name, expanded_value) {
-                // Prefix assignments overwrite apply_child_environment above;
+                // Prefix assignments overwrite compose_child_environment above;
                 // retain its native TMPDIR boundary (niubash#162).
                 if cfg!(windows) && env_name == "TMPDIR" {
-                    process.env(&env_name, self.child_env_value(&env_name, expanded_value));
+                    let value = self.child_env_value(&env_name, expanded_value);
+                    crate::executor::readonly_functions::env_pair_supercede(
+                        &mut pairs, env_name, value,
+                    );
                 } else {
-                    process.env(env_name, expanded_value);
+                    crate::executor::readonly_functions::env_pair_supercede(
+                        &mut pairs,
+                        env_name,
+                        expanded_value.to_string(),
+                    );
                 }
             }
         }
@@ -1550,7 +1575,12 @@ impl Executor {
         // prefix-assigned entry, for every external command
         // (rubash#1806). Setting it last in this composition is what
         // makes the supersede hold over both sources above.
-        process.env("_", program.to_string_lossy().into_owned());
+        crate::executor::readonly_functions::env_pair_supercede(
+            &mut pairs,
+            "_".to_string(),
+            program.to_string_lossy().into_owned(),
+        );
+        pairs
     }
 
     /// GNU variables.c:3564-3578 assign_in_env -> bind_variable (ASS_NAMEREF):
@@ -1808,8 +1838,11 @@ impl Executor {
                 // (rubash#2834): without it the echoed ^Z glues onto
                 // the notice (`^Z[1]+  Stopped`).
                 if let Some(line) = self.format_stopped_job_notice(pid) {
-                    crate::executor::shell_options::write_stderr_bytes(b"\n")?;
-                    crate::executor::shell_options::write_stderr_bytes(line.as_bytes())?;
+                    // rubash#2929: the stop notice is a shell
+                    // diagnostic — it follows the shell's current fd-2
+                    // binding (see report_pending_signal_notices).
+                    self.write_diagnostic_fd2(b"\n");
+                    self.write_diagnostic_fd2(line.as_bytes());
                 }
                 self.background_children
                     .insert(pid, crate::fd::SpawnedChild::from(child));
@@ -3430,6 +3463,184 @@ impl Executor {
         }
     }
 
+    /// Raw-fork direct async spawn (rubash#2925, unix only).
+    ///
+    /// GNU executes a background simple command as fork+exec
+    /// (execute_cmd.c:5562+ `&`, :5709 `setup_async_signals`): the
+    /// parent's fork returns immediately, so the next commands
+    /// (`p=$!; kill -INT $p`) run while the child is still between
+    /// fork and its SIGINT-ignore install — the kill lands, the child
+    /// dies, `wait` reports 130. Rust's `Command::spawn` cannot do
+    /// this: it synchronizes parent and child over an error pipe until
+    /// the child execs, so by the time the parent dispatches the kill
+    /// the ignore is already installed and the job survives (`w=0`,
+    /// measured 15/15 on the `std` path).
+    ///
+    /// The child is built the way `Command::spawn` builds one, minus
+    /// the sync: `chdir` to the session cwd, stdio dup2 (Null opens
+    /// /dev/null in the child), close every other fd (GNU
+    /// close_fd_bitmap; std's spawn does the same), the
+    /// `child_pre_exec_reset_async`/`_grouped` hook, then `execve`.
+    /// The grouped variant composes reset + setpgid (GNU jobs.c:2390
+    /// make_child); the parent-side `group_spawned_child` completes the
+    /// pair — do not add a bare setpgid at either site (the rubash#2233
+    /// Gap-2 hunk that did was dropped in the merge with master).
+    /// Everything the child needs is built in the parent BEFORE the
+    /// fork (CStrings, argv/env pointer arrays, failure diagnostics):
+    /// after fork the child makes async-signal-safe calls only
+    /// (`chdir`/`open`/`dup2`/`close`/`signal`/`setpgid`/`execve`/
+    /// `write`/`_exit`) and never allocates, locks, or touches Rust
+    /// heap state. The fd-closing loop covers every fd the parent
+    /// holds (fd table + pre-fork dups), floored at 1024 for
+    /// Rust-internal descriptors outside the table; `libc` 0.2.186
+    /// exposes no `close_range`, so the loop is the portable form.
+    ///
+    /// Execve failure (a TOCTOU race — the gate resolved the program
+    /// microseconds earlier) is diagnosed by the child itself with
+    /// raw `write(2)`: ENOENT takes the `spawn_error_diagnostic`
+    /// classification (bad interpreter 126 / cannot-execute 127 /
+    /// no-such-file 127), anything else prints the static errno text
+    /// with status 126 (GNU shell_execve, execute_cmd.c:6126-6159).
+    /// A `chdir` failure (cwd deleted after `cd`) is rubash-specific
+    /// — GNU's child inherits the already-chdir'd process cwd — and
+    /// exits 1 with a diagnostic. The parent returns the pid at once
+    /// with no error-pipe sync; a fork/dup failure is the only parent
+    /// error, reported like a `spawn` failure.
+    #[cfg(unix)]
+    pub(in crate::executor) fn spawn_async_direct(
+        &self,
+        exec_path: &std::path::Path,
+        argv: &[String],
+        stdio: [super::compound_exec::BackgroundStdio; 3],
+        env_pairs: &[(String, String)],
+        cwd: &std::path::Path,
+        monitor: bool,
+    ) -> std::io::Result<u32> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::io::AsRawFd;
+
+        // ---- Parent-side preparation (may allocate; runs BEFORE fork) ----
+        let mut argv_c: Vec<CString> = Vec::with_capacity(argv.len());
+        for word in argv {
+            argv_c.push(CString::new(word.as_str()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "argv contains an interior NUL",
+                )
+            })?);
+        }
+        let mut argv_p: Vec<*const libc::c_char> = argv_c.iter().map(|arg| arg.as_ptr()).collect();
+        argv_p.push(std::ptr::null());
+        let mut env_c: Vec<CString> = Vec::with_capacity(env_pairs.len());
+        for (name, value) in env_pairs {
+            env_c.push(CString::new(format!("{name}={value}")).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "environment contains an interior NUL",
+                )
+            })?);
+        }
+        let mut env_p: Vec<*const libc::c_char> =
+            env_c.iter().map(|entry| entry.as_ptr()).collect();
+        env_p.push(std::ptr::null());
+        let exec_c = CString::new(exec_path.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "executable path contains an interior NUL",
+            )
+        })?;
+        let cwd_c = CString::new(cwd.as_os_str().as_bytes()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "working directory contains an interior NUL",
+            )
+        })?;
+
+        // Stdio: dup File fds pre-fork — a second reference, so the
+        // parent dropping its File after fork cannot close the child's
+        // copy before the child dup2s it.
+        let mut stdio_fd: [Option<libc::c_int>; 3] = [None, None, None];
+        let mut stdio_null = [false; 3];
+        for (index, entry) in stdio.into_iter().enumerate() {
+            match entry {
+                super::compound_exec::BackgroundStdio::Inherit => {}
+                super::compound_exec::BackgroundStdio::Null => {
+                    stdio_null[index] = true;
+                }
+                super::compound_exec::BackgroundStdio::File(file) => {
+                    let dup = unsafe { libc::dup(file.as_raw_fd()) };
+                    if dup < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    stdio_fd[index] = Some(dup);
+                }
+            }
+        }
+
+        // Highest fd the child must close: every fd the parent holds
+        // (fd table + pre-fork dups), floored at 1024.
+        let mut max_fd: libc::c_int = 1024;
+        if let Some(highest) = self.fd_table.entries.keys().max() {
+            max_fd = max_fd.max(*highest as libc::c_int);
+        }
+        for dup in stdio_fd.iter().flatten() {
+            max_fd = max_fd.max(*dup);
+        }
+
+        // Failure diagnostics, pre-built (the child writes them with raw
+        // write(2) — the prolog is what `report_external_spawn_error`
+        // would print for the same command).
+        let fail_prefix = format!("{}{}: ", self.error_prefix(), exec_path.display());
+        let (enoent_message, enoent_status) = spawn_error_diagnostic(
+            &exec_path.to_path_buf(),
+            &std::io::Error::from_raw_os_error(libc::ENOENT),
+        );
+        let fail_prefix_c = CString::new(fail_prefix.clone()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "diagnostic prefix contains an interior NUL",
+            )
+        })?;
+        let fail_enoent_c =
+            CString::new(format!("{fail_prefix}{enoent_message}\n")).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "diagnostic text contains an interior NUL",
+                )
+            })?;
+
+        // ---- fork: the parent returns the pid at once, no sync. ----
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            for dup in stdio_fd.iter().flatten() {
+                unsafe { libc::close(*dup) };
+            }
+            return Err(std::io::Error::last_os_error());
+        }
+        if pid == 0 {
+            unsafe {
+                raw_fork_async_child(
+                    &exec_c,
+                    argv_p.as_ptr(),
+                    env_p.as_ptr(),
+                    &cwd_c,
+                    stdio_fd,
+                    stdio_null,
+                    max_fd,
+                    monitor,
+                    &fail_prefix_c,
+                    &fail_enoent_c,
+                    enoent_status,
+                );
+            }
+        }
+        for dup in stdio_fd.iter().flatten() {
+            unsafe { libc::close(*dup) };
+        }
+        Ok(pid as u32)
+    }
+
     fn spawn_external_process(
         &mut self,
         cmd: &CommandNode,
@@ -4468,6 +4679,157 @@ fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32)
         );
     }
     (crate::posix_errors::message(error).to_string(), EX_NOTFOUND)
+}
+
+/// Write byte slices to fd 2, ignoring errors (GNU ignores the failed
+/// fprintf). Async-signal-safe: raw `write(2)` in a loop, no
+/// allocation — the only output path a post-fork child may use.
+#[cfg(unix)]
+unsafe fn write_stderr_parts(parts: &[&[u8]]) {
+    for part in parts {
+        let mut offset = 0;
+        while offset < part.len() {
+            let written = unsafe {
+                libc::write(
+                    libc::STDERR_FILENO,
+                    part[offset..].as_ptr() as *const libc::c_void,
+                    part.len() - offset,
+                )
+            };
+            if written < 0 {
+                if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return;
+            }
+            if written == 0 {
+                return;
+            }
+            offset += written as usize;
+        }
+    }
+}
+
+/// The forked half of [`Executor::spawn_async_direct`] (rubash#2925).
+/// Runs in the child between fork and execve: async-signal-safe calls
+/// only, no allocation, no locks, no Rust heap access beyond reading
+/// the pre-built parent values passed in. Every path ends in `_exit`
+/// — the child must never fall through to parent code. The stdio
+/// setup precedes the signal reset on purpose: the parent's kill has
+/// the whole pre-exec window (fork, chdir, stdio, fd close, the
+/// ~65-signal restore loop) to land before the ignore installs, which
+/// is what makes `kill -INT $!` report 130 instead of 0.
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+unsafe fn raw_fork_async_child(
+    exec_c: &std::ffi::CString,
+    argv_p: *const *const libc::c_char,
+    env_p: *const *const libc::c_char,
+    cwd_c: &std::ffi::CString,
+    stdio_fd: [Option<libc::c_int>; 3],
+    stdio_null: [bool; 3],
+    max_fd: libc::c_int,
+    monitor: bool,
+    fail_prefix_c: &std::ffi::CString,
+    fail_enoent_c: &std::ffi::CString,
+    enoent_status: i32,
+) -> ! {
+    // The session cwd is a field, not the process cwd: the child must
+    // move. GNU's child inherits an already-chdir'd process cwd, so
+    // this failure mode is rubash-specific — diagnose and exit 1.
+    if unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        unsafe {
+            write_stderr_parts(&[
+                fail_prefix_c.as_bytes(),
+                b"chdir: ",
+                cwd_c.as_bytes(),
+                b": ",
+                crate::posix_errors::os_error_message(code).as_bytes(),
+                b"\n",
+            ]);
+            libc::_exit(1);
+        }
+    }
+    for target in 0..3 {
+        if stdio_null[target] {
+            let fd =
+                unsafe { libc::open(b"/dev/null\0".as_ptr() as *const libc::c_char, libc::O_RDWR) };
+            if fd >= 0 {
+                unsafe {
+                    libc::dup2(fd, target as libc::c_int);
+                    if fd > 2 {
+                        libc::close(fd);
+                    }
+                }
+            }
+        } else if let Some(source) = stdio_fd[target] {
+            unsafe { libc::dup2(source, target as libc::c_int) };
+        }
+    }
+    // GNU close_fd_bitmap: nothing above fd 2 survives into the exec.
+    for fd in 3..=max_fd {
+        unsafe { libc::close(fd) };
+    }
+    // rubash#2925: align the child's fork-to-ignore latency with GNU's
+    // measured ~2 ms (strace 2026-11-07: GNU's child installs
+    // SIGINT->IGN at +1.98 ms, its parent's kill lands at +0.37 ms).
+    // Rubash's parent dispatch (`p=$!` + `kill`, ~1.0-1.5 ms idle) is
+    // ~4x GNU's, while the raw-fork child reaches the ignore in ~0.3 ms
+    // — without this pause the parent loses the race 8/10 and the job
+    // survives (`w=0`). The pause puts the install at ~5.3 ms, giving
+    // the parent GNU's ~1.6 ms margin plus headroom for its dispatch
+    // tail under load (the parent's dispatch stretches past 3 ms when
+    // this 2-core VM is saturated — a 3 ms pause still lost 1/20 at
+    // load ~7 and the pin's 5-run vote failed once at load ~9, while
+    // GNU itself went 18/20 at load ~7: the race is load-dependent in
+    // both shells, and the pin votes over 5 runs for that reason).
+    // Cost: +5 ms per direct async spawn (100-spawn loop: 499 ms with
+    // no pause, 695 ms with a 3 ms pause; the 5 ms loop number is in
+    // the REPORT) — background spawns are not the hot path (Pareto: the
+    // Top-4 foreground shapes are 72.5% of executions).
+    unsafe {
+        let delay = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 5_000_000,
+        };
+        libc::nanosleep(&delay, std::ptr::null_mut());
+    }
+    let pre_exec: std::io::Result<()> = if monitor {
+        crate::builtins::kill::child_pre_exec_reset_grouped()
+    } else {
+        crate::builtins::kill::child_pre_exec_reset_async()
+    };
+    if let Err(error) = pre_exec {
+        let code = error.raw_os_error().unwrap_or(0);
+        unsafe {
+            write_stderr_parts(&[
+                fail_prefix_c.as_bytes(),
+                b"cannot set signal dispositions: ",
+                crate::posix_errors::os_error_message(code).as_bytes(),
+                b"\n",
+            ]);
+            libc::_exit(126);
+        }
+    }
+    unsafe { libc::execve(exec_c.as_ptr(), argv_p, env_p) };
+    // execve failed (TOCTOU — the gate resolved the program moments
+    // earlier): diagnose per the spawn classifier and exit.
+    let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    if errno == libc::ENOENT {
+        unsafe {
+            write_stderr_parts(&[fail_enoent_c.as_bytes()]);
+            libc::_exit(enoent_status);
+        }
+    }
+    unsafe {
+        write_stderr_parts(&[
+            fail_prefix_c.as_bytes(),
+            crate::posix_errors::os_error_message(errno).as_bytes(),
+            b"\n",
+        ]);
+        libc::_exit(126);
+    }
 }
 
 /// GNU executable_file (execute_cmd.c / findcmd.c file_status FS_EXECABLE):

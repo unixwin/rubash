@@ -524,11 +524,31 @@ where
         // the current group are handled above). rubash#1631.
         if pid < 0 {
             #[cfg(unix)]
-            match signal_process_group(pid, signal) {
-                Ok(()) => any_succeeded = true,
-                Err(message) => {
-                    writeln!(stderr, "{}kill: ({pid}) - {message}", diagnostic_prefix())?;
-                    any_failed = true;
+            if is_trap_pseudo_signal(signal) {
+                // rubash#2926: kill.def:194-216 — the kernel decides:
+                // ESRCH (dead group) beats EINVAL (live group, bad
+                // signal). Probe with signal 0 (which never EINVALs)
+                // and report the probe's verdict, not a delivery.
+                match signal_process_group(pid, 0) {
+                    Ok(()) => {
+                        writeln!(
+                            stderr,
+                            "{}kill: {sigspec}: invalid signal specification",
+                            diagnostic_prefix()
+                        )?;
+                    }
+                    Err(message) => {
+                        writeln!(stderr, "{}kill: ({pid}) - {message}", diagnostic_prefix())?;
+                    }
+                }
+                any_failed = true;
+            } else {
+                match signal_process_group(pid, signal) {
+                    Ok(()) => any_succeeded = true,
+                    Err(message) => {
+                        writeln!(stderr, "{}kill: ({pid}) - {message}", diagnostic_prefix())?;
+                        any_failed = true;
+                    }
                 }
             }
             continue;
@@ -588,6 +608,31 @@ where
         {
             queue_ancestor_signal(signal);
             any_succeeded = true;
+            continue;
+        }
+
+        // rubash#2926: a trap pseudo-signal (65/66/67) must never be
+        // delivered — kill(2) rejects it with EINVAL — and it must
+        // never reach the mailbox path either. Adjudicate by the
+        // kernel's order (kill.def:194-216): a dead pid reports
+        // "No such process" (ESRCH first); a live pid reports the
+        // invalid signal specification. process_exists probes with
+        // signal 0, which never EINVALs.
+        if is_trap_pseudo_signal(signal) {
+            if process_exists(pid) {
+                writeln!(
+                    stderr,
+                    "{}kill: {sigspec}: invalid signal specification",
+                    diagnostic_prefix()
+                )?;
+            } else {
+                writeln!(
+                    stderr,
+                    "{}kill: ({pid}) - No such process",
+                    diagnostic_prefix()
+                )?;
+            }
+            any_failed = true;
             continue;
         }
 
@@ -754,6 +799,25 @@ fn decode_signal_name(value: &str, allow_sig_prefix: bool) -> Option<&'static st
     if value.eq_ignore_ascii_case("EXIT") {
         return Some("0");
     }
+    // rubash#2926: the trap pseudo-signals (GNU trap.h:40-46 —
+    // DEBUG_TRAP = NSIG, ERROR_TRAP = NSIG+1, RETURN_TRAP = NSIG+2;
+    // support/signames.c:466-468 puts the BARE names in signal_names[],
+    // so trap.c:236 decode_signal resolves them to 65/66/67). The
+    // match is on the value as written: the table entries carry no
+    // `SIG` prefix, so `SIGERR`/`SIGDEBUG`/`SIGRETURN` do NOT match —
+    // they fall through to the prefix strip below and stay NO_SIG.
+    // They are deliberately NOT added to the SIGNALS table: the full
+    // `kill -l` list (common.c:747) iterates 1..NSIG and must keep
+    // excluding them, and `kill -l 65/66/67` stays invalid.
+    if value.eq_ignore_ascii_case("DEBUG") {
+        return Some("65");
+    }
+    if value.eq_ignore_ascii_case("ERR") {
+        return Some("66");
+    }
+    if value.eq_ignore_ascii_case("RETURN") {
+        return Some("67");
+    }
     let bare = if allow_sig_prefix {
         strip_sig_prefix(value).unwrap_or(value)
     } else {
@@ -763,6 +827,14 @@ fn decode_signal_name(value: &str, allow_sig_prefix: bool) -> Option<&'static st
         return None;
     }
     signal_number(bare)
+}
+
+/// True for the trap pseudo-signals (65/66/67): they decode to real
+/// numbers, but kill(2) rejects them with EINVAL, so the delivery
+/// loop must adjudicate them by the kernel's ESRCH-before-EINVAL
+/// order (kill.def:194-216) instead of delivering them.
+fn is_trap_pseudo_signal(signal: i32) -> bool {
+    matches!(signal, 65 | 66 | 67)
 }
 
 /// GNU trap.c:236 decode_signal, whole spec: a valid_number is the
@@ -858,8 +930,15 @@ where
     Ok(status)
 }
 
+/// rubash#2927: GNU kill.def:194 routes pid operands through
+/// general.c valid_number (strtoimax, base 10 — leading whitespace,
+/// optional sign, digits, trailing whitespace, whole word consumed)
+/// and then requires the value to fit pid_t. `value.parse::<i32>()`
+/// rejected every whitespace-padded operand; route through the
+/// file's existing valid_number port (i64) plus the pid_t range
+/// check instead.
 fn parse_pid(value: &str) -> Option<i32> {
-    value.parse::<i32>().ok()
+    valid_number(value).and_then(|number| i32::try_from(number).ok())
 }
 
 pub fn process_exists(pid: u32) -> bool {
