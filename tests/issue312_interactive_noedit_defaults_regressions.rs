@@ -19,6 +19,11 @@
 //! | `-i file.sh` | `himBH` | OFF |
 //! | `-c '…'` | `hBc` | OFF |
 //!
+//! (The `$-` column was probed with a terminal the shell could
+//! claim, so it carries `m`; without one GNU drops the letter —
+//! rubash#2948. The asserts below factor `m` out; the editing-mode
+//! column is terminal-independent.)
+//!
 //! - shell.c:540-549: `-i` forces init_interactive() IMMEDIATELY, before
 //!   the startup files run.
 //! - shell.c:1830-1842 init_interactive: history defaults on and
@@ -88,6 +93,24 @@ fn rubash_args(args: &[&str], stdin_null: bool) -> (String, Option<i32>) {
     )
 }
 
+/// Assert the two output lines with the `m` letter factored out.
+/// The matrix in the header was probed with the shell's stderr on a
+/// terminal, where GNU establishment grants job control and `$-`
+/// carries `m`; without a claimable terminal GNU drops `m`
+/// (rubash#2948: jobs.c:4869 makes the letter the establishment
+/// result). This file's subject is the editing-mode defaults, which
+/// do not depend on the terminal, so the DASH line is compared with
+/// `m` removed and the rest byte-exact; the exact per-harness `m`
+/// matrix is pinned by tests/issue2948_monitor_flag_regressions.rs.
+fn assert_dash_and_edit_mode(out: &str, dash_without_m: &str, edit_line: &str) {
+    let mut lines = out.lines();
+    let dash = lines.next().unwrap_or("");
+    let dash = dash.replacen("DASH=[him", "DASH=[hi", 1);
+    assert_eq!(dash, format!("DASH=[{dash_without_m}]"), "out: {out}");
+    assert_eq!(lines.next(), Some(edit_line), "out: {out}");
+    assert_eq!(lines.next(), None, "out: {out}");
+}
+
 /// The verified GNU matrix.
 #[test]
 fn interactive_no_tty_defaults_match_gnu_matrix() {
@@ -99,13 +122,13 @@ fn interactive_no_tty_defaults_match_gnu_matrix() {
         ],
         true,
     );
-    assert_eq!(out, "DASH=[himBHc]\nEMACS-ON\n");
+    assert_dash_and_edit_mode(&out, "hiBHc", "EMACS-ON");
 
     let (out, _) = rubash_args(&["--rcfile", "rc.sh", "-i"], true);
-    assert_eq!(out, "DASH=[himBH]\nEMACS-ON\n");
+    assert_dash_and_edit_mode(&out, "hiBH", "EMACS-ON");
 
     let (out, _) = rubash_args(&["-i", "rc.sh"], true);
-    assert_eq!(out, "DASH=[himBH]\nEMACS-OFF\n");
+    assert_dash_and_edit_mode(&out, "hiBH", "EMACS-OFF");
 
     let (out, _) = rubash_args(
         &[
@@ -114,14 +137,17 @@ fn interactive_no_tty_defaults_match_gnu_matrix() {
         ],
         true,
     );
-    assert_eq!(out, "DASH=[hBc]\nEMACS-OFF\n");
+    assert_dash_and_edit_mode(&out, "hBc", "EMACS-OFF");
 }
 
 /// The `-i -s` pipe shape.
 #[test]
 fn interactive_stdin_pipe_defaults() {
     let (out, _) = rubash_args(&["-i", "-s"], false);
-    assert!(out.contains("DASH=[himBHs]"), "out: {out}");
+    assert!(
+        out.contains("DASH=[himBHs]") || out.contains("DASH=[hiBHs]"),
+        "out: {out}"
+    );
     assert!(out.contains("E-ON"), "out: {out}");
 }
 
