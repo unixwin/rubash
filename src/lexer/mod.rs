@@ -62,8 +62,7 @@ use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
 pub(crate) use quotes::{
-    escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER,
-    ANSI_C_QUOTE_MARKER_STR, PARAM_NAME_END_MARKER,
+    escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
 pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};
@@ -747,10 +746,16 @@ impl GroupScanFeeder {
 
     /// The tokenize-derived half of `stdin_source_needs_more_posix` for the
     /// accumulated text: keyword stack non-empty, or the last significant
-    /// token is a `&&`/`||`/`|`/`|&` connector. While heredoc bodies are
-    /// still being awaited, a fresh scan at EOF pushes the unterminated-body
-    /// marker token before its separator, so its last significant token is
-    /// the HereDocBody — never a connector — exactly like this formula.
+    /// token is a `&&`/`||`/`|`/`|&` connector. Here-doc bodies never
+    /// update the last-significant summary in either implementation
+    /// (fold_token here, the tail scan in token_walk_verdict): the body
+    /// is drained into its redirection at the newline (parse.y:3120),
+    /// not a grammar token, so a header line's trailing connector
+    /// stays the summary's last token after the drain (rubash#3003).
+    /// While bodies are still being awaited this arm reports no
+    /// continuation on its own — the gather's own pending list (and,
+    /// at real EOF, the batch walk's heredoc_pending stamp) carries
+    /// that verdict.
     /// A stray `)` ends the group too (niubash#482): GNU abandons the
     /// whole submission on the token, so "no more needed" is the answer
     /// that hands the offending text to the parser's diagnostic.
@@ -915,7 +920,20 @@ impl GroupScanFeeder {
                 _ => {}
             }
         }
-        if !(token.kind == TokenKind::Semicolon && token.line_break) {
+        // A here-doc body never updates the summary: the reader drains
+        // it straight into the pending redirection at the newline
+        // (parse.y:3120 gather_here_documents, called from the grammar
+        // actions at parse.y:1265-1266), so it is data, not a grammar
+        // token. Letting it land here masked the header line's
+        // trailing connector once the body drained — `cat <<EOF &&`
+        // read as complete at its delimiter line and the parser died
+        // on the dangling AND_AND (parse.y:1286) with `syntax error:
+        // unexpected end of file` (rubash#3003). The batch twin
+        // (token_walk_verdict's tail scan) skips body tokens the
+        // same way, keeping the two verdicts in agreement.
+        if !(token.kind == TokenKind::Semicolon && token.line_break)
+            && token.kind != TokenKind::HereDocBody
+        {
             self.last_significant = Some(token.kind.clone());
         }
     }

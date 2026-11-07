@@ -304,7 +304,9 @@ where
 /// Unicode scalars become chars, 5/6-byte forms become marker pairs, and
 /// values > 0x7FFFFFFF produce nothing (matching wctomb's -1 return).
 fn unicode_escape_text(codepoint: u32) -> String {
-    if codepoint <= 0x7F || crate::locale::is_multi_byte() {
+    // rubash#2979: u32cconv converts in the shell's CURRENT locale —
+    // ask the active (guard) locale, not the process environment.
+    if codepoint <= 0x7F || crate::locale::is_multi_byte_active() {
         return crate::executor::substitution_metadata::u32cconv_utf8_text(codepoint);
     }
     // Emit the escape literally: backslash + u/U + canonical hex. The
@@ -383,7 +385,7 @@ pub(super) fn shell_quote_form(value: &str, altform: bool) -> String {
     // form with per-byte octal escapes under LC_ALL=C even though it
     // contains no control characters (rubash#1464).
     if value.chars().any(|ch| ch.is_control())
-        || (!crate::locale::is_utf8() && value.chars().any(|ch| !ch.is_ascii()))
+        || (!crate::locale::is_multi_byte_active() && value.chars().any(|ch| !ch.is_ascii()))
     {
         return ansi_c_shell_quote(value);
     }
@@ -502,7 +504,7 @@ fn ansi_c_shell_quote_bytes(bytes: &[u8]) -> String {
 fn push_ansic_escaped_chars(quoted: &mut String, chars: impl Iterator<Item = char>) {
     // R8: the locale cannot change inside one quoting walk (it changes
     // only at command boundaries), so read it once instead of per char.
-    let utf8 = crate::locale::is_utf8();
+    let utf8 = crate::locale::is_multi_byte_active();
     for ch in chars {
         match ch {
             '\\' => quoted.push_str("\\\\"),
@@ -535,7 +537,7 @@ fn ansi_c_shell_quote(value: &str) -> String {
     let mut quoted = String::from("$'");
     // R8: one locale read per walk, not per character (see
     // push_ansic_escaped_chars).
-    let utf8 = crate::locale::is_utf8();
+    let utf8 = crate::locale::is_multi_byte_active();
     for ch in value.chars() {
         match ch {
             '\\' => quoted.push_str("\\\\"),

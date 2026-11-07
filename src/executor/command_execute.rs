@@ -1281,6 +1281,27 @@ impl Executor {
         let mut harvested: Vec<(String, String)> = Vec::new();
         let mut indexes: Vec<usize> = Vec::new();
         for (index, word) in cmd.words.iter().enumerate() {
+            // GNU takes the assignment verdict at READ time, on the
+            // raw token: parse.y stamps W_ASSIGNMENT via assignment()
+            // (general.c:480) over the token exactly as read — quotes
+            // included — and the sweep moves exactly the stamped
+            // words. The cooked word cannot carry the verdict: a
+            // quoted `"v=$v"` cooks to the same text as the bare
+            // token but was never stamped, so judging the cooked
+            // word harvested quoted arguments out of the command
+            // line (rubash#2959). Judge the raw text with the
+            // parser's own predicate (the same one the leading-run
+            // classification reads, parse_loop.rs); the cooked word
+            // only supplies the (name, value) pair. A synthetic word
+            // has no raw token and is never stamped.
+            let raw = cmd
+                .word_metadata
+                .get(index)
+                .map(|meta| meta.raw.as_str())
+                .unwrap_or("");
+            if !crate::lexer::is_assignment(raw) {
+                continue;
+            }
             let Some((name, value)) = split_assignment_word(word) else {
                 continue;
             };
