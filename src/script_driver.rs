@@ -2436,10 +2436,21 @@ fn token_walk_verdict(source: &str) -> TokenWalkVerdict {
     // (parse.y:1290 `list1 '&' newline_list list1` completes $1 first).
     // tokenize emits one Semicolon with line_break=true per physical line,
     // so skip those trailing separators before inspecting the last token.
+    // HereDocBody tokens are skipped too: the walk above already treats
+    // body tokens as data that folds nothing (they are drained into the
+    // redirection at the newline, parse.y:3120 gather_here_documents),
+    // and a body sitting physically after a header line's trailing
+    // connector (`cat <<EOF &&` + body + delimiter) must not mask that
+    // connector — the AND_AND production is still open at the
+    // delimiter line (rubash#3003). GroupScanFeeder::fold_token skips
+    // body tokens the same way, keeping the two verdicts in agreement.
     let last_significant = tokens
         .iter()
         .rev()
-        .find(|token| !(token.kind == TokenKind::Semicolon && token.line_break))
+        .find(|token| {
+            !(token.kind == TokenKind::Semicolon && token.line_break)
+                && token.kind != TokenKind::HereDocBody
+        })
         .map(|token| token.kind.clone());
     if matches!(
         last_significant,
