@@ -72,7 +72,8 @@ fn run_with_env(script: &str, envs: &[(&str, &str)]) -> Outcome {
 fn stdout_in(script: &str, locale: &str) -> Vec<u8> {
     let outcome = run_with_env(script, &[("LC_ALL", locale)]);
     assert_eq!(
-        outcome.status, 0,
+        outcome.status,
+        0,
         "run must succeed, stderr: {}",
         String::from_utf8_lossy(&outcome.stderr)
     );
@@ -121,8 +122,14 @@ fn issue2965_c_locale_float_char_constant() {
 
 #[test]
 fn issue2965_utf8_locale_takes_code_point() {
-    assert_eq!(stdout_in("printf '%d\\n' \"'é\"\n", UTF8), b"233\n".to_vec());
-    assert_eq!(stdout_in("printf '%d\\n' \"'€\"\n", UTF8), b"8364\n".to_vec());
+    assert_eq!(
+        stdout_in("printf '%d\\n' \"'é\"\n", UTF8),
+        b"233\n".to_vec()
+    );
+    assert_eq!(
+        stdout_in("printf '%d\\n' \"'€\"\n", UTF8),
+        b"8364\n".to_vec()
+    );
     assert_eq!(
         stdout_in("printf '%d\\n' \"'😀\"\n", UTF8),
         b"128512\n".to_vec()
@@ -167,7 +174,10 @@ fn issue2965_c_locale_high_bytes_are_themselves() {
 #[test]
 fn issue2965_ascii_controls_agree_in_both_locales() {
     for locale in [C, UTF8] {
-        assert_eq!(stdout_in("printf '%d\\n' \"'a\"\n", locale), b"97\n".to_vec());
+        assert_eq!(
+            stdout_in("printf '%d\\n' \"'a\"\n", locale),
+            b"97\n".to_vec()
+        );
         // Only the first character is read; trailing text is ignored.
         assert_eq!(
             stdout_in("printf '%d\\n' \"'abc\"\n", locale),
