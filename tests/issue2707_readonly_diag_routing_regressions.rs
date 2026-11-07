@@ -118,7 +118,8 @@ fn arith_readonly_diag_without_redirect_still_reported() {
 
 #[test]
 fn read_scalar_readonly_diag_lands_in_redirect_file() {
-    let run = run_script("readonly v=old\nprintf 'new\\n' | read v 2>err.txt\necho \"rc=$? v=$v\"\n");
+    let run =
+        run_script("readonly v=old\nprintf 'new\\n' | read v 2>err.txt\necho \"rc=$? v=$v\"\n");
     assert_eq!(run.status, 0, "stderr: {}", run.stderr);
     assert_eq!(run.stdout, "rc=1 v=old\n", "stdout: {}", run.stdout);
     assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
