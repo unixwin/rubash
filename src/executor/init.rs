@@ -315,14 +315,28 @@ impl Executor {
         // VarTable::from_values also imports any __RUBASH_*_VARS attribute
         // lists a parent rubash left in the environment — the structured
         // form of the cross-process attribute transport.
+        // rubash#2884: the imported values are entry-encoded at this
+        // funnel (env_helpers::entry_encode_imported_env) — GNU
+        // variables.c:368 stores environ verbatim, but this engine's
+        // stored spelling is a transport domain and environment import
+        // was the one entry that skipped the encoding every other
+        // value channel applies. The process_env_snapshot FIELD keeps
+        // the raw values: the Drop-time restore writes them back to
+        // the process environment verbatim.
         let mut env_vars = if process_exit {
             crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::process_env_pairs()
-                    .into_iter()
-                    .collect(),
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    crate::executor::env_helpers::process_env_pairs()
+                        .into_iter()
+                        .collect(),
+                ),
             )
         } else {
-            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
+            crate::shell::var_table::VarTable::from_values(
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    process_env_snapshot.clone(),
+                ),
+            )
         };
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
