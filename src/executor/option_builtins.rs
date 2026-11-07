@@ -41,14 +41,22 @@ impl Executor {
         let mut stderr = Vec::new();
         let mut o_writes: Vec<(String, bool)> = Vec::new();
         let mut login_shell_write = false;
-        let status = crate::builtins::shopt::execute_with_io_and_o_writes(
-            &cmd.words[1..],
-            &mut self.shell_state.env_vars,
-            &mut stdout,
-            &mut stderr,
-            &mut o_writes,
-            &mut login_shell_write,
-        )?;
+        let status = {
+            let row = super::builtin_table::builtin_table_row("shopt")
+                .expect("shopt row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::shopt::execute_with_io_and_o_writes(
+                row,
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &mut diag,
+                &mut stdout,
+                &mut o_writes,
+                &mut login_shell_write,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
+        };
         // GNU builtins/shopt.def:594-606 set_shopt_o_options funnels
         // every `-o` write through builtins/set.def:476-491
         // set_minus_o_option, so a `shopt -s -o vi` lands in the same

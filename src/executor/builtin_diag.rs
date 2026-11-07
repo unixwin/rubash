@@ -393,8 +393,26 @@ impl<'a> Diag<'a> {
 
 /// `valid_number` (`general.c`): base-10 `strtoimax` over the
 /// whole string modulo trailing whitespace; overflow invalid.
+/// The whitespace strtoimax skips is the C `isspace` set — space,
+/// \t, \n, \v, \f, \r. `str::trim_ascii` lacks the vertical tab
+/// (0x0B), so a `\v`-padded number GNU accepts was rejected
+/// (rubash#2958).
 pub(crate) fn valid_number(s: &str) -> Option<i64> {
-    let trimmed = s.trim_ascii();
+    // The word is judged in its decoded form: the carrier bytes
+    // {0x0C, 0x11, 0x13} arrive as raw-byte marker pairs from
+    // expansion (`is_carrier_byte`, substitution_metadata.rs),
+    // and GNU — which has no carrier — judges the byte itself,
+    // so an expansion-produced \f counts as the form feed it
+    // carries (rubash#2958).
+    let decoded;
+    let s = if s.contains('\u{E000}') {
+        decoded = crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(s);
+        decoded.as_str()
+    } else {
+        s
+    };
+    let trimmed =
+        s.trim_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\u{b}' | '\u{c}' | '\r'));
     if trimmed.is_empty() {
         return None;
     }
@@ -570,6 +588,24 @@ mod tests {
         let out = String::from_utf8(sink).unwrap();
         assert!(out.contains("break: 9999999999999999999999: numeric argument required\n"));
         assert!(out.contains("break: too many arguments\n"));
+    }
+
+    #[test]
+    fn valid_number_uses_the_c_isspace_set() {
+        // general.c valid_number via strtoimax: the padding set is
+        // C isspace — vertical tab (0x0B) and form feed (0x0C)
+        // included (rubash#2958; `str::trim_ascii` lacks \v, which
+        // is why this is pinned at the core, not per builtin).
+        assert_eq!(valid_number("\u{b}42"), Some(42));
+        assert_eq!(valid_number("42\u{b}"), Some(42));
+        assert_eq!(valid_number("\u{c}7"), Some(7));
+        // The carrier-byte form of the same padding: 0x0C rides
+        // expansion as the raw-byte marker pair U+E000 U+E00D and
+        // must judge as the form feed it carries.
+        assert_eq!(valid_number("\u{E000}\u{E00D}7"), Some(7));
+        assert_eq!(valid_number(" \t\n\u{b}\u{c}\r-13 \u{b}"), Some(-13));
+        assert_eq!(valid_number("\u{b}"), None);
+        assert_eq!(valid_number("4\u{b}2"), None);
     }
 
     #[test]

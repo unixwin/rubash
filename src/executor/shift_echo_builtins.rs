@@ -7,8 +7,19 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action =
-            crate::builtins::shift::execute_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
+        let action = {
+            let row = super::builtin_table::builtin_table_row("shift")
+                .expect("shift row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::shift::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
+        };
         self.apply_shift_action_with_stderr(action, &mut stderr)?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)
     }
@@ -48,7 +59,7 @@ impl Executor {
                 self.raise_evalerror_abort();
                 self.evalerror_exit_toomany_pending.set(true);
             }
-            crate::builtins::shift::ShiftAction::Shift(amount) => {
+            crate::builtins::shift::ShiftAction::Shift(amount, word) => {
                 if amount > self.shell_state.positional_len() {
                     // GNU general.c:112 (posix_initialize): `set -o posix'
                     // turns print_shift_error ON, so the out-of-range
@@ -58,16 +69,24 @@ impl Executor {
                     // failure itself stays EXECUTION_FAILURE (1, not >
                     // EX_SHERRBASE): shift never sets special_builtin_failed,
                     // so it is not posix-fatal even bare (execute_cmd.c:4886).
+                    // The rendered word is sh_erange's argument
+                    // (builtins/common.c:252-259): the raw count
+                    // word, or no word segment at all when the
+                    // count was implicit (shift.def:74 passes
+                    // `list ? list->word->word : NULL`; rubash#2966).
                     if crate::builtins::shopt::option_enabled(
                         &self.shell_state.env_vars,
                         "shift_verbose",
                     ) || self.posix_mode_enabled()
                     {
-                        writeln!(
-                            stderr,
-                            "{}shift: {amount}: shift count out of range",
-                            self.diagnostic_prefix()
-                        )?;
+                        let row = super::builtin_table::builtin_table_row("shift")
+                            .expect("shift row in BUILTIN_TABLE");
+                        let mut diag = super::builtin_diag::Diag::new(row, &mut *stderr);
+                        diag.error(super::builtin_diag::DiagKind::Erange(
+                            word,
+                            "shift count".to_string(),
+                        ));
+                        diag.flush_with(|| self.diagnostic_prolog());
                     }
                     self.exit_code = 1;
                     return Ok(());

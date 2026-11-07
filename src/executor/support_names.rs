@@ -409,38 +409,6 @@ pub(in crate::executor) fn valid_function_identifier(name: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::executor) enum LoopControlError {
-    TooManyArguments,
-    OutOfRange(String),
-    NotNumeric(String),
-}
-
-pub(in crate::executor) fn loop_control_level(args: &[String]) -> Result<usize, LoopControlError> {
-    let mut args = args.iter().map(String::as_str);
-    let first = match args.next() {
-        Some("--") => args.next(),
-        other => other,
-    };
-
-    let Some(value) = first else {
-        return Ok(1);
-    };
-    if args.next().is_some() {
-        return Err(LoopControlError::TooManyArguments);
-    }
-    // GNU break.def/continue.def read the count through get_numeric_arg
-    // (builtins/common.c:488), whose acceptance rule is general.c:248
-    // valid_number: whitespace-padded numerics are legal (rubash#1339),
-    // non-numeric text is NotNumeric, and a parsed count below 1 is
-    // OutOfRange.
-    match crate::builtins::exit::gnu_valid_number(value) {
-        Some(level) if level > 0 => Ok(level as usize),
-        Some(_) => Err(LoopControlError::OutOfRange(value.to_string())),
-        None => Err(LoopControlError::NotNumeric(value.to_string())),
-    }
-}
-
 pub(in crate::executor) fn invert_exit_status(status: i32) -> i32 {
     i32::from(status == 0)
 }

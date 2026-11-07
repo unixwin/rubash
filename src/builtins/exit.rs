@@ -3,6 +3,8 @@
 //! GNU Bash source ownership:
 //! - builtins/exit.def (`exit_builtin`)
 
+use crate::executor::builtin_diag::{Diag, DiagKind, NumericFatal, Prolog};
+use crate::executor::builtin_table::BuiltinRow;
 use std::io::{self, Write};
 
 const EXECUTION_FAILURE: i32 = 1;
@@ -18,33 +20,44 @@ pub enum ExitAction {
 pub fn execute(args: &[String], last_status: i32) -> io::Result<ExitAction> {
     let mut stdout = io::stdout().lock();
     let mut stderr = io::stderr().lock();
-    execute_with_io(
-        args.iter().map(String::as_str),
-        last_status,
-        &mut stdout,
-        &mut stderr,
-    )
+    let row = crate::executor::builtin_table::builtin_table_row("exit")
+        .expect("exit row in BUILTIN_TABLE");
+    let mut diag = Diag::new(row, &mut stderr);
+    let action = execute_with_io(row, args, last_status, &mut diag, &mut stdout)?;
+    diag.flush_with(|| Prolog {
+        interactive: false,
+        shell_basename: "rubash".to_string(),
+        error_name: "rubash".to_string(),
+        script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+        line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
+    });
+    Ok(action)
 }
 
-pub(crate) fn execute_with_io<'a, I, W, E>(
-    args: I,
+/// Stage-2 ④ Phase 3: the status word goes through
+/// `Diag::numeric_arg` (builtins/common.c:525+ `get_exitstat`,
+/// over `general.c:248` valid_number) — head validity before the
+/// no_args surplus tail (rubash#2956). The executor's
+/// `execute_exit_command_word` intercept still owns the
+/// production diagnostic + special-builtin/DISCARD channels for
+/// these shapes; this direct path produces the same actions with
+/// the caller's Diag as the voice.
+pub(crate) fn execute_with_io<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     last_status: i32,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
 ) -> io::Result<ExitAction>
 where
-    I: IntoIterator<Item = &'a str>,
     W: Write,
-    E: Write,
 {
-    let args: Vec<&str> = args.into_iter().collect();
-
     if args.is_empty() {
         return Ok(ExitAction::Exit(normalize_status(last_status)));
     }
 
     if args[0] == "--help" {
-        print_help(stdout)?;
+        crate::builtins::help::print_builtin_help(row.name, stdout)?;
         // GNU builtins/exit.def exit_builtin: CHECK_HELPOPT prints the help
         // and RETURNS EX_USAGE from the builtin itself — the builtin's
         // nonzero status never reaches jump_to_top_level, so the shell
@@ -59,107 +72,29 @@ where
     // word — `exit --` exits with $?, `exit -- 1` exits 1 (2026-10-18
     // probes X4/X5). `exit -` is not skipped: valid_number("-") fails and
     // it becomes the numeric argument error.
-    let rest = if args[0] == "--" {
-        &args[1..]
-    } else {
-        &args[..]
-    };
-
-    if rest.is_empty() {
+    let start = usize::from(args[0] == "--");
+    if args.len() == start {
         return Ok(ExitAction::Exit(normalize_status(last_status)));
     }
 
-    let status = match parse_exit_status(rest[0]) {
-        Some(status) => status,
-        None => {
-            // The executor's execute_exit_command_word intercepts this
-            // shape with the reader prolog (`bash: line N:` /
-            // `<script>: line N:`); this direct-call fallback keeps the
-            // canonical shell name for the rare non-reader callers and
-            // the unit tests below. The previous helper read
-            // __RUBASH_* from the PROCESS environment, which the engine
-            // only keeps in its internal env map — it always fell back,
-            // dropping the line segment (issue #705 R7.4).
-            writeln!(
-                stderr,
-                "{}exit: {}: numeric argument required",
-                "bash: ", rest[0]
-            )?;
-            return Ok(ExitAction::Exit(EX_USAGE));
-        }
+    let head_end = (start + 1).min(args.len());
+    let value = match diag.numeric_arg(&args[..head_end], NumericFatal::Soft) {
+        Some(value) => value,
+        // sh_neednumarg was already reported by numeric_arg; the
+        // builtin's failure return is EX_USAGE (the shell does not
+        // exit — see the intercept's commentary).
+        None => return Ok(ExitAction::Exit(EX_USAGE)),
     };
 
-    if rest.len() > 1 {
-        // Same shape: the executor intercepts the too-many error with the
-        // reader prolog before this builtin path runs.
-        writeln!(stderr, "{}exit: too many arguments", "bash: ")?;
+    if args.len() > start + 1 {
+        // no_args (builtins/common.c, fatal == 0): the surplus
+        // report; the builtin does NOT exit (the executor's
+        // intercept owns the DISCARD channel for this shape).
+        diag.report(DiagKind::TooManyArgs);
         return Ok(ExitAction::Continue(EXECUTION_FAILURE));
     }
 
-    Ok(ExitAction::Exit(status))
-}
-
-fn print_help<W>(stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    writeln!(stdout, "exit: exit [n]")?;
-    writeln!(stdout, "    Exit the shell.")?;
-    writeln!(stdout, "    ")?;
-    writeln!(
-        stdout,
-        "    Exits the shell with a status of N.  If N is omitted, the exit status"
-    )?;
-    writeln!(stdout, "    is that of the last command executed.")
-}
-
-/// GNU general.c:248 valid_number — the strtoimax acceptance rule behind
-/// get_exitstat and get_numeric_arg (builtins/common.c:488): strtoimax
-/// skips leading isspace and an optional sign, consumes one or more
-/// digits, and the caller then skips trailing isspace; the string is a
-/// number only if it ends there, and strtoimax overflow/underflow
-/// (errno) is invalid. This is why `"1 "`, `" 1"`, `"1\t"`, `"+1 "` and
-/// `"01 "` are legal operands for exit/return/shift/break/continue while
-/// `"1 2"`, `"1x"`, `"0x10 "` and `""` are "numeric argument required"
-/// (rubash#1339).
-pub(crate) fn gnu_valid_number(arg: &str) -> Option<i64> {
-    fn is_space(byte: u8) -> bool {
-        // C isspace in the "C" locale: the set strtoimax skips.
-        matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-    }
-    let bytes = arg.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() && is_space(bytes[index]) {
-        index += 1;
-    }
-    let span_start = index;
-    if index < bytes.len() && (bytes[index] == b'+' || bytes[index] == b'-') {
-        index += 1;
-    }
-    let digits_start = index;
-    while index < bytes.len() && bytes[index].is_ascii_digit() {
-        index += 1;
-    }
-    if index == digits_start {
-        return None;
-    }
-    // Rust's parser rejects overflow exactly where strtoimax sets errno.
-    let value: i64 = arg[span_start..index].parse().ok()?;
-    while index < bytes.len() && is_space(bytes[index]) {
-        index += 1;
-    }
-    if index != bytes.len() {
-        return None;
-    }
-    Some(value)
-}
-
-fn parse_exit_status(arg: &str) -> Option<i32> {
-    // GNU builtins/common.c get_exitstat parses as intmax_t (int64);
-    // out-of-range values are rejected with "numeric argument required"
-    // (rubash#1403), not silently wrapped.
-    let value = gnu_valid_number(arg)?;
-    Some(normalize_status(value))
+    Ok(ExitAction::Exit(normalize_status(value)))
 }
 
 pub(crate) fn normalize_status<T>(status: T) -> i32
@@ -174,10 +109,23 @@ mod tests {
     use super::*;
 
     fn run(args: &[&str], last_status: i32) -> (ExitAction, String) {
+        let row = crate::executor::builtin_table::builtin_table_row("exit").unwrap();
+        let words: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let action =
-            execute_with_io(args.iter().copied(), last_status, &mut stdout, &mut stderr).unwrap();
+        let action = {
+            let mut diag = Diag::new(row, &mut stderr);
+            let action = execute_with_io(row, &words, last_status, &mut diag, &mut stdout).unwrap();
+            diag.flush_with(|| Prolog {
+                interactive: false,
+                shell_basename: "bash".to_string(),
+                error_name: "bash".to_string(),
+                script_file: Some("t.sh".to_string()),
+                line: Some("1".to_string()),
+            });
+            action
+        };
+        let _ = stdout;
         (action, String::from_utf8(stderr).unwrap())
     }
 

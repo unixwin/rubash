@@ -124,32 +124,48 @@ fn supports_not_and_logical_operators() {
     assert_eq!(run(&["x", "-o", ""], false).0, EXECUTION_SUCCESS);
 }
 
+/// The migrated `set` call shape (Stage-2 ④ Phase 3): row +
+/// Diag around `set_with_io`, flushed with a fixed test prolog.
+fn run_set_builtin(
+    args: &[&str],
+    env_vars: &mut crate::shell::var_table::VarTable,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+) {
+    use crate::executor::builtin_diag::{Diag, Prolog};
+    let row = crate::executor::builtin_table::builtin_table_row("set").unwrap();
+    let words: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let mut diag = Diag::new(row, stderr);
+    crate::builtins::set::set_with_io(
+        row,
+        &words,
+        env_vars,
+        &mut diag,
+        stdout,
+        &crate::shell::var_table::TempenvListingUnderlay::new(),
+    )
+    .unwrap();
+    diag.flush_with(|| Prolog {
+        interactive: false,
+        shell_basename: "bash".to_string(),
+        error_name: "bash".to_string(),
+        script_file: Some("t.sh".to_string()),
+        line: Some("1".to_string()),
+    });
+}
+
 #[test]
 fn supports_shell_option_unary_operator() {
     let mut env_vars = crate::shell::var_table::VarTable::default();
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    crate::builtins::set::set_with_io(
-        ["-o", "errexit"],
-        &mut env_vars,
-        &mut stdout,
-        &mut stderr,
-        &crate::shell::var_table::TempenvListingUnderlay::new(),
-    )
-    .unwrap();
+    run_set_builtin(&["-o", "errexit"], &mut env_vars, &mut stdout, &mut stderr);
 
     assert_eq!(
         run_with_env(&["-o", "errexit"], false, &env_vars).0,
         EXECUTION_SUCCESS
     );
-    crate::builtins::set::set_with_io(
-        ["+o", "errexit"],
-        &mut env_vars,
-        &mut stdout,
-        &mut stderr,
-        &crate::shell::var_table::TempenvListingUnderlay::new(),
-    )
-    .unwrap();
+    run_set_builtin(&["+o", "errexit"], &mut env_vars, &mut stdout, &mut stderr);
     assert_eq!(
         run_with_env(&["-o", "errexit"], false, &env_vars).0,
         EXECUTION_FAILURE

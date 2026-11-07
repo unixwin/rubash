@@ -97,6 +97,9 @@ impl Executor {
             return Ok(());
         }
         let mut stderr = Vec::new();
+        let row = super::builtin_table::builtin_table_row(kind.name())
+            .expect("loop-control row in BUILTIN_TABLE");
+        let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
         // GNU loop_level as seen by this executor: loops executing HERE
         // (loop_depth) plus the depth a fork boundary carried in
         // (inherited_loop_depth — command substitution bodies and simple
@@ -108,12 +111,10 @@ impl Executor {
             // out-of-loop diagnostic is suppressed in posix mode; the status
             // stays zero either way (func5.sub posix testfunc `break`).
             if !self.posix_mode_enabled() {
-                writeln!(
-                    &mut stderr,
-                    "{}{}: only meaningful in a `for', `while', or `until' loop",
-                    self.diagnostic_prefix(),
-                    kind.name()
-                )?;
+                diag.free(format_args!(
+                    "only meaningful in a `for', `while', or `until' loop"
+                ));
+                diag.flush_with(|| self.diagnostic_prolog());
             }
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             // Bash emits the diagnostic but leaves the command status at zero
@@ -123,8 +124,45 @@ impl Executor {
             return Ok(());
         }
 
-        match loop_control_level(&cmd.words[1..]) {
-            Ok(level) => {
+        // Stage-2 ④ Phase 3: the count goes through Diag::numeric_arg
+        // (builtins/common.c:488-520 get_numeric_arg (list,
+        // interactive ? 2 : 1)) on the head slice — validity before
+        // the no_args surplus tail (rubash#2956), and the surplus
+        // before break.def's own range check (sh_erange (word,
+        // "loop count"), builtins/break.def:80-91). The unwind
+        // class of each failure is the caller's (the arms below),
+        // so the parse is Soft and its outcome is reified here.
+        enum LoopParse {
+            Level(usize),
+            TooMany,
+            OutOfRange,
+            NotNumeric,
+        }
+        let words = &cmd.words[1..];
+        let start = usize::from(words.first().map(String::as_str) == Some("--"));
+        let parsed = if words.len() > start {
+            match diag.numeric_arg(&words[..=start], super::builtin_diag::NumericFatal::Soft) {
+                None => LoopParse::NotNumeric,
+                Some(_) if words.len() > start + 1 => {
+                    diag.report(super::builtin_diag::DiagKind::TooManyArgs);
+                    LoopParse::TooMany
+                }
+                Some(value) if value <= 0 => {
+                    diag.error(super::builtin_diag::DiagKind::Erange(
+                        Some(words[start].clone()),
+                        "loop count".to_string(),
+                    ));
+                    LoopParse::OutOfRange
+                }
+                Some(value) => LoopParse::Level(value as usize),
+            }
+        } else {
+            // No count word (or a bare `--`): get_numeric_arg's
+            // default count, 1.
+            LoopParse::Level(1)
+        };
+        match parsed {
+            LoopParse::Level(level) => {
                 let level = level.min(total_loop_depth);
                 // GNU break.def/continue.def return EXECUTION_SUCCESS for an
                 // in-range count — the builtin has no user-visible status of
@@ -155,13 +193,8 @@ impl Executor {
                     LoopControlKind::Continue => Err(ExecuteError::Continue(level)),
                 }
             }
-            Err(LoopControlError::TooManyArguments) => {
-                writeln!(
-                    &mut stderr,
-                    "{}{}: too many arguments",
-                    self.diagnostic_prefix(),
-                    kind.name()
-                )?;
+            LoopParse::TooMany => {
+                diag.flush_with(|| self.diagnostic_prolog());
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 // GNU builtins/break.def:73 (continue.def:118): a VALID
                 // numeric count goes to get_numeric_arg, whose tail calls
@@ -184,13 +217,8 @@ impl Executor {
                 self.evalerror_exit_toomany_pending.set(true);
                 Ok(())
             }
-            Err(LoopControlError::OutOfRange(value)) => {
-                writeln!(
-                    &mut stderr,
-                    "{}{}: {value}: loop count out of range",
-                    self.diagnostic_prefix(),
-                    kind.name()
-                )?;
+            LoopParse::OutOfRange => {
+                diag.flush_with(|| self.diagnostic_prolog());
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 // GNU break.def:80-91 / continue.def:120-131: even when the
                 // count is out of range, `breaking`/`continuing` is set to
@@ -213,13 +241,8 @@ impl Executor {
                 let level = self.shell_state.loop_depth;
                 Err(ExecuteError::Break(level))
             }
-            Err(LoopControlError::NotNumeric(value)) => {
-                writeln!(
-                    &mut stderr,
-                    "{}{}: {value}: numeric argument required",
-                    self.diagnostic_prefix(),
-                    kind.name()
-                )?;
+            LoopParse::NotNumeric => {
+                diag.flush_with(|| self.diagnostic_prolog());
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 // GNU break.def:76 get_numeric_arg(list, interactive ? 2 : 1)
                 // (builtins/common.c:488-510): a non-numeric count reports
@@ -287,48 +310,26 @@ impl Executor {
         }
         // GNU builtins/common.c get_exitstat: ISOPTION(word, '-') skips a
         // leading `--` before the status word — `return -- N` returns N
-        // (rubash#1379). Mirrors src/builtins/exit.rs.
-        let args: &[String] = match args.first().map(String::as_str) {
-            Some("--") => &args[1..],
-            _ => args,
-        };
-        // GNU return.def: more than one operand is `return: too many
-        // arguments` — the no_args class (builtins/common.c), exactly
-        // like `exit 1 2`: set_exit_status(EX_BADUSAGE) then
-        // jump_to_top_level(DISCARD). Oracle-verified against GNU 5.3:
-        // the function/source unwinds AND the rest of the current
-        // command list is abandoned (the caller's same-line commands
-        // never run; an `if` whose condition dies this way takes the
-        // whole line with it), while the NEXT line runs with $?=2. At
-        // top level it reports this message — not the can-only-`return'
-        // one. Ride the same evalerror vehicle as exit-too-many
-        // (rubash#705 machinery, rubash#1213).
-        if args.len() > 1 {
-            writeln!(
-                &mut stderr,
-                "{}return: too many arguments",
-                self.diagnostic_prefix()
-            )?;
-            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
-            self.exit_code = 2;
-            self.raise_evalerror_abort();
-            self.evalerror_exit_toomany_pending.set(true);
-            return Ok(());
-        }
+        // (rubash#1379). Stage-2 ④ Phase 3: the status word is judged
+        // through Diag::numeric_arg on the head slice (the `--` plus
+        // the word), and validity is judged BEFORE the no_args
+        // surplus tail (rubash#2956) — the old code checked the
+        // operand count first, so `return x y` misreported
+        // too-many-arguments.
+        let start = usize::from(args.first().map(String::as_str) == Some("--"));
+        let row =
+            super::builtin_table::builtin_table_row("return").expect("return row in BUILTIN_TABLE");
+        let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
         let mut numeric_failed = false;
-        let status = if let Some(value) = args.first() {
+        let mut status_word: Option<i64> = None;
+        if args.len() > start {
             // GNU get_exitstat parses via general.c:248 valid_number
             // (intmax_t): whitespace-padded numerics are legal
             // (rubash#1339); out-of-range rejected (rubash#1403).
-            match crate::builtins::exit::gnu_valid_number(value) {
-                Some(value) => crate::builtins::exit::normalize_status(value),
+            match diag.numeric_arg(&args[..=start], super::builtin_diag::NumericFatal::Soft) {
+                Some(value) => status_word = Some(value),
                 None => {
                     numeric_failed = true;
-                    writeln!(
-                        &mut stderr,
-                        "{}return: {value}: numeric argument required",
-                        self.diagnostic_prefix()
-                    )?;
                     // GNU builtins/return.def:57-69: get_exitstat's
                     // failure is EX_USAGE (258 > EX_SHERRBASE), so the
                     // builtin's completion marks special_builtin_failed
@@ -343,9 +344,34 @@ impl Executor {
                     // `command return ...' (execute_cmd.c:4657-4666).
                     // RC audit phase-1 finding ④ / errors10.
                     self.special_builtin_failed.set(true);
-                    2
                 }
             }
+        }
+        // GNU return.def: more than one operand is `return: too many
+        // arguments` — the no_args class (builtins/common.c), exactly
+        // like `exit 1 2`: set_exit_status(EX_BADUSAGE) then
+        // jump_to_top_level(DISCARD). Oracle-verified against GNU 5.3:
+        // the function/source unwinds AND the rest of the current
+        // command list is abandoned (the caller's same-line commands
+        // never run; an `if` whose condition dies this way takes the
+        // whole line with it), while the NEXT line runs with $?=2. At
+        // top level it reports this message — not the can-only-`return'
+        // one. Ride the same evalerror vehicle as exit-too-many
+        // (rubash#705 machinery, rubash#1213). Only a VALID head
+        // reaches it: an invalid head already reported above.
+        if !numeric_failed && args.len() > start + 1 {
+            diag.report(super::builtin_diag::DiagKind::TooManyArgs);
+            diag.flush_with(|| self.diagnostic_prolog());
+            self.write_buffered_builtin_output(cmd, &[], &stderr)?;
+            self.exit_code = 2;
+            self.raise_evalerror_abort();
+            self.evalerror_exit_toomany_pending.set(true);
+            return Ok(());
+        }
+        let status = if numeric_failed {
+            2
+        } else if let Some(value) = status_word {
+            crate::builtins::exit::normalize_status(value)
         } else {
             // A bare return inside a running signal trap action gets the
             // pre-trap $? only when it terminates the trap action itself
@@ -369,6 +395,10 @@ impl Executor {
             }
         };
 
+        // The numeric diagnostic (if any) is pending in the Diag;
+        // render it into the stderr buffer before any arm below
+        // ships that buffer.
+        diag.flush_with(|| self.diagnostic_prolog());
         let in_function = self.shell_state.function_depth > 0;
         let in_source = self
             .shell_state
@@ -420,11 +450,10 @@ impl Executor {
             return Err(ExecuteError::Return(status));
         }
 
-        writeln!(
-            &mut stderr,
-            "{}return: can only `return' from a function or sourced script",
-            self.diagnostic_prefix()
-        )?;
+        diag.free(format_args!(
+            "can only `return' from a function or sourced script"
+        ));
+        diag.flush_with(|| self.diagnostic_prolog());
         self.write_buffered_builtin_output(cmd, &[], &stderr)?;
         self.exit_code = 2;
         // GNU return.def:74 returns EX_USAGE (258 > EX_SHERRBASE=256), so

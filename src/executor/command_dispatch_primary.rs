@@ -362,18 +362,23 @@ impl Executor {
             // CONTINUES — 5.2 exited here, but docs/architecture.md pins the
             // 5.3.0 baseline (probe D: `-c 'exit abc; echo AFTER'` prints
             // AFTER, $?=2).
-            if let Some(status) = rest.first() {
+            let exit_row =
+                super::builtin_table::builtin_table_row("exit").expect("exit row in BUILTIN_TABLE");
+            if rest.first().is_some() {
                 // get_exitstat's acceptance rule is general.c:248
                 // valid_number (intmax_t): whitespace-padded numerics
-                // pass (rubash#1339), out-of-range fails (rubash#1403).
-                if crate::builtins::exit::gnu_valid_number(status).is_none() {
-                    let mut stderr = Vec::new();
-                    writeln!(
-                        &mut stderr,
-                        "{}exit: {}: numeric argument required",
-                        self.diagnostic_prefix(),
-                        status
-                    )?;
+                // pass (rubash#1339), out-of-range fails (rubash#1403) —
+                // judged through Diag::numeric_arg on the head slice
+                // (the `--` plus the status word), so the surplus
+                // tail cannot fire first (rubash#2956).
+                let mut stderr = Vec::new();
+                let mut diag = super::builtin_diag::Diag::new(exit_row, &mut stderr);
+                let head = &cmd.words[1..][..=arg_index];
+                let valid = diag
+                    .numeric_arg(head, super::builtin_diag::NumericFatal::Soft)
+                    .is_some();
+                if !valid {
+                    diag.flush_with(|| self.diagnostic_prolog());
                     self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                     self.exit_code = 2;
                     // get_exitstat's failure return is EX_USAGE (258 >
@@ -404,11 +409,9 @@ impl Executor {
             // evalerror vehicle with the exit-too-many class marker.
             if rest.len() > 1 {
                 let mut stderr = Vec::new();
-                writeln!(
-                    &mut stderr,
-                    "{}exit: too many arguments",
-                    self.diagnostic_prefix()
-                )?;
+                let mut diag = super::builtin_diag::Diag::new(exit_row, &mut stderr);
+                diag.report(super::builtin_diag::DiagKind::TooManyArgs);
+                diag.flush_with(|| self.diagnostic_prolog());
                 self.write_buffered_builtin_output(cmd, &[], &stderr)?;
                 self.exit_code = 2;
                 self.raise_evalerror_abort();

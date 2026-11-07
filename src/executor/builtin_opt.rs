@@ -100,6 +100,17 @@ pub struct BuiltinOpt<'a, 'd> {
     sp: usize,
     /// Whether the scan has finished (an `End` was returned).
     done: bool,
+    /// The option character that ended the scan in error
+    /// (`list_optopt` in GNU's globals), or `None` if no error
+    /// character has been seen. `set`'s scan switch reads it: an
+    /// error on `'?'` itself maps to EXECUTION_SUCCESS
+    /// (builtins/set.def:684-686).
+    optopt: Option<u8>,
+    /// The sign byte (`-` or `+`) of the word that produced the
+    /// most recent event (`list_opttype` in GNU's globals).
+    /// `set`'s `'i'` refusal builds its errstr from it
+    /// (builtins/set.def:677-683).
+    opttype: u8,
     /// Whether the row is scanned at all (`Getopt` rows only).
     scannable: bool,
     /// The POSIX-mode context bit (project ②'s hook; no effect in
@@ -128,6 +139,8 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
             index: 0,
             sp: 1,
             done: false,
+            optopt: None,
+            opttype: b'-',
             scannable,
             posix,
         }
@@ -144,6 +157,18 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
     /// word holding the error is skipped.
     pub fn operands(&self) -> &'a [String] {
         &self.words[self.index.min(self.words.len())..]
+    }
+
+    /// The option character that ended the scan in error
+    /// (`list_optopt`), or `None` when the scan ended cleanly.
+    pub fn optopt(&self) -> Option<u8> {
+        self.optopt
+    }
+
+    /// The sign byte of the word that produced the most recent
+    /// event (`list_opttype`): `b'-'` or `b'+'`.
+    pub fn opttype(&self) -> u8 {
+        self.opttype
     }
 
     /// The next scan step. Illegal characters, missing arguments
@@ -180,6 +205,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         }
         let bytes = word.as_bytes();
         let sign = bytes[0];
+        self.opttype = sign;
         let c = bytes[self.sp];
         // An option character of ':' is always invalid, whatever
         // the spec says (bashgetopt.c:99).
@@ -191,6 +217,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         let Some(kind) = kind else {
             // Invalid: errstr is the sign + the one character.
             let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
+            self.optopt = Some(c);
             self.diag.error(DiagKind::InvalidOpt(errstr));
             debug_assert_eq!(self.diag.status(), EX_USAGE);
             self.advance_past_bad_char();
@@ -230,6 +257,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
                     return OptEvent::Opt(c);
                 }
                 let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
+                self.optopt = Some(c);
                 self.diag.error(DiagKind::NeedArg(errstr));
                 debug_assert_eq!(self.diag.status(), EX_USAGE);
                 self.sp = 1;
@@ -260,6 +288,7 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
                     }
                     _ => {
                         let errstr = format!("{}{}", sign as char, diagnostic_byte(c));
+                        self.optopt = Some(c);
                         self.diag.error(DiagKind::NeedNumArg(errstr));
                         debug_assert_eq!(self.diag.status(), EX_USAGE);
                         self.sp = 1;
@@ -757,6 +786,61 @@ mod tests {
         let ev_on = drain(&mut on);
         assert_eq!(ev_off, ev_on);
         assert_eq!(ops_off, on.operands());
+    }
+
+    #[test]
+    fn optopt_records_the_error_character() {
+        // set.def:684-686 reads list_optopt after the scan: an
+        // error on '?' itself maps to EXECUTION_SUCCESS, any other
+        // bad character to EX_USAGE.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-?"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.optopt(), Some(b'?'));
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-z?"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(drain(&mut opt), [OptEvent::End]);
+        assert_eq!(opt.optopt(), Some(b'z'), "the FIRST bad character is kept");
+
+        // A clean scan leaves optopt empty.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-e", "-o", "vi"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(
+            drain(&mut opt),
+            [
+                OptEvent::Opt(b'e'),
+                OptEvent::OptArg(b'o', "vi"),
+                OptEvent::End
+            ]
+        );
+        assert_eq!(opt.optopt(), None);
+    }
+
+    #[test]
+    fn opttype_tracks_the_event_words_sign() {
+        // set.def:677-683 builds the `set -i` refusal's errstr from
+        // list_opttype — the sign of the word carrying the 'i'.
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["-ei"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(opt.next(), OptEvent::Opt(b'e'));
+        assert_eq!(opt.next(), OptEvent::Opt(b'i'));
+        assert_eq!(opt.opttype(), b'-');
+
+        let mut sink = Vec::new();
+        let mut diag = diag_for("set", &mut sink);
+        let w = words(&["+i"]);
+        let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
+        assert_eq!(opt.next(), OptEvent::Opt(b'i'));
+        assert_eq!(opt.opttype(), b'+');
     }
 
     #[test]

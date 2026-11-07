@@ -125,15 +125,23 @@ impl Executor {
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
         let mut o_writes: Vec<(String, bool)> = Vec::new();
         let dynamic_set_views = self.dynamic_set_views();
-        let status = crate::builtins::set::set_with_io_and_o_writes(
-            cmd.words[1..].iter().map(String::as_str),
-            &mut self.shell_state.env_vars,
-            &mut stdout,
-            &mut stderr,
-            &underlay,
-            &dynamic_set_views,
-            &mut o_writes,
-        )?;
+        let status = {
+            let row =
+                super::builtin_table::builtin_table_row("set").expect("set row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::set::set_with_io_and_o_writes(
+                row,
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &mut diag,
+                &mut stdout,
+                &underlay,
+                &dynamic_set_views,
+                &mut o_writes,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
+        };
         if !history_prior
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history")
         {
