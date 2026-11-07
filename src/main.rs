@@ -1064,17 +1064,19 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
 
 /// GNU jobs.c:4735 initialize_job_control (shell.c:1969 passes force =
 /// jobs_m_flag) ends with jobs.c:4869 `change_flag ('m', job_control ? '-' :
-/// '+')`. Without a terminal to take a process group on (non-interactive
-/// shell, stderr not a tty), give_terminal_to / tcgetpgrp fail with ENOTTY,
-/// job_control stays 0, and two sys_error/internal_error lines are printed
-/// (jobs.c:4841 "cannot set terminal process group (%d)" and jobs.c:4856
-/// "no job control in this shell") before `-m` is dropped from `$-`.
-/// Windows has no POSIX terminal process groups, so stderr-not-a-terminal is
-/// the honest port of that branch: the option is turned back off exactly as
-/// jobs.c:4869 does. An interactive shell or a terminal on stderr keeps `m`,
-/// matching the GNU paths where job_control could be established
-/// (empirical WSL 5.3.0: `bash -i -c 'echo $-'` -> `himBHc`, `bash -m -c
-/// 'echo $-'` -> the two diagnostics + `hBc`).
+/// '+')`. Without a terminal to take a process group on, give_terminal_to /
+/// tcgetpgrp fail with ENOTTY, job_control stays 0, and two
+/// sys_error/internal_error lines are printed (jobs.c:4841 "cannot set
+/// terminal process group (%d)" and jobs.c:4856 "no job control in this
+/// shell") before `m` is dropped from `$-`. Windows has no POSIX terminal
+/// process groups, so stderr-not-a-terminal is the honest port of that
+/// branch for the non-interactive `-m` arm below: the option is turned back
+/// off exactly as jobs.c:4869 does. The interactive arm runs the SAME
+/// establishment through the engine funnel
+/// (script_driver::establish_interactive_job_control, rubash#2948): the
+/// WSL 5.3.0 probe behind the old unconditional set (`bash -i -c 'echo $-'`
+/// -> `himBHc`) ran WITH a terminal — without one GNU drops `m` there too
+/// (5.3.20: `hiBHc` + the two diagnostics).
 fn apply_startup_job_control(executor: &mut Executor) {
     // A respawned `rubash -c` background child (marked with
     // __RUBASH_SHELL_PID by the background-spawn path) is GNU's forked
@@ -1087,12 +1089,14 @@ fn apply_startup_job_control(executor: &mut Executor) {
     }
     let interactive = executor.get_env("__RUBASH_INTERACTIVE").as_deref() == Some("1");
     if interactive {
-        // jobs.c:4869 `change_flag ('m', job_control ? '-' : '+')` keeps the
-        // letter for interactive shells: initialize_job_control establishes
-        // job control there even without -m (empirical WSL 5.3.0: `bash -i
-        // -c 'echo $-'` -> `himBHc`, with and without an explicit -m/-o
-        // monitor).
-        executor.set_shell_option("monitor", true);
+        // jobs.c:4869 `change_flag ('m', job_control ? '-' : '+')`: for
+        // interactive shells the letter is initialize_job_control's
+        // RESULT, not the interactive bit — established when a
+        // controlling terminal can be taken, dropped (with the two
+        // diagnostics) when it cannot, with or without an explicit
+        // -m/-o monitor (rubash#2948). The engine funnel owns the
+        // rule so the library entries land on the same answer.
+        rubash::script_driver::establish_interactive_job_control(executor);
         // jobs.c:4871 `if (interactive) get_tty_state ()` -> jobs.c:2647-2648
         // -> winsize.c:98-100: initialize_job_control binds LINES/COLUMNS
         // from the controlling terminal before the startup files run

@@ -895,6 +895,62 @@ fn issue863_gap12_apply_interactive_login_arms_typed_state() {
 }
 
 #[test]
+fn issue2948_interactive_apply_establishes_monitor() {
+    // rubash#2948 face C: applying an interactive invocation is where
+    // a library one-shot form (a host's `-i -c` / `-i script` route)
+    // must run GNU's job-control establishment (shell.c:1969 ->
+    // jobs.c:4869: `m` is the establishment result). Before the fix
+    // no establishment ran on this path at all: the monitor carrier
+    // stayed absent, so a one-shot host on a real terminal never got
+    // `m` (GNU `himBH`) and one without a terminal could not be told
+    // apart. The pin is the environment-independent invariant: after
+    // an interactive apply the carrier is WRITTEN (a decision was
+    // made by the engine funnel) and the option state equals it.
+    // Which value the decision takes is harness-shaped (a terminal
+    // the process can claim) and is pinned exactly, per harness, by
+    // tests/issue2948_monitor_flag_regressions.rs.
+    let mut session = Session::builder().build().expect("session builds");
+    assert_eq!(session.variable_value("__RUBASH_SETOPT_monitor"), None);
+    session
+        .apply_invocation_before_startup(&gap12_parse(&["-i"]))
+        .expect("apply succeeds");
+    let carrier = session.variable_value("__RUBASH_SETOPT_monitor");
+    assert!(
+        carrier.is_some(),
+        "interactive apply must run monitor establishment (carrier written)"
+    );
+    assert_eq!(
+        session.views().options().get("monitor"),
+        Some(carrier.as_deref() == Some("1")),
+        "the option state is the establishment decision"
+    );
+
+    // An explicit -m in the invocation is decided by the same
+    // establishment (GNU: `-i -m` without a terminal still drops
+    // `m`), so it too ends with the funnel's decision, not the raw
+    // flag: carrier present, option state equal to it.
+    let mut flagged = Session::builder().build().expect("session builds");
+    flagged
+        .apply_invocation_before_startup(&gap12_parse(&["-i", "-m"]))
+        .expect("apply succeeds");
+    let carrier = flagged.variable_value("__RUBASH_SETOPT_monitor");
+    assert!(carrier.is_some());
+    assert_eq!(
+        flagged.views().options().get("monitor"),
+        Some(carrier.as_deref() == Some("1"))
+    );
+
+    // A non-interactive apply runs no establishment: no carrier is
+    // written and monitor stays at its default.
+    let mut plain = Session::builder().build().expect("session builds");
+    plain
+        .apply_invocation_before_startup(&gap12_parse(&["-l"]))
+        .expect("apply succeeds");
+    assert_eq!(plain.variable_value("__RUBASH_SETOPT_monitor"), None);
+    assert_eq!(plain.views().options().get("monitor"), Some(false));
+}
+
+#[test]
 fn issue863_gap12_restricted_is_two_phase() {
     // Q-A: restrictions must not be live while startup files source
     // (GNU shell.c:679-744), so apply alone arms nothing and the
