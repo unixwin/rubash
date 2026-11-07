@@ -2028,7 +2028,24 @@ impl Executor {
             command_builtin_depth: self.command_builtin_depth,
             builtin_wrapper_depth: self.builtin_wrapper_depth,
             standard_path_scope: self.standard_path_scope.clone(),
-            debug_trap_running: false,
+            // rubash#2991: the fork copy inherits the DEBUG trap's
+            // in-progress state verbatim, the way GNU's fork image
+            // carries SIG_INPROGRESS — run_debug_trap fires only
+            // while that bit is clear (trap.c:1272), reset_signal
+            // clears only SIG_TRAPPED (`/* XXX - SIG_INPROGRESS? */`,
+            // trap.c:1410), and the nofork path threads
+            // `was_trap = running_trap` into parse_and_execute
+            // (subst.c:7090). Resetting it here let the body's first
+            // command re-fire the handler whenever functrace kept the
+            // DEBUG action live in the child (reset_for_subshell_inner),
+            // and the handler's own substitution forked another
+            // cleared copy — unbounded re-entry (the filed hang).
+            debug_trap_running: self.debug_trap_running,
+            // debug_action_running stays false: it is this executor's
+            // call-frame mark (the DEBUG action's own AST executing,
+            // rubash#2969), and the child has no action frame — a
+            // break/continue in the child's own loops is a plain loop
+            // exit there (GNU prints the post-loop body verbatim).
             debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
             // WP-3: a command-substitution child never inherits the
