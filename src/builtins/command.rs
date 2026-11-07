@@ -182,8 +182,10 @@ mod tests {
                 script_file: None,
                 line: None,
             };
-            let mut diag = Diag::new(prolog, row, &mut stderr);
-            execute_with_io(row, &args, &mut diag, &mut stdout).unwrap()
+            let mut diag = Diag::new(row, &mut stderr);
+            let action = execute_with_io(row, &args, &mut diag, &mut stdout).unwrap();
+            diag.flush_with(|| prolog);
+            action
         };
 
         (

@@ -23,7 +23,7 @@ impl Executor {
             .expect("builtin row in BUILTIN_TABLE");
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let mut diag = super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
+        let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
         let (help, operands) = {
             let mut opt = super::builtin_opt::BuiltinOpt::new(row, args, &mut diag, false);
             let mut help = false;
@@ -47,18 +47,28 @@ impl Executor {
         };
         if help {
             crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
+            // The scan records nothing on the help path, but flush
+            // anyway: a `Diag` dropped with pending diagnostics
+            // loses them, and the cost here is one `is_empty`.
+            diag.flush_with(|| self.diagnostic_prolog());
             self.write_buffered_builtin_output(cmd, &stdout, &[])?;
             self.exit_code = 2;
             return Ok(());
         }
         if diag.status() != 0 {
             diag.usage();
+            diag.flush_with(|| self.diagnostic_prolog());
             let status = diag.status();
             drop(diag);
             self.write_buffered_builtin_output(cmd, &[], &stderr)?;
             self.exit_code = status;
             return Ok(());
         }
+        // Flush before the dispatch drops the handle: the scan
+        // records nothing on the clean path, but the flush is the
+        // only render point — dropping first would lose a message
+        // the scan ever recorded without setting a status.
+        diag.flush_with(|| self.diagnostic_prolog());
         drop(diag);
         let args: &[String] = &operands;
         let Some(name) = args.first().map(String::as_str) else {

@@ -22,9 +22,15 @@ impl Executor {
         let action = {
             let row = super::builtin_table::builtin_table_row("command")
                 .expect("command row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::command::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::command::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
         };
         match action {
             crate::builtins::command::CommandAction::Complete(status) => {
@@ -59,8 +65,7 @@ impl Executor {
         let Some((mode, use_standard_path, first_name)) = ({
             let row = super::builtin_table::builtin_table_row("command")
                 .expect("command row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut discard);
+            let mut diag = super::builtin_diag::Diag::new(row, &mut discard);
             parse_command_describe_args(args, &mut diag)
         }) else {
             return Ok(false);
@@ -194,7 +199,7 @@ impl Executor {
             }
             words
         };
-        let mut diag = super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, stderr);
+        let mut diag = super::builtin_diag::Diag::new(row, stderr);
         let (all, force_path, mode, skip_functions, help, names) = {
             let mut opt = super::builtin_opt::BuiltinOpt::new(row, &rewritten, &mut diag, false);
             let mut all = false;
@@ -237,10 +242,15 @@ impl Executor {
         };
         if help {
             crate::builtins::help::print_builtin_help(row.name, stdout)?;
+            // The scan records nothing on the help path, but flush
+            // anyway: a `Diag` dropped with pending diagnostics
+            // loses them, and the cost here is one `is_empty`.
+            diag.flush_with(|| self.diagnostic_prolog());
             return Ok(2);
         }
         if diag.status() != 0 {
             diag.usage();
+            diag.flush_with(|| self.diagnostic_prolog());
             return Ok(diag.status());
         }
 
@@ -264,6 +274,7 @@ impl Executor {
                 }
             }
         }
+        diag.flush_with(|| self.diagnostic_prolog());
         Ok(status)
     }
 }

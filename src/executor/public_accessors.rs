@@ -3279,10 +3279,12 @@ impl Executor {
     /// (`current_error_file_name`), the line
     /// (`__RUBASH_CURRENT_LINE`) and the `get_name_for_error` name.
     /// The `Prolog` is a plain value — the dispatcher hands it to
-    /// `Diag::new` alongside the command's own stderr sink, so a
-    /// builtin's diagnostics can no longer be written to the wrong
-    /// stream (the A3-R1 shape becomes inexpressible in the type
-    /// system once the builtins migrate in Phase 4).
+    /// `Diag::flush_with` after the call, only when the call
+    /// recorded a diagnostic, so a builtin's diagnostics can no
+    /// longer be written to the wrong stream (the A3-R1 shape
+    /// becomes inexpressible in the type system once the builtins
+    /// migrate in Phase 4) and a diagnostic-free call never pays
+    /// the ~7µs build cost (E4, Stage-2 ④ Phase 2).
     pub(crate) fn diagnostic_prolog(&self) -> super::builtin_diag::Prolog {
         super::builtin_diag::Prolog {
             interactive: self.invocation_interactive(),

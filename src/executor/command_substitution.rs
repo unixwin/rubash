@@ -1162,15 +1162,16 @@ impl Executor {
             let status = {
                 let row = super::builtin_table::builtin_table_row("umask")
                     .expect("umask row in BUILTIN_TABLE");
-                let mut diag =
-                    super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut err);
-                crate::builtins::umask::execute_with_io(
+                let mut diag = super::builtin_diag::Diag::new(row, &mut err);
+                let status = crate::builtins::umask::execute_with_io(
                     row,
                     &words[1..],
                     &mut comsub_env,
                     &mut diag,
                     &mut out,
-                )
+                );
+                diag.flush_with(|| self.diagnostic_prolog());
+                status
             }
             .unwrap_or_else(|_| 1); // Vec<u8> writes are infallible
             #[cfg(unix)]

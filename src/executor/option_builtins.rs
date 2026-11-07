@@ -17,16 +17,17 @@ impl Executor {
         let status = {
             let row =
                 super::builtin_table::builtin_table_row("hash").expect("hash row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::hash::execute_with_io_and_functions(
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::hash::execute_with_io_and_functions(
                 row,
                 &cmd.words[1..],
                 &mut self.shell_state.env_vars,
                 &unhashable_names,
                 &mut diag,
                 &mut stdout,
-            )?
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
@@ -124,15 +125,16 @@ impl Executor {
         let status = {
             let row = super::builtin_table::builtin_table_row("umask")
                 .expect("umask row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::umask::execute_with_io(
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::umask::execute_with_io(
                 row,
                 &cmd.words[1..],
                 &mut self.shell_state.env_vars,
                 &mut diag,
                 &mut stdout,
-            )?
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
         };
         // rubash#2084: journal a session-set umask so the root
         // executor's Drop can restore the host's birth value when the

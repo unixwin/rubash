@@ -469,9 +469,15 @@ impl Executor {
         let action = {
             let row = super::builtin_table::builtin_table_row("command")
                 .expect("command row in BUILTIN_TABLE");
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::command::execute_with_io(row, &cmd.words[1..], &mut diag, &mut stdout)?
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::command::execute_with_io(
+                row,
+                &cmd.words[1..],
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(match action {

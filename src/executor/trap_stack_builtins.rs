@@ -357,9 +357,8 @@ impl Executor {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = {
-            let mut diag =
-                super::builtin_diag::Diag::new(self.diagnostic_prolog(), row, &mut stderr);
-            crate::builtins::pushd::execute_with_io(
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let status = crate::builtins::pushd::execute_with_io(
                 row,
                 builtin,
                 cmd.words[1..].iter().map(String::as_str),
@@ -367,7 +366,9 @@ impl Executor {
                 &mut self.shell_state.cwd,
                 &mut diag,
                 &mut stdout,
-            )?
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            status?
         };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.sync_cd_variables();

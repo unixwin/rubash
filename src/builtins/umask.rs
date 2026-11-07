@@ -389,9 +389,10 @@ mod tests {
         }
     }
 
-    /// A `Diag` over the test stderr sink whose prolog renders
-    /// `"rubash: "`, so the existing stderr assertions stay valid.
-    fn diag_for<'a>(sink: &'a mut Vec<u8>) -> Diag<'a> {
+    /// A `Diag` over the test stderr sink, plus the prolog its
+    /// flushed diagnostics render under (`"rubash: "`), so the
+    /// existing stderr assertions stay valid.
+    fn diag_for<'a>(sink: &'a mut Vec<u8>) -> (Diag<'a>, Prolog) {
         let prolog = Prolog {
             interactive: false,
             shell_basename: "rubash".to_string(),
@@ -399,10 +400,12 @@ mod tests {
             script_file: None,
             line: None,
         };
-        Diag::new(
+        (
+            Diag::new(
+                crate::executor::builtin_table::builtin_table_row("umask").unwrap(),
+                sink,
+            ),
             prolog,
-            crate::executor::builtin_table::builtin_table_row("umask").unwrap(),
-            sink,
         )
     }
 
@@ -413,8 +416,10 @@ mod tests {
         stderr: &mut Vec<u8>,
     ) -> i32 {
         let row = crate::executor::builtin_table::builtin_table_row("umask").unwrap();
-        let mut diag = diag_for(stderr);
-        execute_with_io(row, args, env, &mut diag, stdout).unwrap()
+        let (mut diag, prolog) = diag_for(stderr);
+        let status = execute_with_io(row, args, env, &mut diag, stdout).unwrap();
+        diag.flush_with(|| prolog);
+        status
     }
 
     fn run(mode: &str, initial: &str) -> (i32, String, String) {
