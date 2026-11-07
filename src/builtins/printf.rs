@@ -130,6 +130,16 @@ where
     W: Write,
     E: Write,
 {
+    // GNU resolves printf's locale questions (asciicode's mbrtowc,
+    // printf.def:1522-1547) in the shell's CURRENT locale, and the
+    // LC_ALL watcher (variables.c sv_lc_all) makes an in-script
+    // assignment change it at once. This funnel is the one entry every
+    // printf dispatch face flows through (plain, pipeline stage,
+    // command substitution), so install the variable-table locale
+    // override here for the builtin's duration — the rubash#1488
+    // ShellLocaleGuard mechanism the echo paths already use
+    // (rubash#2965). On drop it restores any outer guard's value.
+    let _locale_guard = crate::locale::ShellLocaleGuard::new(&*env_vars);
     // W_ARRAYREF (in-band ARRAYREF_FLAG) is consumed by the executor's
     // SET_VFLAGS pre-pass (printf.def:305); strip any surviving prefix off
     // the operand text so it never leaks into format/arguments.
