@@ -7562,7 +7562,13 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                 if quote == '\'' {
                     output.push_str(&decode_ansi_c_escapes(&body));
                 } else {
-                    output.push_str(&expand_word(&body));
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data.
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7585,17 +7591,16 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // comsub scanner (rubash#153: `case 'a'\''`b`'` ran `b`).
                     output.push_str(&body);
                 } else {
-                    // parse.y read_token_word: a `'` inside double quotes is
-                    // literal data; tag it so expand_word's quote removal
-                    // does not collapse it (same protection the pattern
-                    // twin applies). Quotes inside a `${...}`/`$(...)`/
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data. Quotes inside a `${...}`/`$(...)`/
                     // backtick unit belong to the substitution's own
                     // grammar (parse.y:3877 parse_matched_pair) and stay
-                    // raw — `${x#'foo'}` in a double-quoted case word must
-                    // keep stripping the quoted pattern (rubash#258
-                    // BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
-                    output.push_str(&expand_word(&body));
+                    // raw through the cooker (rubash#258 BUG_PSUBSQUOT).
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7734,6 +7739,15 @@ enum CasePatternSegment {
 /// belongs to the pattern — text before the expansion glues onto that
 /// field, text after it belongs to later fields. A one-element
 /// expansion glues whole; an empty one contributes nothing.
+/// Cook one double-quoted case-pattern segment chunk to the lexer's carrier
+/// spelling before expanding it (same DQ-context rule as
+/// quote_aware_glob_rhs, rubash#2981): `\"`/`\$`/`\\`/`` \` `` resolve as
+/// double-quote escapes and `'` travels as DATA_SQUOTE data, instead of the
+/// raw fragment being re-read without its quoting context.
+fn cook_dquoted_case_segment(chunk: &str) -> String {
+    crate::lexer::quotes::cook_double_quoted_segment(chunk)
+}
+
 fn case_pattern_quoted_segment(
     body: &str,
     expand_word: &mut impl FnMut(&str) -> String,
@@ -7743,11 +7757,11 @@ fn case_pattern_quoted_segment(
     let mut rest = body;
     loop {
         let Some((start, end, name)) = find_case_pattern_array_at(rest) else {
-            literal.push_str(&expand_word(rest));
+            literal.push_str(&expand_word(&cook_dquoted_case_segment(rest)));
             return CasePatternSegment::Continues(literal);
         };
         let (first, count) = array_at.get(&name).cloned().unwrap_or_default();
-        literal.push_str(&expand_word(&rest[..start]));
+        literal.push_str(&expand_word(&cook_dquoted_case_segment(&rest[..start])));
         if count == 0 {
             rest = &rest[end..];
             continue;
@@ -7809,14 +7823,14 @@ fn quote_aware_case_pattern(
                     // opens single-quote state: a `'` inside the body is
                     // literal data (GNU case patterns keep it, so
                     // `case $s in "''")` matches the two quote characters).
-                    // A bare `'` pair fed to expand_word_mut collapses to
-                    // the empty string via quote removal, so tag each one
-                    // with the lexer's decoded-quote marker first — the
-                    // same protection escape_decoded_ansi_c_quotes applies.
-                    // Quotes inside a `${...}`/`$(...)`/backtick unit stay
-                    // raw (parse.y:3877 parse_matched_pair owns them;
+                    // The segment expander cooks each chunk to the lexer's
+                    // carrier spelling before expanding (same DQ-context
+                    // rule as quote_aware_glob_rhs, rubash#2981), so the
+                    // `'` travels as DATA_SQUOTE data and `\"`/`\$`/`\\`/
+                    // `` \` `` resolve as double-quote escapes. Quotes
+                    // inside a `${...}`/`$(...)`/backtick unit stay raw
+                    // (parse.y:3877 parse_matched_pair owns them;
                     // rubash#258 BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
                     match case_pattern_quoted_segment(&body, &mut expand_word, array_at) {
                         CasePatternSegment::Continues(literal) => {
                             output.push_str(&escape_case_pattern_literal(&literal));

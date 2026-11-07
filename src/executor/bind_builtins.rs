@@ -219,23 +219,20 @@ impl Executor {
         }
 
         if flags.macros_readable || flags.macros_plain {
-            let entries: Vec<_> = self
-                .bind_registry_snapshot()
-                .into_iter()
-                .filter(|e| {
-                    matches!(&e.kind, BindKind::Macro { .. })
-                        && same_keymap(e.keymap.as_deref(), keymap.as_deref())
-                })
-                .collect();
-            for entry in entries {
-                if let BindKind::Macro { text } = &entry.kind {
-                    let line = if flags.macros_readable {
-                        crate::builtins::bind::format_macro_readable(&entry.keyseq, text)
-                    } else {
-                        crate::builtins::bind::format_macro_plain(&entry.keyseq, text)
-                    };
-                    let _ = writeln!(stdout, "{line}");
-                }
+            // rl_macro_dumper over the effective keymap: keymap-
+            // valued slots expand recursively, exactly like the
+            // function dump above (see BindRegistry::macro_bindings).
+            let macros = self
+                .bind_registry()
+                .borrow()
+                .macro_bindings(keymap.as_deref());
+            for (seq, text) in &macros {
+                let line = if flags.macros_readable {
+                    crate::builtins::bind::format_macro_readable(seq, text)
+                } else {
+                    crate::builtins::bind::format_macro_plain(seq, text)
+                };
+                let _ = writeln!(stdout, "{line}");
             }
         }
 
@@ -295,6 +292,9 @@ impl Executor {
                                 }
                                 crate::builtins::bind::BindingSpec::Macro { text } => {
                                     BindKind::Macro { text: text.clone() }
+                                }
+                                crate::builtins::bind::BindingSpec::Keymap { name } => {
+                                    BindKind::Keymap { name: name.clone() }
                                 }
                             };
                             registry.register(BindEntry {
@@ -787,6 +787,9 @@ impl Executor {
                     crate::builtins::bind::BindingSpec::Macro { text } => {
                         BindKind::Macro { text: text.clone() }
                     }
+                    crate::builtins::bind::BindingSpec::Keymap { name } => {
+                        BindKind::Keymap { name: name.clone() }
+                    }
                 };
                 let entry_keymap = parsed
                     .binding_keymaps
@@ -833,11 +836,12 @@ impl Executor {
 
 /// BindingSpec → BindKind: both rl_parse_and_bind channels (the
 /// new-style quoted spec and the old-style keyname arm) store the
-/// same two kinds.
+/// same kinds.
 fn bind_kind_of(spec: crate::builtins::bind::BindingSpec) -> BindKind {
     match spec {
         crate::builtins::bind::BindingSpec::Function { name } => BindKind::Function { name },
         crate::builtins::bind::BindingSpec::Macro { text } => BindKind::Macro { text },
+        crate::builtins::bind::BindingSpec::Keymap { name } => BindKind::Keymap { name },
     }
 }
 

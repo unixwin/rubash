@@ -59,7 +59,6 @@ pub(crate) fn compgen_command_builtin_names() -> Vec<&'static str> {
 pub(crate) fn shell_keyword_names() -> Vec<&'static str> {
     crate::executor::command_registry::introspection_keyword_names()
 }
-const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
@@ -2383,16 +2382,9 @@ fn enabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) -> 
 }
 
 fn disabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
-    let mut candidates = env_vars
-        .get(DISABLED_BUILTINS)
-        .map(|value| {
-            value
-                .split(':')
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    // Read through the carrier's owner (rubash#2942): the parse used to
+    // be duplicated here with the old colon split.
+    let mut candidates = crate::builtins::enable::disabled_builtins(env_vars);
     candidates.sort();
     candidates.dedup();
     candidates

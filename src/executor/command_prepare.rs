@@ -1941,14 +1941,17 @@ impl Executor {
             crate::executor::markers::PARAM_NAME_END_MARKER_STR,
             "",
         );
-        let restored = crate::executor::markers::cow_replace(
+        // E400-aware (rubash#2882): a typed `$'\uE002'` arrives
+        // E400-escaped and is user data — restore only the BARE
+        // quoted-null carrier, copying the escaped pair verbatim, like
+        // the sibling chains (conditional.rs,
+        // field_split_values_with_quoted_nulls). The blind cow_replace
+        // ate the pair's char and left a stray E400 introducer.
+        let restored = crate::executor::markers::restore_bare_sentinels(
             &restored,
-            crate::executor::markers::QUOTED_NULL_MARKER_STR,
-            "",
+            &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
         );
-        Some(vec![
-            strip_ifs_protection_markers(&restored.into_owned()).into_owned()
-        ])
+        Some(vec![strip_ifs_protection_markers(&restored).into_owned()])
     }
 
     fn expand_simple_substitution_fragments(
@@ -3384,8 +3387,13 @@ impl Executor {
             // Quoted-empty spans in the alternate carry the quoted-null
             // marker: the splitter keeps each marker-only field as an empty
             // argument (quote2.sub: ${x:+"$e" "$e"} -> two empty args,
-            // subst.c list_string:3181-3186 QUOTED_NULL branch).
-            if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+            // subst.c list_string:3181-3186 QUOTED_NULL branch). Bare
+            // carriers only: a typed `$'\uE002'` is E400-escaped user data
+            // and takes the ordinary split path (rubash#2882).
+            if crate::executor::markers::contains_bare_sentinel(
+                &expanded,
+                crate::executor::embedded_mutations::QUOTED_NULL_MARKER,
+            ) {
                 return Some(field_split_values_with_quoted_nulls(
                     &expanded,
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -3669,7 +3677,13 @@ impl Executor {
             return None;
         }
         let expanded = self.expand_alternate_parameter_word(alternate);
-        if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+        // Bare quoted-null carriers only: a typed `$'\uE002'` is
+        // E400-escaped user data and takes the ordinary split path
+        // (rubash#2882).
+        if crate::executor::markers::contains_bare_sentinel(
+            &expanded,
+            crate::executor::embedded_mutations::QUOTED_NULL_MARKER,
+        ) {
             return Some(field_split_values_with_quoted_nulls(
                 &expanded,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -5378,13 +5392,17 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
             }
             let next = raw_chars.get(index + 1).copied();
             if in_single {
-                // Single-quote span: a backslash is span data and stays a
-                // pair (walk `'` span loop).
-                simulated.push(ch);
-                if let Some(n) = next {
-                    simulated.push(n);
-                }
-                index += 2;
+                // Single-quote span: a backslash is ordinary span data.
+                // GNU calls string_extract_single_quoted with allowesc=0
+                // (subst.c:1088, subst.c:11887), so the backslash neither
+                // escapes nor consumes the following byte; the extracted
+                // span is then quoted byte-by-byte by quote_string
+                // (subst.c:4773). Consume only the backslash here and let
+                // the next byte take its normal single-quoted arm, so an
+                // IFS byte after `\` is recorded as quoted and a closing
+                // quote still closes the span.
+                push_quoted_char(&mut simulated, &mut quoted_ifs_positions, ch, ifs, true);
+                index += 1;
                 continue;
             }
             if in_double {

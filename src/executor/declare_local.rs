@@ -1820,6 +1820,16 @@ impl Executor {
                         Some((name, value)) => (name, Some(value)),
                         None => (arg.as_str(), None),
                     };
+                    // rubash#2980: a subscript operand binds an ELEMENT
+                    // through assign_array_element, which never applies
+                    // the mark_modified_vars mark — the mark belongs to
+                    // whole-name bindings (variables.c:3211-3212).
+                    // execute_local's post-pass already skips subscript
+                    // operands; this pass derived the base name and
+                    // marked it, printing -ax where GNU prints -a.
+                    if raw_name.contains('[') {
+                        continue;
+                    }
                     let (base, _) = assignment_name_and_append(raw_name);
                     let base = base.split('[').next().unwrap_or(base);
                     if has_value.is_none() && !is_shell_name(base) {

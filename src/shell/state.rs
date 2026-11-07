@@ -154,6 +154,20 @@ pub struct ShellState {
     /// parent's shape.
     pub(crate) invocation_interactive: bool,
     pub(crate) invocation_login: bool,
+    /// rubash#2961: GNU's `forced_interactive` (flags.c:174) — the
+    /// state `which_set_flags` renders the `i` letter of `$-` from.
+    /// Startup seeds it from the invocation shape (shell.c) exactly
+    /// like `invocation_interactive`, so it is seeded at that
+    /// field's same write-through funnels; afterwards only
+    /// change_flag moves it, which the set builtin reaches solely
+    /// for an `i` hidden in an inline `-o` operand (`set -ovi` —
+    /// a standalone ±i is refused by the pre-scan). It decides
+    /// NOTHING but the rendered letter: engine decisions keep
+    /// reading `invocation_interactive`, so `set -ovi` in a script
+    /// does not make the session interactive, matching GNU (only
+    /// `$-` changes). Like the invocation fields it rides the
+    /// Clone fork boundary: a subshell renders the letter too.
+    pub(crate) forced_interactive: bool,
     /// alias.c aliases.
     pub(crate) aliases: HashMap<String, Alias>,
     /// variables.c shell_functions.
@@ -890,6 +904,7 @@ impl Clone for ShellState {
             array_compact_budget: self.array_compact_budget.clone(),
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,
+            forced_interactive: self.forced_interactive,
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             function_definition_redirects: self.function_definition_redirects.clone(),
