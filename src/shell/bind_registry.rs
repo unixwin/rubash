@@ -37,6 +37,15 @@ pub(crate) enum BindKind {
     /// probe: `bind '"\C-t": ins-macro'` binds nothing and `bind -s`
     /// lists nothing).
     Macro { text: String },
+    /// `bind 'Control-t: prefix-meta'` — the sequence is bound to a
+    /// whole keymap (rl_generic_bind's ISKMAP value, lib/readline/
+    /// bind.c:1850): the target map's bindings become reachable under
+    /// this sequence as a prefix. The dump/query paths expand the
+    /// target map through the slot; a function or macro bound at the
+    /// slot itself does not displace the map but becomes the target
+    /// map's ANYOTHERKEY fallback (see
+    /// [`BindRegistry::fallbacks`]).
+    Keymap { name: String },
 }
 
 /// One registered binding. `keyseq` keeps the user's written form
@@ -99,6 +108,20 @@ pub(crate) struct BindRegistry {
     /// from one concrete map, so a later editing-mode flip must not
     /// reinterpret the tombstone (rubash#2386).
     pub removals: Vec<(String, Option<String>)>,
+    /// Each keymap's ANYOTHERKEY fallback (target keymap name →
+    /// binding): when rl_generic_bind's sequence walk ends at a slot
+    /// whose value is a keymap, the function/macro being bound is
+    /// stored in THAT keymap's ANYOTHERKEY slot instead (lib/readline/
+    /// bind.c, rl_generic_bind's last-key arm) — so the fallback
+    /// belongs to the target map and shows at every prefix bound to
+    /// it (GNU probe: `bind 'ESC: undo'` then
+    /// `bind 'Control-t: prefix-meta'` makes undo invocable via
+    /// `"\C-t"` too, because both slots point at the one
+    /// emacs_meta_keymap). Unbinding at any of the map's prefixes
+    /// nulls it (the same arm stores _rl_null_function for a NULL
+    /// bind) while the map itself stays bound. At most one fallback
+    /// per keymap — the C slot is a single array cell (index 256).
+    pub fallbacks: Vec<(String, BindKind)>,
     /// The readline kill ring (lib/readline/kill.c): text killed by
     /// the line editor, newest entry last, shared by every editor
     /// session in the process (the `read -e` editor today; C-k in one
@@ -119,6 +142,7 @@ impl Default for BindRegistry {
                 .collect(),
             readline_initialized: false,
             removals: Vec::new(),
+            fallbacks: Vec::new(),
             kill_ring: Vec::new(),
         }
     }
@@ -184,6 +208,72 @@ impl BindRegistry {
         }
     }
 
+    /// The keymap-valued slots of one map: (prefix sequence, target
+    /// keymap), both normalized. emacs-standard's defaults bind ESC
+    /// to emacs-meta and C-x to emacs-ctlx (lib/readline/
+    /// emacs_keymap.c:62, :59 — the flattened default table is
+    /// exactly the standard map's direct rows plus those two
+    /// submaps composed under their prefixes); a session
+    /// [`BindKind::Keymap`] registration at a default slot's sequence
+    /// re-points the slot, and one at any other sequence adds a
+    /// slot, mirroring rl_generic_bind's ISKMAP assignment.
+    fn keymap_slots(&self, keymap: &str) -> Vec<(String, String)> {
+        let mut slots: Vec<(String, String)> = match keymap {
+            "emacs-standard" => vec![
+                ("\\e".to_string(), "emacs-meta".to_string()),
+                ("\\C-x".to_string(), "emacs-ctlx".to_string()),
+            ],
+            _ => Vec::new(),
+        };
+        for entry in self.entries_for_keymap(Some(keymap)) {
+            if let BindKind::Keymap { name } = &entry.kind {
+                let target = normalize_keymap_name(name).to_string();
+                match slots.iter_mut().find(|(seq, _)| *seq == entry.keyseq) {
+                    Some(slot) => slot.1 = target,
+                    None => slots.push((entry.keyseq.clone(), target)),
+                }
+            }
+        }
+        slots
+    }
+
+    /// The target keymap of the slot at `keyseq` in `keymap`, when
+    /// the sequence currently names a keymap there.
+    fn slot_target(&self, keymap: &str, keyseq: &str) -> Option<String> {
+        self.keymap_slots(keymap)
+            .into_iter()
+            .find(|(seq, _)| seq == keyseq)
+            .map(|(_, target)| target)
+    }
+
+    /// One keymap's ANYOTHERKEY fallback binding, if any (see the
+    /// `fallbacks` field).
+    pub fn keymap_fallback(&self, keymap: &str) -> Option<&BindKind> {
+        let wanted = normalize_keymap_name(keymap);
+        self.fallbacks
+            .iter()
+            .find(|(map, _)| map == wanted)
+            .map(|(_, kind)| kind)
+    }
+
+    /// Store `kind` as `target`'s ANYOTHERKEY fallback, replacing
+    /// the previous one (the C slot is a single cell).
+    fn set_fallback(&mut self, target: &str, kind: BindKind) {
+        match self.fallbacks.iter_mut().find(|(map, _)| map == target) {
+            Some(slot) => slot.1 = kind,
+            None => self.fallbacks.push((target.to_string(), kind)),
+        }
+    }
+
+    /// Null `target`'s ANYOTHERKEY fallback (rl_generic_bind's
+    /// unbind arm stores _rl_null_function there). Returns true
+    /// when a fallback was actually cleared.
+    fn clear_fallback(&mut self, target: &str) -> bool {
+        let before = self.fallbacks.len();
+        self.fallbacks.retain(|(map, _)| map != target);
+        self.fallbacks.len() != before
+    }
+
     /// Insert or replace the binding for `(keyseq, keymap)`. GNU's
     /// rl_generic_bind replaces any previous binding of the same sequence.
     /// Registering also revives a sequence a `bind -r`/`-u` removed:
@@ -202,10 +292,46 @@ impl BindRegistry {
             !(seq == &entry.keyseq
                 && normalize_keymap_name(keymap.as_deref().unwrap_or("emacs-standard")) == wanted)
         });
+        // rl_generic_bind's last-key arm: a function or macro bound
+        // at a sequence that currently names a KEYMAP descends into
+        // that keymap and lands in its ANYOTHERKEY slot — the map
+        // stays bound, and the binding becomes the target map's
+        // fallback, visible at every prefix of that map.
+        if matches!(
+            entry.kind,
+            BindKind::Function { .. } | BindKind::Macro { .. }
+        ) {
+            if let Some(target) = self.slot_target(&wanted, &entry.keyseq) {
+                self.set_fallback(&target, entry.kind);
+                self.generation += 1;
+                return;
+            }
+        }
+        if matches!(entry.kind, BindKind::Keymap { .. }) {
+            // An ISKMAP assignment replaces the slot's previous
+            // function/macro/keymap value outright — the displaced
+            // binding is discarded, it does NOT become the new
+            // map's fallback (oracle: `bind 'Control-t: undo'` then
+            // `bind 'Control-t: prefix-meta'` leaves undo unbound
+            // at that key). A `bind -x` command at the same
+            // sequence lives in GNU's parallel command map
+            // (bashline.c:4771) and survives.
+            self.entries.retain(|existing| {
+                !(existing.keyseq == entry.keyseq
+                    && normalize_keymap_name(
+                        existing.keymap.as_deref().unwrap_or("emacs-standard"),
+                    ) == wanted
+                    && !matches!(existing.kind, BindKind::Execute { .. }))
+            });
+            self.entries.push(entry);
+            self.generation += 1;
+            return;
+        }
         match self.entries.iter_mut().find(|existing| {
             existing.keyseq == entry.keyseq
                 && normalize_keymap_name(existing.keymap.as_deref().unwrap_or("emacs-standard"))
                     == wanted
+                && !matches!(existing.kind, BindKind::Keymap { .. })
         }) {
             Some(existing) => existing.kind = entry.kind,
             None => self.entries.push(entry),
@@ -253,9 +379,30 @@ impl BindRegistry {
     /// Returns true when an entry was removed.
     pub fn unbind_keyseq(&mut self, keyseq: &str) -> bool {
         let before = self.entries.len();
-        self.entries.retain(|entry| entry.keyseq != keyseq);
+        // A keymap-valued binding is never removed by unbinding its
+        // sequence: rl_unbind_keyseq at a keymap slot stores
+        // _rl_null_function in the map's ANYOTHERKEY and leaves the
+        // map itself bound (oracle: `bind -r '\C-t'` after
+        // prefix-meta keeps every `"\C-t…"` submap row).
+        self.entries.retain(|entry| {
+            entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. })
+        });
         let removed = self.entries.len() != before;
-        if removed {
+        let mut changed = removed;
+        // That same unbind nulls the fallback of every map this
+        // sequence is a slot into, whichever prefix set it.
+        let targets: Vec<String> = KEYMAP_TABLE_SELECTORS
+            .iter()
+            .filter_map(|selector| {
+                self.slot_target(normalize_keymap_name(selector.unwrap()), keyseq)
+            })
+            .collect();
+        for target in &targets {
+            if self.clear_fallback(target) {
+                changed = true;
+            }
+        }
+        if changed {
             self.generation += 1;
         }
         for keymap in KEYMAP_TABLE_SELECTORS {
@@ -281,7 +428,14 @@ impl BindRegistry {
             |entry| !matches!(&entry.kind, BindKind::Function { name: bound } if bound == name),
         );
         let removed = before - self.entries.len();
-        if removed > 0 {
+        // A fallback holding the function is a binding of it too:
+        // rl_unbind_function_in_map clears a map's ANYOTHERKEY slot
+        // when it holds the function.
+        let fallbacks_before = self.fallbacks.len();
+        self.fallbacks.retain(
+            |(_, kind)| !matches!(kind, BindKind::Function { name: bound } if bound == name),
+        );
+        if removed > 0 || self.fallbacks.len() != fallbacks_before {
             self.generation += 1;
         }
         for keymap in KEYMAP_TABLE_SELECTORS {
@@ -306,6 +460,13 @@ impl BindRegistry {
                 && normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard"))
                     == wanted)
         });
+        // The keymap's own ANYOTHERKEY slot is one of its bindings
+        // of the function (rl_unbind_function_in_map clears it).
+        if matches!(self.keymap_fallback(&wanted), Some(BindKind::Function { name: bound }) if bound == name)
+        {
+            self.clear_fallback(&wanted);
+            self.generation += 1;
+        }
         for (seq, bound) in crate::builtins::bind::default_bindings_for_keymap(Some(&wanted)) {
             if *bound == name {
                 self.record_removal(seq, Some(&wanted));
@@ -341,14 +502,23 @@ impl BindRegistry {
         let wanted = self.resolve_keymap(keymap);
         let before = self.entries.len();
         self.entries.retain(|entry| {
-            if entry.keyseq != keyseq {
+            if entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. }) {
                 return true;
             }
             let bound = normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard"));
             bound != wanted
         });
         let removed = self.entries.len() != before;
-        if removed {
+        let mut changed = removed;
+        // Unbinding at a keymap-valued slot in this map nulls the
+        // target map's ANYOTHERKEY fallback; the map stays bound
+        // (see unbind_keyseq).
+        if let Some(target) = self.slot_target(&wanted, keyseq) {
+            if self.clear_fallback(&target) {
+                changed = true;
+            }
+        }
+        if changed {
             self.generation += 1;
         }
         self.record_removal(keyseq, Some(&wanted));
@@ -364,37 +534,130 @@ impl BindRegistry {
     /// session registrations applied: a registered sequence shadows the
     /// default binding of the same sequence (rl_generic_bind replaces
     /// the slot, whatever kind the new binding is), and the session's
-    /// own function bindings join the list. The merged list is sorted
-    /// by translated key bytes, which is the C scan's order.
+    /// own function bindings join the list. Keymap-valued slots
+    /// (the defaults ESC→emacs-meta and C-x→emacs-ctlx, plus session
+    /// prefix-meta bindings) are expanded recursively: the target
+    /// map's rows compose under the slot's prefix, and the target's
+    /// ANYOTHERKEY fallback lists at the bare prefix. The merged list
+    /// is sorted in the C scan's order ([`keyseq_scan_order`]).
     pub fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
         let wanted = self.resolve_keymap(keymap);
-        let mut seqs: Vec<String> =
-            crate::builtins::bind::default_bindings_for_keymap(Some(&wanted))
-                .iter()
-                .filter(|(_, bound)| *bound == function)
-                .map(|(seq, _)| seq.to_string())
-                .filter(|seq| {
-                    !self.is_removed(seq, Some(&wanted))
-                        && !self.entries.iter().any(|entry| {
-                            entry.keyseq == *seq
-                                && normalize_keymap_name(
-                                    entry.keymap.as_deref().unwrap_or("emacs-standard"),
-                                ) == wanted
-                        })
+        let mut path = vec![wanted.clone()];
+        let mut seqs = self.invoking_in(function, &wanted, &mut path);
+        seqs.sort_by(|a, b| keyseq_scan_order(a, b));
+        seqs.dedup();
+        seqs
+    }
+
+    /// The recursive half of [`BindRegistry::invoking_keyseqs`].
+    /// `path` is the chain of keymaps whose slots led here; a slot
+    /// whose target is already on the path is not expanded again —
+    /// readline's own invoking scan recurses without a guard and
+    /// crashes on a self-referential keymap (oracle: GNU 5.3.20
+    /// segfaults on `bind -m emacs-meta 'Control-t: prefix-meta'`
+    /// followed by `bind -m emacs-meta -q transpose-words`), so the
+    /// finite answer here is a deliberate divergence from a crash.
+    fn invoking_in(&self, function: &str, map: &str, path: &mut Vec<String>) -> Vec<String> {
+        let slots = self.keymap_slots(map);
+        let shadowed = |seq: &str| {
+            self.is_removed(seq, Some(map))
+                || self.entries.iter().any(|entry| {
+                    entry.keyseq == seq
+                        && normalize_keymap_name(
+                            entry.keymap.as_deref().unwrap_or("emacs-standard"),
+                        ) == map
                 })
-                .collect();
-        for entry in self.entries_for_keymap(Some(&wanted)) {
+        };
+        // Direct rows of this map: the default table's rows that do
+        // not live under a keymap-valued slot's prefix (those belong
+        // to the target map and are composed back by the slot
+        // recursion below — for emacs-standard the decomposition is
+        // exact: the flattened table is the direct rows plus the
+        // meta rows under \e and the ctlx rows under \C-x), minus
+        // removals and session-shadowed sequences.
+        let mut seqs: Vec<String> = crate::builtins::bind::default_bindings_for_keymap(Some(map))
+            .iter()
+            .filter(|(_, bound)| *bound == function)
+            .map(|(seq, _)| seq.to_string())
+            .filter(|seq| {
+                !slots
+                    .iter()
+                    .any(|(prefix, _)| seq.starts_with(prefix.as_str()))
+                    && !shadowed(seq)
+            })
+            .collect();
+        for entry in self.entries_for_keymap(Some(map)) {
             if let BindKind::Function { name } = &entry.kind {
                 if name == function {
                     seqs.push(entry.keyseq.clone());
                 }
             }
         }
-        seqs.sort_by(|a, b| {
-            crate::builtins::bind::keyseq_bytes(a).cmp(&crate::builtins::bind::keyseq_bytes(b))
-        });
-        seqs.dedup();
+        for (prefix, target) in &slots {
+            if path.contains(target) {
+                continue;
+            }
+            // The target's ANYOTHERKEY fallback lists at the bare
+            // prefix (rl_invoking_keyseqs_in_map reports it there).
+            if let Some(BindKind::Function { name }) = self.keymap_fallback(target) {
+                if name == function {
+                    seqs.push(prefix.clone());
+                }
+            }
+            path.push(target.clone());
+            for sub in self.invoking_in(function, target, path) {
+                let composed = format!("{prefix}{sub}");
+                // A sequence registered at the composed spelling in
+                // THIS map wins over the row shining through the
+                // slot (the recursive call already applied the
+                // target map's own removals and shadows).
+                if !shadowed(&composed) {
+                    seqs.push(composed);
+                }
+            }
+            path.pop();
+        }
         seqs
+    }
+
+    /// Every macro visible in one keymap, as (sequence, text) pairs
+    /// in readline's scan order — rl_macro_dumper (lib/readline/
+    /// bind.c:2899) recurses keymaps exactly like the function
+    /// dumper: a macro bound in a target map lists under each of
+    /// this map's keymap-valued slots, and a target map's macro
+    /// fallback lists at the bare prefix.
+    pub fn macro_bindings(&self, keymap: Option<&str>) -> Vec<(String, String)> {
+        let wanted = self.resolve_keymap(keymap);
+        let mut path = vec![wanted.clone()];
+        let mut macros = self.macros_in(&wanted, &mut path);
+        macros.sort_by(|a, b| keyseq_scan_order(&a.0, &b.0));
+        macros.dedup();
+        macros
+    }
+
+    /// The recursive half of [`BindRegistry::macro_bindings`]; the
+    /// visited-path rule is [`BindRegistry::invoking_in`]'s.
+    fn macros_in(&self, map: &str, path: &mut Vec<String>) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for entry in self.entries_for_keymap(Some(map)) {
+            if let BindKind::Macro { text } = &entry.kind {
+                out.push((entry.keyseq.clone(), text.clone()));
+            }
+        }
+        for (prefix, target) in self.keymap_slots(map) {
+            if path.contains(&target) {
+                continue;
+            }
+            if let Some(BindKind::Macro { text }) = self.keymap_fallback(&target) {
+                out.push((prefix.clone(), text.clone()));
+            }
+            path.push(target.clone());
+            for (sub, text) in self.macros_in(&target, path) {
+                out.push((format!("{prefix}{sub}"), text));
+            }
+            path.pop();
+        }
+        out
     }
 
     pub fn snapshot(&self) -> Vec<BindEntry> {
@@ -416,6 +679,29 @@ const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
     Some("vi-insert"),
     Some("vi-movement"),
 ];
+
+/// Listing order for invoking sequences: rl_invoking_keyseqs_in_map
+/// scans a keymap's slots in translated-byte order with ANYOTHERKEY
+/// (index 256) as the array's LAST slot, so a sequence that is a
+/// strict prefix of another sorts AFTER the longer sequences
+/// through it — the bare prefix carries the submap's fallback and
+/// prints after the submap's own rows (GNU probe:
+/// `bind 'Control-x: undo'` makes `bind -q undo` answer
+/// `"\C-x\C-u", "\C-x", "\C-_"`). Modelled by comparing the
+/// translated bytes with end-of-sequence counting as 256.
+pub(crate) fn keyseq_scan_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let a = crate::builtins::bind::keyseq_bytes(a);
+    let b = crate::builtins::bind::keyseq_bytes(b);
+    for i in 0..a.len().max(b.len()) {
+        let x = a.get(i).map_or(256u32, |byte| u32::from(*byte));
+        let y = b.get(i).map_or(256u32, |byte| u32::from(*byte));
+        match x.cmp(&y) {
+            std::cmp::Ordering::Equal => continue,
+            order => return order,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
 
 /// Keymap aliases that are the same readline map (bind.def:37-40: vi,
 /// vi-move and vi-command name the movement keymap; emacs and
@@ -700,6 +986,100 @@ mod tests {
             .invoking_keyseqs("beginning-of-line", None)
             .iter()
             .any(|seq| seq == r"\C-a"));
+    }
+
+    fn keymap_entry(keyseq: &str, target: &str, keymap: Option<&str>) -> BindEntry {
+        BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Keymap {
+                name: target.to_string(),
+            },
+            keymap: keymap.map(str::to_string),
+        }
+    }
+
+    fn function_entry(keyseq: &str, name: &str, keymap: Option<&str>) -> BindEntry {
+        BindEntry {
+            keyseq: keyseq.to_string(),
+            kind: BindKind::Function {
+                name: name.to_string(),
+            },
+            keymap: keymap.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn prefix_meta_expands_the_target_keymap() {
+        // rubash#2923: a Keymap registration composes the target
+        // map's rows under its prefix and displaces the slot's
+        // previous default (transpose-chars is gone, as in GNU).
+        let mut registry = BindRegistry::default();
+        registry.register(keymap_entry("\\C-t", "emacs-meta", None));
+        assert_eq!(
+            registry.invoking_keyseqs("transpose-words", None),
+            vec![r"\C-tt", r"\et"]
+        );
+        assert!(registry
+            .invoking_keyseqs("transpose-chars", None)
+            .is_empty());
+    }
+
+    #[test]
+    fn function_at_a_keymap_slot_becomes_the_shared_fallback() {
+        // rubash#2923: the fallback belongs to the target map, so
+        // it lists at the default ESC prefix and at the session
+        // prefix alike; unbinding at either prefix clears it and
+        // leaves both maps bound.
+        let mut registry = BindRegistry::default();
+        registry.register(function_entry("\\e", "undo", None));
+        assert!(matches!(
+            registry.keymap_fallback("emacs-meta"),
+            Some(BindKind::Function { name }) if name == "undo"
+        ));
+        registry.register(keymap_entry("\\C-t", "emacs-meta", None));
+        assert_eq!(
+            registry.invoking_keyseqs("undo", None),
+            vec![r"\C-t", r"\C-x\C-u", r"\e", r"\C-_"]
+        );
+        registry.unbind_keyseq_for_keymap("\\C-t", None);
+        assert_eq!(
+            registry.invoking_keyseqs("undo", None),
+            vec![r"\C-x\C-u", r"\C-_"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("transpose-words", None),
+            vec![r"\C-tt", r"\et"]
+        );
+    }
+
+    #[test]
+    fn keymap_bind_discards_the_slots_previous_function() {
+        // rubash#2923: the ISKMAP assignment replaces the slot —
+        // the function bound there first is not saved anywhere.
+        let mut registry = BindRegistry::default();
+        registry.register(function_entry("\\C-t", "undo", None));
+        registry.register(keymap_entry("\\C-t", "emacs-meta", None));
+        assert_eq!(
+            registry.invoking_keyseqs("undo", None),
+            vec![r"\C-x\C-u", r"\C-_"]
+        );
+        assert!(registry.keymap_fallback("emacs-meta").is_none());
+    }
+
+    #[test]
+    fn self_referential_keymap_expansion_terminates() {
+        // rubash#2923: GNU crashes on this query; the visited-path
+        // guard returns the finite rows.
+        let mut registry = BindRegistry::default();
+        registry.register(keymap_entry("\\C-t", "emacs-meta", Some("emacs-meta")));
+        assert_eq!(
+            registry.invoking_keyseqs("transpose-words", Some("emacs-meta")),
+            vec!["t"]
+        );
+        assert_eq!(
+            registry.invoking_keyseqs("transpose-words", None),
+            vec![r"\et"]
+        );
     }
 
     #[test]

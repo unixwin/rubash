@@ -6087,21 +6087,62 @@ fn bind_table_for<'a>(
     let stale = !matches!(&st.bind_cache, Some((gen, _)) if *gen == generation);
     if stale {
         let vi = executor.bind_editing_mode().as_deref() == Some("vi");
-        let table: Vec<(Vec<char>, crate::shell::bind_registry::BindKind)> = executor
-            .bind_registry_snapshot()
-            .into_iter()
+        let in_family = |entry: &crate::shell::bind_registry::BindEntry| {
+            let keymap = entry.keymap.as_deref().map(normalize_keymap_name);
+            match (vi, keymap) {
+                (_, None) => true,
+                (false, Some("emacs-standard" | "emacs-meta" | "emacs-ctlx")) => true,
+                (true, Some("vi-insert")) => true,
+                _ => false,
+            }
+        };
+        let snapshot = executor.bind_registry_snapshot();
+        let mut table: Vec<(Vec<char>, crate::shell::bind_registry::BindKind)> = snapshot
+            .iter()
             .filter(|entry| {
-                let keymap = entry.keymap.as_deref().map(normalize_keymap_name);
-                match (vi, keymap) {
-                    (_, None) => true,
-                    (false, Some("emacs-standard" | "emacs-meta" | "emacs-ctlx")) => true,
-                    (true, Some("vi-insert")) => true,
-                    _ => false,
-                }
+                in_family(entry)
+                    && !matches!(
+                        entry.kind,
+                        crate::shell::bind_registry::BindKind::Keymap { .. }
+                    )
             })
-            .map(|entry| (decode_bind_keyseq(&entry.keyseq), entry.kind))
+            .map(|entry| (decode_bind_keyseq(&entry.keyseq), entry.kind.clone()))
             .filter(|(seq, _)| !seq.is_empty())
             .collect();
+        // A keymap-valued entry (rubash#2923) is a prefix to the
+        // editor: the target map's own session bindings compose
+        // under it, and the target's ANYOTHERKEY fallback fires at
+        // the bare prefix. One level only — this flat dispatch has
+        // no deeper keymap nesting to mirror, and the engine's own
+        // DEFAULT submap rows are the default dispatch's business,
+        // not this table's.
+        let registry = executor.bind_registry();
+        let registry = registry.borrow();
+        for entry in snapshot.iter().filter(|entry| in_family(entry)) {
+            let crate::shell::bind_registry::BindKind::Keymap { name } = &entry.kind else {
+                continue;
+            };
+            let target = normalize_keymap_name(name);
+            let prefix = decode_bind_keyseq(&entry.keyseq);
+            if prefix.is_empty() {
+                continue;
+            }
+            for inner in snapshot.iter().filter(|inner| {
+                !matches!(
+                    inner.kind,
+                    crate::shell::bind_registry::BindKind::Keymap { .. }
+                ) && inner.keymap.as_deref().map(normalize_keymap_name) == Some(target)
+            }) {
+                let mut seq = prefix.clone();
+                seq.extend(decode_bind_keyseq(&inner.keyseq));
+                if !seq.is_empty() {
+                    table.push((seq, inner.kind.clone()));
+                }
+            }
+            if let Some(fallback) = registry.keymap_fallback(target) {
+                table.push((prefix, fallback.clone()));
+            }
+        }
         st.bind_cache = Some((generation, table));
     }
     match &st.bind_cache {
@@ -6218,6 +6259,13 @@ fn run_bound_kind(
             EditOutcome::None
         }
         BindKind::Function { name } => run_readline_function(executor, st, name, key),
+        BindKind::Keymap { .. } => {
+            // Unreachable: bind_table_for expands keymap-valued
+            // entries into composed rows (and the target's fallback
+            // at the bare prefix) and never emits the kind itself.
+            // A keymap value cannot "fire" — it only prefixes.
+            EditOutcome::None
+        }
         BindKind::Macro { text } => {
             // readline feeds macro text back through the dispatch as
             // if it had been typed (rl_executing_macro).

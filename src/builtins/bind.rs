@@ -1698,8 +1698,19 @@ impl BindSpecError {
 /// `bind '"\C-t": "ins-macro"'` binds a macro `bind -s` lists).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingSpec {
-    Function { name: String },
-    Macro { text: String },
+    Function {
+        name: String,
+    },
+    Macro {
+        text: String,
+    },
+    /// The old-style arm's `prefix-meta` value (lib/readline/
+    /// bind.c:1845): the key is bound to a whole keymap (ISKMAP),
+    /// not to a function. `name` is the target keymap — the C's
+    /// only producer names emacs_meta_keymap.
+    Keymap {
+        name: String,
+    },
 }
 
 /// One parsed plain binding argument.
@@ -2370,6 +2381,22 @@ fn old_style_keyseq(key: u32) -> String {
     }
 }
 
+/// The stored (written) sequence for the prefix-meta arm's key.
+/// rl_generic_bind receives the sequence built from the RAW key
+/// byte (bind.c:1850 passes the one-byte string), bypassing
+/// rl_bind_key's ESC-prefix routing of META keys, so a key below
+/// 0x80 spells as usual while a META key keeps its raw byte —
+/// which the dumpers spell in the \ooo form (GNU probe:
+/// `bind 'Meta-t: prefix-meta'` puts the meta map under "\364",
+/// not under "\et").
+fn old_style_keymap_keyseq(key: u32) -> String {
+    if key < 0x80 {
+        old_style_single_keyseq(key)
+    } else {
+        format!("\\{:03o}", key & 0xff)
+    }
+}
+
 fn old_style_single_keyseq(key: u32) -> String {
     match key {
         0x1b => "\\e".to_string(),
@@ -2490,15 +2517,23 @@ pub fn parse_old_style_binding(arg: &str) -> OldStyleSpec {
             },
         });
     }
+    if funname.eq_ignore_ascii_case("prefix-meta") {
+        // PREFIX_META_HACK (bind.c:1845-1855): the one name the C
+        // intercepts before rl_named_function — the key is bound
+        // to the emacs-meta KEYMAP (ISKMAP), with the raw-byte
+        // sequence (old_style_keymap_keyseq), not through
+        // rl_bind_key (rubash#2923).
+        return OldStyleSpec::Bind(ParsedBinding {
+            keyseq: old_style_keymap_keyseq(key),
+            spec: BindingSpec::Keymap {
+                name: "emacs-meta".to_string(),
+            },
+        });
+    }
     // rl_bind_key (key, rl_named_function (funname)) (bind.c:1856):
     // an unknown name binds a NULL slot, which the registry
     // reproduces by storing the name verbatim — it shadows the
-    // key's default binding and is never listed. The one name the C
-    // intercepts, `prefix-meta` (bind.c:1845, PREFIX_META_HACK),
-    // binds the key to the emacs-meta keymap; the registry is a flat
-    // sequence table with no keymap-valued kind, so the name is
-    // stored verbatim like any other and the slot is occupied the
-    // same way.
+    // key's default binding and is never listed.
     OldStyleSpec::Bind(ParsedBinding {
         keyseq,
         spec: BindingSpec::Function {
@@ -2821,6 +2856,52 @@ mod tests {
         assert_eq!(DEFAULT_BINDINGS_VI_MOVEMENT.len(), 104);
         assert!(is_known_function("complete"));
         assert!(is_known_function("history-search-backward"));
+    }
+
+    #[test]
+    fn old_style_prefix_meta_binds_the_emacs_meta_keymap() {
+        // rubash#2923 (bind.c:1845-1855): the value names a keymap,
+        // the sequence is the raw key byte, and the name match is
+        // case-insensitive (_rl_stricmp).
+        assert_eq!(
+            parse_old_style_binding("Control-t: prefix-meta"),
+            OldStyleSpec::Bind(ParsedBinding {
+                keyseq: "\\C-t".to_string(),
+                spec: BindingSpec::Keymap {
+                    name: "emacs-meta".to_string(),
+                },
+            })
+        );
+        assert_eq!(
+            parse_old_style_binding("Control-t: PREFIX-META"),
+            OldStyleSpec::Bind(ParsedBinding {
+                keyseq: "\\C-t".to_string(),
+                spec: BindingSpec::Keymap {
+                    name: "emacs-meta".to_string(),
+                },
+            })
+        );
+        // A META key keeps its raw byte (\364), never an ESC prefix.
+        assert_eq!(
+            parse_old_style_binding("Meta-t: prefix-meta"),
+            OldStyleSpec::Bind(ParsedBinding {
+                keyseq: "\\364".to_string(),
+                spec: BindingSpec::Keymap {
+                    name: "emacs-meta".to_string(),
+                },
+            })
+        );
+        // A QUOTED "prefix-meta" value is a macro, not the hack
+        // (the C's quoted arm runs first, bind.c:1834).
+        assert_eq!(
+            parse_old_style_binding("Control-t: \"prefix-meta\""),
+            OldStyleSpec::Bind(ParsedBinding {
+                keyseq: "\\C-t".to_string(),
+                spec: BindingSpec::Macro {
+                    text: "prefix-meta".to_string(),
+                },
+            })
+        );
     }
 
     #[test]
