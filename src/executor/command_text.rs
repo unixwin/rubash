@@ -951,9 +951,7 @@ fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> 
         .args
         .iter()
         .enumerate()
-        .map(|(index, arg)| {
-            command_word_source_text(index, arg, &conditional_command.arg_metadata)
-        })
+        .map(|(index, arg)| command_word_source_text(index, arg, &conditional_command.arg_metadata))
         .collect::<Vec<_>>();
     format!("[[ {}", rendered.join(" "))
 }

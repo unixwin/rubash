@@ -131,9 +131,8 @@ fn issue2987_respawn_inline_subshell_conditional_survives() {
 
 #[test]
 fn issue2987_respawn_for_word_list_quoting_survives() {
-    let (stdout, stderr, code) = rubash_file(
-        "f() { for i in \"a b\" c; do echo \"for:[$i]\"; done }\n( f ) &\nwait\n",
-    );
+    let (stdout, stderr, code) =
+        rubash_file("f() { for i in \"a b\" c; do echo \"for:[$i]\"; done }\n( f ) &\nwait\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
     assert_eq!(stdout, "for:[a b]\nfor:[c]\n");
