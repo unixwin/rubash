@@ -1034,6 +1034,9 @@ impl Executor {
                 // respawn verbatim; None keeps the arrays unmaterialized
                 // exactly as the parent's fork left them.
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
+                dynamic_cells: std::cell::RefCell::new(
+                    crate::shell::state::DynamicCellState::default(),
+                ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
@@ -1644,6 +1647,12 @@ impl Executor {
         // exists (`declare -p COMP_WORDBREAKS` succeeds) but print_var_list
         // (the `set` listing) skips invisible variables (rubash#1325).
         mark_env_name(env_vars, INVISIBLE_VARS, "COMP_WORDBREAKS");
+        // BASH_ARGV0 carries att_invisible in GNU too (variables.c
+        // table registration): the same two listing rules apply — the
+        // `set` form skips it, and declaration listings render the
+        // bare name (show_var_attributes) while a NAMED lookup still
+        // prints its value (rubash#2973).
+        mark_env_name(env_vars, INVISIBLE_VARS, "BASH_ARGV0");
         // GNU shell.c: a shell whose environment carries no TERM binds
         // TERM="dumb" (plain, unexported) instead of leaving it unset
         // (rubash#1325).

@@ -1521,47 +1521,68 @@ impl Executor {
                     // (rubash#1363 for PIPESTATUS, rubash#2700 for the
                     // rest). The VISIBLE class (GROUPS and the stack
                     // arrays) appears in every listing form, bare
-                    // `declare` included; the INVISIBLE provider scalars
+                    // `declare` included; the provider scalars
                     // appear only in print/filtered forms, matching
                     // GNU's att_invisible handling in print_var_list.
-                    // A listing prints, so building a view draws exactly
-                    // what GNU's listing draws — but a name an active
-                    // filter excludes outright is never built, so a
-                    // filtered listing does not draw for a name it
-                    // cannot print.
+                    // Listing views are CELL views (rubash#2973):
+                    // enumeration renders what reads stored into the
+                    // cells and never fires a getter, so building one
+                    // draws nothing. The pre-filter below only skips
+                    // names that cannot pass under any reading of the
+                    // active options (the builtin adjudicates exactly,
+                    // with the gate/any rule of setattr.def).
                     if listing {
                         let filtered = ['a', 'A', 'i', 'l', 'n', 'r', 'u', 'x']
                             .iter()
                             .any(|&option| declare_args_contain_option(&args, option, true));
                         let could_pass = |name: &str, integer: bool, array: bool| {
-                            let env_vars = &self.shell_state.env_vars;
-                            (!declare_args_contain_option(&args, 'x', true)
-                                || is_marked_var(env_vars, EXPORTED_VARS, name))
-                                && (!declare_args_contain_option(&args, 'r', true)
-                                    || is_marked_var(env_vars, READONLY_VARS, name))
-                                && (!declare_args_contain_option(&args, 'a', true) || array)
-                                && !declare_args_contain_option(&args, 'A', true)
-                                && (!declare_args_contain_option(&args, 'i', true) || integer)
-                                && (!declare_args_contain_option(&args, 'u', true)
-                                    || is_marked_var(env_vars, UPPERCASE_VARS, name))
-                                && (!declare_args_contain_option(&args, 'l', true)
-                                    || is_marked_var(env_vars, LOWERCASE_VARS, name))
-                                && (!declare_args_contain_option(&args, 'n', true)
-                                    || is_marked_var(env_vars, NAMEREF_VARS, name))
+                            // -A gates on assoc: no dynamic cell is
+                            // associative, so none can pass.
+                            if declare_args_contain_option(&args, 'A', true) {
+                                return false;
+                            }
+                            // -a gates on the array class.
+                            if declare_args_contain_option(&args, 'a', true) && !array {
+                                return false;
+                            }
+                            // -i alone excludes non-integers; combined
+                            // with any other attribute the ANY rule can
+                            // still admit them, so only the pure--i form
+                            // pre-filters here.
+                            if declare_args_contain_option(&args, 'i', true)
+                                && !integer
+                                && !['a', 'l', 'n', 'r', 'u', 'x']
+                                    .iter()
+                                    .any(|&option| declare_args_contain_option(&args, option, true))
+                            {
+                                return false;
+                            }
+                            let _ = name;
+                            true
                         };
                         let mut push_registry = |name: &str| {
                             // rubash#1569: a name bound by this very
                             // command's prefix renders from the underlay
                             // snapshot (its pre-frame storage), not the
-                            // live dynamic view.
+                            // dynamic view.
                             if underlay.contains_key(name)
                                 || views.iter().any(|view| view.name == name)
                             {
                                 return;
                             }
-                            let (integer, array) = Self::dynamic_declaration_class(name);
+                            let (class_integer, array) = Self::dynamic_declaration_class(name);
+                            // The cell's integer bit for SECONDS is
+                            // state-dependent (earned on first read).
+                            let integer = class_integer
+                                && (name != "SECONDS"
+                                    || self
+                                        .shell_state
+                                        .dynamic_cells
+                                        .borrow()
+                                        .integer_earned
+                                        .contains(name));
                             if could_pass(name, integer, array) {
-                                if let Some(view) = self.dynamic_view(name) {
+                                if let Some(view) = self.dynamic_cell_view(name) {
                                     views.push(view);
                                 }
                             }
@@ -1574,13 +1595,13 @@ impl Executor {
                         for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
                             push_registry(name);
                         }
-                        if print_requested {
-                            // rubash#1363: GNU's full `declare -p`
-                            // listing includes a materialized PIPESTATUS
-                            // array even though its value lives outside
-                            // the variable table.
-                            push_registry("PIPESTATUS");
-                        }
+                        // rubash#1363 + rubash#2973: GNU enumerates a
+                        // materialized PIPESTATUS cell in EVERY
+                        // listing form (its value lives outside the
+                        // variable table); the cell view is None while
+                        // the cell does not exist yet (no pipeline has
+                        // completed), so early listings stay clean.
+                        push_registry("PIPESTATUS");
                         if print_requested || filtered {
                             for name in [
                                 "BASHPID",
@@ -1593,7 +1614,10 @@ impl Executor {
                                 "BASH_MONOSECONDS",
                                 "LINENO",
                                 "BASH_SUBSHELL",
-                                "BASH_ARGV0",
+                                // BASH_ARGV0 is a table cell (an
+                                // att_invisible one, rendered by the
+                                // builtin's invisible rule); it has no
+                                // dynamic view (rubash#2973).
                                 "BASH_COMMAND",
                             ] {
                                 push_registry(name);

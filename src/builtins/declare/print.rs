@@ -93,6 +93,7 @@ pub(super) fn print_declare_names<W, E>(
     variables: &crate::shell::var_table::VarTable,
     options: DeclareOptions,
     plain: bool,
+    listing_mode: bool,
     mut status: i32,
     dynamic_views: &[DynamicDeclarationView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -322,6 +323,15 @@ where
             .map(|view| &view.text)
         {
             writeln!(stdout, "{rendered}")?;
+        } else if listing_mode && variables.is_marked(crate::executor::types::INVISIBLE_VARS, &name)
+        {
+            // GNU show_var_attributes (builtins/setattr.def): an
+            // att_invisible cell renders NAME ONLY in an enumeration;
+            // its value appears only through a named lookup. The
+            // invisible cells here (BASH_ARGV0, COMP_WORDBREAKS) are
+            // ordinary table entries, so the listing arm renders them
+            // like a value-less declaration (rubash#2973).
+            print_unset_declaration(&name, attrs, stdout)?;
         } else if let Some(Some((under_value, _))) = underlay.get(&name) {
             // rubash#1569: render the pre-frame binding's stored text;
             // a binding that existed without env text (declared but
@@ -351,6 +361,17 @@ where
             || underlay_attr(&name, DECLARED_UNSET_VARS, |a| a.declared_unset)
         {
             print_unset_declaration(&name, attrs, stdout)?;
+        } else if listing_mode {
+            // An enumeration only walks names the candidate sources
+            // computed; a name that resolves to no cell, no value and
+            // no attribute here (a mark whose cell lives outside the
+            // table and whose view was not supplied, e.g. an
+            // unmaterialized PIPESTATUS) is simply not a listing
+            // member — GNU's enumeration cannot name a cell that does
+            // not exist, so it never errors for one (rubash#2973).
+            // The not-found diagnostic below belongs to NAMED
+            // lookups, where the user asked for the name explicitly.
+            continue;
         } else {
             writeln!(
                 stderr,
