@@ -4722,8 +4722,11 @@ impl Executor {
         // notify_of_job_status prints a leading "\n" before the
         // JSTOPPED job line (rubash#2834).
         if let Some(line) = self.format_stopped_job_notice(pids[0]) {
-            crate::executor::shell_options::write_stderr_bytes(b"\n")?;
-            crate::executor::shell_options::write_stderr_bytes(line.as_bytes())?;
+            // rubash#2929: the stop notice is a shell diagnostic — it
+            // follows the shell's current fd-2 binding (see
+            // report_pending_signal_notices).
+            self.write_diagnostic_fd2(b"\n");
+            self.write_diagnostic_fd2(line.as_bytes());
         }
         // Park the stopped members' handles for fg/bg/wait; disarm their
         // dev-fd finishes (a flush into a stopped child's pipe could

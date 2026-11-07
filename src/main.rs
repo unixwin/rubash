@@ -1532,6 +1532,16 @@ fn run_command_string_with_init(
         };
     executor.exit_parse_and_execute_frame(saved_frame);
     executor.set_root_line_span_run_armed(false);
+    // rubash#2928: a `-c` string has no second read after its last
+    // list, so GNU never prints its background death notices (parse.y
+    // shell_getc has no next pull) — drop them before finish_shell's
+    // stream-end flush. Foreground notices stay (GNU reports those
+    // synchronously from wait_for). Respawned children keep the
+    // stream-end behavior: their own background deaths belong to the
+    // transporting parent's job table, not this `-c` run.
+    if !rubash::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
+        executor.drop_pending_background_signal_notices();
+    }
     executor.set_command_string_mode(false);
     finish_shell(executor, status, interactive)
 }

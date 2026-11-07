@@ -7340,12 +7340,15 @@ impl<'e> FinishPass<'e> {
             self.executor.hangup_all_jobs();
         }
         // rubash#1853: end-of-stream job notifications. The
-        // boundary flush in execute_ast only fires when a
-        // further top-level command is walked, so a signal
-        // death in the stream's last command would otherwise
-        // leave the shell silently (GNU prints it from the
+        // reader-level flush only fires when a NEXT list is pulled,
+        // so a signal death in the stream's last command would
+        // otherwise leave the shell silently (GNU prints it from the
         // wait itself — jobs.c:3385 notify_and_cleanup in
         // wait_for; jobs.c:4723 maybe_print_job_notifications).
+        // rubash#2928: the flush stamps foreground deaths with the
+        // last command's line and background deaths with the EOF
+        // pull's line (one past it); a `-c` run dropped its
+        // background entries before finish_shell (no second pull).
         // This runs before the EXIT trap below, matching GNU's
         // order.
         let _ = self.executor.flush_job_notifications_at_stream_end();
