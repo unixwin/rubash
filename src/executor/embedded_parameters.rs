@@ -1030,6 +1030,73 @@ impl Executor {
                             &mut word,
                             &mut case_depth,
                         );
+                        // GNU parse.y:4463-4470 (parse_comsub peeks `$((`
+                        // and hands the whole construct to the P_ARITH
+                        // matched-pair scan) + parse.y:4970
+                        // (parse_arith_cmd): a `$((...))` the gate
+                        // classifies as arithmetic is ONE opaque unit for
+                        // this collector — copy it verbatim so a shift
+                        // `<<` inside it never reaches the heredoc arm
+                        // below (rubash#2930). A subshell-or-list verdict
+                        // falls through to the per-char walk. `rest`
+                        // begins at the `((` opener itself — exactly the
+                        // gate's documented contract — so it is passed
+                        // unchanged.
+                        if source_ch == '$'
+                            && !single
+                            && !double
+                            && chars.peek().copied() == Some('(')
+                        {
+                            let rest: String = chars.clone().collect();
+                            if rest.starts_with('(')
+                                && crate::lexer::dollar_double_paren_is_arithmetic(&rest)
+                            {
+                                source.push(source_ch);
+                                source.push(chars.next().expect("arithmetic first paren"));
+                                source.push(chars.next().expect("arithmetic second paren"));
+                                let mut arith_depth = 0usize;
+                                let mut arith_single = false;
+                                let mut arith_double = false;
+                                let mut arith_escaped = false;
+                                while let Some(arith_ch) = chars.next() {
+                                    source.push(arith_ch);
+                                    if arith_escaped {
+                                        arith_escaped = false;
+                                        continue;
+                                    }
+                                    if arith_single {
+                                        if arith_ch == '\'' {
+                                            arith_single = false;
+                                        }
+                                        continue;
+                                    }
+                                    if arith_double {
+                                        if arith_ch == '\\' {
+                                            arith_escaped = true;
+                                        } else if arith_ch == '"' {
+                                            arith_double = false;
+                                        }
+                                        continue;
+                                    }
+                                    match arith_ch {
+                                        '\\' => arith_escaped = true,
+                                        '\'' => arith_single = true,
+                                        '"' => arith_double = true,
+                                        '(' => arith_depth += 1,
+                                        ')' if arith_depth > 0 => arith_depth -= 1,
+                                        ')' if chars.peek().copied() == Some(')') => {
+                                            source.push(
+                                                chars.next().expect("arithmetic closing paren"),
+                                            );
+                                            break;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                token_boundary = false;
+                                continue;
+                            }
+                        }
                         match source_ch {
                             '\'' if !double => {
                                 single = !single;
