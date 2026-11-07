@@ -325,16 +325,6 @@ fn glob_pattern_p(pattern: &str) -> bool {
     false
 }
 
-pub(crate) fn print_shift_help_with_io<W>(stdout: &mut W) -> io::Result<()>
-where
-    W: Write,
-{
-    if let Some(topic) = find_topic("shift") {
-        return print_topic_long(topic, stdout);
-    }
-    Ok(())
-}
-
 pub(crate) fn print_caller_help_with_io<W>(stdout: &mut W) -> io::Result<()>
 where
     W: Write,

@@ -480,7 +480,7 @@ pub(crate) const BUILTIN_TABLE: &[BuiltinRow] = &[
     BuiltinRow { name: "readarray", handler: H::Mapfile, flags: F::DISABLEABLE, opt_spec: O::Getopt("d:u:n:O:tC:c:s:"), doc: D::Topic("readarray"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "readonly", handler: H::Readonly, flags: F::DISABLEABLE.or(F::SPECIAL).or(F::ASSIGNMENT), opt_spec: O::Getopt("aAfnp"), doc: D::Topic("readonly"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "return", handler: H::Return, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::NoScan, doc: D::Topic("return"), introspection: I::Builtin, help_entry: true },
-    BuiltinRow { name: "set", handler: H::Set, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::Getopt("+abefhikmnprtuvxlBCEHPTo;"), doc: D::Topic("set"), introspection: I::Builtin, help_entry: true },
+    BuiltinRow { name: "set", handler: H::Set, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::Getopt("+abefhikmnprtuvxBCEHPTo;"), doc: D::Topic("set"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "shift", handler: H::Shift, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::NoScan, doc: D::Topic("shift"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "shopt", handler: H::Shopt, flags: F::DISABLEABLE, opt_spec: O::Getopt("psuoq"), doc: D::Topic("shopt"), introspection: I::Builtin, help_entry: true },
     BuiltinRow { name: "source", handler: H::Source, flags: F::DISABLEABLE.or(F::SPECIAL), opt_spec: O::Getopt("p:"), doc: D::Topic("source"), introspection: I::Builtin, help_entry: true },
@@ -868,7 +868,14 @@ mod tests {
         // Spot pins for the specs that are easy to get wrong: the
         // dynamic ones, the plus-mode ones, and the leading-colon one.
         let spec = |name: &str| builtin_table_row(name).unwrap().opt_spec;
-        assert_eq!(spec("set"), OptSpec::Getopt("+abefhikmnprtuvxlBCEHPTo;"));
+        // set's spec is flags.c:372-382's built optflags: '+' +
+        // shell_flags[] letters + "o;". The Phase 0 census carried
+        // a stray `l` — flags.c:188-190 keeps `l` out of
+        // shell_flags[] under `#if 0`, so it is not in optflags
+        // (Phase 3 correction; `set -l` is an invalid option in
+        // GNU, and with `l` in the spec the scan would have let it
+        // through to the apply loop at the wrong status).
+        assert_eq!(spec("set"), OptSpec::Getopt("+abefhikmnprtuvxBCEHPTo;"));
         assert_eq!(
             spec("ulimit"),
             OptSpec::Getopt("aSHP;R;T;b;c;d;e;f;i;k;l;m;n;p;q;r;s;t;u;v;w;x;")

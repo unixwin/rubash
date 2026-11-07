@@ -15,6 +15,9 @@ pub use unset::unset;
 pub(crate) use unset::unset_with_stderr;
 use unset::valid_identifier;
 
+use crate::executor::builtin_diag::{Diag, DiagKind, Prolog};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
@@ -22,7 +25,6 @@ pub(super) const EXECUTION_SUCCESS: i32 = 0;
 pub(super) const EXECUTION_FAILURE: i32 = 1;
 pub(crate) const EX_USAGE: i32 = 2;
 
-const SET_FLAGS: &str = "abefhkmnprtuvxBCEHPT";
 /// The apply loop's admission set is change_flag's table (flags.c:168-200
 /// shell_flags[]), which unlike the pre-scan DOES include 'i' — a character
 /// hidden inside an inline `o` operand (`set -opipefail`) reaches the apply
@@ -104,13 +106,35 @@ pub(super) const INVISIBLE_VARS: &str = "__RUBASH_INVISIBLE_VARS";
 pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) -> io::Result<i32> {
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    set_with_io(
-        args.iter().map(String::as_str),
+    let row =
+        crate::executor::builtin_table::builtin_table_row("set").expect("set row in BUILTIN_TABLE");
+    let mut diag = Diag::new(row, &mut stderr);
+    let status = set_with_io(
+        row,
+        args,
         env_vars,
+        &mut diag,
         &mut stdout,
-        &mut stderr,
         &crate::shell::var_table::TempenvListingUnderlay::new(),
-    )
+    );
+    diag.flush_with(|| prolog_for_env(env_vars));
+    status
+}
+
+/// The flush prolog for the stdio entry points above, built from
+/// the same env cells `builtin_error_prefix` reads (the executor
+/// path builds its own via `Executor::diagnostic_prolog`).
+fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    Prolog {
+        interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
+        shell_basename: env_vars
+            .get("__RUBASH_SHELL_NAME")
+            .cloned()
+            .unwrap_or_else(|| "rubash".to_string()),
+        error_name: "rubash".to_string(),
+        script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+        line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
+    }
 }
 
 /// GNU builtin_error prolog (builtins/common.c:83-94): the shell name, the
@@ -150,19 +174,18 @@ pub fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
     }
 }
 
-pub(crate) fn set_with_io<'a, I, W, E>(
-    args: I,
+pub(crate) fn set_with_io<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
 ) -> io::Result<i32>
 where
-    I: IntoIterator<Item = &'a str>,
     W: Write,
-    E: Write,
 {
-    set_with_io_tracked(args, env_vars, stdout, stderr, underlay, &[], None)
+    set_with_io_tracked(row, args, env_vars, diag, stdout, underlay, &[], None)
 }
 
 /// [`set_with_io`] plus a sink for the `-o` option WRITES (name,
@@ -175,47 +198,44 @@ where
 /// the writes themselves, not a before/after state diff
 /// (rubash#2448; the shopt door's tracked twin is rubash#2435). The
 /// `-o` print form (no operand) writes nothing and records nothing.
-pub(crate) fn set_with_io_and_o_writes<'a, I, W, E>(
-    args: I,
+pub(crate) fn set_with_io_and_o_writes<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
     o_writes: &mut Vec<(String, bool)>,
 ) -> io::Result<i32>
 where
-    I: IntoIterator<Item = &'a str>,
     W: Write,
-    E: Write,
 {
     set_with_io_tracked(
+        row,
         args,
         env_vars,
+        diag,
         stdout,
-        stderr,
         underlay,
         dynamic,
         Some(o_writes),
     )
 }
 
-fn set_with_io_tracked<'a, I, W, E>(
-    args: I,
+fn set_with_io_tracked<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
-    I: IntoIterator<Item = &'a str>,
     W: Write,
-    E: Write,
 {
-    let args: Vec<&str> = args.into_iter().collect();
-
     if args.is_empty() {
         print_shell_variables(env_vars, underlay, dynamic, stdout)?;
         return Ok(EXECUTION_SUCCESS);
@@ -224,104 +244,58 @@ where
     // GNU set.def:671-691 pre-scan: internal_getopt (bashgetopt.c) walks the
     // words with optflags (flags.c:372-382 = shell_flags letters + "o;")
     // and validates every flag word BEFORE set_builtin's apply loop runs,
-    // so `set -e -Z` reports the error with errexit still off. The scan
-    // stops at the first non-option word and at `--`/`-` (bashgetopt.c:76-90
-    // NOTOPT / "--" handling), swallows an inline `o` operand without
-    // validating its characters (`-opipefail`: the scan sees only 'o'), and
-    // consumes a following non-option word (`-o pipefail`) so a bad flag
-    // AFTER the operand is still a scan error with nothing applied.
+    // so `set -e -Z` reports the error with errexit still off.
     {
-        let mut scan = args.iter().peekable();
-        while let Some(arg) = scan.next() {
-            let arg: &str = arg;
-            if arg == "--" || arg == "-" {
-                break;
-            }
-            if arg == "--help" {
-                // builtins/bashgetopt.c:80-85: internal_getopt returns
-                // GETOPT_HELP for a `--help` word in option position,
-                // and set.def:684 CASE_HELPOPT prints the long help and
-                // returns EX_USAGE — from this VALIDITY scan, before
-                // the apply loop, so nothing is applied (`set -e
-                // --help` leaves errexit off). Words consumed above as
-                // a `-o` operand never reach this check, and the scan
-                // stops before `--`/positional words, mirroring
-                // internal_getopt's fresh-word order (rubash#2128).
-                crate::builtins::help::print_builtin_help("set", stdout)?;
-                return Ok(EX_USAGE);
-            }
-            let Some(prefix) = arg.chars().next().filter(|ch| *ch == '-' || *ch == '+') else {
-                break;
-            };
-            let flags = &arg[1..];
-            if flags.is_empty() {
-                break;
-            }
-            let mut chars = flags.chars();
-            while let Some(flag) = chars.next() {
-                if flag == 'o' {
-                    // bashgetopt.c:111-137: an inline operand consumes the
-                    // rest of the word unvalidated; otherwise a following
-                    // NOTOPT word is the operand.
-                    if chars.next().is_some() {
-                        break;
-                    }
-                    if let Some(next) = scan.peek() {
-                        let notopt =
-                            (!next.starts_with('-') && !next.starts_with('+')) || next.len() == 1;
-                        if notopt {
-                            scan.next();
-                        }
-                    }
-                    continue;
-                }
-                if flag == 'i' {
-                    // set.def:677-683: `set -i` is explicitly refused.
-                    writeln!(
-                        stderr,
-                        "{}set: {}i: invalid option",
-                        builtin_error_prefix(env_vars),
-                        prefix
-                    )?;
-                    writeln!(
-                        stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                    )?;
+        // Stage-2 ④ Phase 3: the validity scan is the (table row +
+        // BuiltinOpt + Diag) triple — the row's spec is the optflags
+        // string itself ('+' + shell_flags letters + "o;",
+        // flags.c:372-382). The machine stops at the first
+        // non-option word and at `--`/`-`, swallows an inline `o`
+        // operand without validating its characters (`-opipefail`:
+        // the scan sees only 'o'), and consumes a following
+        // non-option word (`-o pipefail`) so a bad flag AFTER the
+        // operand is still a scan error with nothing applied.
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    // builtins/bashgetopt.c:80-85: internal_getopt
+                    // returns GETOPT_HELP for a `--help` word in
+                    // option position, and set.def:684 CASE_HELPOPT
+                    // prints the long help and returns EX_USAGE —
+                    // from this VALIDITY scan, before the apply loop,
+                    // so nothing is applied (`set -e --help` leaves
+                    // errexit off). Words consumed as a `-o` operand
+                    // never reach this check (rubash#2128).
+                    crate::builtins::help::print_builtin_help("set", stdout)?;
                     return Ok(EX_USAGE);
                 }
-                if flag == '?' {
-                    // bashgetopt.c:99-101 prints the invalid-option line for
-                    // '?' itself; set.def:684-686 turns list_optopt=='?'
-                    // into EXECUTION_SUCCESS.
-                    writeln!(
-                        stderr,
-                        "{}set: {}?: invalid option",
-                        builtin_error_prefix(env_vars),
-                        prefix
-                    )?;
-                    writeln!(
-                        stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                    )?;
-                    return Ok(EXECUTION_SUCCESS);
-                }
-                if !SET_FLAGS.contains(flag) {
-                    // bashgetopt.c:99-101 sh_invalidopt + '?' return;
-                    // set.def:685-686 maps it to EX_USAGE.
-                    writeln!(
-                        stderr,
-                        "{}set: {}{}: invalid option",
-                        builtin_error_prefix(env_vars),
-                        prefix,
-                        flag
-                    )?;
-                    writeln!(
-                        stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                    )?;
+                OptEvent::Opt(b'i') => {
+                    // set.def:677-683: `set -i` is explicitly
+                    // refused; the errstr carries the sign of the
+                    // word that carried the `i` (list_opttype).
+                    let sign = if opt.opttype() == b'-' { "-i" } else { "+i" };
+                    diag.error(DiagKind::InvalidOpt(sign.to_string()));
+                    diag.usage();
                     return Ok(EX_USAGE);
                 }
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {}
+                OptEvent::End => break,
             }
+        }
+        let optopt = opt.optopt();
+        drop(opt);
+        if diag.status() != 0 {
+            // The machine already reported the character
+            // (bashgetopt.c:99-101 sh_invalidopt + '?' return);
+            // set.def:684-686 adds the usage and maps an error on
+            // '?' itself (list_optopt) to EXECUTION_SUCCESS.
+            diag.usage();
+            return Ok(if optopt == Some(b'?') {
+                EXECUTION_SUCCESS
+            } else {
+                EX_USAGE
+            });
         }
     }
 
@@ -348,12 +322,7 @@ where
                         if !name.is_empty() && !name.starts_with('-') && !name.starts_with('+') =>
                     {
                         if !is_shell_option(name) {
-                            writeln!(
-                                stderr,
-                                "{}set: {}: invalid option name",
-                                builtin_error_prefix(env_vars),
-                                name
-                            )?;
+                            diag.free(format_args!("{name}: invalid option name"));
                             // GNU set.def treats an invalid `-o` name as a
                             // usage error, distinct from a valid option that
                             // simply reports failure.
@@ -373,23 +342,24 @@ where
                 continue;
             }
 
+            if option == '?' {
+                // set.def:724-728: the apply loop's own '?' arm —
+                // builtin_usage + EXECUTION_SUCCESS, with NO
+                // invalid-option line. Reachable only for a '?'
+                // hidden inside an inline `o` operand (`set -o?`):
+                // a standalone '?' is the pre-scan's (rubash#2957).
+                diag.usage();
+                return Ok(EXECUTION_SUCCESS);
+            }
+
             if option == 'r' {
                 if prefix == '+' && shell_option_enabled(env_vars, "restricted") {
                     // GNU flags.c change_flag (flags.c:227-235) refuses
                     // "set +r" in a restricted shell with FLAG_ERROR;
                     // set.def:763-771 reports sh_invalidopt("+r") plus the
                     // builtin usage line and returns EXECUTION_FAILURE.
-                    writeln!(
-                        stderr,
-                        "{}set: {}{}: invalid option",
-                        builtin_error_prefix(env_vars),
-                        prefix,
-                        option
-                    )?;
-                    writeln!(
-                        stderr,
-                        "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                    )?;
+                    diag.error(DiagKind::InvalidOpt(format!("{prefix}r")));
+                    diag.usage();
                     return Ok(EXECUTION_FAILURE);
                 }
                 set_shell_option(env_vars, "restricted", prefix == '-');
@@ -400,17 +370,8 @@ where
                 // set.def:763-771: change_flag's FLAG_ERROR path. Only
                 // reachable for characters hidden from the pre-scan inside
                 // an inline `o` operand (`set -opipefail` dies at 'l').
-                writeln!(
-                    stderr,
-                    "{}set: {}{}: invalid option",
-                    builtin_error_prefix(env_vars),
-                    prefix,
-                    option
-                )?;
-                writeln!(
-                    stderr,
-                    "set: usage: set [-abefhkmnptuvxBCEHPT] [-o option-name] [--] [-] [arg ...]"
-                )?;
+                diag.error(DiagKind::InvalidOpt(format!("{prefix}{option}")));
+                diag.usage();
                 return Ok(EXECUTION_FAILURE);
             }
 
@@ -708,19 +669,42 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut env_vars = env_vars.clone();
-        let status = set_with_io(
-            args.iter().copied(),
-            &mut env_vars,
-            &mut stdout,
-            &mut stderr,
-            &crate::shell::var_table::TempenvListingUnderlay::new(),
-        )
-        .unwrap();
+        let status = run_set_with_io(args, &mut env_vars, &mut stdout, &mut stderr);
         (
             status,
             String::from_utf8(stdout).unwrap(),
             String::from_utf8(stderr).unwrap(),
         )
+    }
+
+    /// The migrated call shape: build the row + Diag, call, flush
+    /// with a fixed test prolog (`t.sh: line 1: `).
+    fn run_set_with_io(
+        args: &[&str],
+        env_vars: &mut crate::shell::var_table::VarTable,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> i32 {
+        let row = crate::executor::builtin_table::builtin_table_row("set").unwrap();
+        let words: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let mut diag = Diag::new(row, stderr);
+        let status = set_with_io(
+            row,
+            &words,
+            env_vars,
+            &mut diag,
+            stdout,
+            &crate::shell::var_table::TempenvListingUnderlay::new(),
+        )
+        .unwrap();
+        diag.flush_with(|| Prolog {
+            interactive: false,
+            shell_basename: "bash".to_string(),
+            error_name: "bash".to_string(),
+            script_file: Some("t.sh".to_string()),
+            line: Some("1".to_string()),
+        });
+        status
     }
 
     #[test]
@@ -760,14 +744,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
-            set_with_io(
-                ["-r"],
-                &mut env_vars,
-                &mut stdout,
-                &mut stderr,
-                &crate::shell::var_table::TempenvListingUnderlay::new(),
-            )
-            .unwrap(),
+            run_set_with_io(&["-r"], &mut env_vars, &mut stdout, &mut stderr),
             EXECUTION_SUCCESS
         );
         assert!(shell_option_enabled(&env_vars, "restricted"));
@@ -780,14 +757,7 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         assert_eq!(
-            set_with_io(
-                ["+r"],
-                &mut env_vars,
-                &mut stdout,
-                &mut stderr,
-                &crate::shell::var_table::TempenvListingUnderlay::new(),
-            )
-            .unwrap(),
+            run_set_with_io(&["+r"], &mut env_vars, &mut stdout, &mut stderr),
             EXECUTION_FAILURE
         );
         assert!(shell_option_enabled(&env_vars, "restricted"));

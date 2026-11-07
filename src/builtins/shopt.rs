@@ -27,6 +27,9 @@ pub(crate) fn print_shopt_listing<W: Write>(
     print_all_shopts(env_vars, reusable, stdout)
 }
 
+use crate::executor::builtin_diag::{Diag, Prolog};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::BuiltinRow;
 use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
@@ -75,6 +78,22 @@ pub fn execute(
     execute_with_io(args, env_vars, &mut stdout, &mut stderr)
 }
 
+/// The flush prolog for the stdio entry point, built from the
+/// env cells the executor keeps (the executor path builds its
+/// own via `Executor::diagnostic_prolog`).
+fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    Prolog {
+        interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
+        shell_basename: env_vars
+            .get("__RUBASH_SHELL_NAME")
+            .cloned()
+            .unwrap_or_else(|| "rubash".to_string()),
+        error_name: "rubash".to_string(),
+        script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+        line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
+    }
+}
+
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     env_vars: &mut crate::shell::var_table::VarTable,
@@ -85,7 +104,12 @@ where
     W: Write,
     E: Write,
 {
-    execute_with_io_tracked(args, env_vars, stdout, stderr, None, None)
+    let row = crate::executor::builtin_table::builtin_table_row("shopt")
+        .expect("shopt row in BUILTIN_TABLE");
+    let mut diag = Diag::new(row, stderr);
+    let status = execute_with_io_tracked(row, args, env_vars, &mut diag, stdout, None, None);
+    diag.flush_with(|| prolog_for_env(env_vars));
+    status
 }
 
 /// [`execute_with_io`] plus a sink for the `-o` binary-option WRITES
@@ -109,106 +133,112 @@ where
 /// still counts: `shopt -s login_shell` inside a `( )` region writes
 /// "on" here but must end off, so a before/after diff cannot detect
 /// it.
-pub(crate) fn execute_with_io_and_o_writes<W, E>(
-    args: &[String],
+pub(crate) fn execute_with_io_and_o_writes<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     o_writes: &mut Vec<(String, bool)>,
     login_shell_write: &mut bool,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     execute_with_io_tracked(
+        row,
         args,
         env_vars,
+        diag,
         stdout,
-        stderr,
         Some(o_writes),
         Some(login_shell_write),
     )
 }
 
-fn execute_with_io_tracked<W, E>(
-    args: &[String],
+fn execute_with_io_tracked<'a, W>(
+    row: &'a BuiltinRow,
+    args: &'a [String],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     o_writes: Option<&mut Vec<(String, bool)>>,
     mut login_shell_write: Option<&mut bool>,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     // `shopt` lists human-readable states by default; `-p` switches to
     // reusable `shopt -s/-u` commands.  An empty argument list is not `-p`.
     let mut print = false;
     let mut use_set_options = false;
     let mut mode = ShoptMode::List;
-    let mut names = Vec::new();
     let mut status = EXECUTION_SUCCESS;
     let mut saw_set = false;
     let mut saw_unset = false;
     // GNU builtins/shopt.def:313: `-q` is QFLAG (quiet), independent of the
     // set/unset mode — `shopt -s -q opt` SETS opt silently (rubash#1357).
     let mut quiet = false;
-    // GNU builtins/bashgetopt.c:84-89: a bare `--` ends option parsing.
-    let mut parsing_options = true;
 
-    for arg in args {
-        if parsing_options && arg == "--" {
-            parsing_options = false;
-            continue;
-        }
-        if parsing_options && arg.starts_with('-') && arg != "-" {
-            for option in arg[1..].chars() {
-                match option {
-                    's' => {
-                        mode = ShoptMode::Set;
-                        saw_set = true;
-                    }
-                    'u' => {
-                        mode = ShoptMode::Unset;
-                        saw_unset = true;
-                    }
-                    'q' => quiet = true,
-                    'p' => print = true,
-                    'o' => use_set_options = true,
-                    other => {
-                        writeln!(
-                            stderr,
-                            "{}shopt: -{}: invalid option",
-                            diagnostic_prefix(),
-                            other
-                        )?;
-                        writeln!(stderr, "shopt: usage: shopt [-pqsu] [-o] [optname ...]")?;
-                        return Ok(EX_USAGE);
-                    }
+    // Stage-2 ④ Phase 3: the scan is the (table row + BuiltinOpt +
+    // Diag) triple — `internal_getopt (list, "psuoq")`
+    // (builtins/shopt.def). The machine stops at the first operand
+    // and at a bare `--` (bashgetopt.c:84-89), reports an unknown
+    // character itself, and yields Help for a `--help` word in
+    // option position (rubash#2955).
+    let names: Vec<&str> = {
+        let mut opt = BuiltinOpt::new(row, args, diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Opt(b's') => {
+                    mode = ShoptMode::Set;
+                    saw_set = true;
                 }
+                OptEvent::Opt(b'u') => {
+                    mode = ShoptMode::Unset;
+                    saw_unset = true;
+                }
+                OptEvent::Opt(b'q') => quiet = true,
+                OptEvent::Opt(b'p') => print = true,
+                OptEvent::Opt(b'o') => use_set_options = true,
+                OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {
+                    unreachable!("shopt spec is \"psuoq\"")
+                }
+                OptEvent::Help => {
+                    crate::builtins::help::print_builtin_help("shopt", stdout)?;
+                    return Ok(EX_USAGE);
+                }
+                OptEvent::End => break,
             }
-        } else {
-            parsing_options = false;
-            names.push(arg.as_str());
         }
-    }
+        let scan_failed = opt.optopt().is_some();
+        let operands = opt
+            .operands()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        drop(opt);
+        if scan_failed {
+            // The machine reported the character; shopt.def's scan
+            // switch adds the usage and returns EX_USAGE.
+            diag.usage();
+            return Ok(EX_USAGE);
+        }
+        operands
+    };
 
     // GNU builtins/shopt.def:331-334: if both -s and -u are given, report
     // "cannot set and unset shell options simultaneously" via builtin_error.
     if saw_set && saw_unset {
-        writeln!(
-            stderr,
-            "{}shopt: cannot set and unset shell options simultaneously",
-            diagnostic_prefix()
-        )?;
+        diag.free(format_args!(
+            "cannot set and unset shell options simultaneously"
+        ));
         return Ok(EXECUTION_FAILURE);
     }
 
     if use_set_options {
         return execute_set_option_mode(
-            mode, print, quiet, &names, env_vars, stdout, stderr, o_writes,
+            mode, print, quiet, &names, env_vars, diag, stdout, o_writes,
         );
     }
 
@@ -244,11 +274,7 @@ where
 
     for name in names {
         if !is_supported_option(name) {
-            writeln!(
-                stderr,
-                "{}shopt: {name}: invalid shell option name",
-                diagnostic_prefix()
-            )?;
+            diag.free(format_args!("{name}: invalid shell option name"));
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -266,12 +292,12 @@ where
         match mode {
             ShoptMode::Set => {
                 if let Some(diagnostic) = set_option(env_vars, name, true) {
-                    writeln!(stderr, "{}{diagnostic}", diagnostic_prefix())?;
+                    write_readonly_diagnostic(diag, env_vars, &diagnostic);
                 }
             }
             ShoptMode::Unset => {
                 if let Some(diagnostic) = set_option(env_vars, name, false) {
-                    writeln!(stderr, "{}{diagnostic}", diagnostic_prefix())?;
+                    write_readonly_diagnostic(diag, env_vars, &diagnostic);
                 }
             }
             // GNU shopt.def list_shopts with QFLAG: no output, rc reflects
@@ -300,19 +326,18 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn execute_set_option_mode<W, E>(
+fn execute_set_option_mode<'a, W>(
     mode: ShoptMode,
     print: bool,
     quiet: bool,
     names: &[&str],
     env_vars: &mut crate::shell::var_table::VarTable,
+    diag: &mut Diag<'a>,
     stdout: &mut W,
-    stderr: &mut E,
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
     let mut status = EXECUTION_SUCCESS;
     // Operand-less `shopt -o` listing goes through GNU's minus-o print path:
@@ -383,11 +408,7 @@ where
 
     for name in names {
         if !crate::builtins::set::is_shell_option(name) {
-            writeln!(
-                stderr,
-                "{}shopt: {name}: invalid option name",
-                diagnostic_prefix()
-            )?;
+            diag.free(format_args!("{name}: invalid option name"));
             // GNU shopt.def (minus-o forms): a SET/UNSET request reports
             // the bad name but keeps status 0 — the failure status belongs
             // to the query/list forms only (`shopt -o badname` and
@@ -781,15 +802,31 @@ fn serialize_state(state: &HashSet<String>) -> String {
     names.join(DATA_DOLLAR_STR)
 }
 
-fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        std::env::var("__RUBASH_SCRIPT_NAME"),
-        std::env::var("__RUBASH_CURRENT_LINE"),
+/// GNU's compat44 readonly report is an `err_readonly` line
+/// (error.c:453): the error prolog with NO builtin-name segment,
+/// so it cannot ride a Diag skeleton line ({prolog}{name}: ...) —
+/// it goes through the Diag's sink with the prefix built from the
+/// env cells, the pushd `bindpwd_write` pattern (the `gnu_errfmt`
+/// shopt selects the `file:line:` shape over `file: line N:`).
+fn write_readonly_diagnostic(
+    diag: &mut Diag,
+    env_vars: &crate::shell::var_table::VarTable,
+    diagnostic: &str,
+) {
+    let prefix = match (
+        env_vars.get("__RUBASH_SCRIPT_NAME"),
+        env_vars.get("__RUBASH_CURRENT_LINE"),
     ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
+        (Some(script), Some(line)) => {
+            if option_enabled(env_vars, "gnu_errfmt") {
+                format!("{script}:{line}: ")
+            } else {
+                format!("{script}: line {line}: ")
+            }
+        }
+        _ => "bash: ".to_string(),
+    };
+    diag.sink().write_str(&format!("{prefix}{diagnostic}\n"));
 }
 
 #[cfg(test)]

@@ -140,12 +140,20 @@ impl Executor {
         } else {
             self.exit_code
         };
-        let action = crate::builtins::exit::execute_with_io(
-            cmd.words[1..].iter().map(String::as_str),
-            last_status,
-            &mut stdout,
-            &mut stderr,
-        )?;
+        let action = {
+            let row =
+                super::builtin_table::builtin_table_row("exit").expect("exit row in BUILTIN_TABLE");
+            let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
+            let action = crate::builtins::exit::execute_with_io(
+                row,
+                &cmd.words[1..],
+                last_status,
+                &mut diag,
+                &mut stdout,
+            );
+            diag.flush_with(|| self.diagnostic_prolog());
+            action?
+        };
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         // GNU exit.def:147 (exit_or_logout -> bash_logout): once the
         // exit arguments have validated — an argument error returns in
@@ -266,7 +274,7 @@ impl Executor {
         };
         let status = match rest.first() {
             None => self.exit_code,
-            Some(word) => match crate::builtins::exit::gnu_valid_number(word) {
+            Some(word) => match super::builtin_diag::valid_number(word) {
                 Some(value) => crate::builtins::exit::normalize_status(value),
                 None => {
                     let mut stderr = Vec::new();
