@@ -218,7 +218,7 @@ mod pipeline_exec;
 mod pipeline_stages;
 mod print_comsub;
 
-mod read_helpers;
+pub(crate) mod read_helpers;
 mod read_split;
 mod redirect_inherit;
 mod redirection;
