@@ -402,16 +402,19 @@ impl DocId {
 pub struct BuiltinRow {
     /// The name as typed (`"declare"`, `"."`, `"["`).
     pub name: &'static str,
-    /// The canonical processor identity.
-    pub handler: HandlerSlot,
+    /// The canonical processor identity. `pub(crate)`: `HandlerSlot`
+    /// is engine-internal — exposing it as `pub` fails the
+    /// private-in-public check (E0603) on current stable (rubash#2949).
+    pub(crate) handler: HandlerSlot,
     /// The GNU `builtins.h` flag bits.
     pub flags: BuiltinFlags,
     /// The getopt specification (`§4.2`).
     pub opt_spec: OptSpec,
     /// The help-table index (`§4.4`; `DocId::None` for `env`).
     pub doc: DocId,
-    /// The `type` / `command -v` answer category.
-    pub introspection: Introspection,
+    /// The `type` / `command -v` answer category. `pub(crate)` for the
+    /// same reason as `handler` above (rubash#2949).
+    pub(crate) introspection: Introspection,
     /// Whether `--help` in option position prints the long help
     /// (status 2). True for every `Getopt` row and for the
     /// `Grammar`/`NoScan` rows whose `.def` calls `CHECK_HELPOPT`;
