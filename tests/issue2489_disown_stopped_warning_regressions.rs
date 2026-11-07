@@ -10,13 +10,23 @@
 //! against GNU bash 5.3.20 probes (script files); the r46 jr13 shape
 //! is the first test. The `bash: line 1:` prefix is rubash's
 //! established -c diagnostic rendering (GNU invoked as `bash`).
+//!
+//! rubash#2935: the helper pins argv[0] to `bash` via `arg0`. D1
+//! (rubash#2714) renders the invocation name VERBATIM in the
+//! diagnostic prefix — GNU does exactly the same (oracle probe:
+//! `exec -a /x/y/zsh bash -c '...'` prefixes `/x/y/zsh: line 1:`) —
+//! so the byte-exact expectations below hold only with argv[0]
+//! controlled; spawning by the absolute CARGO_BIN_EXE path made the
+//! prefix the path and reddened every warning pin in this file.
 
 #![cfg(unix)]
 
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 fn rubash(script: &str) -> (String, String, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg0("bash")
         .arg("-c")
         .arg(script)
         .output()

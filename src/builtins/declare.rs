@@ -1359,7 +1359,11 @@ where
         )?;
         return Ok(attr_status);
     }
-    if names.is_empty() && !had_name_args {
+    // Listing mode = the no-operand enumeration (as opposed to a
+    // named lookup); the printer's att_invisible rule keys on it
+    // (rubash#2973).
+    let listing_mode = names.is_empty() && !had_name_args;
+    if listing_mode {
         print = true;
     }
 
@@ -1373,6 +1377,7 @@ where
         variables,
         options,
         plain,
+        listing_mode,
         attr_status,
         dynamic_views,
         underlay,

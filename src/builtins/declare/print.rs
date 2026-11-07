@@ -14,12 +14,86 @@ use super::{
     LOWERCASE_VARS, NAMEREF_VARS, READONLY_VARS, UPPERCASE_VARS,
 };
 
+// Listing-filter attribute bits for the GNU adjudication below.
+const F_EXPORT: u16 = 1 << 0;
+const F_READONLY: u16 = 1 << 1;
+const F_ARRAY: u16 = 1 << 2;
+const F_ASSOC: u16 = 1 << 3;
+const F_INTEGER: u16 = 1 << 4;
+const F_UPPERCASE: u16 = 1 << 5;
+const F_LOWERCASE: u16 = 1 << 6;
+const F_NAMEREF: u16 = 1 << 7;
+const F_TRACE: u16 = 1 << 8;
+const F_CAPCASE: u16 = 1 << 9;
+
+/// The requested-attribute mask of a no-operand listing from the
+/// builtin's minus-form option set.
+#[allow(clippy::too_many_arguments)]
+fn listing_request_mask(
+    export: bool,
+    readonly: bool,
+    array: bool,
+    assoc: bool,
+    integer: bool,
+    uppercase: bool,
+    lowercase: bool,
+    nameref: bool,
+    trace: bool,
+    capcase: bool,
+) -> u16 {
+    (if export { F_EXPORT } else { 0 })
+        | (if readonly { F_READONLY } else { 0 })
+        | (if array { F_ARRAY } else { 0 })
+        | (if assoc { F_ASSOC } else { 0 })
+        | (if integer { F_INTEGER } else { 0 })
+        | (if uppercase { F_UPPERCASE } else { 0 })
+        | (if lowercase { F_LOWERCASE } else { 0 })
+        | (if nameref { F_NAMEREF } else { 0 })
+        | (if trace { F_TRACE } else { 0 })
+        | (if capcase { F_CAPCASE } else { 0 })
+}
+
+/// GNU builtins/setattr.def set_or_show_attributes, the listing
+/// branch declare_builtin reaches for no-operand forms: the array
+/// attribute is a type GATE when requested (the assoc attribute is
+/// the gate only when -a is absent — the C code is an `else if`),
+/// the gate bit is removed from the attribute set unless it was the
+/// only flag, and a variable is shown iff it passes the gate AND
+/// carries at least one of the remaining attributes
+/// (`(var->attributes & attribute) != 0`). With no flag requested
+/// everything passes; with only the gate requested the gate alone
+/// decides (rubash#2972 — the pre-fix code conjoined all filters,
+/// and trace/capcase were not filters at all).
+fn listing_filter_passes(requested: u16, held: u16) -> bool {
+    if requested == 0 {
+        return true;
+    }
+    let gate = if requested & F_ARRAY != 0 {
+        F_ARRAY
+    } else if requested & F_ASSOC != 0 {
+        F_ASSOC
+    } else {
+        0
+    };
+    if gate != 0 && held & gate == 0 {
+        return false;
+    }
+    let rest = if gate != 0 && requested != gate {
+        requested & !gate
+    } else {
+        requested
+    };
+    held & rest != 0
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn print_declare_names<W, E>(
     command_name: &str,
     names: &[&str],
     variables: &crate::shell::var_table::VarTable,
     options: DeclareOptions,
     plain: bool,
+    listing_mode: bool,
     mut status: i32,
     dynamic_views: &[DynamicDeclarationView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
@@ -48,6 +122,8 @@ where
     let filter_uppercase = options.uppercase;
     let filter_lowercase = options.lowercase;
     let filter_nameref = options.nameref;
+    let filter_trace = options.trace;
+    let filter_capcase = options.capcase;
 
     let names_to_print = if names.is_empty() {
         // Listing mode only: declaration_names_to_print consumes these
@@ -68,6 +144,8 @@ where
             filter_uppercase,
             filter_lowercase,
             filter_nameref,
+            filter_trace,
+            filter_capcase,
             &uppercase,
             &lowercase,
             &namerefs,
@@ -82,20 +160,57 @@ where
         // carry those attributes in GNU but no mark-set entries here);
         // the remaining filters consult the mark sets exactly like the
         // table-driven listing.
+        let requested = listing_request_mask(
+            filter_exported,
+            filter_readonly,
+            filter_array,
+            filter_assoc,
+            filter_integer,
+            filter_uppercase,
+            filter_lowercase,
+            filter_nameref,
+            filter_trace,
+            filter_capcase,
+        );
         for view in dynamic_views {
             let view_name = view.name.as_str();
             if listed.iter().any(|name| name == view_name) {
                 continue;
             }
-            let passes = (!filter_exported || variables.is_marked(EXPORTED_VARS, view_name))
-                && (!filter_readonly || variables.is_marked(READONLY_VARS, view_name))
-                && (!filter_array || view.array)
-                && (!filter_assoc)
-                && (!filter_integer || view.integer)
-                && (!filter_uppercase || variables.is_marked(UPPERCASE_VARS, view_name))
-                && (!filter_lowercase || variables.is_marked(LOWERCASE_VARS, view_name))
-                && (!filter_nameref || variables.is_marked(NAMEREF_VARS, view_name));
-            if passes {
+            // Same GNU adjudication as the table walk: the view's
+            // own class supplies the array/integer bits (the dynamic
+            // cells carry those attributes in GNU but no mark-set
+            // entries here), the remaining attributes consult the
+            // mark sets exactly like a table variable.
+            let mut held = 0u16;
+            if view.array {
+                held |= F_ARRAY;
+            }
+            if view.integer {
+                held |= F_INTEGER;
+            }
+            if variables.is_marked(EXPORTED_VARS, view_name) {
+                held |= F_EXPORT;
+            }
+            if variables.is_marked(READONLY_VARS, view_name) {
+                held |= F_READONLY;
+            }
+            if variables.is_marked(UPPERCASE_VARS, view_name) {
+                held |= F_UPPERCASE;
+            }
+            if variables.is_marked(LOWERCASE_VARS, view_name) {
+                held |= F_LOWERCASE;
+            }
+            if variables.is_marked(NAMEREF_VARS, view_name) {
+                held |= F_NAMEREF;
+            }
+            if variables.is_marked(super::TRACE_VARS, view_name) {
+                held |= F_TRACE;
+            }
+            if variables.is_marked(super::CAPCASE_VARS, view_name) {
+                held |= F_CAPCASE;
+            }
+            if listing_filter_passes(requested, held) {
                 listed.push(view.name.clone());
             }
         }
@@ -107,26 +222,53 @@ where
         // underlying binding has no table cell (a declared-but-unset
         // variable) are added here when they pass.
         if !underlay.is_empty() {
-            let passes_under = |attrs: &crate::shell::var_table::VarAttrs| {
-                (!filter_exported || attrs.exported)
-                    && (!filter_readonly || attrs.readonly)
-                    && (!filter_array || attrs.array)
-                    && (!filter_assoc || attrs.assoc)
-                    && (!filter_integer || attrs.integer)
-                    && (!filter_uppercase || attrs.uppercase)
-                    && (!filter_lowercase || attrs.lowercase)
-                    && (!filter_nameref || attrs.nameref)
+            // The underlay snapshot adjudicates by the same GNU rule
+            // (capcase has no VarAttrs slot and stays live, as in the
+            // per-name attribute reads below).
+            let passes_under = |name: &str, attrs: &crate::shell::var_table::VarAttrs| {
+                let mut held = 0u16;
+                if attrs.exported {
+                    held |= F_EXPORT;
+                }
+                if attrs.readonly {
+                    held |= F_READONLY;
+                }
+                if attrs.array {
+                    held |= F_ARRAY;
+                }
+                if attrs.assoc {
+                    held |= F_ASSOC;
+                }
+                if attrs.integer {
+                    held |= F_INTEGER;
+                }
+                if attrs.uppercase {
+                    held |= F_UPPERCASE;
+                }
+                if attrs.lowercase {
+                    held |= F_LOWERCASE;
+                }
+                if attrs.nameref {
+                    held |= F_NAMEREF;
+                }
+                if attrs.trace {
+                    held |= F_TRACE;
+                }
+                if variables.is_marked(super::CAPCASE_VARS, name) {
+                    held |= F_CAPCASE;
+                }
+                listing_filter_passes(requested, held)
             };
             listed.retain(|name| match underlay.get(name) {
                 None => true,
                 Some(None) => false,
-                Some(Some((_, attrs))) => passes_under(attrs),
+                Some(Some((_, attrs))) => passes_under(name, attrs),
             });
             for (name, under) in underlay.iter() {
                 let Some((_, attrs)) = under else {
                     continue;
                 };
-                if passes_under(attrs) && !listed.iter().any(|listed| listed == name) {
+                if passes_under(name, attrs) && !listed.iter().any(|listed| listed == name) {
                     listed.push(name.clone());
                 }
             }
@@ -181,6 +323,15 @@ where
             .map(|view| &view.text)
         {
             writeln!(stdout, "{rendered}")?;
+        } else if listing_mode && variables.is_marked(crate::executor::types::INVISIBLE_VARS, &name)
+        {
+            // GNU show_var_attributes (builtins/setattr.def): an
+            // att_invisible cell renders NAME ONLY in an enumeration;
+            // its value appears only through a named lookup. The
+            // invisible cells here (BASH_ARGV0, COMP_WORDBREAKS) are
+            // ordinary table entries, so the listing arm renders them
+            // like a value-less declaration (rubash#2973).
+            print_unset_declaration(&name, attrs, stdout)?;
         } else if let Some(Some((under_value, _))) = underlay.get(&name) {
             // rubash#1569: render the pre-frame binding's stored text;
             // a binding that existed without env text (declared but
@@ -210,6 +361,17 @@ where
             || underlay_attr(&name, DECLARED_UNSET_VARS, |a| a.declared_unset)
         {
             print_unset_declaration(&name, attrs, stdout)?;
+        } else if listing_mode {
+            // An enumeration only walks names the candidate sources
+            // computed; a name that resolves to no cell, no value and
+            // no attribute here (a mark whose cell lives outside the
+            // table and whose view was not supplied, e.g. an
+            // unmaterialized PIPESTATUS) is simply not a listing
+            // member — GNU's enumeration cannot name a cell that does
+            // not exist, so it never errors for one (rubash#2973).
+            // The not-found diagnostic below belongs to NAMED
+            // lookups, where the user asked for the name explicitly.
+            continue;
         } else {
             writeln!(
                 stderr,
@@ -270,6 +432,7 @@ pub(crate) fn declaration_line(
     Some(text.trim_end_matches('\n').to_string())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn declaration_names_to_print(
     variables: &crate::shell::var_table::VarTable,
     export: bool,
@@ -280,6 +443,8 @@ pub(crate) fn declaration_names_to_print(
     uppercase: bool,
     lowercase: bool,
     nameref: bool,
+    trace: bool,
+    capcase: bool,
     uppercase_vars: &HashSet<String>,
     lowercase_vars: &HashSet<String>,
     nameref_vars: &HashSet<String>,
@@ -289,8 +454,49 @@ pub(crate) fn declaration_names_to_print(
     let arrays = marked_vars(variables, ARRAY_VARS);
     let assocs = marked_vars(variables, ASSOC_VARS);
     let integers = marked_vars(variables, INTEGER_VARS);
-    let filter_by_attr =
-        export || readonly || array || assoc || integer || uppercase || lowercase || nameref;
+    let trace_vars = marked_vars(variables, super::TRACE_VARS);
+    let capcase_vars = marked_vars(variables, super::CAPCASE_VARS);
+    let declared_unset = marked_vars(variables, DECLARED_UNSET_VARS);
+    let requested = listing_request_mask(
+        export, readonly, array, assoc, integer, uppercase, lowercase, nameref, trace, capcase,
+    );
+    let filter_by_attr = requested != 0;
+    // The attributes one candidate carries, from the mark sets —
+    // the input to the GNU gate/any adjudication (rubash#2972).
+    let held_bits = |name: &str| -> u16 {
+        let mut held = 0u16;
+        if exported.contains(name) {
+            held |= F_EXPORT;
+        }
+        if readonly_vars.contains(name) {
+            held |= F_READONLY;
+        }
+        if arrays.contains(name) {
+            held |= F_ARRAY;
+        }
+        if assocs.contains(name) {
+            held |= F_ASSOC;
+        }
+        if integers.contains(name) {
+            held |= F_INTEGER;
+        }
+        if uppercase_vars.contains(name) {
+            held |= F_UPPERCASE;
+        }
+        if lowercase_vars.contains(name) {
+            held |= F_LOWERCASE;
+        }
+        if nameref_vars.contains(name) {
+            held |= F_NAMEREF;
+        }
+        if trace_vars.contains(name) {
+            held |= F_TRACE;
+        }
+        if capcase_vars.contains(name) {
+            held |= F_CAPCASE;
+        }
+        held
+    };
     // rubash#2702 (owner decision D7): THIS_SH is not a GNU variable;
     // the engine injects it at startup for ${THIS_SH} self-invocation
     // (executor init), so the injected spelling (the running
@@ -321,21 +527,29 @@ pub(crate) fn declaration_names_to_print(
             if !filter_by_attr {
                 return true;
             }
-            (!export || exported.contains(*name))
-                && (!readonly || readonly_vars.contains(*name))
-                && (!array || arrays.contains(*name))
-                && (!assoc || assocs.contains(*name))
-                && (!integer || integers.contains(*name))
-                && (!uppercase || uppercase_vars.contains(*name))
-                && (!lowercase || lowercase_vars.contains(*name))
-                && (!nameref || nameref_vars.contains(*name))
+            listing_filter_passes(requested, held_bits(name))
         })
         .cloned()
         .collect();
+    // Candidate sources beyond the value table: a name declared
+    // without a value lives only in the attribute mark sets (and the
+    // declared-unset set), yet GNU's enumeration walks every variable
+    // cell, so every mark set is a candidate source — the pre-fix
+    // chain covered only exported/readonly/nameref and silently
+    // dropped e.g. a value-less `declare -i x` from every listing
+    // (rubash#2972).
     for name in exported
         .iter()
         .chain(readonly_vars.iter())
+        .chain(arrays.iter())
+        .chain(assocs.iter())
+        .chain(integers.iter())
+        .chain(uppercase_vars.iter())
+        .chain(lowercase_vars.iter())
         .chain(nameref_vars.iter())
+        .chain(trace_vars.iter())
+        .chain(capcase_vars.iter())
+        .chain(declared_unset.iter())
     {
         if name.starts_with("__RUBASH_") {
             continue;
@@ -351,19 +565,12 @@ pub(crate) fn declaration_names_to_print(
         if !valid_identifier(name) {
             continue;
         }
-        if !filter_by_attr && !variables.contains_key(name) {
-            continue;
-        }
-        if filter_by_attr
-            && !((!export || exported.contains(name))
-                && (!readonly || readonly_vars.contains(name))
-                && (!array || arrays.contains(name))
-                && (!assoc || assocs.contains(name))
-                && (!integer || integers.contains(name))
-                && (!uppercase || uppercase_vars.contains(name))
-                && (!lowercase || lowercase_vars.contains(name))
-                && (!nameref || nameref_vars.contains(name)))
-        {
+        // No table-entry requirement: a mark-set name IS a live
+        // variable cell (unset removes the marks with the cell), and
+        // GNU's full listing includes value-less cells — the pre-fix
+        // `contains_key` guard dropped every declared-but-unset name
+        // from unfiltered listings (rubash#2972).
+        if filter_by_attr && !listing_filter_passes(requested, held_bits(name)) {
             continue;
         }
         if !names.iter().any(|current| current == name) {

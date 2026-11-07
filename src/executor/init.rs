@@ -315,14 +315,28 @@ impl Executor {
         // VarTable::from_values also imports any __RUBASH_*_VARS attribute
         // lists a parent rubash left in the environment — the structured
         // form of the cross-process attribute transport.
+        // rubash#2884: the imported values are entry-encoded at this
+        // funnel (env_helpers::entry_encode_imported_env) — GNU
+        // variables.c:368 stores environ verbatim, but this engine's
+        // stored spelling is a transport domain and environment import
+        // was the one entry that skipped the encoding every other
+        // value channel applies. The process_env_snapshot FIELD keeps
+        // the raw values: the Drop-time restore writes them back to
+        // the process environment verbatim.
         let mut env_vars = if process_exit {
             crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::process_env_pairs()
-                    .into_iter()
-                    .collect(),
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    crate::executor::env_helpers::process_env_pairs()
+                        .into_iter()
+                        .collect(),
+                ),
             )
         } else {
-            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
+            crate::shell::var_table::VarTable::from_values(
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    process_env_snapshot.clone(),
+                ),
+            )
         };
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
@@ -1004,6 +1018,11 @@ impl Executor {
                 // validated stamp IS this child's invocation shape.
                 invocation_interactive: false,
                 invocation_login: respawn_login_shell,
+                // rubash#2961: forced_interactive is seeded by the
+                // same funnels that seed invocation_interactive
+                // (the host declares the shape after construction);
+                // a respawned child re-derives it there too.
+                forced_interactive: false,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
@@ -1034,6 +1053,9 @@ impl Executor {
                 // respawn verbatim; None keeps the arrays unmaterialized
                 // exactly as the parent's fork left them.
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
+                dynamic_cells: std::cell::RefCell::new(
+                    crate::shell::state::DynamicCellState::default(),
+                ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
@@ -1644,6 +1666,12 @@ impl Executor {
         // exists (`declare -p COMP_WORDBREAKS` succeeds) but print_var_list
         // (the `set` listing) skips invisible variables (rubash#1325).
         mark_env_name(env_vars, INVISIBLE_VARS, "COMP_WORDBREAKS");
+        // BASH_ARGV0 carries att_invisible in GNU too (variables.c
+        // table registration): the same two listing rules apply — the
+        // `set` form skips it, and declaration listings render the
+        // bare name (show_var_attributes) while a NAMED lookup still
+        // prints its value (rubash#2973).
+        mark_env_name(env_vars, INVISIBLE_VARS, "BASH_ARGV0");
         // GNU shell.c: a shell whose environment carries no TERM binds
         // TERM="dumb" (plain, unexported) instead of leaving it unset
         // (rubash#1325).

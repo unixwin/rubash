@@ -822,17 +822,37 @@ impl Executor {
                 QuoteKind::Single | QuoteKind::Backslash => body,
                 QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
                 QuoteKind::Double | QuoteKind::Locale => {
-                    // parse.y read_token_word's double-quote scanner never
-                    // opens single-quote state, so a `'` inside the body is
-                    // literal data (GNU cond_expand_word keeps it). Feeding
-                    // a bare `'` to expand_word_mut makes quote removal
-                    // treat it as an unclosed single-quote span and drop
-                    // it, collapsing `[[ "''" == "''" ]]`'s pattern to the
-                    // empty string. Tag it with the lexer's decoded-quote
-                    // marker (the same protection escape_decoded_ansi_c_
-                    // quotes applies) so it survives as data.
-                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
-                    self.expand_conditional_word(&body)
+                    // GNU cond.c cond_expand_word expands the pattern
+                    // operand as a word WITH its quoting intact (parse.y
+                    // read_token_word + subst.c expand_word_internal):
+                    // inside double quotes `\$`, `\\`, `\"` and `` \` ``
+                    // are escapes resolving to literal `$`, `\`, `"`,
+                    // `` ` ``, and `'` is data (the double-quote scanner
+                    // never opens single-quote state). Expanding the
+                    // quote-stripped body as a bare fragment loses that
+                    // context: `\$` misreads as `\` + a live `$name`
+                    // expansion, `\\` never collapses, and a `'` hand-
+                    // tagged with the U+E010 decoded-quote marker
+                    // survives whenever a backslash routes the fragment
+                    // through the mutable walker (which never decodes
+                    // that marker) — so `[[ "\`x'" == ... ]]`,
+                    // `[[ "a\$b" == ... ]]` and `[[ "a\\b" == ... ]]`
+                    // all fail against GNU (rubash#2981). Cook the body
+                    // to the lexer's carrier spelling first
+                    // (cook_double_quoted_segment): escapes become DATA_*
+                    // carriers and `'` becomes DATA_SQUOTE, the exact
+                    // spelling the whole-word expansion of `right`
+                    // already consumes correctly — so the segment expands
+                    // to its literal text with no re-interpretation of
+                    // raw escapes. Quotes inside a nested `$(...)`/
+                    // `${...}`/backtick unit belong to that unit's own
+                    // grammar and travel verbatim through the cooker
+                    // (parse.y:3877 parse_matched_pair), so cooking
+                    // cannot corrupt them; a raw `"` cannot appear in the
+                    // body (it would have ended the span).
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    let value = self.expand_conditional_word(&cooked);
+                    value
                 }
             };
             append_literal_glob_text(&mut output, &value);
@@ -1377,7 +1397,16 @@ impl Executor {
                 let quoted = match kind {
                     QuoteKind::Single | QuoteKind::Backslash => body,
                     QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                    QuoteKind::Double | QuoteKind::Locale => self.expand_conditional_word(&body),
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data instead of being re-read from the
+                    // raw fragment.
+                    QuoteKind::Double | QuoteKind::Locale => {
+                        let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                        self.expand_conditional_word(&cooked)
+                    }
                 };
                 let quoted =
                     crate::executor::substitution_metadata::shell_text_to_raw_bytes(&quoted);
@@ -1735,6 +1764,21 @@ fn raw_quote_at(chars: &[char], start: usize) -> Option<(QuoteKind, usize, usize
 
     let mut index = start + opener_len;
     while index < chars.len() {
+        // GNU parse.y skip_double_quoted (via parse_matched_pair,
+        // parse.y:5416-5432): inside `"..."` a substitution unit owns its
+        // own quoting — `$(` takes parse_comsub/parse_matched_pair, `${`
+        // takes parse_matched_pair, and a backquote opens backquote mode
+        // — so an inner `"` never ends the span. The case side's
+        // quoted_case_pattern_end already skips these units (rubash#259);
+        // without the skip here, `"$(echo "x")"` truncated at the inner
+        // quote and the comsub looked unclosed (rubash#2981).
+        if terminator == '"' {
+            if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(chars, index)
+            {
+                index = next;
+                continue;
+            }
+        }
         if chars[index] == '\\' && terminator != '\'' {
             index += 2;
             continue;

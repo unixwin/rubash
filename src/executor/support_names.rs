@@ -778,15 +778,62 @@ pub(in crate::executor) fn split_shell_path(path: &str) -> Vec<String> {
     if cfg!(windows) {
         split_windows_shell_path(path)
     } else {
-        // GNU findcmd.c get_next_path_element(): an empty PATH element
-        // (leading ':', trailing ':', or "::") denotes the current
-        // directory — it is replaced with ".", never dropped. Dropping
-        // it made `PATH=:/usr/bin cmd` miss commands in the cwd.
-        path.split(':')
-            .map(|entry| if entry.is_empty() { "." } else { entry })
-            .map(str::to_string)
-            .collect()
+        split_gnu_path(path)
     }
+}
+
+/// The POSIX PATH walk, ported from GNU findcmd.c/general.c
+/// (rubash#2943):
+///
+/// - `path_value` (findcmd.c:266-281): an empty PATH value normalizes
+///   to `"."` before any iteration.
+/// - `user_command_matches` (findcmd.c:481) iterates
+///   `while (path_list[path_index])` with `extract_colon_unit`
+///   (general.c:1058): each call leaves the index RESTING on a colon;
+///   the next call steps past it, and an empty unit consumes the colon
+///   it rests on as well. A run of adjacent empty elements therefore
+///   yields fewer visits than a naive `split(':')` — the second empty
+///   in a run folds into the previous unit's terminator — while a
+///   naive split visits every element and made `type -a` report the
+///   cwd match once per empty element.
+/// - `get_next_path_element` (findcmd.c:322): an empty unit is ".".
+///
+/// First-match consumers are unaffected (a folded visit could only
+/// return the same candidate again); enumeration (`type -a`) now
+/// matches GNU's counts exactly.
+fn split_gnu_path(path: &str) -> Vec<String> {
+    if path.is_empty() {
+        return vec![".".to_string()];
+    }
+    let bytes = path.as_bytes();
+    let mut entries = Vec::new();
+    let mut index = 0usize;
+    // while (path_list[path_index])
+    while index < bytes.len() {
+        // extract_colon_unit: step past the colon the index rests on
+        // (never at index 0 — a leading colon is a leading empty unit).
+        let mut i = index;
+        if i > 0 && bytes[i] == b':' {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] != b':' {
+            i += 1;
+        }
+        let mut p_index = i;
+        if i == start && i < bytes.len() {
+            // Empty unit: the index advances past the resting colon.
+            p_index += 1;
+        }
+        let unit = &path[start..i];
+        entries.push(if unit.is_empty() {
+            ".".to_string()
+        } else {
+            unit.to_string()
+        });
+        index = p_index;
+    }
+    entries
 }
 
 fn split_windows_shell_path(path: &str) -> Vec<String> {
@@ -865,6 +912,32 @@ mod split_shell_path_tests {
                 "/bin;/literal-semicolon".to_string()
             ]
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_path_walk_matches_extract_colon_unit() {
+        // rubash#2943: the (PATH -> visited elements) table GNU
+        // user_command_matches enumerates — path_value normalizes ""
+        // to "." (findcmd.c:266-281), extract_colon_unit rests the
+        // index on a colon so runs of empty elements fold
+        // (general.c:1058), and empty units render "." here.
+        let cases: &[(&str, &[&str])] = &[
+            ("", &["."]),
+            (":", &["."]),
+            ("::", &[".", "."]),
+            (":::", &[".", "."]),
+            (":/usr/bin:", &[".", "/usr/bin", "."]),
+            ("/usr/bin::", &["/usr/bin", "."]),
+            ("::/usr/bin", &[".", "/usr/bin"]),
+            (":/usr/bin:::/tmp", &[".", "/usr/bin", ".", "/tmp"]),
+            (":::/usr/bin::", &[".", ".", "/usr/bin", "."]),
+            ("/usr/bin:/bin", &["/usr/bin", "/bin"]),
+        ];
+        for (path, expected) in cases {
+            let expected: Vec<String> = expected.iter().map(|e| e.to_string()).collect();
+            assert_eq!(split_shell_path(path), expected, "PATH={path:?}");
+        }
     }
 }
 

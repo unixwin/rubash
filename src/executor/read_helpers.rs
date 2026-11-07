@@ -134,18 +134,13 @@ pub(in crate::executor) fn note_reaped_child_cpu<C: ReapedChildCpu>(child: &C) {
     }
 }
 
+/// The SELF counters on Windows: GetProcessTimes on the current
+/// process — also where rubash's no-fork subshell and builtin work
+/// lands, so it is the half that moves for in-process timed commands
+/// (a pure builtin loop under `time` used to report user 0m0.000s
+/// here).
 #[cfg(windows)]
-fn rusage_counters() -> RusageCounters {
-    // Windows has no getrusage. The SELF half of GNU's SELF+CHILDREN
-    // sum maps to GetProcessTimes on the current process — which is
-    // also where rubash's no-fork subshell and builtin work lands, so
-    // it is the half that moves for in-process timed commands (a pure
-    // builtin loop under `time` used to report user 0m0.000s here).
-    // The CHILDREN half is the reap-site accumulator above
-    // (rubash#1776): external children sampled at wait time. One
-    // known gap remains: a capture pipeline's last member is consumed
-    // by wait_with_output, which closes its handle before any sample
-    // point, so that member's CPU is still missing.
+fn windows_self_counters() -> RusageCounters {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
@@ -171,16 +166,67 @@ fn rusage_counters() -> RusageCounters {
     if ok == 0 {
         return RusageCounters::default();
     }
-    let mut counters = RusageCounters {
+    RusageCounters {
         user: ticks(user),
         sys: ticks(kernel),
-    };
+    }
+}
+
+#[cfg(windows)]
+fn rusage_counters() -> RusageCounters {
+    // Windows has no getrusage. The SELF half of GNU's SELF+CHILDREN
+    // sum is windows_self_counters; the CHILDREN half is the reap-site
+    // accumulator above (rubash#1776): external children sampled at
+    // wait time. One known gap remains: a capture pipeline's last
+    // member is consumed by wait_with_output, which closes its handle
+    // before any sample point, so that member's CPU is still missing.
+    let mut counters = windows_self_counters();
     let reaped = REAPED_CHILDREN_CPU
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     counters.user += reaped.1.user;
     counters.sys += reaped.1.sys;
     counters
+}
+
+/// The four counters the `times` builtin prints, kept SEPARATE
+/// (rubash#2932): GNU builtins/times.def:65-88 calls
+/// getrusage(RUSAGE_SELF) for the first line and
+/// getrusage(RUSAGE_CHILDREN) for the second. Unlike rusage_counters
+/// (the `time` keyword's merged SELF+CHILDREN sum), the halves must
+/// not merge here. Returns (self_user, self_sys, child_user,
+/// child_sys). On Windows the children half is the reap accumulator's
+/// current sum — the same source rusage_counters merges in.
+pub(crate) fn process_times() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
+    #[cfg(unix)]
+    {
+        let (self_user, self_sys) = read_rusage(libc::RUSAGE_SELF);
+        let (child_user, child_sys) = read_rusage(libc::RUSAGE_CHILDREN);
+        (self_user, self_sys, child_user, child_sys)
+    }
+    #[cfg(windows)]
+    {
+        let self_counters = windows_self_counters();
+        let reaped = REAPED_CHILDREN_CPU
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1;
+        (
+            self_counters.user,
+            self_counters.sys,
+            reaped.user,
+            reaped.sys,
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Default::default()
+    }
 }
 
 #[cfg(not(any(unix, windows)))]

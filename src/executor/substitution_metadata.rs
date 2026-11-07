@@ -721,6 +721,26 @@ pub(crate) fn command_string_entry_text(command: &str) -> String {
     output
 }
 
+/// Value-entry encoding for text that arrives as DATA (not source):
+/// the stored spelling every other value channel produces — stdin
+/// lines, `read` input, and comsub assignment RHS all enter through
+/// `bytes_to_shell_text`, whose valid-text arm is exactly this escape.
+/// Environment import (rubash#2884) was the one entry that skipped it;
+/// `env_helpers::entry_encode_imported_env` routes imported user
+/// values here. Fast path: text with no marker-zone char and no
+/// carrier byte is already in stored spelling.
+pub(crate) fn entry_encode_value_text(text: &str) -> String {
+    if !text.chars().any(|ch| {
+        crate::executor::markers::is_marker_zone_char(ch)
+            || (ch as u32) < 0x80 && is_carrier_byte(ch as u32)
+    }) {
+        return text.to_string();
+    }
+    let mut output = String::with_capacity(text.len());
+    push_escaped_text_with_carriers(&mut output, text);
+    output
+}
+
 /// E400-escape every marker-zone char in `text` (script-source literal
 /// boundary — see `bytes_to_script_text`).
 fn push_marker_zone_escaped(output: &mut String, text: &str) {
@@ -729,7 +749,7 @@ fn push_marker_zone_escaped(output: &mut String, text: &str) {
     }
 }
 
-fn escape_marker_zone_chars(text: &str) -> String {
+pub(crate) fn escape_marker_zone_chars(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     push_marker_zone_escaped(&mut output, text);
     output
