@@ -93,6 +93,16 @@ fn compound_append_not_exported_under_allexport() {
 }
 
 #[test]
+fn declare_plus_a_scalar_still_exported_under_allexport() {
+    // Control (both shells): `+a` unsets the array attribute, so the
+    // operand is a plain scalar bind and the allexport mark applies —
+    // the -a/-A stand-down must key on the attribute's final state, not
+    // on the mere presence of the letter.
+    let (_, stdout, _) = run_c("set -a; declare +a s=1; declare -p s");
+    assert_eq!(stdout, "declare -x s=\"1\"\n");
+}
+
+#[test]
 fn subscript_assignment_not_exported_under_allexport() {
     // Control (mC4, both shells): an element bind never marked.
     let (_, stdout, _) = run_c("set -a; arr[0]=x; declare -p arr");

@@ -84,6 +84,14 @@ fn local_global_initializer_exports_under_allexport() {
 }
 
 #[test]
+fn local_plus_a_initializer_exports_under_allexport() {
+    // `+a` leaves the array attribute unset, so the operand binds as a
+    // scalar through bind_variable_value and marks (GNU: declare -x).
+    let (_, stdout, _) = run_c("set -a; f(){ local +a s=1; declare -p s; }; f");
+    assert_eq!(stdout, "declare -x s=\"1\"\n");
+}
+
+#[test]
 fn valueless_local_does_not_export_under_allexport() {
     // Control (both shells): a valueless local performs no bind
     // (make_local_variable only), so set -a does not mark it.

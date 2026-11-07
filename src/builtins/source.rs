@@ -289,9 +289,15 @@ where
 
     let Some(source_path) = invocation.resolve_path(executor) else {
         if invocation.path.is_some() || posix_plain_name_lookup(executor, filename) {
+            // GNU builtins/source.def registers two builtins over this one
+            // implementation — `source` (source.def:23) and `.`
+            // (source.def:39) — and the diagnostic is builtin_error's
+            // "%s: file not found" (source.def:179), whose prefix is
+            // this_command_name, the INVOKED name (builtins/common.c:93-94).
+            // Name the invocation, not a hardcoded spelling (rubash#2947).
             writeln!(
                 stderr,
-                "{}.: {filename}: file not found",
+                "{}{command_name}: {filename}: file not found",
                 executor.diagnostic_prefix()
             )?;
         } else {
