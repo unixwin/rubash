@@ -4881,6 +4881,80 @@ pub fn acquire_controlling_terminal() {
 #[cfg(not(unix))]
 pub fn acquire_controlling_terminal() {}
 
+/// Whether this process can take a controlling terminal for job
+/// control (GNU jobs.c:4755-4766): stderr is already a terminal, or
+/// /dev/tty opens. GNU reaches for /dev/tty only when
+/// forced_interactive made stderr's shape irrelevant; every caller
+/// of the establishment below is an interactive entry, which is
+/// exactly that population — and the arm is load-bearing there,
+/// since GNU establishes job control when /dev/tty opens while
+/// stdin (and even stderr) is piped. Non-unix hosts have no
+/// /dev/tty: the console on stderr is the whole question (the same
+/// honest port the binary's `-m` arm makes).
+#[cfg(unix)]
+fn controlling_terminal_available() -> bool {
+    if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return true;
+    }
+    // SAFETY: plain open/close of the terminal device; no retained
+    // state.
+    unsafe {
+        let dev_tty = b"/dev/tty\0";
+        let fd = libc::open(
+            dev_tty.as_ptr() as *const libc::c_char,
+            libc::O_RDWR | libc::O_NONBLOCK,
+        );
+        if fd >= 0 {
+            libc::close(fd);
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn controlling_terminal_available() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+}
+
+/// GNU shell.c:1969 -> jobs.c:4731-4869 initialize_job_control, the
+/// interactive establishment: jobs.c:4869 ends with
+/// `change_flag ('m', job_control ? '-' : '+')` — the monitor letter
+/// IS the establishment result, wholesale. An explicit `-m` does not
+/// survive a terminal that cannot be taken (GNU `-i -m -c`, no tty:
+/// the two diagnostics + `hiBHc`), and an explicit `+m` does not
+/// suppress it when the terminal can be taken (GNU `+m -i -c` under
+/// a PTY: `himBHc`). Establishment failure prints jobs.c:4841
+/// "cannot set terminal process group (%d)" and jobs.c:4856
+/// "no job control in this shell".
+///
+/// This is the engine's single establishment funnel (rubash#2948):
+/// the binary's startup (main.rs apply_startup_job_control), the
+/// invocation application (invocation.rs — library one-shot forms),
+/// and the interactive stdin reader's fallback (run_interactive_stdin
+/// below) all land here, so every host gets the same rule. A
+/// respawned child is GNU's forked child: it inherits the parent's
+/// job-control state and never re-runs initialize_job_control
+/// (rubash#234), so it returns untouched.
+pub fn establish_interactive_job_control(executor: &mut Executor) {
+    if crate::executor::RESPAWNED_CHILD.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let established = controlling_terminal_available();
+    executor.set_shell_option("monitor", established);
+    if !established {
+        let shell_name = executor
+            .get_env("__RUBASH_SHELL_NAME")
+            .or_else(|| executor.get_env("BASH_ARGV0"))
+            .unwrap_or("bash");
+        eprintln!(
+            "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
+            std::process::id()
+        );
+        eprintln!("{shell_name}: no job control in this shell");
+    }
+}
+
 /// GNU's interactive command reader for every shape this engine serves:
 /// parse.y:1710-1711 routes an interactive shell's reads through
 /// yy_readline_get -> bashline.c bash_readline -> readline(), whose prompt
@@ -4909,25 +4983,31 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     // rubash#1991: job control must exist for every interactive
     // session, whoever drives it. GNU establishes it inside
     // initialize_shell_basics for interactive shells (jobs.c:4869
-    // keeps the `m` flag there even without -m); rubash's binary
+    // makes the `m` flag the establishment result); rubash's binary
     // startup does the equivalent in apply_startup_job_control, but
     // that step lives in main.rs, so a library host driving THIS
     // entry (invocation.rs: a library host (niu) drives the stdin
     // reader) ran interactive sessions with monitor permanently off
     // and fg/bg refused with "no job control" on a real terminal.
-    // Mirror the binary's rule at the library entry: an interactive
-    // session defaults monitor on; an explicit startup transport
-    // value (__RUBASH_SETOPT_monitor, from -m/+m or -o/+o monitor)
-    // is respected untouched. Applied once per process: a host may
-    // re-enter this reader per line, and a user's later
-    // `set +o monitor` must survive those re-entries.
+    // rubash#2948: the establishment is the shared funnel
+    // (establish_interactive_job_control) — monitor tracks whether
+    // a controlling terminal could actually be taken, never the
+    // interactive bit alone. This reader is the FALLBACK funnel: it
+    // fires only when no earlier funnel decided, which the carrier
+    // records exactly — establishment (and the binary's startup)
+    // always writes __RUBASH_SETOPT_monitor, so an absent carrier
+    // means nobody decided yet, while a present one (an explicit
+    // -m/+m or -o/+o monitor transport included) is left untouched.
+    // Applied once per process: a host may re-enter this reader per
+    // line, and a user's later `set +o monitor` must survive those
+    // re-entries.
     static JOB_CONTROL_DEFAULT_APPLIED: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
     if !JOB_CONTROL_DEFAULT_APPLIED.swap(true, std::sync::atomic::Ordering::Relaxed)
         && executor.invocation_interactive()
         && executor.get_env("__RUBASH_SETOPT_monitor").is_none()
     {
-        executor.set_shell_option("monitor", true);
+        establish_interactive_job_control(executor);
     }
     // parse.y:1710: the SAME reader serves tty and non-tty stdin; the two
     // cases differ only in who echoes the accepted line (readline echoes
@@ -7260,12 +7340,15 @@ impl<'e> FinishPass<'e> {
             self.executor.hangup_all_jobs();
         }
         // rubash#1853: end-of-stream job notifications. The
-        // boundary flush in execute_ast only fires when a
-        // further top-level command is walked, so a signal
-        // death in the stream's last command would otherwise
-        // leave the shell silently (GNU prints it from the
+        // reader-level flush only fires when a NEXT list is pulled,
+        // so a signal death in the stream's last command would
+        // otherwise leave the shell silently (GNU prints it from the
         // wait itself — jobs.c:3385 notify_and_cleanup in
         // wait_for; jobs.c:4723 maybe_print_job_notifications).
+        // rubash#2928: the flush stamps foreground deaths with the
+        // last command's line and background deaths with the EOF
+        // pull's line (one past it); a `-c` run dropped its
+        // background entries before finish_shell (no second pull).
         // This runs before the EXIT trap below, matching GNU's
         // order.
         let _ = self.executor.flush_job_notifications_at_stream_end();

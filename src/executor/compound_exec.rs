@@ -837,7 +837,7 @@ enum CoprocRedirectOutcome {
 /// Resolved stdio disposition for one of a background child's fds 0-2,
 /// tracking what GNU's do_redirections would leave the descriptor
 /// pointing at inside the forked subshell.
-enum BackgroundStdio {
+pub(in crate::executor) enum BackgroundStdio {
     /// fd keeps the parent's handle (GNU: the subshell inherited it).
     Inherit,
     /// fd is /dev/null (async stdin default, `>&-`, `<&-`, `>/dev/null`).
@@ -1278,69 +1278,76 @@ impl Executor {
                 &program,
                 &self.shell_state.env_vars,
             );
-            let mut process = match &exec_name {
-                Some(name) => std::process::Command::new(name),
-                None => std::process::Command::new(&program),
-            };
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                process.arg0(&argv[0]);
-            }
-            process.args(&argv[1..]);
-            let [stdin_stdio, stdout_stdio, stderr_stdio] = stdio.map(|resolved| match resolved {
-                BackgroundStdio::Inherit => std::process::Stdio::inherit(),
-                BackgroundStdio::Null => std::process::Stdio::null(),
-                BackgroundStdio::File(file) => std::process::Stdio::from(file),
-            });
-            process
-                .stdin(stdin_stdio)
-                .stdout(stdout_stdio)
-                .stderr(stderr_stdio);
-            // Same environment application as every foreground external
-            // (exported shell vars; no assignments exist at this gate).
-            self.apply_external_environment(&background_command.command, &mut process, &program);
-            // rubash#229/#737 unix arm: reset inherited signal dispositions
-            // in the child exactly like the foreground spawn path. The #737
-            // pdeathsig arm keys off __RUBASH_BACKGROUND_WRAPPER, which is
-            // never set here — a directly-exec'd async child survives shell
-            // exit, as GNU's does.
+            let job_control =
+                crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor");
+            // rubash#2925: on unix the direct spawn is a raw fork, not
+            // `Command::spawn` — the spawn's error-pipe sync blocks the
+            // parent until the child execs, so the parent's kill always
+            // arrives after the child's SIGINT-ignore install (`w=0`).
+            // The raw fork returns the pid at once (see
+            // `spawn_async_direct`); the child installs the same
+            // dispositions, so the delayed-kill steady state is unchanged.
             // rubash#1035: GNU execute_cmd.c setup_async_signals ignores
             // SIGINT/SIGQUIT in the async child while job_control is off
-            // (the `monitor` option is unset) — a background `sleep`
-            // survives `kill -INT $!`. The async pre_exec variant forces
-            // that ignore after the entry-disposition restore; with job
-            // control on the plain reset applies, as in GNU.
+            // — a background `sleep` survives `kill -INT $!`; with job
+            // control on, the grouped reset applies instead (GNU
+            // jobs.c:2390 make_child). The #737 pdeathsig arm keys off
+            // __RUBASH_BACKGROUND_WRAPPER, which is never set here — a
+            // directly-exec'd async child survives shell exit, as GNU's
+            // does.
             #[cfg(unix)]
-            unsafe {
-                use std::os::unix::process::CommandExt;
-                if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
-                {
-                    // rubash#2241: with job control the child also takes
-                    // its own process group (GNU jobs.c:2390 make_child).
-                    // (The rubash#2233 Gap-2 hunk that added a bare
-                    // pre_exec setpgid at this same site was dropped in
-                    // the merge with master: reset_grouped already
-                    // composes reset + setpgid, and the parent-side
-                    // group_spawned_child below completes the pair —
-                    // keeping both would setpgid twice.)
-                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset_grouped);
-                } else {
-                    process.pre_exec(crate::builtins::kill::child_pre_exec_reset_async);
-                }
-            }
-            process.current_dir(&self.shell_state.cwd);
-            suppress_orphan_console(&mut process);
-            match process.spawn() {
+            let spawned = {
+                let exec_path: &std::path::Path = exec_name
+                    .as_deref()
+                    .map(std::path::Path::new)
+                    .unwrap_or(&program);
+                // Same environment composition as every foreground external
+                // (exported shell vars; no assignments exist at this gate).
+                let env_pairs =
+                    self.compose_external_environment(&background_command.command, &program);
+                self.spawn_async_direct(
+                    exec_path,
+                    &argv,
+                    stdio,
+                    &env_pairs,
+                    &self.shell_state.cwd,
+                    job_control,
+                )
+                .map(crate::fd::SpawnedChild::from_pid)
+            };
+            #[cfg(not(unix))]
+            let spawned = {
+                let mut process = match &exec_name {
+                    Some(name) => std::process::Command::new(name),
+                    None => std::process::Command::new(&program),
+                };
+                process.args(&argv[1..]);
+                let [stdin_stdio, stdout_stdio, stderr_stdio] =
+                    stdio.map(|resolved| match resolved {
+                        BackgroundStdio::Inherit => std::process::Stdio::inherit(),
+                        BackgroundStdio::Null => std::process::Stdio::null(),
+                        BackgroundStdio::File(file) => std::process::Stdio::from(file),
+                    });
+                process
+                    .stdin(stdin_stdio)
+                    .stdout(stdout_stdio)
+                    .stderr(stderr_stdio);
+                // Same environment application as every foreground external
+                // (exported shell vars; no assignments exist at this gate).
+                self.apply_external_environment(
+                    &background_command.command,
+                    &mut process,
+                    &program,
+                );
+                process.current_dir(&self.shell_state.cwd);
+                suppress_orphan_console(&mut process);
+                process.spawn().map(crate::fd::SpawnedChild::from)
+            };
+            match spawned {
                 Ok(child) => {
                     let pid = child.id();
                     adopt_orphan_console(pid);
-                    self.background_children
-                        .insert(pid, crate::fd::SpawnedChild::from(child));
-                    let job_control = crate::builtins::set::shell_option_enabled(
-                        &self.shell_state.env_vars,
-                        "monitor",
-                    );
+                    self.background_children.insert(pid, child);
                     // rubash#2241: parent half of the grouping
                     // (GNU jobs.c:2455) — the recorded pgrp in
                     // async_job_pgrp already assumed this group exists.

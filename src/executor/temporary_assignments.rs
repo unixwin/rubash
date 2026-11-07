@@ -2190,7 +2190,15 @@ impl Executor {
         // register the pair as synced for the boundary verifier
         // (rubash#1510).
         self.note_typed_cell_synced(base_name);
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
+        // GNU's mark_modified_vars (flags.c:47,167) is applied only by the
+        // scalar bind primitives (variables.c:3211-3212 bind_variable tail).
+        // A compound bind never passes through them — do_compound_assignment
+        // (subst.c:3441) -> assign_array_from_string (arrayfunc.c:507) sets
+        // no export bit — so a compound assignment under set -a must NOT be
+        // marked (rubash#2945); scalar binds reaching this tail still are.
+        if !compound_assignment
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport")
+        {
             self.mark_exported(base_name);
         }
         // The in-place append already wrote the mirror, so the process-env

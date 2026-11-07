@@ -2135,29 +2135,34 @@ impl Executor {
         let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
             crate::executor::expand_braced_indices::next_word_ctx(),
         );
-        // rubash#960 follow-up: an associative element-assignment word
-        // (`m[sub]=value`) is expanded twice by the pipeline below — the
-        // whole-word expansion is discarded whenever
-        // prepare_array_element_assignment_word resolves a synthetic word.
-        // GNU has no whole-word pass for this shape: general.c:480
-        // assignment() splits the syntactic word and arrayfunc.c:382
-        // assign_array_element_internal expands the subscript once
-        // (expand_subscript_string, subst.c:11063) and the value once
-        // (assignment RHS). When that whole-word pass is provably
-        // side-effect-free, run the assignment pass FIRST and skip it;
-        // otherwise keep the original order. The admission is a whitelist
-        // over the raw source (rubash#117): plain parameter reads and
-        // literal text only, anything else falls through. Placed before the
-        // per-word pre-scans below so the skipped pass costs nothing.
+        // rubash#960 follow-up, completed by rubash#2946: an associative
+        // element-assignment word (`m[sub]=value`) must not be expanded by
+        // the whole-word pipeline below at all. GNU has no whole-word pass
+        // for this shape: general.c:480 assignment() splits the syntactic
+        // word and arrayfunc.c:382 assign_array_element_internal expands
+        // the subscript once (expand_subscript_string, subst.c:11063) and
+        // the value once (assignment RHS). The pipeline used to run the
+        // whole-word expansion first — evaluating the subscript's command
+        // substitutions — and then prepare_array_element_assignment_word
+        // expanded the raw subscript a second time, discarding the first
+        // result, so `a[$(f)]=W` ran f twice and stored the SECOND
+        // evaluation's key. The #960 pass gated the prepare-first order on
+        // the whole-word pass being provably side-effect-free; but
+        // whenever preparation resolves a synthetic word the whole-word
+        // result is discarded anyway (see the tail of this function), so
+        // its only observable effect was the duplicated side effects.
+        // Attempt preparation FIRST for every associative element
+        // assignment; when it declines (literal subscript, dynamic array
+        // name), the word falls through to the whole-word pass unchanged.
+        // Placed before the per-word pre-scans below so the skipped pass
+        // costs nothing.
         if let Some(assignment) = cmd
             .array_element_assignments
             .iter()
             .find(|assignment| assignment.word_index == Some(index))
         {
-            if raw.is_some_and(assoc_element_word_expansion_is_side_effect_free) {
-                if let Some(prepared) = self.prepare_array_element_assignment_word(assignment) {
-                    return vec![prepared];
-                }
+            if let Some(prepared) = self.prepare_array_element_assignment_word(assignment) {
+                return vec![prepared];
             }
         }
         // Assignment operators inside parameter expansions take effect at
@@ -4229,46 +4234,6 @@ fn raw_word_contains_process_substitution(raw: Option<&str>) -> bool {
     // the same scan; all of them now delegate to the one implementation so
     // the answers can never drift apart.
     raw.is_some_and(crate::parser::raw_word_has_unquoted_process_substitution)
-}
-
-/// Whether the raw source of an associative element-assignment word
-/// (`name[sub]=value`, GNU general.c:480 `assignment()`) expands without
-/// observable side effects, so the discarded whole-word pass in
-/// `expand_command_word` can be replaced by the assignment pass alone.
-///
-/// GNU arrayfunc.c:382 `assign_array_element_internal` expands the subscript
-/// once via `expand_subscript_string` (subst.c:11063) and the value once as
-/// an assignment RHS (arrayfunc.c:865); there is no whole-word pass. Rubash
-/// runs one for every command word and throws it away for this shape, which
-/// also runs any side effect twice. Skipping it is observationally identical
-/// only when neither pass can observe a side effect or resolve differently.
-///
-/// Whitelist admission (rubash#117 discipline — doubt falls through): plain
-/// parameter reads (`$name`, `$1`, `$?`, `$@`) and literal text only.
-/// Command substitution `$(`/arithmetic `$((`, braced parameters `${`,
-/// backticks, process substitution, quoting, backslash and tilde are all
-/// rejected: each can run a side effect, or resolve differently between the
-/// whole-word pass and the assignment pass.
-fn assoc_element_word_expansion_is_side_effect_free(raw: &str) -> bool {
-    if raw.contains(['`', '\'', '"', '\\', '~', '(', ')', '{', '}']) {
-        return false;
-    }
-    let bytes = raw.as_bytes();
-    let mut index = 0;
-    while let Some(offset) = raw[index..].find('$') {
-        let after = index + offset + 1;
-        match bytes.get(after) {
-            Some(&ch)
-                if ch.is_ascii_alphabetic()
-                    || ch == b'_'
-                    || ch.is_ascii_digit()
-                    || matches!(ch, b'?' | b'$' | b'!' | b'#' | b'-' | b'*' | b'@') => {}
-            // `$(`/`${`/a trailing `$` are not plain reads.
-            _ => return false,
-        }
-        index = after;
-    }
-    true
 }
 
 fn expanded_word_has_process_substitution(word: &str) -> bool {

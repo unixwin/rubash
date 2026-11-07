@@ -290,6 +290,13 @@ where
 
     // #916: same fresh-name short-circuit as export above.
     if value.is_none() && !env_vars.contains_key(name) {
+        // GNU set_var_attribute creates the missing variable through
+        // bind_variable (setattr.def, variables.c:3211-3212), so under
+        // set -a the creation bind also applies the mark_modified_vars
+        // export mark (rubash#2944: `set -a; readonly r` -> declare -rx r).
+        if crate::builtins::set::shell_option_enabled(env_vars, "allexport") {
+            mark_exported(env_vars, name);
+        }
         mark_readonly(env_vars, name);
         return Ok(EXECUTION_SUCCESS);
     }
@@ -344,6 +351,20 @@ where
     // has_assign gate as export above).
     if has_assign && name == "PATH" {
         crate::builtins::hash::flush_command_hash_table(env_vars);
+    }
+    // rubash#2944: a valued readonly word binds through
+    // do_assignment_no_expand -> bind_variable, whose tail applies the
+    // mark_modified_vars export mark under set -a (variables.c:3211-3212)
+    // — including a compound value bound without -a/-A (GNU shows
+    // `readonly arr=(1 2)` as -arx). The -a/-A forms instead rewrite to
+    // an array creation (setattr.def:240-258), which never marks, and a
+    // name-only operand on an existing variable performs no bind at all
+    // (set_var_attribute only sets the attribute), so neither marks here.
+    if has_assign
+        && !(array || assoc)
+        && crate::builtins::set::shell_option_enabled(env_vars, "allexport")
+    {
+        mark_exported(env_vars, name);
     }
     mark_readonly(env_vars, name);
     Ok(EXECUTION_SUCCESS)

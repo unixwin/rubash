@@ -114,7 +114,10 @@ fn interactive_syntax_error_does_not_end_session() {
 
 /// `-i -s` with piped stdin is GNU's readline reader too (verified WSL
 /// GNU 5.3.0: `printf 'echo $-\n' | bash -i -s` renders PS1 on stderr):
-/// the prompt channel renders and `$-` keeps the `himBHs` shape.
+/// the prompt channel renders and `$-` keeps the `hi(m)BHs` shape —
+/// the WSL probe's terminal supplied job control (`himBHs`); without
+/// a claimable terminal GNU renders `hiBHs` (rubash#2948, jobs.c:4869
+/// makes `m` the establishment result).
 /// Root marker as the engine renders it (`\$` is `#` for euid 0;
 /// calibrated per host — pinning `#` unconditionally only passed as
 /// root).
@@ -136,7 +139,10 @@ fn root_mark() -> &'static str {
 #[test]
 fn interactive_dash_s_stdin_renders_prompt_stream() {
     let (stdout, stderr, _) = run_stdin(&["-i", "-s"], b"echo $-\nexit\n", &[]);
-    assert!(stdout.contains("himBHs"), "stdout: {stdout:?}");
+    assert!(
+        stdout.contains("himBHs") || stdout.contains("hiBHs"),
+        "stdout: {stdout:?}"
+    );
     assert!(
         stderr.contains(&format!("bash-5.3{}", root_mark())),
         "PS1 stream missing on -i -s: {stderr:?}"
@@ -174,13 +180,22 @@ fn interactive_exit_status_propagates() {
 
 /// The PS1 environment variable drives the rendered prompt (the #419
 /// complaint: PS1 was ignored on the console entry). GNU imports PS1
-/// from the environment (variables.c set_if_not).
+/// from the environment (variables.c set_if_not). The env PS1 prompt
+/// is the FIRST prompt rendered; the only bytes allowed before it
+/// are GNU's job-control establishment diagnostics, which
+/// initialize_job_control prints before the first prompt when the
+/// harness gives the shell no terminal to claim (rubash#2948; GNU
+/// 5.3.20 over a pipe: the two lines, then the prompt).
 #[test]
 fn interactive_env_ps1_drives_prompt_stream() {
     let (_stdout, stderr, _) = run_stdin(&["-i"], b"exit\n", &[("PS1", "X> ")]);
+    let prompt_at = stderr.find("X> ").expect("env PS1 prompt rendered");
+    let before = &stderr[..prompt_at];
     assert!(
-        stderr.starts_with("X> "),
-        "env PS1 not rendered first: {stderr:?}"
+        before.is_empty()
+            || (before.contains("cannot set terminal process group")
+                && before.contains("no job control in this shell")),
+        "env PS1 not the first prompt rendered: {stderr:?}"
     );
 }
 

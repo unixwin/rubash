@@ -140,7 +140,15 @@ fn issue1991_kill_jobspec_term_and_stop_actually_deliver() {
         sh.buf
     );
 
-    // STOP form: the job must show Stopped, then die by SIGKILL.
+    // STOP form: the signal must deliver (the wait codes below are
+    // the proof), then the job dies by SIGKILL. The `jobs` DISPLAY
+    // in this pipe harness is GNU's no-terminal shape: with no
+    // terminal to take, initialize_job_control fails, monitor is
+    // off, and GNU itself prints "Running" for the stopped child
+    // (5.3.20 probed in this exact harness; rubash#2948). The
+    // "Stopped" display belongs to the established arrangement and
+    // is pinned under a PTY in
+    // issue1991_kill_stop_shows_stopped_under_pty below.
     sh.send("sleep 30 &\n");
     sh.send("kill -STOP %1; echo S$((6*7))RC=$?\n");
     assert!(
@@ -150,8 +158,8 @@ fn issue1991_kill_jobspec_term_and_stop_actually_deliver() {
     );
     sh.send("jobs %1; echo J$((6*7))END\n");
     assert!(
-        sh.wait_for("Stopped", Duration::from_secs(10)),
-        "job must be Stopped after kill -STOP %1: {}",
+        sh.wait_for("Running", Duration::from_secs(10)),
+        "no-terminal GNU shape: stopped child still lists Running: {}",
         sh.buf
     );
     sh.send("kill -9 %1\n");
@@ -409,4 +417,52 @@ fn issue1990_sigint_healthy_fg_child_still_dies_130() {
         "session must survive the interrupt: {text:?}"
     );
     assert_pid_gone(&pf, "issue1990-healthy");
+}
+
+/// The Stopped DISPLAY half of #1991, in the arrangement that can
+/// surface it: a terminal present, so GNU establishes job control
+/// (monitor on) and `jobs` reports the stopped child as Stopped
+/// (5.3.20 probed: `[1]+ Stopped sleep 30`). Harness shape:
+/// script(1) gives the shell a controlling PTY with itself as the
+/// session leader's child — a non-orphaned process group, the only
+/// shape whose job-control readings are valid. The pipe harness
+/// above cannot show this face: GNU over pipes prints Running for
+/// the same stopped child (rubash#2948 adjudication).
+#[test]
+fn issue1991_kill_stop_shows_stopped_under_pty() {
+    if Command::new("script").arg("--version").output().is_err() {
+        eprintln!("no script(1) on this host; skipping");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("rubash-1991-pty-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let probe = dir.join("probe.sh");
+    std::fs::write(
+        &probe,
+        "sleep 30 &\nkill -STOP %1\necho S$((6*7))RC=$?\njobs %1\necho J$((6*7))END\nkill -9 %1\n",
+    )
+    .expect("write probe");
+    let output = Command::new("script")
+        .args([
+            "-qec",
+            &format!("{} -i {}", shell_bin().display(), probe.display()),
+            "/dev/null",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run script(1) PTY harness");
+    let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        text.contains("S42RC=0"),
+        "kill -STOP must return 0 under a terminal: {text:?}"
+    );
+    assert!(
+        text.contains("Stopped"),
+        "with job control established, jobs must show Stopped: {text:?}"
+    );
+    assert!(
+        text.contains("J42END"),
+        "session must complete the probe: {text:?}"
+    );
 }

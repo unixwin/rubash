@@ -146,6 +146,20 @@ impl Executor {
     fn execute_ast_inner_walk(&mut self, commands: &[CommandNode]) -> Result<(), ExecuteError> {
         self.evalerror_exec_depth
             .set(self.evalerror_exec_depth.get() + 1);
+        // rubash#2928: a fresh reader unit (top-level run, eval string,
+        // sourced group — at_discard_boundary) is a GNU read point:
+        // deaths queued since the last read print NOW, stamped with
+        // this unit's first command's line (the line the reader just
+        // pulled), before any of its commands runs. Nested walks
+        // (function/compound/loop bodies) are pre-parsed, never fresh
+        // reads, so they do not flush. A no-op on an empty queue.
+        if self.at_discard_boundary() {
+            if let Some(first) = commands.first() {
+                if let Some(line) = first.logical_line.or(first.line) {
+                    self.report_pending_signal_notices_at_line(line)?;
+                }
+            }
+        }
         // rubash#1164: a nested list (function body, compound body) samples
         // was_error_trap per its own commands; the enclosing command's
         // sample must be intact when its adjudication runs after the
@@ -335,6 +349,11 @@ impl Executor {
 
     fn execute_ast_inner_body(&mut self, commands: &[CommandNode]) -> Result<(), ExecuteError> {
         let mut index = 0;
+        // rubash#2928: the physical line of the last top-level command
+        // this walk flushed for — a newer line at a fresh-read
+        // boundary is the next list (GNU parse.y shell_getc), a
+        // same-line command is the same list and never flushes.
+        let mut prev_top_line: Option<usize> = None;
         // GNU execute_cmd.c:1576 execute_in_subshell: the forked child's
         // whole mutable state is a copy of the parent's. The flat `( )`
         // region runs in place on this executor, so the boundary is the
@@ -942,14 +961,35 @@ impl Executor {
                     self.refresh_background_jobs()?;
                 }
                 self.run_pending_signal_traps()?;
-                // GNU eval.c:355 runs notify_and_cleanup after each top-level
-                // command: children killed by a signal get their stderr
-                // notice here (rubash#229, jobs.c:4625 notify_of_job_status).
-                // At this point __RUBASH_CURRENT_LINE is still the previous
-                // command's line, matching GNU's line_number at notify time.
-                // (no notice point without execute_command)
-                if !noexec {
-                    self.report_pending_signal_notices()?;
+                // rubash#2928: the signal-death notice does NOT print
+                // here. GNU's notify fires when the reader pulls the
+                // next LIST (parse.y:2524 shell_getc ->
+                // notify_and_cleanup), never between the commands of one
+                // list — eval.c:355's notify is interactive-reader-only,
+                // and execute_cmd.c:2884's is gated on job control +
+                // interactive, so neither covers a non-interactive
+                // `-c`/script run. The print now rides the read: the
+                // walk-start flush in execute_ast_inner_walk, the
+                // line-change flush below, the `jobs` builtin's own
+                // notify (jobs.def:141,172), and the stream-end flush.
+                // The reap above stays per-command (GNU waitchld lag,
+                // rubash#1494/#2529): only the PRINT moves.
+            }
+            // rubash#2928: the line-change flush — a top-level command
+            // on a NEWER physical line at a fresh-read boundary is the
+            // next list, so deaths the reap above just recorded print
+            // now, stamped with this line (the line being read). A
+            // `;`-joined command on the same line is the same list and
+            // never flushes. `-n` runs no notify (GNU eval.c:236-238).
+            // Nested walks never reach here as a fresh read (their own
+            // at_discard_boundary is false); the tracker is per-walk,
+            // so a nested walk's lines never move it.
+            if !noexec && self.at_discard_boundary() {
+                if let Some(line) = command.logical_line.or(command.line) {
+                    if prev_top_line.map_or(false, |previous| line > previous) {
+                        self.report_pending_signal_notices_at_line(line)?;
+                    }
+                    prev_top_line = Some(line);
                 }
             }
             let _t_chain = super::exec_profile::PhaseTimer::new(&super::exec_profile::P_CHAIN);
