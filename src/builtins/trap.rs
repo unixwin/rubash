@@ -3,6 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/trap.def
 
+use super::diagnostic::diagnostic_prefix;
 use crate::shell::var_table::VarTable;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -325,20 +326,13 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     execute_with_io(args, &mut env_vars, &mut stdout, &mut stderr)
 }
 
-/// Build the shell diagnostic prefix (`<script>: line N: `) from the shell
-/// environment, falling back to `rubash: ` without script context. GNU
-/// trap.def errors go through builtin_error -> error_prolog, which prefixes
-/// `./script: line N:` when running a script file (trap.tests line 118
-/// baseline: `./trap.tests: line 118: trap: cannot specify both -p and -P`).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefix is the shared builtin_error prolog
+// (`super::diagnostic::diagnostic_prefix`): GNU trap.def errors go
+// through builtin_error -> error_prolog, which prefixes
+// `./script: line N:` when running a script file (trap.tests line
+// 118 baseline: `./trap.tests: line 118: trap: cannot specify both
+// -p and -P`), and the shared builder names the frame's definition
+// file (rubash#3035).
 
 pub fn execute_with_io<W, E>(
     args: &[String],

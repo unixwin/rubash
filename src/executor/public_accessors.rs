@@ -2628,6 +2628,67 @@ impl Executor {
                     *self.line_env_os_value.borrow_mut() = Some(rendered);
                 }
             }
+            // The FILE half of the same frame stamp (rubash#3035):
+            // wherever the line is current, the frame's file must be
+            // current too — see stamp_current_file.
+            self.stamp_current_file();
+        }
+    }
+
+    /// rubash#3035: stamp the diagnostic frame's FILE into the
+    /// `__RUBASH_CURRENT_FILE` carrier, in the same two storages and
+    /// under the same equality gates as `__RUBASH_CURRENT_LINE`.
+    ///
+    /// GNU's diagnostic prolog name is `get_name_for_error`
+    /// (error.c:90-120) = BASH_SOURCE[0]; at a function call the
+    /// innermost frame's source is the function's DEFINITION file
+    /// (execute_cmd.c:5310-5313 execute_function pushes the recorded
+    /// `source_file`). `current_error_file_name` is that composed
+    /// view — the same source `diagnostic_prolog` reads — but the
+    /// builtins-layer diagnostics (the private `diagnostic_prefix`
+    /// copies in test/ulimit/trap/cd/exec/...) only receive an env
+    /// map or the process env, and the stored BASH_SOURCE mirror
+    /// refreshes only at source-frame push/pop, never at function
+    /// entry, so they cannot derive the frame file themselves. They
+    /// used to pair the per-frame line with the top-level-only
+    /// `__RUBASH_SCRIPT_NAME`, reporting the right line under the
+    /// wrong file inside any sourced-file function.
+    ///
+    /// Stamping here — the per-command stamp every dispatch path
+    /// already crosses — keeps the carrier equal to the composed
+    /// view across function entry/exit, source, eval and trap frames
+    /// with no paired push/pop bookkeeping. When the composed view
+    /// names nothing, the carrier is removed and readers fall back
+    /// to `__RUBASH_SCRIPT_NAME`, the pre-carrier behavior.
+    fn stamp_current_file(&mut self) {
+        match self
+            .current_error_file_name()
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => {
+                if self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_FILE")
+                    .map(String::as_str)
+                    != Some(name.as_str())
+                {
+                    self.shell_state
+                        .env_vars
+                        .insert("__RUBASH_CURRENT_FILE".to_string(), name.clone());
+                }
+                if self.file_env_os_value.borrow().as_deref() != Some(name.as_str()) {
+                    set_process_env("__RUBASH_CURRENT_FILE", &name);
+                    *self.file_env_os_value.borrow_mut() = Some(name);
+                }
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_FILE");
+                if self.file_env_os_value.borrow().is_some() {
+                    unset_process_env("__RUBASH_CURRENT_FILE");
+                    *self.file_env_os_value.borrow_mut() = None;
+                }
+            }
         }
     }
 
@@ -3548,13 +3609,13 @@ impl Executor {
                 Self::interactive_shell_basename(&self.shell_state.env_vars)
             );
         }
-        let name = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .unwrap_or_else(|| self.error_report_name());
-        format!("{name}: ")
+        // rubash#3035: the name is the diagnostic frame's file
+        // (error_report_name starts from the composed BASH_SOURCE[0]),
+        // not the top-level __RUBASH_SCRIPT_NAME — inside a function
+        // defined in a sourced file these execution-time diagnostics
+        // name the definition file, exactly like the builtin_error
+        // family. At top level and during source the two agree.
+        format!("{}: ", self.error_report_name())
     }
 
     pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {
