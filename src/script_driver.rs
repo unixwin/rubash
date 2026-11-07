@@ -627,6 +627,17 @@ fn run_script_grouped_at_line_offset(
         } else {
             executor.shell_state.bash_source_stack.first().cloned()
         };
+        // rubash#2849: for an interactive invocation this grouped
+        // run is a reader submission (Session::run_line and the
+        // prompt-command runner funnel here): GNU's table is
+        // current at the read boundary (jobs.c:4036 sigchld_handler
+        // -> waitchld records while the reader blocks), so observe
+        // recorded job state before the group executes. Script
+        // streams (non-interactive invocation) keep the boundary
+        // sweep's waitchld-lag gates untouched.
+        if executor.invocation_interactive() {
+            executor.observe_jobs_at_reader_boundary();
+        }
         let status = run_history_group(
             executor,
             &session,
@@ -5308,6 +5319,17 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
     }
 
     while !eof {
+        // rubash#2849: GNU records child deaths while the shell
+        // blocks in the reader (jobs.c:4036 sigchld_handler ->
+        // waitchld; parse.y:2533 read_command -> notify_and_cleanup),
+        // so the table a freshly read line consults is already
+        // current. Observe recorded job state at the top of each
+        // read cycle — before PROMPT_COMMAND and before the line is
+        // read — so a death the previous line's own `kill` dealt
+        // (held one command by the rubash#1604 fresh-fatal window)
+        // is claimed here, and the first `exit` or EOF on the new
+        // line sees the job Completed, not Stopped.
+        executor.observe_jobs_at_reader_boundary();
         // rubash#2233/#2346: a termsig death recorded by the signal
         // dispatch (e.g. the prompt poll swallowed the unwind as an
         // abort) ends the reader here; finish_shell runs the termsig
