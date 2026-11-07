@@ -25,18 +25,16 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 
 #[test]
 fn read_ifs_backslash_is_escape_not_delimiter() {
-    let (stdout, _, code) = rubash(
-        "printf '%s\\n' 'x\\y' | { IFS='\\' read a b; echo \"a=[$a] b=[$b]\"; }",
-    );
+    let (stdout, _, code) =
+        rubash("printf '%s\\n' 'x\\y' | { IFS='\\' read a b; echo \"a=[$a] b=[$b]\"; }");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "a=[xy] b=[]\n");
 }
 
 #[test]
 fn read_r_ifs_backslash_is_delimiter() {
-    let (stdout, _, code) = rubash(
-        "printf '%s\\n' 'x\\y' | { IFS='\\' read -r a b; echo \"a=[$a] b=[$b]\"; }",
-    );
+    let (stdout, _, code) =
+        rubash("printf '%s\\n' 'x\\y' | { IFS='\\' read -r a b; echo \"a=[$a] b=[$b]\"; }");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "a=[x] b=[y]\n");
 }
