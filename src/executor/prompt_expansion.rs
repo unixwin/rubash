@@ -661,8 +661,11 @@ impl Executor {
         // the one table letter with no `set -o` name — flags.c:174 maps it
         // to `forced_interactive`, which shell.c:672 turns on for every
         // interactive shell (`-i` forced, or tty-detected at
-        // shell.c:540-547) — so it renders from the interactive marker in
-        // its table position between `h` and `k`.
+        // shell.c:540-547) — so it renders from that state in its table
+        // position between `h` and `k`. The state is seeded from the
+        // invocation shape but change_flag can move it afterwards
+        // (`set -ovi` / `set +ovi`, rubash#2961), so it must NOT be
+        // read off the immutable invocation bit.
         for (flag, option) in [
             ('a', Some("allexport")),
             ('b', Some("notify")),
@@ -702,7 +705,7 @@ impl Executor {
                 Some(option) => {
                     crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option)
                 }
-                None => self.invocation_interactive(),
+                None => self.shell_state.forced_interactive,
             };
             if on {
                 flags.push(flag);

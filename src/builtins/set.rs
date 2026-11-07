@@ -389,6 +389,20 @@ where
                     writes.push(("monitor".to_string(), prefix == '-'));
                 }
             }
+            // flags.c:226: change_flag has no special case for `i` —
+            // reached only inside an inline `-o` operand (`set
+            // -ovi`; a standalone ±i is refused by the pre-scan), it
+            // flips forced_interactive, the state `$-` renders the
+            // letter from. That state lives on ShellState, not in
+            // the env table, so — exactly like monitor's job_control
+            // replay above (rubash#2487) — record it with the `-o`
+            // writes for the executor dispatch to replay onto its
+            // home (rubash#2961).
+            if option == 'i' {
+                if let Some(writes) = o_writes.as_deref_mut() {
+                    writes.push(("forced_interactive".to_string(), prefix == '-'));
+                }
+            }
         }
 
         index += 1;

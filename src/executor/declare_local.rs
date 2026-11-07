@@ -42,6 +42,26 @@ fn declare_written_operand_hints(
 /// declare scanner).
 pub(crate) const DECLARE_OPTION_LETTERS: &str = "acfgilnprtuxAFGI";
 
+/// Whether a declare-family invocation carries NAME operands (as
+/// opposed to only option clusters): the walk mirrors
+/// scan_declare_options' stop rules — `--` ends the option run and
+/// every later word is an operand, a lone `-`/`+` is an operand, and
+/// any word that does not open an option cluster is an operand.
+fn declare_invocation_has_operands(args: &[String]) -> bool {
+    let mut options_open = true;
+    for arg in args {
+        if options_open && arg == "--" {
+            options_open = false;
+            continue;
+        }
+        if options_open && (arg.starts_with('-') || arg.starts_with('+')) && arg.len() > 1 {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
 fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
     const VALID: &str = DECLARE_OPTION_LETTERS;
     let mut letters = Vec::new();
@@ -1521,47 +1541,68 @@ impl Executor {
                     // (rubash#1363 for PIPESTATUS, rubash#2700 for the
                     // rest). The VISIBLE class (GROUPS and the stack
                     // arrays) appears in every listing form, bare
-                    // `declare` included; the INVISIBLE provider scalars
+                    // `declare` included; the provider scalars
                     // appear only in print/filtered forms, matching
                     // GNU's att_invisible handling in print_var_list.
-                    // A listing prints, so building a view draws exactly
-                    // what GNU's listing draws — but a name an active
-                    // filter excludes outright is never built, so a
-                    // filtered listing does not draw for a name it
-                    // cannot print.
+                    // Listing views are CELL views (rubash#2973):
+                    // enumeration renders what reads stored into the
+                    // cells and never fires a getter, so building one
+                    // draws nothing. The pre-filter below only skips
+                    // names that cannot pass under any reading of the
+                    // active options (the builtin adjudicates exactly,
+                    // with the gate/any rule of setattr.def).
                     if listing {
                         let filtered = ['a', 'A', 'i', 'l', 'n', 'r', 'u', 'x']
                             .iter()
                             .any(|&option| declare_args_contain_option(&args, option, true));
                         let could_pass = |name: &str, integer: bool, array: bool| {
-                            let env_vars = &self.shell_state.env_vars;
-                            (!declare_args_contain_option(&args, 'x', true)
-                                || is_marked_var(env_vars, EXPORTED_VARS, name))
-                                && (!declare_args_contain_option(&args, 'r', true)
-                                    || is_marked_var(env_vars, READONLY_VARS, name))
-                                && (!declare_args_contain_option(&args, 'a', true) || array)
-                                && !declare_args_contain_option(&args, 'A', true)
-                                && (!declare_args_contain_option(&args, 'i', true) || integer)
-                                && (!declare_args_contain_option(&args, 'u', true)
-                                    || is_marked_var(env_vars, UPPERCASE_VARS, name))
-                                && (!declare_args_contain_option(&args, 'l', true)
-                                    || is_marked_var(env_vars, LOWERCASE_VARS, name))
-                                && (!declare_args_contain_option(&args, 'n', true)
-                                    || is_marked_var(env_vars, NAMEREF_VARS, name))
+                            // -A gates on assoc: no dynamic cell is
+                            // associative, so none can pass.
+                            if declare_args_contain_option(&args, 'A', true) {
+                                return false;
+                            }
+                            // -a gates on the array class.
+                            if declare_args_contain_option(&args, 'a', true) && !array {
+                                return false;
+                            }
+                            // -i alone excludes non-integers; combined
+                            // with any other attribute the ANY rule can
+                            // still admit them, so only the pure--i form
+                            // pre-filters here.
+                            if declare_args_contain_option(&args, 'i', true)
+                                && !integer
+                                && !['a', 'l', 'n', 'r', 'u', 'x']
+                                    .iter()
+                                    .any(|&option| declare_args_contain_option(&args, option, true))
+                            {
+                                return false;
+                            }
+                            let _ = name;
+                            true
                         };
                         let mut push_registry = |name: &str| {
                             // rubash#1569: a name bound by this very
                             // command's prefix renders from the underlay
                             // snapshot (its pre-frame storage), not the
-                            // live dynamic view.
+                            // dynamic view.
                             if underlay.contains_key(name)
                                 || views.iter().any(|view| view.name == name)
                             {
                                 return;
                             }
-                            let (integer, array) = Self::dynamic_declaration_class(name);
+                            let (class_integer, array) = Self::dynamic_declaration_class(name);
+                            // The cell's integer bit for SECONDS is
+                            // state-dependent (earned on first read).
+                            let integer = class_integer
+                                && (name != "SECONDS"
+                                    || self
+                                        .shell_state
+                                        .dynamic_cells
+                                        .borrow()
+                                        .integer_earned
+                                        .contains(name));
                             if could_pass(name, integer, array) {
-                                if let Some(view) = self.dynamic_view(name) {
+                                if let Some(view) = self.dynamic_cell_view(name) {
                                     views.push(view);
                                 }
                             }
@@ -1574,13 +1615,13 @@ impl Executor {
                         for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
                             push_registry(name);
                         }
-                        if print_requested {
-                            // rubash#1363: GNU's full `declare -p`
-                            // listing includes a materialized PIPESTATUS
-                            // array even though its value lives outside
-                            // the variable table.
-                            push_registry("PIPESTATUS");
-                        }
+                        // rubash#1363 + rubash#2973: GNU enumerates a
+                        // materialized PIPESTATUS cell in EVERY
+                        // listing form (its value lives outside the
+                        // variable table); the cell view is None while
+                        // the cell does not exist yet (no pipeline has
+                        // completed), so early listings stay clean.
+                        push_registry("PIPESTATUS");
                         if print_requested || filtered {
                             for name in [
                                 "BASHPID",
@@ -1593,7 +1634,10 @@ impl Executor {
                                 "BASH_MONOSECONDS",
                                 "LINENO",
                                 "BASH_SUBSHELL",
-                                "BASH_ARGV0",
+                                // BASH_ARGV0 is a table cell (an
+                                // att_invisible one, rendered by the
+                                // builtin's invisible rule); it has no
+                                // dynamic view (rubash#2973).
                                 "BASH_COMMAND",
                             ] {
                                 push_registry(name);
@@ -1603,6 +1647,14 @@ impl Executor {
                     views
                 };
                 let mut oob_word = None;
+                // rubash#2973: declare/typeset name-only operands
+                // resolve through find_variable like the setattr
+                // pair — `declare SECONDS` materializes the dynamic
+                // cell (and earns SECONDS its integer attribute)
+                // before the builtin applies its own attributes.
+                if !print_requested {
+                    self.fire_dynamic_operand_lookups(&args);
+                }
                 let dynamic_set_views = self.dynamic_set_views();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
@@ -1768,6 +1820,16 @@ impl Executor {
                         Some((name, value)) => (name, Some(value)),
                         None => (arg.as_str(), None),
                     };
+                    // rubash#2980: a subscript operand binds an ELEMENT
+                    // through assign_array_element, which never applies
+                    // the mark_modified_vars mark — the mark belongs to
+                    // whole-name bindings (variables.c:3211-3212).
+                    // execute_local's post-pass already skips subscript
+                    // operands; this pass derived the base name and
+                    // marked it, printing -ax where GNU prints -a.
+                    if raw_name.contains('[') {
+                        continue;
+                    }
                     let (base, _) = assignment_name_and_append(raw_name);
                     let base = base.split('[').next().unwrap_or(base);
                     if has_value.is_none() && !is_shell_name(base) {
@@ -1865,6 +1927,12 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#2974: a nameless `local -F` renders the frame's
+        // locals with nodefs set (declare.def's local branch passes
+        // nodefs to show_local_var_attributes); the values are
+        // stripped from the rendered listing at the flush below.
+        let nodefs_listing = scan_declare_options(&cmd.words[1..]).0.contains(&'F')
+            && !declare_invocation_has_operands(&cmd.words[1..]);
         let (status, final_args) = if self.shell_state.function_depth == 0 {
             writeln!(
                 stderr,
@@ -1884,6 +1952,7 @@ impl Executor {
             .0
             .iter()
             .any(|letter| *letter == 'f' || *letter == 'F')
+            && declare_invocation_has_operands(&cmd.words[1..])
         {
             // rubash#2582: GNU's local is declare_internal in a local
             // context (declare.def), so `-f`/`-F` take the SAME
@@ -1893,6 +1962,11 @@ impl Executor {
             // scanner, whose letter table has no f/F (it never sees
             // them on the declare route), so `local -f g` was rejected
             // there after validate_local_options had accepted it.
+            // rubash#2974: the divert requires NAME operands — GNU's
+            // declare.def checks list_function_p only on the operand
+            // path; a NAMELESS `local -f`/`-F` takes the local-variable
+            // branch (show_local_var_attributes, nodefs for -F) and
+            // prints the frame's locals, never function definitions.
             let status =
                 self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
@@ -2368,6 +2442,32 @@ impl Executor {
                 &final_args,
                 declare_args_request_print(&final_args),
             );
+        }
+        // rubash#2974 (nodefs half): the builtin has no nodefs input
+        // for variables, so a nameless `local -F` listing loses its
+        // values here. Declaration lines are `declare <flags> NAME=…`
+        // — flags and names never contain '=', value-less lines and
+        // the `local -` line have none.
+        if nodefs_listing {
+            let text = String::from_utf8_lossy(&stdout).into_owned();
+            let mut stripped = String::with_capacity(text.len());
+            for line in text.split_inclusive('\n') {
+                let body = line.strip_suffix('\n').unwrap_or(line);
+                if body.starts_with("declare ") {
+                    match body.find('=') {
+                        Some(eq) => {
+                            stripped.push_str(&body[..eq]);
+                            if line.ends_with('\n') {
+                                stripped.push('\n');
+                            }
+                        }
+                        None => stripped.push_str(line),
+                    }
+                } else {
+                    stripped.push_str(line);
+                }
+            }
+            stdout = stripped.into_bytes();
         }
         let stderr = local_stderr_from_declare(stderr);
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
