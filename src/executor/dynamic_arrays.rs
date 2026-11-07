@@ -359,6 +359,26 @@ impl Executor {
         Some(value)
     }
 
+    /// GNU's attribute builtins resolve every name-only operand
+    /// through find_variable (the operand walks of builtins/
+    /// setattr.def export/readonly and builtins/declare.def), and
+    /// find_variable_internal fires a dynamic variable's getter,
+    /// storing the value into its cell (variables.c:1175-1189). So
+    /// `export RANDOM`, `readonly SECONDS` and `declare RANDOM` all
+    /// materialize the dynamic cell even though they bind nothing —
+    /// a later listing renders the drawn value (rubash#2973; the
+    /// behavior rubash#2700's export row pins). Callers gate this on
+    /// non-print invocations: assignment operands bind instead of
+    /// looking up, and print forms render through the live views.
+    pub(in crate::executor) fn fire_dynamic_operand_lookups(&self, args: &[String]) {
+        for arg in args {
+            if arg.starts_with('-') || arg.starts_with('+') || arg.contains('=') {
+                continue;
+            }
+            let _ = self.dynamic_parameter_value(arg);
+        }
+    }
+
     fn dynamic_parameter_value_live(&self, name: &str) -> Option<String> {
         // Hot-path reorder: the UNSET_DYNAMIC_VARS probe below is a
         // SipHash over the name, paid on EVERY variable read (the assoc

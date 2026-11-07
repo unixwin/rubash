@@ -199,6 +199,28 @@ fn set_form_groups_materializes_after_fetch() {
 }
 
 #[test]
+fn attribute_builtin_operands_materialize_dynamic_cells() {
+    // GNU's attribute builtins resolve name-only operands through
+    // find_variable, which fires the getter: `export RANDOM` alone
+    // (no read anywhere) makes the -x listing render a drawn value,
+    // and `declare SECONDS` earns SECONDS its integer attribute.
+    let line = listing_line("export RANDOM\ndeclare -x\n", "RANDOM");
+    assert!(line.starts_with("declare -ix RANDOM=\""), "{line}");
+    let line = listing_line("readonly RANDOM\ndeclare -r\n", "RANDOM");
+    assert!(line.starts_with("declare -ir RANDOM=\""), "{line}");
+    let (stdout, stderr, status, _) = run_script("declare SECONDS\ndeclare -i\n");
+    assert_eq!(status, 0, "{stderr}");
+    assert!(
+        stdout.contains("declare -i SECONDS=\""),
+        "declare operand earns SECONDS its -i: {stdout}"
+    );
+    // Control: a plain assignment operand binds instead of looking
+    // up — the cell holds the assigned literal, not a draw.
+    let line = listing_line("RANDOM=42\ndeclare -p\n", "RANDOM");
+    assert_eq!(line, "declare -i RANDOM=\"42\"");
+}
+
+#[test]
 fn named_views_still_render_live_values() {
     // Controls: by-name `declare -p NAME` fires the provider — these
     // already matched GNU before the fix and must not regress.

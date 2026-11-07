@@ -1647,6 +1647,14 @@ impl Executor {
                     views
                 };
                 let mut oob_word = None;
+                // rubash#2973: declare/typeset name-only operands
+                // resolve through find_variable like the setattr
+                // pair — `declare SECONDS` materializes the dynamic
+                // cell (and earns SECONDS its integer attribute)
+                // before the builtin applies its own attributes.
+                if !print_requested {
+                    self.fire_dynamic_operand_lookups(&args);
+                }
                 let dynamic_set_views = self.dynamic_set_views();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
