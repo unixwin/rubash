@@ -196,6 +196,86 @@ fn printf_paths_carry_no_markers() {
     assert_clean(&out, "printf");
 }
 
+/// rubash#2882 (PUA sweep F2): U+E002 is QUOTED_NULL_MARKER. A typed
+/// `$'\uE002'` arrives E400-escaped (push_literal_char) and is user
+/// DATA, but blind consumers that `cow_replace`/`contains` the bare
+/// marker ate it: `printf %s "$v"` emitted a stray U+E400 alone,
+/// `echo "$v"` emitted nothing, `"a${v}b"` dropped the char. GNU
+/// protects a user CTLNUL with CTLESC at read time (parse.y
+/// got_character) so dequote passes (subst.c remove_quoted_nulls)
+/// strip only the BARE marker — the char survives every consumer.
+/// Storage was always fine (`declare -p`, `${#v}` correct on the
+/// broken tree too — they are the control cells). The correct output
+/// legitimately CONTAINS U+E002, so these cells assert exact bytes
+/// instead of the no-PUA predicate. Run under LC_ALL=C.UTF-8: in the
+/// POSIX locale GNU itself keeps the literal `\uE002` spelling.
+#[test]
+fn user_e002_quoted_null_char_roundtrips_as_data() {
+    let e002 = "\u{E002}";
+    let run_utf8 = |script: &str| -> Vec<u8> {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", script])
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        child.wait_with_output().expect("wait rubash").stdout
+    };
+    // printf %s of the quoted value: the char, nothing else (the
+    // broken tree emitted a stray U+E400 here).
+    let out = run_utf8("v=$'\\uE002'; printf '%s' \"$v\"");
+    assert_eq!(out, e002.as_bytes(), "printf %s of quoted U+E002 value");
+    // Braced form, same expectation.
+    let out = run_utf8("v=$'\\uE002'; printf '%s' \"${v}\"");
+    assert_eq!(out, e002.as_bytes(), "printf %s of braced U+E002 value");
+    // echo: char + newline (the broken tree emitted just the newline).
+    let out = run_utf8("v=$'\\uE002'; echo \"$v\"");
+    assert_eq!(out, format!("{e002}\n").as_bytes(), "echo of U+E002 value");
+    // Concatenation inside a double-quoted word keeps the char.
+    let out = run_utf8("v=$'\\uE002'; w=\"a${v}b\"; printf '%s' \"$w\"");
+    assert_eq!(out, format!("a{e002}b").as_bytes(), "concatenation a${{v}}b");
+    let out = run_utf8("v=$'\\uE002'; echo \"x${v}y\"");
+    assert_eq!(out, format!("x{e002}y\n").as_bytes(), "echo concatenation");
+    // Assignment round-trip: the stored value is the char.
+    let out = run_utf8("v=$'\\uE002'; u=$v; printf '%s' \"$u\"");
+    assert_eq!(out, e002.as_bytes(), "assignment round-trip of U+E002");
+    // Two typed chars stay two chars.
+    let out = run_utf8("x=$'\\uE002'$'\\uE002'; printf '%s' \"$x\"");
+    assert_eq!(out, format!("{e002}{e002}").as_bytes(), "double U+E002");
+    // Unquoted expansion: one field carrying the char.
+    let out = run_utf8("v=$'\\uE002'; printf '<%s>\\n' $v");
+    assert_eq!(out, format!("<{e002}>\n").as_bytes(), "unquoted U+E002 field");
+    // Alternate words, quoted and unquoted (field-split gate shapes).
+    let out = run_utf8("v=$'\\uE002'; e=; printf '%s' \"${e:-$v}\"");
+    assert_eq!(out, e002.as_bytes(), "quoted alternate with U+E002");
+    let out = run_utf8("v=$'\\uE002'; e=; printf '<%s>\\n' ${e:-a${v}b}");
+    assert_eq!(
+        out,
+        format!("<a{e002}b>\n").as_bytes(),
+        "unquoted alternate with U+E002"
+    );
+    // External argv boundary: the child sees the raw char.
+    let out = run_utf8("v=$'\\uE002'; /usr/bin/printf '%s' \"$v\"");
+    assert_eq!(out, e002.as_bytes(), "external printf argv U+E002");
+    // Controls: storage views were already correct — pin them so the
+    // fix cannot regress them. `declare -p` renders the raw char and
+    // must not show the E400 escape introducer; length is 1.
+    let out = run_utf8("v=$'\\uE002'; declare -p v");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(e002) && !text.contains('\u{E400}'),
+        "declare -p must render the raw U+E002 char: {text:?}"
+    );
+    let out = run_utf8("v=$'\\uE002'; echo \"len=${#v}\"");
+    assert_eq!(out, b"len=1\n".as_slice(), "length of U+E002 value");
+    // Conditional match against itself (the conditional.rs consumer is
+    // already E400-aware; pin the agreement).
+    let out = run_utf8("v=$'\\uE002'; case \"$v\" in *\"$v\"*) echo MATCH;; *) echo NOMATCH;; esac");
+    assert_eq!(out, b"MATCH\n".as_slice(), "case match of U+E002 value");
+}
+
 /// rubash#727: the assertion must actually see the registry's codepoints
 /// (U+E000-based, UTF-8 lead byte 0xEE). Before the fix it tested 0xEF and
 /// therefore could not fire on any registered marker.
