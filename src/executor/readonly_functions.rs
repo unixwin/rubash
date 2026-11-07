@@ -233,7 +233,6 @@ impl Executor {
         let row =
             crate::executor::builtin_table::builtin_table_row("readonly").expect("readonly row");
         let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
-        let prolog = self.diagnostic_prolog();
         let mut print = false;
         let operands: Vec<&str> = {
             let mut opt =
@@ -262,7 +261,7 @@ impl Executor {
             drop(opt);
             if diag.status() != 0 {
                 diag.usage();
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(diag.status());
             }
             operands
@@ -296,7 +295,7 @@ impl Executor {
             }
             mark_env_name(&mut self.shell_state.env_vars, READONLY_FUNCTIONS, name);
         }
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(|| self.diagnostic_prolog());
 
         Ok(status)
     }

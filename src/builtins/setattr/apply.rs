@@ -9,7 +9,7 @@ use super::value::{
 };
 use super::{bare_diag_line, readonly_error_prefix};
 use super::{ExportMode, EXECUTION_FAILURE, EXECUTION_SUCCESS, READONLY_VARS};
-use crate::executor::builtin_diag::{Diag, DiagKind, Prolog};
+use crate::executor::builtin_diag::{Diag, DiagKind};
 use crate::executor::local_helpers::sync_shell_assignment_process_env;
 
 /// The subject GNU's sh_invalidid names for a bad assignment operand
@@ -35,7 +35,6 @@ pub(super) fn apply_export_arg(
     assoc: bool,
     env_vars: &mut crate::shell::var_table::VarTable,
     diag: &mut Diag,
-    prolog: &Prolog,
     oob_word: &mut Option<String>,
     traced: Option<&mut Vec<(String, bool, String)>>,
 ) -> io::Result<i32> {
@@ -74,7 +73,7 @@ pub(super) fn apply_export_arg(
     match mode {
         ExportMode::Set => {
             if value.is_some() && env_vars.is_marked(READONLY_VARS, name) {
-                diag.err_readonly(&readonly_error_prefix(env_vars, prolog), name);
+                diag.err_readonly(&readonly_error_prefix(env_vars), name);
                 return Ok(EXECUTION_FAILURE);
             }
 
@@ -144,7 +143,7 @@ pub(super) fn apply_export_arg(
             // so gate on has_assign like the sv_path flush below.
             if has_assign {
                 if let Some(warning) = crate::locale::locale_assignment_warning(name, env_vars) {
-                    bare_diag_line(diag, prolog, &format!("warning: {warning}"));
+                    bare_diag_line(diag, env_vars, &format!("warning: {warning}"));
                 }
             }
             // GNU variables.c:5819/5919 sv_path -> phash_flush
@@ -165,7 +164,7 @@ pub(super) fn apply_export_arg(
             // the operand entirely lost the value.
             if let Some(assigned) = value {
                 if env_vars.is_marked(READONLY_VARS, name) {
-                    diag.err_readonly(&readonly_error_prefix(env_vars, prolog), name);
+                    diag.err_readonly(&readonly_error_prefix(env_vars), name);
                     return Ok(EXECUTION_FAILURE);
                 }
                 let converted = env_vars.contains_key(name);
@@ -205,7 +204,6 @@ pub(super) fn apply_readonly_arg(
     undo: bool,
     env_vars: &mut crate::shell::var_table::VarTable,
     diag: &mut Diag,
-    prolog: &Prolog,
     context_name: Option<&str>,
     oob_word: &mut Option<String>,
     traced: Option<&mut Vec<(String, bool, String)>>,
@@ -246,9 +244,12 @@ pub(super) fn apply_readonly_arg(
             // gnu_errfmt gate): `{prolog}{subject}: {name}: readonly
             // variable` is the err_readonly skeleton with the compound
             // name `{subject}: {name}`.
-            diag.err_readonly(&prolog.render(), &format!("{subject}: {name}"));
+            diag.err_readonly(
+                &super::diag_prolog(env_vars).render(),
+                &format!("{subject}: {name}"),
+            );
         } else {
-            diag.err_readonly(&readonly_error_prefix(env_vars, prolog), name);
+            diag.err_readonly(&readonly_error_prefix(env_vars), name);
         }
         return Ok(EXECUTION_FAILURE);
     }
@@ -311,7 +312,7 @@ pub(super) fn apply_readonly_arg(
     // (same has_assign gate as the sv_path flush below).
     if has_assign {
         if let Some(warning) = crate::locale::locale_assignment_warning(name, env_vars) {
-            bare_diag_line(diag, prolog, &format!("warning: {warning}"));
+            bare_diag_line(diag, env_vars, &format!("warning: {warning}"));
         }
     }
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551):

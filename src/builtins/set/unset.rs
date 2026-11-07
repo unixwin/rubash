@@ -25,8 +25,8 @@ struct UnsetOptions {
     nameref: bool,
 }
 
-/// The lib-level `Diag` prolog, mirroring
-/// `builtins::declare::diag_prolog`: the same env cells the deleted
+/// The lib-level `Diag` prolog, mirroring the declare layer's
+/// `PrologParts::Lib` composition: the same env cells the deleted
 /// local `diagnostic_prefix` read.
 fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     Prolog {
@@ -75,7 +75,6 @@ where
     // command's redirection (A3-R1, rubash#2707).
     let row = builtin_table_row("unset").expect("unset row exists");
     let mut diag = Diag::new(row, stderr);
-    let prolog = diag_prolog(env_vars);
     let args: Vec<String> = args.into_iter().map(str::to_string).collect();
     // GNU set.def unset_builtin scans with internal_getopt over
     // "fnv" (the row's spec); the single BuiltinOpt machine replaces
@@ -108,7 +107,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| diag_prolog(env_vars));
             // GNU set.def:855 returns EX_USAGE (258 > EX_SHERRBASE).
             return Ok(EX_USAGE_ORIG);
         }
@@ -119,13 +118,13 @@ where
         diag.free(format_args!(
             "cannot simultaneously unset a function and a variable"
         ));
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(|| diag_prolog(env_vars));
         return Ok(EXECUTION_FAILURE);
     }
 
     let mut status = EXECUTION_SUCCESS;
     for name in &operands {
-        let name_status = unset_name(name, options, env_vars, &mut diag, &prolog)?;
+        let name_status = unset_name(name, options, env_vars, &mut diag)?;
         if name_status != EXECUTION_SUCCESS {
             // Preserve error statuses > EX_SHERRBASE (256) so the executor can
             // set special_builtin_failed; fall back to EXECUTION_FAILURE.
@@ -137,7 +136,7 @@ where
         }
     }
 
-    diag.flush_with(|| prolog.clone());
+    diag.flush_with(|| diag_prolog(env_vars));
     Ok(status)
 }
 
@@ -146,7 +145,6 @@ fn unset_name(
     options: UnsetOptions,
     env_vars: &mut crate::shell::var_table::VarTable,
     diag: &mut Diag,
-    prolog: &Prolog,
 ) -> io::Result<i32> {
     if options.functions {
         return Ok(EXECUTION_SUCCESS);

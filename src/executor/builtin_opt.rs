@@ -91,8 +91,12 @@ pub struct BuiltinOpt<'a, 'd> {
     words: &'a [String],
     diag: &'d mut Diag<'a>,
     /// The parsed spec: (option byte, argument kind) pairs, plus
-    /// whether the spec opens with `'+'` (plus mode).
-    spec: Vec<(u8, ArgKind)>,
+    /// whether the spec opens with `'+'` (plus mode). Parsed once
+    /// per distinct spec string and shared (`parsed_spec`): the
+    /// declare family's predicate probes construct this machine
+    /// several times per call, and re-parsing the row's static spec
+    /// on every construction was a measurable per-call tax (E4).
+    spec: &'static [(u8, ArgKind)],
     plus: bool,
     /// Index of the word being scanned.
     index: usize,
@@ -127,8 +131,8 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         posix: bool,
     ) -> Self {
         let (spec, plus, scannable) = match row.opt_spec {
-            OptSpec::Getopt(spec) => (parse_spec(spec), spec.starts_with('+'), true),
-            OptSpec::Grammar | OptSpec::NoScan => (Vec::new(), false, false),
+            OptSpec::Getopt(spec) => (parsed_spec(spec), spec.starts_with('+'), true),
+            OptSpec::Grammar | OptSpec::NoScan => (&[][..], false, false),
         };
         BuiltinOpt {
             row,
@@ -353,6 +357,25 @@ fn is_option_word(word: &[u8], plus: bool) -> bool {
 /// A leading `'+'` enables plus mode and is not an option. The
 /// `':'` / `';'` / `'#'` after a letter sets its argument kind;
 /// a leading `':'` in the spec (fc's `":e:lnrs"`) is inert.
+/// `parse_spec` memoized per distinct spec string: the parse is a
+/// pure function of the row's static spec, so it is computed once
+/// and the result leaked into a shared slice. Bounded by the number
+/// of distinct row specs (one per builtin).
+fn parsed_spec(spec: &'static str) -> &'static [(u8, ArgKind)] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static [(u8, ArgKind)]>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(hit) = cache.get(spec) {
+        return hit;
+    }
+    let parsed: &'static [(u8, ArgKind)] = Box::leak(parse_spec(spec).into_boxed_slice());
+    cache.insert(spec, parsed);
+    parsed
+}
+
 fn parse_spec(spec: &str) -> Vec<(u8, ArgKind)> {
     let bytes = spec.as_bytes();
     let mut out = Vec::new();

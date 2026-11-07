@@ -33,7 +33,7 @@ pub(super) fn assign_declare_names(
     mark_unset_declarations: bool,
     deleted_names: &mut std::collections::HashSet<String>,
     diag: &mut crate::executor::builtin_diag::Diag<'_>,
-    prolog: &crate::executor::builtin_diag::Prolog,
+    prolog: &crate::executor::builtin_diag::PrologParts,
     oob_word: &mut Option<String>,
     written_hints: &mut super::WrittenOperandHints,
 ) -> io::Result<i32> {
@@ -118,7 +118,7 @@ pub(super) fn assign_declare_names(
             if let Err(pattern) =
                 append_array_value("()", &expanded_value, integer, variables, oob_word)
             {
-                bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
+                bare_diag_line(diag, prolog, variables, &format!("no match: {pattern}"));
                 status = EXECUTION_FAILURE;
                 deleted_names.insert(raw_target.to_string());
                 continue;
@@ -132,6 +132,7 @@ pub(super) fn assign_declare_names(
             bare_diag_line(
                 diag,
                 prolog,
+                variables,
                 &format!("{raw_target}: cannot assign list to array member"),
             );
             status = EXECUTION_FAILURE;
@@ -179,7 +180,12 @@ pub(super) fn assign_declare_names(
                             mark_typed(variables, ARRAY_VARS, base);
                         }
                         Err(pattern) => {
-                            bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("no match: {pattern}"),
+                            );
                             status = EXECUTION_FAILURE;
                             deleted_names.insert(raw_target.to_string());
                         }
@@ -201,6 +207,7 @@ pub(super) fn assign_declare_names(
                 bare_diag_line(
                     diag,
                     prolog,
+                    variables,
                     &format!("warning: {name}: quoted compound array assignment deprecated"),
                 );
             }
@@ -258,6 +265,7 @@ pub(super) fn assign_declare_names(
                     bare_diag_line(
                         diag,
                         prolog,
+                        variables,
                         &format!("warning: {base}: removing nameref attribute"),
                     );
                     unmark_typed(variables, NAMEREF_VARS, base);
@@ -315,7 +323,12 @@ pub(super) fn assign_declare_names(
                         });
                         if wrapped.is_none() {
                             let word = written_element_word(name, written_hints);
-                            bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
+                            bare_diag_line(
+                                diag,
+                                prolog,
+                                variables,
+                                &format!("{word}: bad array subscript"),
+                            );
                         }
                         wrapped
                     }
@@ -425,7 +438,7 @@ pub(super) fn assign_declare_names(
             // fail earlier through the builtin_error path, which keeps the
             // `declare:` command prefix.
             if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-                diag.err_readonly(&prolog.render(), var_name);
+                diag.err_readonly(&prolog.build(variables).render(), var_name);
             } else {
                 diag.error(DiagKind::Readonly(var_name.to_string()));
             }
@@ -493,7 +506,7 @@ pub(super) fn assign_declare_names(
                 // sv_locale watcher fires on it (variables.c:6272).
                 if let Some(warning) = crate::locale::locale_assignment_warning(var_name, variables)
                 {
-                    bare_diag_line(diag, prolog, &format!("warning: {warning}"));
+                    bare_diag_line(diag, prolog, variables, &format!("warning: {warning}"));
                 }
                 unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
                 continue;
@@ -554,7 +567,12 @@ pub(super) fn assign_declare_names(
                 // bad array subscript` but does NOT set any_failed — the
                 // pair is skipped and the assignment still succeeds.
                 for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
-                    bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
+                    bare_diag_line(
+                        diag,
+                        prolog,
+                        variables,
+                        &format!("{word}: bad array subscript"),
+                    );
                 }
                 if value.starts_with('(') && value.ends_with(')') {
                     append_assoc_value(&current, value, integer, variables)
@@ -586,7 +604,7 @@ pub(super) fn assign_declare_names(
                 match append_array_value(&baseline, value, integer, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
-                        bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
+                        bare_diag_line(diag, prolog, variables, &format!("no match: {pattern}"));
                         status = EXECUTION_FAILURE;
                         deleted_names.insert(var_name.to_string());
                         continue;
@@ -622,7 +640,12 @@ pub(super) fn assign_declare_names(
             // GNU assign_assoc_from_kvlist (arrayfunc.c:644-650): same
             // kvpair empty-key diagnostic as the append path above.
             for word in crate::executor::assignment_helpers::assoc_empty_key_words(value) {
-                bare_diag_line(diag, prolog, &format!("{word}: bad array subscript"));
+                bare_diag_line(
+                    diag,
+                    prolog,
+                    variables,
+                    &format!("{word}: bad array subscript"),
+                );
             }
             append_assoc_value("()", value, integer, variables)
         } else if integer {
@@ -630,7 +653,7 @@ pub(super) fn assign_declare_names(
                 match append_array_value("()", value, true, variables, oob_word) {
                     Ok(storage) => storage,
                     Err(pattern) => {
-                        bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
+                        bare_diag_line(diag, prolog, variables, &format!("no match: {pattern}"));
                         status = EXECUTION_FAILURE;
                         deleted_names.insert(var_name.to_string());
                         continue;
@@ -661,7 +684,7 @@ pub(super) fn assign_declare_names(
             match append_array_value("()", &expanded_value, false, variables, oob_word) {
                 Ok(storage) => storage,
                 Err(pattern) => {
-                    bare_diag_line(diag, prolog, &format!("no match: {pattern}"));
+                    bare_diag_line(diag, prolog, variables, &format!("no match: {pattern}"));
                     status = EXECUTION_FAILURE;
                     deleted_names.insert(var_name.to_string());
                     continue;
@@ -715,7 +738,7 @@ pub(super) fn assign_declare_names(
             } else {
                 format!("{var_name}: nameref variable self references not allowed")
             };
-            bare_diag_line(diag, prolog, &text);
+            bare_diag_line(diag, prolog, variables, &text);
             status = EXECUTION_FAILURE;
             continue;
         }
@@ -736,7 +759,7 @@ pub(super) fn assign_declare_names(
         // rubash#1692: same sv_locale bind hook as the nameref path
         // above (variables.c:6272).
         if let Some(warning) = crate::locale::locale_assignment_warning(var_name, variables) {
-            bare_diag_line(diag, prolog, &format!("warning: {warning}"));
+            bare_diag_line(diag, prolog, variables, &format!("warning: {warning}"));
         }
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
         if compound_operand && !assoc && !variables.is_marked(ASSOC_VARS, var_name) {
@@ -758,7 +781,7 @@ pub(super) fn assign_declare_names(
         if let Err(diagnostic) =
             crate::builtins::shopt::sync_compat_flags_from_bash_compat(variables)
         {
-            bare_diag_line(diag, prolog, &diagnostic);
+            bare_diag_line(diag, prolog, variables, &diagnostic);
         }
     }
     Ok(status)

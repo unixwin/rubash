@@ -34,7 +34,7 @@ pub(crate) struct DynamicDeclarationView {
     pub array: bool,
 }
 
-use crate::executor::builtin_diag::{Diag, DiagKind, Prolog};
+use crate::executor::builtin_diag::{Diag, DiagKind, PrologParts};
 use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
 use crate::executor::builtin_table::builtin_table_row;
 use crate::shell::VariableStore;
@@ -94,31 +94,13 @@ use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::types::COMPOUND_ASSIGNMENT_MARKER;
 const EX_USAGE: i32 = 2;
 
-/// The flush prolog for this family's `Diag` handles, built from the
-/// same env cells the deleted `diagnostic::diagnostic_prefix` read
-/// (executor map first, process environment as fallback — nested
-/// in-process executions strip the markers from the process env, so
-/// the map wins). Mirrors `set.rs`'s `prolog_for_env`; the executor
-/// callers build their own via `Executor::diagnostic_prolog` and hand
-/// it in, so every line of one call carries one prolog.
-pub(super) fn diag_prolog(variables: &crate::shell::var_table::VarTable) -> Prolog {
-    Prolog {
-        interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: variables
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: variables
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
-        line: variables
-            .get("__RUBASH_CURRENT_LINE")
-            .cloned()
-            .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
-    }
-}
+/// The flush prolog for this family's `Diag` handles is composed
+/// from the variable table at the diagnostic site
+/// (`PrologParts::build`): the executor crossings hand in
+/// `PrologParts::Executor` (their own flavor, deferred), this
+/// module's non-executor entry hands in `PrologParts::Lib`, so
+/// every line of one call carries one prolog and a
+/// diagnostic-free call builds none (E4).
 
 /// A diagnostic line that carries the prolog but NO builtin name —
 /// the `error.c` report family (`err_badarraysub`, the unqualified
@@ -126,9 +108,15 @@ pub(super) fn diag_prolog(variables: &crate::shell::var_table::VarTable) -> Prol
 /// prefix, not `builtin_error`. Recorded diagnostics are flushed
 /// first so the line keeps its position relative to the standard
 /// `{prolog}{name}:` skeleton lines queued on the same handle.
-pub(super) fn bare_diag_line(diag: &mut Diag, prolog: &Prolog, text: &str) {
-    diag.flush_with(|| prolog.clone());
-    let head = prolog.render();
+pub(super) fn bare_diag_line(
+    diag: &mut Diag,
+    prolog: &PrologParts,
+    variables: &crate::shell::var_table::VarTable,
+    text: &str,
+) {
+    let built = prolog.build(variables);
+    diag.flush_with(|| built.clone());
+    let head = built.render();
     diag.sink().write_str(&format!("{head}{text}\n"));
 }
 
@@ -553,7 +541,7 @@ where
     // the stderr the caller supplied (Stage-2 ④ Phase 4).
     let row = builtin_table_row(command_name)
         .unwrap_or_else(|| builtin_table_row("declare").expect("declare row exists"));
-    let prolog = diag_prolog(variables);
+    let prolog = PrologParts::Lib;
     let mut diag = Diag::new(row, stderr);
     let status = execute_with_io_named_in_context(
         command_name,
@@ -570,7 +558,7 @@ where
         oob_word,
         &mut WrittenOperandHints::default(),
     )?;
-    diag.flush_with(|| prolog);
+    diag.flush_with(|| prolog.build(variables));
     Ok(status)
 }
 
@@ -585,7 +573,7 @@ pub(crate) fn execute_with_io_named_in_context<'a, W>(
     variables: &mut crate::shell::var_table::VarTable,
     stdout: &mut W,
     diag: &mut Diag<'a>,
-    prolog: &Prolog,
+    prolog: &PrologParts,
     in_function: bool,
     frame_locals: &[String],
     dynamic_views: &[DynamicDeclarationView],
@@ -765,7 +753,7 @@ where
         };
         if let Some(option) = conflict {
             diag.error(DiagKind::InvalidOpt(format!("-{option}")));
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| prolog.build(variables));
             return Ok(EX_USAGE);
         }
         // GNU declare.def:222 declare_invalid_opts, first branch:
@@ -789,7 +777,7 @@ where
             };
             if let Some(option) = conflict {
                 diag.error(DiagKind::InvalidOpt(format!("-{option}")));
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| prolog.build(variables));
                 return Ok(EXECUTION_FAILURE);
             }
         }
@@ -827,7 +815,7 @@ where
         // -f); it fires only on direct core entries.
         if function && name.contains('=') {
             diag.free(format_args!("cannot use `-f' to make functions"));
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| prolog.build(variables));
             return Ok(EXECUTION_FAILURE);
         }
         // GNU builtins/declare.def:549-580 runs the nameref-specific lexical
@@ -887,6 +875,7 @@ where
                     bare_diag_line(
                         diag,
                         prolog,
+                        variables,
                         &format!("warning: {lhs}: circular name reference"),
                     );
                 } else {
@@ -1091,6 +1080,7 @@ where
                 bare_diag_line(
                     diag,
                     prolog,
+                    variables,
                     &format!("warning: {var_name}: removing nameref attribute"),
                 );
                 unmark_typed(variables, NAMEREF_VARS, var_name);
@@ -1219,6 +1209,7 @@ where
                         bare_diag_line(
                             diag,
                             prolog,
+                            variables,
                             &format!("`{target}': not a valid identifier"),
                         );
                         attr_status = EXECUTION_FAILURE;

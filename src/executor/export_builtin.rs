@@ -303,7 +303,6 @@ impl Executor {
         // read by the caller.
         let row = crate::executor::builtin_table::builtin_table_row("export").expect("export row");
         let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
-        let prolog = self.diagnostic_prolog();
         let mut unset = false;
         let mut print = false;
         let operands: Vec<&str> = {
@@ -329,7 +328,7 @@ impl Executor {
             drop(opt);
             if diag.status() != 0 {
                 diag.usage();
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(diag.status());
             }
             operands
@@ -367,7 +366,7 @@ impl Executor {
                 mark_env_name(&mut self.shell_state.env_vars, EXPORTED_FUNCTIONS, name);
             }
         }
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(|| self.diagnostic_prolog());
 
         Ok(status)
     }

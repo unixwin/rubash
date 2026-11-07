@@ -130,7 +130,6 @@ impl Executor {
         // ④ Phase 4 — the old code hardcoded `declare:` here).
         let row = builtin_table_row(command_name).expect("declare-family row");
         let mut diag = Diag::new(row, stderr);
-        let prolog = self.diagnostic_prolog();
         let (option_letters, invalid_letter) = declare_option_scan(row, args);
         let function_flag_on = option_letters
             .iter()
@@ -143,7 +142,7 @@ impl Executor {
             if let Some(invalid) = invalid_letter {
                 diag.error(DiagKind::InvalidOpt(format!("-{invalid}")));
                 diag.usage();
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(2);
             }
             // GNU declare.def declare_invalid_opts checks the conflicting
@@ -155,7 +154,7 @@ impl Executor {
                 .map(|letter| format!("-{letter}"));
             if let Some(opt) = bad_opt {
                 diag.error(DiagKind::InvalidOpt(opt));
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(1);
             }
         }
@@ -167,7 +166,7 @@ impl Executor {
             for arg in args {
                 if !arg.starts_with('-') && !arg.starts_with('+') && arg.contains('=') {
                     diag.free(format_args!("cannot use `-f' to make functions"));
-                    diag.flush_with(|| prolog.clone());
+                    diag.flush_with(|| self.diagnostic_prolog());
                     return Ok(1);
                 }
             }
@@ -1622,7 +1621,7 @@ impl Executor {
                 let row = crate::executor::builtin_table::builtin_table_row(command_name)
                     .expect("declare-family row");
                 let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
-                let prolog = self.diagnostic_prolog();
+                let prolog = self.diagnostic_prolog_parts();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
@@ -1638,7 +1637,7 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
                 // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
                 // rubash#635): report_error carries no `command:` segment
                 // (unlike `declare: x: readonly variable`); abort the list
@@ -1867,7 +1866,7 @@ impl Executor {
             let row =
                 crate::executor::builtin_table::builtin_table_row("local").expect("local row");
             let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
-            let prolog = self.diagnostic_prolog();
+            let prolog = self.diagnostic_prolog_parts();
             let dynamic_set_views = self.dynamic_set_views();
             let underlay = crate::shell::var_table::TempenvListingUnderlay::new();
             let mut oob_word = None;
@@ -1887,7 +1886,7 @@ impl Executor {
                 &mut oob_word,
                 &mut written_hints,
             )?;
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
             (status, Vec::new())
         } else if self.shell_state.function_depth == 0 {
             writeln!(
@@ -2213,7 +2212,7 @@ impl Executor {
                 let row =
                     crate::executor::builtin_table::builtin_table_row("local").expect("local row");
                 let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
-                let prolog = self.diagnostic_prolog();
+                let prolog = self.diagnostic_prolog_parts();
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
@@ -2229,7 +2228,7 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
                 let status = if local_blocked.is_empty()
                     && noassign_blocked.is_empty()
                     && print_missing.is_empty()

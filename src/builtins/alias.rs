@@ -78,7 +78,6 @@ where
     // command's own buffered stderr.
     let row = builtin_table_row("alias").expect("alias row exists");
     let mut diag = Diag::new(row, stderr);
-    let prolog = diag_prolog();
     // GNU alias.def scans with internal_getopt over "p" (the row's
     // spec); the single BuiltinOpt machine replaces the hand scan
     // here (Stage-2 ④ Phase 4).
@@ -104,7 +103,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(diag_prolog);
             return Ok(diag.status());
         }
         operands
@@ -146,7 +145,7 @@ where
         }
     }
 
-    diag.flush_with(|| prolog.clone());
+    diag.flush_with(diag_prolog);
     Ok(status)
 }
 
@@ -164,10 +163,9 @@ where
     // builtin_usage), so it is `diag.usage()`, not a free line.
     let row = builtin_table_row("unalias").expect("unalias row exists");
     let mut diag = Diag::new(row, stderr);
-    let prolog = diag_prolog();
     if args.is_empty() {
         diag.usage();
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(diag_prolog);
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -195,7 +193,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(diag_prolog);
             return Ok(diag.status());
         }
         operands
@@ -208,7 +206,7 @@ where
 
     if args.is_empty() {
         diag.usage();
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(diag_prolog);
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -220,7 +218,7 @@ where
         }
     }
 
-    diag.flush_with(|| prolog.clone());
+    diag.flush_with(diag_prolog);
     Ok(status)
 }
 

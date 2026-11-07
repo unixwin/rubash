@@ -19,8 +19,8 @@ use print::{print_exported, print_readonly};
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 pub(crate) const EX_USAGE: i32 = 2;
-/// The lib-level `Diag` prolog, mirroring
-/// `builtins::declare::diag_prolog`: the same env cells the deleted
+/// The lib-level `Diag` prolog, mirroring the declare layer's
+/// `PrologParts::Lib` composition: the same env cells the deleted
 /// `value::diagnostic_prefix` read. The `rubash: ` fallback the old
 /// prefix used is replaced by the prolog's `error_name` shape, the
 /// same simplification declare took in Phase 4 (E1/E2 run script
@@ -49,8 +49,11 @@ fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
 /// `warning:` lines). Recorded diagnostics are flushed first so the
 /// line keeps its position relative to the standard
 /// `{prolog}{name}:` skeleton lines queued on the same handle.
-fn bare_diag_line(diag: &mut Diag, prolog: &Prolog, text: &str) {
-    diag.flush_with(|| prolog.clone());
+fn bare_diag_line(diag: &mut Diag, env_vars: &crate::shell::var_table::VarTable, text: &str) {
+    // Diagnostic-only path: the prolog is built here, on demand, never
+    // at builtin entry (E4 — a diagnostic-free call must not pay for it).
+    let prolog = diag_prolog(env_vars);
+    diag.flush_with(|| diag_prolog(env_vars));
     let head = prolog.render();
     diag.sink().write_str(&format!("{head}{text}\n"));
 }
@@ -60,7 +63,7 @@ fn bare_diag_line(diag: &mut Diag, prolog: &Prolog, text: &str) {
 /// render. This is the deleted `value::readonly_error_prefix`,
 /// re-homed on the `Diag` (the caller supplies the rendered prefix
 /// to `Diag::err_readonly`).
-fn readonly_error_prefix(env_vars: &crate::shell::var_table::VarTable, prolog: &Prolog) -> String {
+fn readonly_error_prefix(env_vars: &crate::shell::var_table::VarTable) -> String {
     if let (Some(script), Some(line)) = (
         env_vars.get("__RUBASH_SCRIPT_NAME"),
         env_vars.get("__RUBASH_CURRENT_LINE"),
@@ -69,7 +72,7 @@ fn readonly_error_prefix(env_vars: &crate::shell::var_table::VarTable, prolog: &
             return format!("{script}:{line}: ");
         }
     }
-    prolog.render()
+    diag_prolog(env_vars).render()
 }
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
@@ -124,7 +127,6 @@ fn sync_bash_compat_flags(
     env_vars: &mut crate::shell::var_table::VarTable,
     operands: &[&str],
     diag: &mut Diag,
-    prolog: &Prolog,
 ) -> io::Result<()> {
     let binds = operands
         .iter()
@@ -133,7 +135,7 @@ fn sync_bash_compat_flags(
         if let Err(diagnostic) =
             crate::builtins::shopt::sync_compat_flags_from_bash_compat(env_vars)
         {
-            bare_diag_line(diag, prolog, &diagnostic);
+            bare_diag_line(diag, env_vars, &diagnostic);
         }
     }
     Ok(())
@@ -185,7 +187,6 @@ where
     // the flush below runs before the buffer is read.
     let row = builtin_table_row("export").expect("export row exists");
     let mut diag = Diag::new(row, stderr);
-    let prolog = diag_prolog(env_vars);
     let args: Vec<String> = args.into_iter().map(str::to_string).collect();
     let mut mode = ExportMode::Set;
     let mut print = false;
@@ -229,7 +230,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| diag_prolog(env_vars));
             return Ok(diag.status());
         }
         operands
@@ -277,7 +278,6 @@ where
             assoc,
             env_vars,
             &mut diag,
-            &prolog,
             oob_word,
             traced.as_deref_mut(),
         )? != EXECUTION_SUCCESS
@@ -293,8 +293,8 @@ where
         }
     }
 
-    sync_bash_compat_flags(env_vars, &operands, &mut diag, &prolog)?;
-    diag.flush_with(|| prolog.clone());
+    sync_bash_compat_flags(env_vars, &operands, &mut diag)?;
+    diag.flush_with(|| diag_prolog(env_vars));
 
     Ok(status)
 }
@@ -316,7 +316,6 @@ where
     // Same Diag-over-caller's-stderr shape as export_with_io above.
     let row = builtin_table_row("readonly").expect("readonly row exists");
     let mut diag = Diag::new(row, stderr);
-    let prolog = diag_prolog(env_vars);
     let args: Vec<String> = args.into_iter().map(str::to_string).collect();
     let mut print = false;
     let mut array = false;
@@ -356,7 +355,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| diag_prolog(env_vars));
             return Ok(diag.status());
         }
         operands
@@ -390,7 +389,6 @@ where
             undo,
             env_vars,
             &mut diag,
-            &prolog,
             context_name,
             oob_word,
             traced.as_deref_mut(),
@@ -403,8 +401,8 @@ where
             return Ok(EXECUTION_FAILURE);
         }
     }
-    sync_bash_compat_flags(env_vars, &operands, &mut diag, &prolog)?;
-    diag.flush_with(|| prolog.clone());
+    sync_bash_compat_flags(env_vars, &operands, &mut diag)?;
+    diag.flush_with(|| diag_prolog(env_vars));
     Ok(status)
 }
 

@@ -99,6 +99,94 @@ impl Prolog {
     }
 }
 
+/// The deferred form of a `Prolog`, for the declare family's
+/// in-context entry: the variable table is mutably borrowed for the
+/// whole call there, so the composed `Prolog` (which reads that
+/// same table) cannot be handed in by the dispatcher without paying
+/// its ~7µs build on every call — and a closure over the executor
+/// cannot build it either, since that borrow would coexist with
+/// the `&mut` table borrow for the call's duration. The two fields
+/// that do NOT derive from the table — the composed error file
+/// name (a `bash_source_stack` product) and the invocation shape —
+/// cross by value; every table-derived field is composed in
+/// `build`, which runs only at a diagnostic site, so a
+/// diagnostic-free declare/local call never pays for a prolog
+/// (E4, the Phase-2 lesson — see `Diag`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrologParts {
+    /// The executor flavor (`Executor::diagnostic_prolog`,
+    /// deferred): the fields are composed at the dispatch point.
+    Executor {
+        /// `current_error_file_name()` at the dispatch point.
+        script_file: Option<String>,
+        /// `invocation_interactive()` at the dispatch point.
+        interactive: bool,
+    },
+    /// The library flavor (the declare layer's own table-only
+    /// composition, for the non-executor entry).
+    Lib,
+}
+
+impl PrologParts {
+    /// Compose the `Prolog` from the variable table, exactly as
+    /// the eager builder of the same flavor composes it (the
+    /// table-derived fields — the argv0 chain, the shell basename,
+    /// the current line — are read here, at the diagnostic site;
+    /// the declare family never writes those cells itself).
+    pub fn build(&self, variables: &crate::shell::var_table::VarTable) -> Prolog {
+        match self {
+            PrologParts::Executor {
+                script_file,
+                interactive,
+            } => Prolog {
+                interactive: *interactive,
+                shell_basename: super::Executor::interactive_shell_basename(&**variables),
+                error_name: error_report_name(script_file, variables),
+                script_file: script_file.clone(),
+                line: variables.get("__RUBASH_CURRENT_LINE").cloned(),
+            },
+            PrologParts::Lib => Prolog {
+                interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
+                shell_basename: variables
+                    .get("__RUBASH_SHELL_NAME")
+                    .cloned()
+                    .unwrap_or_else(|| "rubash".to_string()),
+                error_name: "rubash".to_string(),
+                script_file: variables
+                    .get("__RUBASH_SCRIPT_NAME")
+                    .cloned()
+                    .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+                line: variables
+                    .get("__RUBASH_CURRENT_LINE")
+                    .cloned()
+                    .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
+            },
+        }
+    }
+}
+
+/// `Executor::error_report_name_with_file` over a variable table:
+/// the error file name when it names one, else the raw argv0 keys
+/// in order, else the shell basename.
+fn error_report_name(
+    file_name: &Option<String>,
+    variables: &crate::shell::var_table::VarTable,
+) -> String {
+    if let Some(name) = file_name.as_ref().filter(|name| !name.is_empty()) {
+        return name.clone();
+    }
+    for key in [
+        "BASH_ARGV0",
+        "__RUBASH_ARGV0_AFTER_UNSET",
+        "__RUBASH_TOP_LEVEL_NAME",
+    ] {
+        if let Some(value) = variables.get(key).filter(|value| !value.is_empty()) {
+            return value.clone();
+        }
+    }
+    super::Executor::interactive_shell_basename(&**variables)
+}
+
 /// The sink a `Diag` writes to: the command's own stderr (the
 /// redirection-applied IO context the dispatcher binds).
 pub trait DiagSink {

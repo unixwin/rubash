@@ -107,7 +107,6 @@ impl Executor {
         // over the same sink inside the builtin.
         let row = crate::executor::builtin_table::builtin_table_row("unset").expect("unset row");
         let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
-        let prolog = self.diagnostic_prolog();
 
         let function_only = args.iter().any(|arg| arg == "-f");
         let variable_only = args.iter().any(|arg| arg == "-v");
@@ -157,7 +156,7 @@ impl Executor {
         }
 
         if function_only {
-            diag.flush_with(|| prolog.clone());
+            diag.flush_with(|| self.diagnostic_prolog());
             return Ok(function_status);
         }
 
@@ -232,12 +231,11 @@ impl Executor {
                     // element against the REFERENCED array (nameref15.sub:
                     // v[0] is unbound and n survives) — resolve before the
                     // element path consumes the operand.
-                    if let Some(status) = self.unset_through_nameref(&name, &mut diag, &prolog) {
+                    if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
-                    if let Some(status) = self.unset_array_element(&name, true, &mut diag, &prolog)
-                    {
+                    if let Some(status) = self.unset_array_element(&name, true, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
@@ -266,7 +264,7 @@ impl Executor {
             // array's element (unset n[0] with n->v removes v[0]); a plain
             // nameref whose cell is an array reference unbinds that element
             // while keeping the nameref itself.
-            if let Some(status) = self.unset_through_nameref(&name, &mut diag, &prolog) {
+            if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -278,7 +276,7 @@ impl Executor {
                 &self.shell_state.env_vars,
                 "array_expand_once",
             );
-            if let Some(status) = self.unset_array_element(&name, verbatim, &mut diag, &prolog) {
+            if let Some(status) = self.unset_array_element(&name, verbatim, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -357,7 +355,7 @@ impl Executor {
         // Flush first: the builtin builds its own Diag over the
         // same sink, and its lines must follow the ones recorded
         // above in the byte stream.
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(|| self.diagnostic_prolog());
         let variable_status = {
             crate::builtins::set::unset_with_stderr(
                 variable_args.iter().copied(),
@@ -428,7 +426,7 @@ impl Executor {
         // (> EX_SHERRBASE = 256) to the final exit code, and sets
         // special_builtin_failed for special builtins. EX_USAGE (258) → 2,
         // EX_UTILERROR (263) → 1 (EXECUTION_FAILURE).
-        diag.flush_with(|| prolog.clone());
+        diag.flush_with(|| self.diagnostic_prolog());
         if raw_status > 256 {
             self.special_builtin_failed.set(true);
             let converted = match raw_status {
@@ -491,7 +489,6 @@ impl Executor {
         &mut self,
         name: &str,
         diag: &mut crate::executor::builtin_diag::Diag,
-        prolog: &crate::executor::builtin_diag::Prolog,
     ) -> Option<u8> {
         if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
             // GNU builtins/set.def:925/990-1014: `unset` of a nameref walks to
@@ -519,9 +516,7 @@ impl Executor {
                 .cloned()
                 .unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
-                return self
-                    .unset_array_element(&cell, false, diag, prolog)
-                    .or(Some(0));
+                return self.unset_array_element(&cell, false, diag).or(Some(0));
             }
             // GNU set.def:936-937 + 962-966: the resolved referent is
             // unbound by name; a readonly referent is an error on the
@@ -567,7 +562,7 @@ impl Executor {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"), false, diag, prolog)
+        self.unset_array_element(&format!("{cell}[{subscript}]"), false, diag)
             .or(Some(0))
     }
 
@@ -676,7 +671,6 @@ impl Executor {
         name: &str,
         arrayref: bool,
         diag: &mut crate::executor::builtin_diag::Diag,
-        prolog: &crate::executor::builtin_diag::Prolog,
     ) -> Option<u8> {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
             return None;
@@ -762,7 +756,7 @@ impl Executor {
                 // entirely (A3-R1, rubash#2707). It now travels through
                 // the Diag, whose sink is the command's bound fd 2.
                 diag.free(format_args!("[{subscript}]: bad array subscript"));
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Some(1);
             }
             let mut entries = assoc_entries(&current);
@@ -841,7 +835,7 @@ impl Executor {
                 // Same A3-R1 fix as the assoc arm above: through
                 // the Diag, never the process stderr.
                 diag.free(format_args!("[{subscript}]: bad array subscript"));
-                diag.flush_with(|| prolog.clone());
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Some(1);
             };
             let mut entries = indexed_array_entries(&current);

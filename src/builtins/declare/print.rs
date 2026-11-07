@@ -25,7 +25,7 @@ pub(super) fn print_declare_names<W>(
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     stdout: &mut W,
     diag: &mut crate::executor::builtin_diag::Diag<'_>,
-    prolog: &crate::executor::builtin_diag::Prolog,
+    prolog: &crate::executor::builtin_diag::PrologParts,
 ) -> io::Result<i32>
 where
     W: Write,
