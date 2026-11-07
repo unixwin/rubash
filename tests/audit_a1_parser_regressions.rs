@@ -62,7 +62,11 @@ fn audit_a1_f06_coproc_function_definition_is_syntax_error() {
         "coproc ( ); echo rc=$?",
     ] {
         let (stdout, stderr, code) = rubash(script);
-        assert_eq!(code, Some(2), "{script}: stdout={stdout:?} stderr={stderr:?}");
+        assert_eq!(
+            code,
+            Some(2),
+            "{script}: stdout={stdout:?} stderr={stderr:?}"
+        );
         assert_eq!(stdout, "", "{script}");
         assert!(stderr.contains("syntax error"), "{script}: {stderr:?}");
     }
@@ -88,7 +92,11 @@ fn audit_a1_f06_coproc_legal_forms_still_work() {
 #[test]
 fn audit_a1_f13_heredoc_delimiter_with_escaped_space_terminates() {
     let (stdout, stderr, code) = rubash("cat <<E\\ OF\nbody\nE OF\n");
-    assert_eq!((stdout.as_str(), code), ("body\n", Some(0)), "stderr={stderr:?}");
+    assert_eq!(
+        (stdout.as_str(), code),
+        ("body\n", Some(0)),
+        "stderr={stderr:?}"
+    );
     assert_eq!(stderr, "", "{stderr:?}");
     let (stdout, _, code) = rubash("cat <<\\ EOF\nbody\n EOF\n");
     assert_eq!((stdout.as_str(), code), ("body\n", Some(0)));
