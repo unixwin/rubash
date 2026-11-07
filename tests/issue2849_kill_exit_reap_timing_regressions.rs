@@ -183,10 +183,7 @@ fn stopped_sleep_session() -> Option<(PtySession, usize)> {
 /// wait_for below times out on the unfixed tree.
 fn assert_child_exited(session: &PtySession, probe_from: usize) {
     session.wait_for("marker=unset", probe_from, LONG);
-    let flat = session
-        .text()
-        .replace("\r\n", "\n")
-        .replace('\r', "\n");
+    let flat = session.text().replace("\r\n", "\n").replace('\r', "\n");
     assert!(
         !flat.contains("There are stopped jobs."),
         "the first exit was deferred by a stale Stopped entry: {flat:?}"
