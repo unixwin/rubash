@@ -1735,6 +1735,19 @@ impl Executor {
             // creates the name through bind_variable first, so GNU shows
             // -ax for `declare arr=(1 2)` and the mark must stay.
             let array_creation_invocation = declare_invocation_sets_array_attribute(&args);
+            // rubash#2964: inside a function (and without -g) declare
+            // runs in GNU's local context, where a compound operand is
+            // created through the local array machinery and converted
+            // via do_compound_assignment (subst.c:3441, ASS_MKLOCAL) —
+            // neither applies the mark_modified_vars mark, and the
+            // top-level ASS_FORCE creation pre-bind behind the
+            // top-level -ax quirk does not occur. The post-pass below
+            // therefore stands down for compound operands in the local
+            // context (execute_local's post-pass already does);
+            // scalar operands there still bind through
+            // bind_variable_value (variables.c:3366-3367) and mark.
+            let local_context =
+                self.shell_state.function_depth > 0 && !declare_args_force_global(&args);
             if !array_creation_invocation
                 && crate::builtins::set::shell_option_enabled(
                     &self.shell_state.env_vars,
@@ -1759,6 +1772,38 @@ impl Executor {
                     let base = base.split('[').next().unwrap_or(base);
                     if has_value.is_none() && !is_shell_name(base) {
                         continue;
+                    }
+                    if local_context {
+                        if let Some(value) = has_value {
+                            let compound = value
+                                .strip_prefix(crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER)
+                                .unwrap_or(value);
+                            let paren_value = compound.starts_with('(') && compound.ends_with(')');
+                            // GNU declare.def:935-947: a `(...)`
+                            // operand binds as a compound assignment
+                            // when the word carried W_COMPASSIGN or
+                            // the target already is an array/assoc; a
+                            // quoted `(x)` on a scalar target stays a
+                            // literal string and marks as a scalar
+                            // bind. The marks are read after the bind,
+                            // so a compound-created array also reads
+                            // as an array target here.
+                            if paren_value
+                                && (value.starts_with(
+                                    crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER,
+                                ) || is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    ASSOC_VARS,
+                                    base,
+                                ) || is_marked_var(
+                                    &self.shell_state.env_vars,
+                                    ARRAY_VARS,
+                                    base,
+                                ))
+                            {
+                                continue;
+                            }
+                        }
                     }
                     self.mark_exported(base);
                 }
