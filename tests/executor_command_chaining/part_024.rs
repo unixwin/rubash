@@ -19,6 +19,41 @@ fn test_parameter_replacement_matches_literal_backslashes() {
     let _ = fs::remove_file(output_path);
 }
 
+/// rubash#2932: `times` prints real getrusage values now, so the
+/// redirect tests below pin the LINE SHAPE (print_timeval's
+/// `{mins}m{secs}.{millis:03}s`, two fields per line, two lines)
+/// instead of the old stub's byte-exact zeros — their subject is the
+/// redirect plumbing, not the values.
+fn assert_times_lines(text: &str) {
+    fn valid_timeval(field: &str) -> bool {
+        let Some((mins, rest)) = field.split_once('m') else {
+            return false;
+        };
+        let Some((secs, frac)) = rest.split_once('.') else {
+            return false;
+        };
+        let Some(frac) = frac.strip_suffix('s') else {
+            return false;
+        };
+        !mins.is_empty()
+            && mins.bytes().all(|b| b.is_ascii_digit())
+            && !secs.is_empty()
+            && secs.bytes().all(|b| b.is_ascii_digit())
+            && frac.len() == 3
+            && frac.bytes().all(|b| b.is_ascii_digit())
+    }
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 2, "text: {text}");
+    for line in lines {
+        let fields: Vec<&str> = line.split(' ').collect();
+        assert_eq!(fields.len(), 2, "line: {line}");
+        for field in fields {
+            assert!(valid_timeval(field), "field: {field}");
+        }
+    }
+}
+
 #[test]
 fn test_times_redirects_output() {
     let _cwd_guard = CwdGuard::take();
@@ -33,10 +68,7 @@ fn test_times_redirects_output() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n"
-    );
+    assert_times_lines(&fs::read_to_string(output_path).unwrap());
     let _ = fs::remove_file(output_path);
 }
 
@@ -55,10 +87,11 @@ fn test_times_appends_output() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "before\n0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n"
-    );
+    let content = fs::read_to_string(output_path).unwrap();
+    let rest = content
+        .strip_prefix("before\n")
+        .expect("append keeps prefix");
+    assert_times_lines(rest);
     let _ = fs::remove_file(output_path);
 }
 
@@ -76,10 +109,9 @@ fn test_times_ignores_non_option_arguments() {
 
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    assert_eq!(
-        fs::read_to_string(output_path).unwrap(),
-        "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n0\n"
-    );
+    let content = fs::read_to_string(output_path).unwrap();
+    let head = content.strip_suffix("0\n").expect("status line follows");
+    assert_times_lines(head);
     let _ = fs::remove_file(output_path);
 }
 

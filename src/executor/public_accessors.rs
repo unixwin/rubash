@@ -1572,6 +1572,10 @@ impl Executor {
         match name {
             "__RUBASH_INTERACTIVE" => {
                 self.shell_state.invocation_interactive = value == "1";
+                // rubash#2961: startup seeds forced_interactive from
+                // the invocation shape (shell.c) — the same fact,
+                // before any change_flag write can move it.
+                self.shell_state.forced_interactive = value == "1";
             }
             "__RUBASH_LOGIN_SHELL" => {
                 self.shell_state.invocation_login = value == "1";
@@ -1690,7 +1694,12 @@ impl Executor {
         // rubash#2130: write-through counterpart of set_env's —
         // removing a shape carrier clears the typed state.
         match name {
-            "__RUBASH_INTERACTIVE" => self.shell_state.invocation_interactive = false,
+            "__RUBASH_INTERACTIVE" => {
+                self.shell_state.invocation_interactive = false;
+                // rubash#2961: removal counterpart of the set_env
+                // seed above.
+                self.shell_state.forced_interactive = false;
+            }
             "__RUBASH_LOGIN_SHELL" => self.shell_state.invocation_login = false,
             _ => {}
         }
@@ -2103,6 +2112,11 @@ impl Executor {
             .get("__RUBASH_INTERACTIVE")
             .map(String::as_str)
             == Some("1");
+        // rubash#2961: a whole-table restore re-seeds the invocation
+        // shape, so forced_interactive re-seeds with it (any
+        // change_flag state the old table carried is gone with the
+        // table, exactly like the invocation bit itself).
+        self.shell_state.forced_interactive = self.shell_state.invocation_interactive;
         self.shell_state.invocation_login = self
             .shell_state
             .env_vars
