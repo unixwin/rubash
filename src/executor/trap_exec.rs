@@ -1662,7 +1662,14 @@ impl Executor {
             None => ast_base,
         };
         let saved_alias_streamed = self.mark_alias_streamed();
+        // rubash#2969: mark the action's own execution — break/continue
+        // defer to the pending loop-control flags only inside this
+        // window (debugger consults and their evaluations run under
+        // debug_trap_running but outside this flag, and keep the
+        // unwind channel).
+        let saved_debug_action = std::mem::replace(&mut self.debug_action_running, true);
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        self.debug_action_running = saved_debug_action;
         // Cache the (re-based) AST under its spliced text for the next
         // firing; the recorded base makes the next rebase exact.
         *self.debug_trap_action_cache.borrow_mut() = Some((action, ast, ast_base));

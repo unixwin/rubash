@@ -167,9 +167,19 @@ impl Executor {
             // on the final iteration leaves the for command's status at the
             // trap's status (probe k1: `FOR=1`).
             if self.debug_trap_in_scope() {
-                if let Some(skip_status) =
-                    self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text)?
-                {
+                // rubash#2969: GNU's loop_level is already 1 when the
+                // head trap fires (execute_cmd.c increments it at
+                // execute_for_command entry; the fire is :3053), so a
+                // break/continue in the head's trap action validates
+                // against this loop and defers to its pending flag.
+                // This port raises loop_depth only around the body walk
+                // below; raise it across the fire too — otherwise the
+                // action's break saw depth 0, misreported "only
+                // meaningful", and the loop ran on (issue #2969 face A).
+                self.shell_state.loop_depth += 1;
+                let fire = self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text);
+                self.shell_state.loop_depth -= 1;
+                if let Some(skip_status) = fire? {
                     self.exit_code = skip_status;
                     ran_body = true;
                     continue;
@@ -313,7 +323,25 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: the unwind abandons this frame; flags
+                    // banked against it must not survive into the
+                    // enclosing list (no driver remains to consume them).
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
+            }
+            // rubash#2969: GNU execute_cmd.c:3108-3118 — consume one
+            // pending DEBUG-trap flag level after the body: a break
+            // ends the loop; a continue advances, or — with levels
+            // remaining for an outer loop — ends this loop with the
+            // flag still standing for that driver. Runs before the
+            // stopped check below: in GNU the stop banks into the same
+            // `breaking` global this check reads.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration => continue,
+                LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3108-3111
             // execute_for_command — a SIGTSTP stop in the body set

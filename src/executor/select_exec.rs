@@ -664,7 +664,18 @@ impl Executor {
         let result = self.execute_ast(&body);
         self.shell_state.loop_depth -= 1;
         match result {
-            Ok(()) => Ok(SelectBodyFlow::ContinueLoop),
+            // rubash#2969: GNU execute_cmd.c:3609-3619
+            // (execute_select_command) reads the pending flags after
+            // the body like every loop driver — a DEBUG-trap break
+            // banked during the body ends the select; a continue
+            // advances to the next reply read (or ends this select
+            // with levels remaining for an outer driver).
+            Ok(()) => match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => Ok(SelectBodyFlow::BreakLoop),
+                LoopControlFlow::NextIteration | LoopControlFlow::None => {
+                    Ok(SelectBodyFlow::ContinueLoop)
+                }
+            },
             Err(ExecuteError::Break(level)) if level <= 1 => {
                 self.exit_code = self.take_break_failure_status().unwrap_or(0);
                 Ok(SelectBodyFlow::BreakLoop)
@@ -675,7 +686,11 @@ impl Executor {
                 Ok(SelectBodyFlow::ContinueLoop)
             }
             Err(ExecuteError::Continue(level)) => Err(ExecuteError::Continue(level - 1)),
-            Err(error) => Err(error),
+            Err(error) => {
+                // rubash#2969: frame abandoned; drop banked flags.
+                self.clear_pending_loop_control();
+                Err(error)
+            }
         }
     }
 }

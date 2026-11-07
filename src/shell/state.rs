@@ -279,6 +279,21 @@ pub struct ShellState {
     /// close) reverts this to the enclosing frame's value, so a closed
     /// boundary never leaks budget outward.
     pub(crate) subshell_saved_loop_depth: usize,
+    /// rubash#2969: GNU's pending loop-control flags (builtins/break.def:55
+    /// `int breaking`, :58 `int continuing`). A break/continue executed
+    /// inside a DEBUG trap action does NOT unwind in GNU — the builtin
+    /// only ASSIGNS the flag (break.def:88 `breaking = newbreak`, :133
+    /// `continuing = newcont`); the command-entry gate
+    /// (execute_cmd.c:635-636) skips every command entered while a flag
+    /// stands, and the loop drivers consume one level after each body
+    /// (execute_cmd.c:3108-3118). These live in ShellState beside
+    /// loop_depth so the flat `( )` region boundary (clone at entry,
+    /// wholesale restore at close) gives them fork semantics for free:
+    /// a flag set inside a region dies at the restore, exactly like the
+    /// forked child's copy. Outside a DEBUG trap action both stay 0 and
+    /// break/continue unwind through ExecuteError as before.
+    pub(crate) loop_breaking: usize,
+    pub(crate) loop_continuing: usize,
     /// rubash#817 read-unit identity for the executor-level alias same-read
     /// guard (arithmetic_aliases.rs alias_defined_on_current_line). GNU
     /// expands an alias use only when the definition was consumed by an
@@ -868,6 +883,8 @@ impl Clone for ShellState {
             loop_depth: self.loop_depth,
             inherited_loop_depth: self.inherited_loop_depth,
             subshell_saved_loop_depth: self.subshell_saved_loop_depth,
+            loop_breaking: self.loop_breaking,
+            loop_continuing: self.loop_continuing,
             read_generation: self.read_generation,
             read_generation_ceiling: self.read_generation_ceiling,
             command_number: self.command_number,

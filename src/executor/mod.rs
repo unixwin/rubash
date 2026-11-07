@@ -406,6 +406,20 @@ enum LoopControlKind {
     Continue,
 }
 
+/// rubash#2969: one loop driver's verdict after consuming a pending
+/// DEBUG-trap loop-control flag (see ShellState::loop_breaking). Mirrors
+/// the three shapes of GNU's post-body flag checks (execute_cmd.c:
+/// 3108-3118 for, 3840-3850 while/until): nothing pending, the consumed
+/// level ends this loop (a break, or a continue whose remaining levels
+/// target an outer loop — the flag stays standing for that driver), or
+/// a continue consumed at its target level so the driver advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControlFlow {
+    None,
+    BreakLoop,
+    NextIteration,
+}
+
 pub(crate) type FunctionBody = Rc<Ast>;
 
 /// Print/roundtrip metadata for a defined function that the body AST alone
@@ -900,6 +914,18 @@ pub struct Executor {
     /// reads — is never mutated (rubash#1047).
     standard_path_scope: Option<String>,
     debug_trap_running: bool,
+    /// rubash#2969: true only while the DEBUG trap ACTION's own AST
+    /// executes (the execute_ast call in run_debug_trap). Distinct from
+    /// debug_trap_running, which also covers debugger consults whose
+    /// evaluations rely on the re-entrancy flag: a break/continue
+    /// defers to the pending loop-control flags only when it is part
+    /// of the action itself (GNU assigns `breaking`/`continuing` for
+    /// the action's commands); debugger-typed evaluations and
+    /// breakpoint conditions are a separate principal whose
+    /// break/continue keeps the unwind channel (debugger design 5.3:
+    /// a condition that unwinds is a failed condition; a typed
+    /// `break 1` preempts the pending command like script text).
+    debug_action_running: bool,
     /// rubash#375: parse-once cache for the DEBUG trap action. GNU parses a
     /// trap action once at `trap` invocation (trap.c read_trap_action) and
     /// runs the cached parse per firing; re-tokenizing + re-parsing the same
