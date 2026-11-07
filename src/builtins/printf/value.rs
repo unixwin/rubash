@@ -34,6 +34,31 @@ pub(super) fn format_value(
     // GNU's printwidestr decision reads locale_mb_cur_max, which the
     // sv_locale watchers keep equal to the shell's variable table.
     let byte_mode = !(wide && crate::locale::is_multi_byte_active());
+    // rubash#3008: `%S` in a single-byte locale never reaches the wide
+    // path (printf.def:532 gates it on locale_mb_cur_max > 1); the
+    // directive falls to the PF macro (printf.def:153), which hands
+    // the "%S" format and the byte-string argument to libc printf —
+    // glibc reads the argument as a wchar_t *, the conversion fails
+    // with EILSEQ, and PF reports strerror(EILSEQ) via builtin_error
+    // and PRETURNs: the directive emits nothing (not even width
+    // padding), output already produced stays, and the builtin stops
+    // with EXECUTION_FAILURE. The failure is keyed on the `S`
+    // specifier alone: the modstart rewrite (printf.def:490) turns
+    // `%ls` into "%s" before PF, and `%C` takes the narrow getchr
+    // path, so both still print in a single-byte locale. In a
+    // multibyte locale getwidestr cannot fail (an invalid sequence
+    // widens byte-wise, printf.def:1570), so this is the only
+    // failing direction.
+    if spec.specifier == 'S' && !crate::locale::is_multi_byte_active() {
+        return (
+            String::new(),
+            true,
+            vec![(
+                "printf: Invalid or incomplete multibyte or wide character".to_string(),
+                true,
+            )],
+        );
+    }
     // GNU printf.def:681-694: a %Q precision that overflows decodes to -1
     // (no truncation of the unquoted argument); the effective precision is
     // then re-derived from the quoted length in printstr.
