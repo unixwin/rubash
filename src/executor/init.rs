@@ -1004,6 +1004,11 @@ impl Executor {
                 // validated stamp IS this child's invocation shape.
                 invocation_interactive: false,
                 invocation_login: respawn_login_shell,
+                // rubash#2961: forced_interactive is seeded by the
+                // same funnels that seed invocation_interactive
+                // (the host declares the shape after construction);
+                // a respawned child re-derives it there too.
+                forced_interactive: false,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),

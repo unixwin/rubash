@@ -5,8 +5,8 @@
 use rubash::executor::Executor;
 use rubash::script_driver::{
     check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
-    run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
-    script_uses_history, script_uses_runtime_parse_gates,
+    run_script_with_history, run_source, run_source_with_line_offset, script_may_set_onecmd,
+    script_uses_aliases, script_uses_history, script_uses_runtime_parse_gates,
 };
 use std::env;
 use std::fs;
@@ -1047,17 +1047,35 @@ fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
 }
 
 fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
+    // The full letter set GNU's parse_shell_options (shell.c:913-974)
+    // admits as invocation shell flags — the same table the library
+    // keeps for its own invocation parse (invocation.rs cli_flag_name).
+    // The partial table that stood here made every unlisted letter
+    // fall through to the script-operand arm, so `rubash -t script`
+    // treated `-t` as the script name and exited 127 (rubash#2960);
+    // completing the table from the library's own list fixes the
+    // class, not just the one letter.
     match flag {
+        'a' => Some("allexport"),
+        'b' => Some("notify"),
         'e' => Some("errexit"),
-        'u' => Some("nounset"),
-        'x' => Some("xtrace"),
-        'C' => Some("noclobber"),
         'f' => Some("noglob"),
         'h' => Some("hashall"),
+        'k' => Some("keyword"),
         'm' => Some("monitor"),
         'n' => Some("noexec"),
-        'B' => Some("braceexpand"),
+        'p' => Some("privileged"),
         'r' => Some("restricted"),
+        't' => Some("onecmd"),
+        'u' => Some("nounset"),
+        'v' => Some("verbose"),
+        'x' => Some("xtrace"),
+        'B' => Some("braceexpand"),
+        'C' => Some("noclobber"),
+        'E' => Some("errtrace"),
+        'H' => Some("histexpand"),
+        'P' => Some("physical"),
+        'T' => Some("functrace"),
         _ => None,
     }
 }
@@ -1728,7 +1746,15 @@ fn run_script_file_with_init(
     // below already parsed them. Route such scripts through the grouped
     // driver, which lexes each group after the previous groups ran.
     let uses_parse_gates = script_uses_runtime_parse_gates(&contents);
-    let status = if uses_hist || uses_alias || uses_parse_gates {
+    // rubash#2960: a script that may leave `onecmd` standing — or one
+    // entered with the flag already on (`-t` at invocation, read
+    // through the option's env key like apply_startup_job_control
+    // reads monitor's) — needs the grouped reader's per-unit
+    // consultation (eval.c:206-207); the whole-file fast path has no
+    // unit boundary to consult at.
+    let uses_onecmd = script_may_set_onecmd(&contents)
+        || executor.get_env("__RUBASH_SETOPT_onecmd").as_deref() == Some("1");
+    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)

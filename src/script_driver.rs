@@ -39,6 +39,97 @@ pub fn script_uses_history(contents: &str) -> bool {
     contents.lines().any(line_enables_history)
 }
 
+/// rubash#2960: over-admitting routing scan in the
+/// `script_uses_history` shape — the script may leave `onecmd`
+/// standing (`set -t`, a bundled `-…t…`, `set -o onecmd`), or it
+/// may run a `.`/`source`/`eval` unit whose body sets the flag
+/// where a text scan cannot see it. Such scripts take the grouped
+/// reader, whose per-unit consultation (Executor::onecmd_reader_
+/// stop) adjudicates the live state after every unit; the
+/// whole-file fast path has no unit boundary to consult at. A false
+/// positive only costs the incremental driver; a missed vector
+/// (the flag smuggled through a variable, `set $flags`) leaves the
+/// run on the fast path with the flag unhonored — the same
+/// admitted-miss class as the history scan's.
+pub fn script_may_set_onecmd(contents: &str) -> bool {
+    contents.lines().any(line_may_set_onecmd)
+}
+
+fn line_may_set_onecmd(line: &str) -> bool {
+    // `set -o onecmd` and `set -oonecmd` both carry the option name
+    // verbatim; so does a comment or string mentioning it — the
+    // scan only routes, so the substring is enough.
+    if line.contains("onecmd") {
+        return true;
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let boundary = i == 0
+            || matches!(
+                bytes[i - 1],
+                b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b'{'
+            );
+        if boundary {
+            // A `.` in command position sources a file whose body
+            // can set the flag invisibly to this scan.
+            if bytes[i] == b'.' && dot_is_command_position(bytes, i) {
+                return true;
+            }
+            for word in ["set", "eval", "source"] {
+                let w = word.as_bytes();
+                if bytes.len() - i >= w.len()
+                    && &bytes[i..i + w.len()] == w
+                    && (i + w.len() == bytes.len()
+                        || matches!(bytes[i + w.len()], b' ' | b'\t' | b';' | b'&' | b'|'))
+                {
+                    // An eval/source body can set the flag where the
+                    // scan cannot see it; the reader consultation
+                    // after their unit is what GNU adjudicates.
+                    if word != "set" {
+                        return true;
+                    }
+                    if set_args_may_set_onecmd(&line[i + w.len()..]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The `.` at `i` is a sourcing command (not a path or argument
+/// dot) when, walking back over blanks, it sits at the start of
+/// the line or right behind a command separator.
+fn dot_is_command_position(bytes: &[u8], i: usize) -> bool {
+    if i + 1 < bytes.len() && !matches!(bytes[i + 1], b' ' | b'\t') {
+        return false;
+    }
+    let mut j = i;
+    while j > 0 && matches!(bytes[j - 1], b' ' | b'\t') {
+        j -= 1;
+    }
+    j == 0 || matches!(bytes[j - 1], b';' | b'&' | b'|' | b'(' | b'{')
+}
+
+fn set_args_may_set_onecmd(args: &str) -> bool {
+    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
+        if token.len() >= 2 && token.starts_with('-') && !token.starts_with("--") {
+            // A flag bundle: `t` counts only before any `o`, which
+            // would swallow the rest of the bundle as its option
+            // name operand (`set -ot` names an option, sets none).
+            let bundle = &token[1..];
+            let head = bundle.split('o').next().unwrap_or("");
+            if head.contains('t') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn line_enables_history(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut i = 0usize;
@@ -653,6 +744,18 @@ fn run_script_grouped_at_line_offset(
                 (exit_jump && !parse_error) || errexit_stop,
                 classification,
             );
+        }
+        // rubash#2960: GNU eval.c:206-207 — with just_one_command
+        // standing, reader_loop takes EOF after the unit that left
+        // it standing. Break into this driver's own input-exhaustion
+        // tail below: the run ends with the last unit's status and
+        // no exit jump, exactly like natural EOF. Skipped groups
+        // (the failglob span above) never reach this consultation —
+        // they did not execute. The gate on the consultation keeps
+        // it out of parse_and_execute bodies and command strings
+        // (see Executor::onecmd_reader_stop).
+        if executor.onecmd_reader_stop() {
+            break;
         }
     }
     // WP-8 (debugger design 5.1): the reader reached the end of
@@ -7170,6 +7273,11 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
         pending.clear();
         if parse_error
             || executor.take_exit_jump_pending()
+            // rubash#2960: GNU eval.c:206-207 — this stdin reader is
+            // a principal reader, so a standing just_one_command ends
+            // it after the unit that left the flag standing, with
+            // that unit's status (already committed above).
+            || executor.onecmd_reader_stop()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
