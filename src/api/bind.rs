@@ -138,6 +138,20 @@ impl BindView {
                     },
                     BindKind::Function { name } => BindKindView::Function { name: name.clone() },
                     BindKind::Macro { text } => BindKindView::Macro { text: text.clone() },
+                    // The contract has no keymap-valued view kind:
+                    // GAP-13's Q-E ruling kept BindKind internal and
+                    // the view a 1:1 mirror, so a faithful rendering
+                    // needs a BindKindView::Keymap variant plus
+                    // ledger rows on both sides — a contract change
+                    // for the captain to schedule, NOT made here.
+                    // Rendering the entry as the `prefix-meta`
+                    // function name preserves exactly what hosts
+                    // saw for this binding before the registry grew
+                    // the kind (the old-style arm stored the name
+                    // verbatim, rubash#2923).
+                    BindKind::Keymap { .. } => BindKindView::Function {
+                        name: "prefix-meta".to_string(),
+                    },
                 };
                 let dump = match &entry.kind {
                     BindKind::Execute { command } => {
@@ -145,6 +159,9 @@ impl BindView {
                     }
                     BindKind::Function { name } => format_function_readable(&entry.keyseq, name),
                     BindKind::Macro { text } => format_macro_readable(&entry.keyseq, text),
+                    BindKind::Keymap { .. } => {
+                        format_function_readable(&entry.keyseq, "prefix-meta")
+                    }
                 };
                 BindEntryView {
                     bytes: keyseq_bytes(&entry.keyseq),
