@@ -22,8 +22,86 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 /// are syntax and drop out, a backslash contributes its escaped byte. Used
 /// by the eof-gather warning arm, which must name the delimiter GNU's
 /// `here-document ... (wanted `X')` report carries (make_cmd.c:627).
+/// Byte index of the first `<<` in `header` that is a here-document
+/// operator: outside quotes and backticks (opaque spans, skipped with
+/// the same unit walkers the lexer uses) and outside every
+/// classified-arithmetic `$((...))` unit, whose `<<` is the shift
+/// operator (GNU parse.y:4463-4470 parse_comsub routes the whole
+/// construct to the P_ARITH matched-pair scan; parse.y:4970
+/// parse_arith_cmd supplies the arithmetic verdict). A `$((` the gate
+/// classifies as a subshell-or-list is command text: its body is walked
+/// char by char, so a real heredoc inside it is still found. Returns
+/// None when no operator `<<` exists (rubash#2930).
+fn first_heredoc_operator_index(header: &str) -> Option<usize> {
+    let chars: Vec<char> = header.chars().collect();
+    let mut index = 0usize;
+    let mut single = false;
+    let mut double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            if ch == '\\' {
+                index += 2;
+                continue;
+            }
+            if ch == '"' {
+                double = false;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' => index += 2,
+            '\'' => {
+                single = true;
+                index += 1;
+            }
+            '"' => {
+                double = true;
+                index += 1;
+            }
+            '`' => {
+                index = crate::lexer::skip_backtick_corrected(&chars, index).unwrap_or(chars.len());
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                if chars.get(index + 2) == Some(&'(')
+                    && crate::lexer::dollar_double_paren_is_arithmetic(
+                        &chars[index + 1..].iter().collect::<String>(),
+                    )
+                {
+                    index = crate::lexer::skip_arith_substitution_corrected(&chars, index + 3)
+                        .unwrap_or(chars.len());
+                } else {
+                    // Command substitution (or subshell-or-list `$((`):
+                    // descend — a heredoc inside the body is a real
+                    // operator for this header scan.
+                    index += 2;
+                }
+            }
+            '<' if chars.get(index + 1) == Some(&'<') => {
+                return Some(
+                    header
+                        .char_indices()
+                        .nth(index)
+                        .map(|(byte, _)| byte)
+                        .unwrap_or(header.len()),
+                );
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
 fn heredoc_header_delimiter_word(header: &str) -> Option<String> {
-    let ll_pos = header.find("<<")?;
+    let ll_pos = first_heredoc_operator_index(header)?;
     let after = &header[ll_pos + 2..];
     let after = after.strip_prefix('-').unwrap_or(after);
     let after = after.trim_start();
@@ -66,7 +144,14 @@ fn heredoc_header_closes_command_substitution(source: &str) -> bool {
     let Some(header) = source.lines().next() else {
         return false;
     };
-    let Some(ll_pos) = header.find("<<") else {
+    // GNU parse.y:4463-4470 (parse_comsub) + parse.y:4970
+    // (parse_arith_cmd): a `<<` inside a classified-arithmetic `$((...))`
+    // unit is the shift operator, never a here-document operator — the
+    // header scan must not see it. Find the first `<<` that sits outside
+    // every arithmetic unit (and outside quotes/backticks, whose spans
+    // the unit walkers treat as opaque); a header whose only `<<` is
+    // arithmetic text has no heredoc at all (rubash#2930).
+    let Some(ll_pos) = first_heredoc_operator_index(header) else {
         return false;
     };
     let after = &header[ll_pos + 2..];

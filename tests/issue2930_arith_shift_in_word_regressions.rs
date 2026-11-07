@@ -274,3 +274,97 @@ fn comsub_heredoc_body_with_arith_shift_line() {
     assert_eq!(stdout, "v=4\ndone\n", "stderr: {stderr}");
     assert_eq!(rc, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Second face of rubash#2930 (captain takeover, 2026-11-07): the same
+// arithmetic-verdict-before-heredoc-scan rule at the EXECUTOR-side
+// collectors and the remaining lexer unit scans. The pushed lexer fix
+// classified `$((...))` at token positions, but the collectors that copy
+// a command-substitution body verbatim (embedded_mutations::
+// collect_command_substitution_source_ex, the embedded_parameters
+// collector, command_input_scope's span scan), the heredoc-header scans
+// (command_substitution_pipelines::heredoc_header_*), and the lexer unit
+// scans (skip_parenthesized_unit_corrected, command_substitutions_balanced)
+// still walked the body as command text, so a shift `<<` inside a nested
+// `$((...))` reached a heredoc arm: the closing `))` was swallowed as
+// heredoc body (unexpected-EOF) or a spurious "unterminated
+// here-document" warning was emitted. GNU ground truth is the same
+// parse.y:4463-4470 + parse.y:4970 pair cited in the header: a
+// classified-arithmetic unit is opaque everywhere it is scanned.
+// Fail-first record (pushed head f332892d, captain probe 2026-11-07):
+// five of the shapes below died with "unexpected EOF while looking for
+// matching `)'", two printed the right value with a spurious
+// unterminated-here-document warning on stderr; all seven are byte-equal
+// to GNU Bash 5.3.20 once the collectors consult the gate.
+// ---------------------------------------------------------------------------
+
+/// A bare arithmetic shift inside a command substitution: the collector
+/// must copy the `$((...))` unit verbatim, not heredoc-scan its body.
+#[test]
+fn second_face_comsub_arith_shift() {
+    let (stdout, stderr, rc) = run("echo $(echo $((1<<2)))");
+    assert_eq!(stdout, "4\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// Same unit in an assignment capture: right value, and NO spurious
+/// unterminated-here-document warning (the header scan took the shift
+/// `<<` as a heredoc operator on the unfixed tree).
+#[test]
+fn second_face_comsub_arith_shift_assignment_no_warning() {
+    let (stdout, stderr, rc) = run("x=$(printf %s $((3<<1))); echo $x");
+    assert_eq!(stdout, "6\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// Nested command substitutions around the arithmetic unit
+/// (command_substitutions_balanced must also classify before scanning).
+#[test]
+fn second_face_nested_comsub_arith_shift() {
+    let (stdout, stderr, rc) = run("echo $(echo $(echo $((2<<3))))");
+    assert_eq!(stdout, "16\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// An arithmetic shift EARLIER in the same substitution header must not
+/// hide a real here-document that follows it: the header scan finds the
+/// first OPERATOR `<<`, skipping the arithmetic unit.
+#[test]
+fn second_face_arith_shift_then_real_heredoc_in_comsub() {
+    let script = "echo $(a=$((1<<1)); cat <<MARKER\nhi\nMARKER\n)";
+    let (stdout, stderr, rc) = run(script);
+    assert_eq!(stdout, "hi\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// Spaced shift inside a command substitution.
+#[test]
+fn second_face_comsub_arith_shift_spaced() {
+    let (stdout, stderr, rc) = run("echo $(echo $(( 1 << 2 )))");
+    assert_eq!(stdout, "4\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// Backtick substitution around the arithmetic unit: right value, no
+/// spurious unterminated-here-document warning.
+#[test]
+fn second_face_backtick_arith_shift_no_warning() {
+    let (stdout, stderr, rc) = run("echo `echo $((1<<3))`");
+    assert_eq!(stdout, "8\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
+
+/// Two sibling substitutions, each with an arithmetic shift.
+#[test]
+fn second_face_double_comsub_arith_shift() {
+    let (stdout, stderr, rc) = run("echo $(echo $((5<<1))) $(echo $((1<<1)))");
+    assert_eq!(stdout, "10 2\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+    assert_eq!(rc, 0);
+}
