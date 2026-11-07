@@ -2667,11 +2667,11 @@ impl Executor {
         // \x1d quote marker for the whole-word braced form so the operator
         // expander can tell "${v:-~}" (no tilde) from ${v:-~} (tilde).
         let word = if raw.is_some_and(|raw| raw.starts_with('"') && raw.ends_with('"'))
-            && !word.starts_with('\u{1d}')
+            && !word.starts_with(STORAGE_WORD_PREFIX)
             && word.starts_with("${")
             && word.ends_with('}')
         {
-            format!("\u{1d}{word}")
+            format!("{STORAGE_WORD_PREFIX}{word}")
         } else {
             word.to_string()
         };
