@@ -15,7 +15,11 @@
 //! - Business code must `use crate::executor::markers::*` (or name the
 //!   const) — never write a raw `'\x1f'` / `'\u{E302}'` literal.
 //! - A new marker = a new const + encode/decode pair + a boundary entry in
-//!   `MARKERS`, plus a `tests/marker_leak_golden.rs` case asserting the
+//!   `MARKERS`, plus golden coverage: the registry-driven typed-data
+//!   test in this module iterates `MARKERS` through the core shapes (a
+//!   new marker gets cells automatically), and
+//!   `tests/marker_leak_golden.rs` (+ its PTY sibling) asserts one cell
+//!   per output channel that
 //!   sentinel never appears in stdout / `declare -p` / xtrace output on
 //!   marker-free input (the #824 audit moved leak detection out of the
 //!   shared decoder's output — there the codepoints are indistinguishable
@@ -1736,5 +1740,148 @@ mod tests {
             return u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32);
         }
         inner.chars().next()
+    }
+
+    /// rubash#2885 E6 — the registry-driven typed-data cells. Every
+    /// codepoint in the table is typed as user data (`v=$'…'`) and must
+    /// round-trip byte-for-byte through the three core shapes — the
+    /// sweep battery collected the same cells from GNU bash 5.3.20
+    /// (52/54 codepoints GNU-identical on the #2885 base). Because the
+    /// cells iterate `MARKERS`, a newly registered marker gets coverage
+    /// automatically; the per-CHANNEL dimension lives in
+    /// `tests/marker_leak_golden.rs` (+ its PTY sibling).
+    ///
+    /// Known-broken cells are pinned in `TYPED_DATA_EXCEPTIONS` with
+    /// their tracking issue and asserted to still differ — when the fix
+    /// lands, this test goes red and the exception must be removed.
+    #[test]
+    fn registry_typed_data_roundtrips_core_shapes() {
+        use std::collections::BTreeSet;
+        use std::process::{Command, Stdio};
+
+        /// (codepoint, shape) cells known to diverge from GNU, with the
+        /// issue that owns the fix. Shape ids: 1 = `printf '%s' "$v"`,
+        /// 2 = `echo "$v"`, 3 = `w="a${v}b"` (assignment-concat).
+        const TYPED_DATA_EXCEPTIONS: &[(u32, u8, &str)] = &[
+            // QUOTED_NULL_MARKER: bare U+E002 is consumed as the
+            // empty-token sentinel at word boundaries (#2882, sweep F2).
+            (0xE002, 1, "rubash#2882"),
+            (0xE002, 2, "rubash#2882"),
+            (0xE002, 3, "rubash#2882"),
+            // PROMPT_ESCAPE_GUARD: the assignment storage chain folds a
+            // typed U+E316 to a backslash in shape 3 (found by this
+            // test's probe; candidate finding in the #2885 lane REPORT).
+            (0xE316, 3, "rubash#2885-report-candidate"),
+        ];
+
+        let bin = std::env::var_os("CARGO_BIN_EXE_rubash")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                let exe = std::env::current_exe().ok()?;
+                let deps = exe.parent()?;
+                let root = deps.parent()?;
+                let candidate = root.join("rubash");
+                candidate.exists().then_some(candidate)
+            })
+            .expect("built rubash binary for the registry cells");
+
+        let mut codes: BTreeSet<u32> = BTreeSet::new();
+        for info in MARKERS {
+            let cp = info.code as u32;
+            if cp == 0 {
+                // NUL sentinels (CASE_PATTERN_*): a NUL cannot be
+                // typed into a shell string in GNU either — there is
+                // no typed-data shape to gate.
+                continue;
+            }
+            if info.name == "QUOTED_HEREDOC_MARKER" {
+                // String marker: its `code` is the '_' of the named
+                // string "__RUBASH_HD1__"; the golden's named-string
+                // leak scan covers it.
+                continue;
+            }
+            codes.insert(cp);
+        }
+        assert!(
+            codes.len() >= 40,
+            "registry scan must see the marker population, saw {} codepoints",
+            codes.len()
+        );
+        for &(cp, _, _) in TYPED_DATA_EXCEPTIONS {
+            assert!(
+                codes.contains(&cp),
+                "exception table names U+{cp:04X}, which is not a registry codepoint"
+            );
+        }
+
+        for cp in codes {
+            let ch = char::from_u32(cp).expect("registry code is a char");
+            let escape = if cp < 0x100 {
+                format!("\\x{cp:02x}")
+            } else {
+                format!("\\u{cp:04X}")
+            };
+            let script = format!(
+                "v=$'{escape}'; printf '%s' \"$v\"; printf '\\n@@2@@\\n'; \
+                 echo \"$v\"; printf '@@3@@\\n'; w=\"a${{v}}b\"; \
+                 printf '%s' \"$w\"; printf '\\n@@END@@\\n'"
+            );
+            let out = Command::new(&bin)
+                .args(["-c", &script])
+                .env("LC_ALL", "C.UTF-8")
+                .stdin(Stdio::null())
+                .output()
+                .expect("run registry cell");
+            assert!(
+                out.status.success(),
+                "registry cell U+{cp:04X} ran clean: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = out.stdout;
+            let mut segs = stdout.split(|b| *b == b'\n');
+            // Segment layout: [S1] @@2@@ [S2] @@3@@ [S3] @@END@@ []
+            let s1 = segs.next().unwrap_or_default().to_vec();
+            assert_eq!(
+                segs.next(),
+                Some("@@2@@".as_bytes()),
+                "cell frame for U+{cp:04X}: {stdout:?}"
+            );
+            let s2 = segs.next().unwrap_or_default().to_vec();
+            assert_eq!(
+                segs.next(),
+                Some("@@3@@".as_bytes()),
+                "cell frame for U+{cp:04X}: {stdout:?}"
+            );
+            let s3 = segs.next().unwrap_or_default().to_vec();
+
+            let mut expected_char = [0u8; 4];
+            let char_bytes = ch.encode_utf8(&mut expected_char).as_bytes().to_vec();
+            let shapes: [(u8, Vec<u8>, Vec<u8>); 3] = [
+                (1, s1, char_bytes.clone()),
+                (2, s2, char_bytes.clone()),
+                (
+                    3,
+                    s3,
+                    [b"a".as_slice(), &char_bytes, b"b".as_slice()].concat(),
+                ),
+            ];
+            for (shape, got, want) in shapes {
+                let exception = TYPED_DATA_EXCEPTIONS
+                    .iter()
+                    .find(|&&(ecp, eshape, _)| ecp == cp && eshape == shape);
+                match exception {
+                    Some((_, _, tracker)) => assert_ne!(
+                        got, want,
+                        "U+{cp:04X} shape {shape} now round-trips — remove its \
+                         exception (tracked by {tracker})"
+                    ),
+                    None => assert_eq!(
+                        got, want,
+                        "typed U+{cp:04X} must round-trip through shape {shape} \
+                         (GNU-collected cell, rubash#2885 E6)"
+                    ),
+                }
+            }
+        }
     }
 }

@@ -7,16 +7,34 @@ use std::process::{Command, Stdio};
 /// registry zone, U+E000..=U+E4FF — markers.rs currently tops out at
 /// U+E401, UTF-8 lead byte 0xEE) and the named protocol strings
 /// (`__RUBASH_*`).
+///
+/// rubash#2885 E6: this file carries one cell per output channel of the
+/// #2879 sweep's §2.1 matrix. The per-marker dimension is NOT hand-written
+/// here — `src/executor/markers.rs`'s registry-driven test iterates the
+/// MARKERS table through the core shapes, so a new marker gets cells
+/// automatically; this file's job is the per-CHANNEL dimension. The
+/// interactive prompt / `read -p` / history cells live in the PTY sibling
+/// (`tests/marker_leak_golden_pty.rs`). The one §2.1 channel with no cell
+/// anywhere is the debugger/JSON face (sweep Q2: it runs zero decoders and
+/// no user-level repro was ever attempted; driving it needs a DAP session,
+/// not a shell invocation) — recorded here so the gap is explicit, not
+/// silent.
 
 fn run(args: &[&str]) -> Vec<u8> {
+    run_full(args, &[]).0
+}
+
+fn run_full(args: &[&str], envs: &[(&str, &str)]) -> (Vec<u8>, Vec<u8>) {
     let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .args(args)
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rubash");
-    child.wait_with_output().expect("wait rubash").stdout
+    let out = child.wait_with_output().expect("wait rubash");
+    (out.stdout, out.stderr)
 }
 
 fn assert_no_pua_marker(out: &[u8], ctx: &str) {
@@ -211,4 +229,228 @@ fn pua_assertion_sees_a_registered_marker() {
 #[test]
 fn pua_assertion_ignores_the_f000_block() {
     assert_no_pua_marker("\u{F000}".as_bytes(), "selftest");
+}
+
+// ======================================================================
+// rubash#2885 E6 — one cell per §2.1 channel. Expectations were collected
+// byte-for-byte from GNU bash 5.3.20 with script-file probes (the sweep
+// battery shapes); where a channel's output legitimately carries user
+// data codepoints, the cell asserts the literal round-trip instead of
+// the leak scan, exactly like the xtrace PUA-word cell above.
+// ======================================================================
+
+/// `set` listing — the setattr `quote_listing_value` rendering of the
+/// same declare formatting. The array shape is byte-identical to GNU;
+/// the raw-C0 scalar shape decodes to the raw bytes (asserted) — GNU
+/// additionally wraps it in $'...' quoting, a quoting-style divergence
+/// recorded in the #2885 lane REPORT (not a marker leak: no pair, no
+/// PUA glyph reaches the listing).
+#[test]
+fn set_listing_carries_no_markers() {
+    let out = run(&["-c", "arr=($'a\\x11b' 'c d'); set | grep '^arr='"]);
+    assert_eq!(
+        out,
+        "arr=([0]=$'a\\021b' [1]=\"c d\")\n".as_bytes(),
+        "set listing must render storage bytes in declare form: {out:?}"
+    );
+    let out = run(&["-c", "v=$'a\\x11b\\x1fc'; set | grep '^v='"]);
+    assert_clean(&out, "set listing (C0 scalar)");
+    assert!(
+        out.starts_with(b"v=a\x11b\x1fc"),
+        "set listing must carry the decoded raw bytes, not transport pairs: {out:?}"
+    );
+}
+
+/// PS4 template — sweep battery cell c21. Expansion-introduced raw bytes
+/// (comsub result, stored variable) must decode AFTER prompt expansion
+/// (PR #2878): the trace prefix carries the real ESC byte, never the
+/// E000+E01C pair.
+#[test]
+fn ps4_template_decodes_expansion_introduced_markers() {
+    let (_, err) = run_full(
+        &[
+            "-c",
+            concat!(
+                "PS4='X$(printf \"P\\033Q\") '; set -x; true; set +x; ",
+                "x=$'\\x1b'; PS4='P${x}Q '; set -x; true; set +x"
+            ),
+        ],
+        &[],
+    );
+    assert_clean(&err, "PS4 trace");
+    assert!(
+        err.windows(4).any(|w| w == b"XP\x1bQ"),
+        "comsub ESC must reach the PS4 prefix as a raw byte: {err:?}"
+    );
+    assert!(
+        err.windows(4).any(|w| w == b"P\x1bQ "),
+        "stored ESC must reach the PS4 prefix as a raw byte: {err:?}"
+    );
+}
+
+/// Prompts via the public API (`Session::expand_prompt`) — the host
+/// rendering path. A stored ESC, a comsub ESC, a TAB carried by a value
+/// (the sweep's open Q1: the ANSI_C_IFS_GUARD must not survive into the
+/// rendered prompt), and a typed PUA value all render as their real
+/// bytes/chars.
+#[test]
+fn prompts_via_public_api_carry_no_markers() {
+    use rubash::api::{RunOptions, Session};
+    let mut session = Session::builder().build().expect("session builds");
+    session
+        .run(
+            "esc=$(printf 'A\\033B'); tab=$'A\\tB'; pua=$'\\uE314'",
+            &RunOptions::default(),
+        )
+        .expect("seed values run");
+    assert_eq!(session.expand_prompt("<$esc>"), "<A\u{1b}B>");
+    assert_eq!(session.expand_prompt("$(printf 'P\\033Q')"), "P\u{1b}Q");
+    let rendered = session.expand_prompt("<$tab>");
+    assert_eq!(rendered, "<A\tB>", "Q1: TAB value must render as TAB");
+    assert!(
+        !rendered.contains('\u{E401}'),
+        "Q1: ANSI_C_IFS_GUARD must not survive into a rendered prompt: {rendered:?}"
+    );
+    assert_eq!(session.expand_prompt("<$pua>"), "<\u{E314}>");
+}
+
+/// Function bodies (`declare -f`, ast print) — the
+/// `fold_literal_char_escapes` channel.
+#[test]
+fn declare_f_carries_no_markers() {
+    let out = run(&["-c", "f() { echo 'a$b' \"$1\"; x=$'\\x11'; }; declare -f f"]);
+    assert_clean(&out, "declare -f");
+    assert!(
+        String::from_utf8_lossy(&out).contains("echo 'a$b'"),
+        "function body must print in source form: {out:?}"
+    );
+}
+
+/// Diagnostics (stderr) — bad-substitution display decodes through the
+/// sanctioned decoder; the command-not-found and redirection-error
+/// paths fold literal-char escapes, so the diagnostic names the user's
+/// raw char, never the E400 escape pair (sweep F5 shapes; byte-verified
+/// against GNU on this tree).
+#[test]
+fn diagnostics_carry_no_markers() {
+    // Bad substitution (battery c22 shape).
+    let (out, err) = run_full(&["-c", "v=$'\\uE314'; echo ${v@Z}; echo after"], &[]);
+    assert_clean(&err, "bad-substitution diagnostic");
+    assert!(
+        String::from_utf8_lossy(&out).contains("after"),
+        "shell must survive a bad substitution: {out:?}"
+    );
+    // Command not found (battery c33 shape).
+    let (_, err) = run_full(&["-c", "v=$'\\uE314'; \"$v\""], &[]);
+    let text = String::from_utf8_lossy(&err);
+    assert!(
+        text.contains('\u{E314}') && !text.contains('\u{E400}'),
+        "command-not-found must name the raw char, not its E400 pair: {text:?}"
+    );
+    // Redirection error names the target.
+    let dir = std::env::temp_dir().join(format!("rubash-golden-redir-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let script = format!(
+        "cd {} && v=$'\\uE314' && {{ echo x > \"$v\"; }} 2>&1",
+        dir.display()
+    );
+    let (out, _) = run_full(&["-c", &script], &[]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains('\u{E314}') && !text.contains('\u{E400}'),
+        "redirect diagnostic must name the raw char, not its E400 pair: {text:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// External boundaries against real child binaries (sweep F1 shapes,
+/// fixed by #2881): an exported value, an argv value, and an `env`-
+/// command value carrying a typed registry-zone char reach
+/// /usr/bin/env and /usr/bin/printf as the RAW char — the E400 escape
+/// introducer must not cross the process boundary.
+#[test]
+#[cfg(unix)]
+fn external_boundaries_carry_raw_user_bytes() {
+    let out = run(&["-c", "v=$'\\uE314'; /usr/bin/printf '%s' \"$v\""]);
+    assert_eq!(
+        out,
+        "\u{E314}".as_bytes(),
+        "argv must carry the raw char to a real child binary: {out:?}"
+    );
+    let out = run(&["-c", "v=$'\\uE314'; export v; /usr/bin/env"]);
+    let line = out
+        .split(|&b| b == b'\n')
+        .find(|l| l.starts_with(b"v="))
+        .expect("exported v reaches the child env");
+    assert_eq!(
+        line,
+        "v=\u{E314}".as_bytes(),
+        "child env must carry the raw char: {line:?}"
+    );
+    let out = run(&["-c", "v=$'\\uE314'; env W=\"$v\" /usr/bin/env"]);
+    let line = out
+        .split(|&b| b == b'\n')
+        .find(|l| l.starts_with(b"W="))
+        .expect("env-command W reaches the child env");
+    assert_eq!(
+        line,
+        "W=\u{E314}".as_bytes(),
+        "env-command env must carry the raw char: {line:?}"
+    );
+}
+
+/// Environment import (sweep F6 shapes, fixed by #2884): a parent-set
+/// value enters through the import funnel's entry encoding, so
+/// `declare -p` renders it exactly like a typed value — a bare
+/// registry-zone char is data (not `v=""`), and a raw ESC value gets
+/// GNU's $'A\EB' quoting instead of a raw byte inside plain quotes.
+#[test]
+fn env_import_decodes_like_a_typed_value() {
+    let (out, _) = run_full(&["-c", "declare -p IMPORTED"], &[("IMPORTED", "\u{E314}")]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains('\u{E314}') && !text.contains("IMPORTED=\"\""),
+        "imported registry-zone char must render as data: {text:?}"
+    );
+    let (out, _) = run_full(&["-c", "declare -p IMPORTED"], &[("IMPORTED", "A\u{1b}B")]);
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains("$'A\\EB'"),
+        "imported ESC value must take GNU's ANSI-C quoting in declare -p: {text:?}"
+    );
+}
+
+/// Completion / compgen — a zero-decoder channel, safe only by
+/// construction; the cell enrolls it. Candidates render as data, and
+/// compgen must not disclose the internal __RUBASH_* namespace
+/// (sweep §2.1, incident #1045 was name disclosure).
+#[test]
+fn compgen_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        "compgen -W 'a$b c*d e\\f' | sort; compgen -A variable | grep -c RUBASH",
+    ]);
+    assert_clean(&out, "compgen");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains("c*d") && text.trim_end().ends_with('0'),
+        "candidates render as data and no internal names are disclosed: {text:?}"
+    );
+}
+
+/// Jobs builtins / job text — a zero-decoder channel (sweep battery
+/// c31 was PASS-equivalent modulo PID digits). The cell leak-scans the
+/// `jobs` renderings of a marker-carrying command; PIDs make byte
+/// equality impossible, so the assertion is the leak scan itself.
+#[test]
+fn jobs_text_carries_no_markers() {
+    let out = run(&[
+        "-c",
+        "printf '%s' $'\\uE314' & sleep 0.2 & jobs; jobs -l; wait; echo done",
+    ]);
+    assert_clean(&out, "jobs");
+    assert!(
+        String::from_utf8_lossy(&out).contains("done"),
+        "job table must complete: {out:?}"
+    );
 }
