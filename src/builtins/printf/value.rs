@@ -232,7 +232,10 @@ fn apply_width_locale(value: String, spec: &FormatSpec, byte_mode: bool) -> Stri
 
 /// The byte view of a word: raw-byte marker pairs (substitution_metadata)
 /// decode back to the bytes they carry, everything else keeps its UTF-8 bytes.
-fn locale_byte_span(value: &str) -> Vec<u8> {
+/// Shared with the numeric getters (number.rs): GNU's asciicode reads
+/// arg[1] as bytes, so a marker-carried high byte must be seen as the
+/// byte it carries, not as the marker character.
+pub(super) fn locale_byte_span(value: &str) -> Vec<u8> {
     let sentinel = char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
         .expect("raw-byte sentinel is a valid char");
     if value.contains(sentinel) {
