@@ -2698,9 +2698,21 @@ impl<'a> InputrcParseState<'a> {
                 // `bind '"\C-t'` prints
                 // `readline: "\C-t: no closing `"' in key binding`, rc 0).
                 Some(Err(_)) => {}
-                // Other non-quote text is silently ignored (GNU probe:
-                // `bind 'ls -l'` → rc 0, no output).
-                None => {}
+                // A line the quoted parser does not claim is an
+                // old-style keyname line for rl_parse_and_bind's
+                // other arm (bind.c:1594): _rl_read_init_file feeds
+                // every line to the same parser, so route it through
+                // parse_old_style_binding like the positional `bind`
+                // argument (rubash#2924 — these lines were silently
+                // dropped, bindings and diagnostics alike).
+                None => match parse_old_style_binding(line) {
+                    OldStyleSpec::Bind(parsed) => {
+                        self.result.bindings.push((parsed.keyseq, parsed.spec));
+                        self.result.binding_keymaps.push(self.keymap.clone());
+                    }
+                    OldStyleSpec::Diagnostic(core) => self.diagnostic(number, core),
+                    OldStyleSpec::Silent => {}
+                },
             }
         }
     }
@@ -2718,11 +2730,16 @@ impl<'a> InputrcParseState<'a> {
                     // `$if term=…` compares $TERM verbatim (case
                     // sensitive, GNU probe: XTERM ≠ xterm).
                     "term" => self.env.term == Some(value),
-                    // `$if mode=…` compares the CURRENT editing mode —
-                    // a `set editing-mode` earlier in the file already
-                    // updated env.editing_mode (GNU probe: the mode=vi
-                    // block after `set editing-mode vi` applies).
-                    "mode" => self.env.editing_mode == Some(value),
+                    // `$if mode=…` compares the CURRENT editing mode:
+                    // unset means emacs — readline's default editing
+                    // mode (the variable table's own default, and
+                    // the oracle: a bare `$if mode=emacs` block
+                    // applies with no `set` line at all, rubash#2924).
+                    // A `set editing-mode` earlier in the file
+                    // already updated env.editing_mode (GNU probe:
+                    // the mode=vi block after `set editing-mode vi`
+                    // applies).
+                    "mode" => self.env.editing_mode.unwrap_or("emacs") == value,
                     _ => false,
                 }
             } else {
@@ -3059,6 +3076,53 @@ mod tests {
     }
 
     #[test]
+    fn inputrc_old_style_lines_bind_and_diagnose() {
+        // rubash#2924: _rl_read_init_file feeds every line to
+        // rl_parse_and_bind, so old-style keyname lines bind (with
+        // the keymap stamp of the file's position) and their
+        // diagnostics surface with file/line position.
+        let text = "Control-t: undo\nset editing-mode vi\nControl-y: \"echo hi\"\nControl-x: prefix-meta\n";
+        let parsed = parse_inputrc_with_env(text, "rc", &InputrcEnv::default(), &mut |_| None);
+        assert_eq!(parsed.bindings.len(), 3);
+        assert_eq!(
+            parsed.bindings[0],
+            (
+                "\\C-t".to_string(),
+                BindingSpec::Function {
+                    name: "undo".to_string()
+                }
+            )
+        );
+        assert_eq!(parsed.binding_keymaps[0], None);
+        assert_eq!(
+            parsed.bindings[1],
+            (
+                "\\C-y".to_string(),
+                BindingSpec::Macro {
+                    text: "echo hi".to_string()
+                }
+            )
+        );
+        assert_eq!(parsed.binding_keymaps[1], Some("vi-insert".to_string()));
+        assert_eq!(
+            parsed.bindings[2].1,
+            BindingSpec::Keymap {
+                name: "emacs-meta".to_string()
+            }
+        );
+        let parsed = parse_inputrc_with_env(
+            "# c\nFoo-t: undo\n",
+            "rc",
+            &InputrcEnv::default(),
+            &mut |_| None,
+        );
+        assert!(parsed.bindings.is_empty());
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(parsed.diagnostics[0].line, 2);
+        assert_eq!(parsed.diagnostics[0].core, "Foo-t: unknown key modifier");
+    }
+
+    #[test]
     fn inputrc_term_condition_applies_when_term_matches() {
         let text = "$if term=xterm\n\"\\C-x\": beginning-of-line\n$else\n\"\\C-y\": yank\n$endif\n";
         let env = InputrcEnv {
@@ -3077,6 +3141,17 @@ mod tests {
         let parsed = parse_inputrc_with_env(text, "", &env, &mut |_| None);
         assert_eq!(parsed.bindings.len(), 1);
         assert_eq!(parsed.bindings[0].0, "\\C-y");
+    }
+
+    #[test]
+    fn inputrc_mode_condition_defaults_to_emacs() {
+        // rubash#2924: with no `set editing-mode` anywhere, the
+        // current editing mode is emacs — a bare `$if mode=emacs`
+        // block applies, `$if mode=vi` does not (GNU probe).
+        let text = "$if mode=emacs\n\"\\C-x\": beginning-of-line\n$endif\n$if mode=vi\n\"\\C-y\": yank\n$endif\n";
+        let parsed = parse_inputrc_with_env(text, "", &InputrcEnv::default(), &mut |_| None);
+        assert_eq!(parsed.bindings.len(), 1);
+        assert_eq!(parsed.bindings[0].0, "\\C-x");
     }
 
     #[test]
