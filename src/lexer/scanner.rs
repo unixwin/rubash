@@ -466,8 +466,19 @@ impl<'a> Lexer<'a> {
         // clause) no longer opens a phantom compound frame there.
         if token.kind == TokenKind::Keyword && is_keyword(&token.value) {
             token.reserved_position = if self.parse_state.case_pattern {
+                // parse.y:3181-3184 (CHECK_FOR_RESERVED_WORD under
+                // PST_CASEPAT): an `esac' directly after `|' (Posix grammar
+                // rule 4) or `(' (the phantom rule) is pattern text, never
+                // the terminator — it is not a reserved word there.
                 token.value == "esac"
-                    && !matches!(self.parse_state.last_token, Some((TokenKind::Pipe, _)))
+                    && !matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    )
+                    && !matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    )
             } else {
                 self.reserved_word_position()
             };
@@ -496,7 +507,11 @@ impl<'a> Lexer<'a> {
 
         // `case` is a reserved word only in command position; counting it
         // unconditionally would turn `echo case x in {)` into pattern state.
-        if self.reserved_word_position() && keyword_is("case") {
+        // parse.y:3177-3178: inside PST_CASEPAT only `esac' is recognized,
+        // so a pattern-list `case' (`(case|...)`) is pattern text — it must
+        // not open a nested case frame (rubash#3000: it inflated
+        // case_stmt_depth, so a later terminator left the depth wrong).
+        if !self.parse_state.case_pattern && self.reserved_word_position() && keyword_is("case") {
             self.parse_state.case_stmt_depth += 1;
             self.parse_state.case_expect_word = true;
         } else if self.parse_state.case_expect_word {
@@ -529,7 +544,44 @@ impl<'a> Lexer<'a> {
         {
             self.parse_state.case_pattern = true;
         }
-        if self.parse_state.case_stmt_depth > 0 && (keyword_is("esac") || word_is("esac")) {
+        // GNU CHECK_FOR_RESERVED_WORD (parse.y:3168-3177): inside PST_CASEPAT
+        // only an UNQUOTED `esac' terminates the case. A backslash-quoted
+        // `\esac' (Word, raw `\esac') is pattern text, as is an `esac'
+        // directly after `|' (Posix grammar rule 4, parse.y:3181-3182) or
+        // `(' (parse.y:3183-3184) — the parser side already carries this
+        // shape (is_case_end_keyword). The one Word-`esac' that DOES
+        // terminate is the empty case's (parse.y:3433-3441
+        // special_case_tokens): `case x in esac' lexes `esac' as a Word
+        // (reserved_word_position is false after `in'), so a Word `esac'
+        // while the pattern state the header `in' just armed is still live
+        // — the header consumed (case_expect_in clear, so not the subject
+        // `in' of `case in esac'), directly after that `in' (so not a
+        // pattern `in' after `|' / `(') — closes the case. A Word `esac'
+        // in a clause body (`foo in esac') is an argument, never a
+        // terminator: case_pattern is false there.
+        let terminates_case = self.parse_state.case_stmt_depth > 0
+            && ((keyword_is("esac")
+                && !(self.parse_state.case_pattern
+                    && (matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    ) || matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    ))))
+                || (word_is("esac")
+                    && self.parse_state.case_pattern
+                    && !self.parse_state.case_expect_in
+                    && matches!(&self.parse_state.last_token, Some((_, v)) if v == "in")
+                    && !matches!(
+                        &self.parse_state.token_before_that,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    )
+                    && !matches!(
+                        &self.parse_state.token_before_that,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    )));
+        if terminates_case {
             self.parse_state.case_stmt_depth -= 1;
             self.parse_state.case_pattern = false;
             self.parse_state.case_expect_in = false;
