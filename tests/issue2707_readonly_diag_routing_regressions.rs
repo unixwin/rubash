@@ -193,6 +193,116 @@ fn plain_assignment_readonly_diag_ignores_statement_redirect() {
 }
 
 #[test]
+fn unset_readonly_diag_lands_in_redirect_file() {
+    // GNU set.def:961-967 (unset_builtin): the readonly verdict is
+    // builtin_error ("%s: cannot unset: readonly %s") — it writes
+    // to the fd 2 do_redirections bound for THIS command, so
+    // `2>err.txt` collects it and the shell's stderr stays empty.
+    // Regression cell (Phase 4 migration): execute_unset opened
+    // the target itself, let the Diag flush into that file, then
+    // the trailing buffered-output route re-applied the redirect
+    // (a second, truncating open) and overwrote it with an empty
+    // buffer — the diagnostic vanished entirely.
+    let run = run_script("readonly uv=old\nunset uv 2>err.txt\necho \"rc=$?\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1\n", "stdout: {}", run.stdout);
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
+    assert_eq!(
+        file(&run, "err.txt"),
+        "case.sh: line 2: unset: uv: cannot unset: readonly variable\n"
+    );
+}
+
+#[test]
+fn unset_readonly_diag_follows_dup_to_stdout() {
+    let run = run_script("readonly uv=old\nunset uv 2>&1\necho \"rc=$?\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout, "case.sh: line 2: unset: uv: cannot unset: readonly variable\nrc=1\n",
+        "stdout: {}",
+        run.stdout
+    );
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
+}
+
+#[test]
+fn unset_readonly_diag_without_redirect_still_reported() {
+    // Control: no redirection — the diagnostic reaches the shell's
+    // stderr exactly once, status 1, value unchanged.
+    let run = run_script("readonly uv=old\nunset uv\necho \"rc=$? uv=$uv\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1 uv=old\n", "stdout: {}", run.stdout);
+    assert_eq!(
+        run.stderr, "case.sh: line 2: unset: uv: cannot unset: readonly variable\n",
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
+fn unset_readonly_diag_appends_to_redirect_file() {
+    // Control for the append arm: `2>>` must keep prior content and
+    // append the diagnostic (this shape survived the migration;
+    // it must not regress with the routing fix).
+    let run = run_script(
+        "printf 'PRE\\n' > err.txt\nreadonly uv=old\nunset uv 2>>err.txt\necho \"rc=$?\"\n",
+    );
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1\n", "stdout: {}", run.stdout);
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
+    assert_eq!(
+        file(&run, "err.txt"),
+        "PRE\ncase.sh: line 3: unset: uv: cannot unset: readonly variable\n"
+    );
+}
+
+#[test]
+fn unset_v_invalid_id_diag_lands_in_redirect_file() {
+    // Same swallowed-diagnostic regression, through the
+    // builtin-diagnostics branch: GNU set.def:917-918 reports
+    // sh_invalidid and raises posix_utility_error (EX_UTILERROR).
+    let run = run_script("unset -v \"1bad\" 2>err.txt\necho \"rc=$?\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1\n", "stdout: {}", run.stdout);
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
+    assert_eq!(
+        file(&run, "err.txt"),
+        "case.sh: line 1: unset: `1bad': not a valid identifier\n"
+    );
+}
+
+#[test]
+fn unset_f_readonly_function_diag_lands_in_redirect_file() {
+    // Same regression through the executor-side Diag: set.def:964
+    // with unset_function set — "cannot unset: readonly function".
+    let run = run_script("f() { :; }\nreadonly -f f\nunset -f f 2>err.txt\necho \"rc=$?\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1\n", "stdout: {}", run.stdout);
+    assert!(run.stderr.is_empty(), "stderr: {}", run.stderr);
+    assert_eq!(
+        file(&run, "err.txt"),
+        "case.sh: line 3: unset: f: cannot unset: readonly function\n"
+    );
+}
+
+#[test]
+fn unset_with_unopenable_redirect_never_runs() {
+    // GNU redir.c: a redirection that cannot be opened fails the
+    // command before the builtin body runs — the variable survives
+    // and the open diagnostic goes to the shell's stderr. Guards
+    // the single-application fix against dropping the pregate's
+    // suppression of the body.
+    let run = run_script("x=1\nunset x 2>no-such-dir-xyz/err.txt\necho \"rc=$? x=${x-unset}\"\n");
+    assert_eq!(run.status, 0, "stderr: {}", run.stderr);
+    assert_eq!(run.stdout, "rc=1 x=1\n", "stdout: {}", run.stdout);
+    assert_eq!(
+        run.stderr, "case.sh: line 2: no-such-dir-xyz/err.txt: No such file or directory\n",
+        "stderr: {}",
+        run.stderr
+    );
+}
+
+#[test]
 fn local_readonly_assign_diag_ignores_statement_redirect() {
     // Same assignment-statement shape inside a function: GNU
     // aborts the function body at the failed bind, the redirect

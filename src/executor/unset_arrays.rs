@@ -27,68 +27,33 @@ impl Executor {
             })
             .collect();
 
-        // GNU redir.c: `2>&N`/`2>&-`/`>&word` are NOT file opens — fd 2 is
-        // dup2'd (or closed) by the general redirect machinery before the
-        // builtin runs, so the diagnostic must flow through the command's
-        // BOUND fd 2 (the landed #250/#271 path below). Only a plain
-        // filename target may be opened directly here; a `&`-prefixed
-        // target would otherwise become a bogus file literally named `&1`
-        // (rubash#271: `unset rv 2>&1` wrote the readonly diagnostic into
-        // a file called `&1`).
-        // The stdout buffer carries `--help` long-help output (set.def
-        // CASE_HELPOPT prints to stdout); the stderr sink below is the
-        // command's own fd 2 in every branch (A3-R1, rubash#2707).
+        // GNU execute_cmd.c:5606 (execute_builtin_or_function):
+        // do_redirections binds the command's fds exactly ONCE, before
+        // the builtin body runs, and builtin_error (builtins/common.c:98)
+        // then writes to the bound fd 2 — an enclosing `exec 2>...`
+        // binding, a dup (`2>&1`, the rubash#271 case), or a capture
+        // contains it. rubash's single application is the ordered
+        // buffered route below: the Diag speaks into a buffered stderr
+        // and write_buffered_builtin_output resolves cmd's redirect
+        // state once (dup/closed targets are fd-state resolutions,
+        // never filename opens — a `&`-prefixed target must not become
+        // a bogus file literally named `&1`, rubash#271). A target
+        // that cannot be opened is settled before the body runs by
+        // the dispatch pregate (probe_output_redirect), the same
+        // suppression GNU's failed do_redirections produces.
+        //
+        // Regression shape this replaces: the pre-migration branches
+        // opened a plain `2>file` target directly and returned; the
+        // Phase 4 migration kept those branches but appended the
+        // buffered route for the new stdout buffer (set.def
+        // CASE_HELPOPT long help prints to stdout), so the route
+        // re-applied the redirect — its second, truncating open
+        // erased the diagnostic the Diag had just flushed into the
+        // first handle, and `unset uv 2>f` lost it entirely (append
+        // targets survived: no truncation). Every other migrated
+        // family member (declare/readonly/export/local/alias) runs
+        // this buffered shape; unset now does too (A3-R1, rubash#2707).
         let mut stdout_buf: Vec<u8> = Vec::new();
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_redirect_target(redirect);
-            if !target.starts_with('&') {
-                if is_null_device(&target) {
-                    let status = self.execute_unset_with_stderr(
-                        &cmd.words[1..],
-                        &arrayref_flags,
-                        &mut stdout_buf,
-                        &mut std::io::sink(),
-                    )?;
-                    let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &[]);
-                    return Ok(status);
-                }
-                let mut file = File::create(
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-                )?;
-                let status = self.execute_unset_with_stderr(
-                    &cmd.words[1..],
-                    &arrayref_flags,
-                    &mut stdout_buf,
-                    &mut file,
-                )?;
-                let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &[]);
-                return Ok(status);
-            }
-        }
-
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            if !target.starts_with('&') {
-                let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-                )?;
-                let status = self.execute_unset_with_stderr(
-                    &cmd.words[1..],
-                    &arrayref_flags,
-                    &mut stdout_buf,
-                    &mut file,
-                )?;
-                let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &[]);
-                return Ok(status);
-            }
-        }
-
-        // GNU execute_cmd.c: the diagnostic goes to the shell's CURRENTLY
-        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null`, a dup
-        // (`2>&1`, the rubash#271 case), or a capture contains it. Route
-        // through the ordered builtin-output boundary, which resolves the
-        // command's redirect state (including dup targets that must not be
-        // opened as files).
         let mut stderr = Vec::new();
         let status = self.execute_unset_with_stderr(
             &cmd.words[1..],
