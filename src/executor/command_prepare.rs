@@ -5392,13 +5392,17 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
             }
             let next = raw_chars.get(index + 1).copied();
             if in_single {
-                // Single-quote span: a backslash is span data and stays a
-                // pair (walk `'` span loop).
-                simulated.push(ch);
-                if let Some(n) = next {
-                    simulated.push(n);
-                }
-                index += 2;
+                // Single-quote span: a backslash is ordinary span data.
+                // GNU calls string_extract_single_quoted with allowesc=0
+                // (subst.c:1088, subst.c:11887), so the backslash neither
+                // escapes nor consumes the following byte; the extracted
+                // span is then quoted byte-by-byte by quote_string
+                // (subst.c:4773). Consume only the backslash here and let
+                // the next byte take its normal single-quoted arm, so an
+                // IFS byte after `\` is recorded as quoted and a closing
+                // quote still closes the span.
+                push_quoted_char(&mut simulated, &mut quoted_ifs_positions, ch, ifs, true);
+                index += 1;
                 continue;
             }
             if in_double {

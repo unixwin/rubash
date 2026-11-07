@@ -98,6 +98,120 @@ pub(crate) fn mark_data_squotes_around_substitutions(body: &str) -> String {
     out
 }
 
+/// Cook the raw content of one `"..."` segment to the lexer's carrier
+/// spelling for a pattern builder (quote_aware_glob_rhs, the `=~` marked
+/// stream, quote_aware_case_word/pattern).
+///
+/// GNU parse.y read_token_word + subst.c expand_word_internal expand a
+/// double-quoted segment WITH its quoting intact: `\$`, `\\`, `\"` and
+/// `` \` `` are escapes resolving to literal `$`, `\`, `"`, `` ` ``, and
+/// `'` is data (the double-quote scanner never opens single-quote state).
+/// The pattern builders used to re-expand the quote-stripped body as a
+/// bare fragment, which loses that context: `\$` misreads as `\` + a live
+/// `$name` expansion, `\\` never collapses, and a `'` hand-tagged with the
+/// U+E010 decoded-quote marker survives whenever a backslash routes the
+/// fragment through the mutable walker (which never decodes that marker)
+/// — so `[[ "\`x'" == ... ]]`, `[[ "a\$b" == ... ]]` and
+/// `[[ "a\\b" == ... ]]` all fail against GNU (rubash#2981).
+///
+/// This is the double-quote cooker's escape table
+/// (remove_double_quoted_into_cursor) WITHOUT its CTLESC-marking arm:
+/// quote-removal marks bare `*?[@+!` with CTLESC so pathname expansion
+/// treats them as literals, but a pattern segment needs the plain literal
+/// text — the builder's own append_literal_glob_text /
+/// escape_case_pattern_literal does the glob-escaping, and a stray CTLESC
+/// byte in the value breaks the match (`[[ "a*b" == "a*b" ]]`).
+/// Nested `$(...)`/`${...}`/`$[...]`/backtick units are copied verbatim
+/// (parse.y:3877 parse_matched_pair owns their quoting); `'` outside them
+/// becomes DATA_SQUOTE, the lexer's own data carrier, decoded by both
+/// expansion walkers. A `$'...'` span is NOT decoded: its quotes become
+/// DATA_SQUOTE individually, so the text stays literal exactly as the
+/// pre-fix fragment expansion left it (GNU agrees — `[[ "ab" ==
+/// "a$'b'" ]]` is a non-match).
+pub(crate) fn cook_double_quoted_segment(body: &str) -> String {
+    let chars: Vec<char> = body.chars().collect();
+    let mut out = String::with_capacity(body.len());
+    let mut index = 0usize;
+    while index < chars.len() {
+        let unit_start = index;
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
+            if let Some(close) = skip_braced_unit_quotes(&chars, index + 1, '}') {
+                out.extend(&chars[unit_start..=close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'(') {
+            if let Some(close) = skip_braced_unit_quotes(&chars, index + 1, ')') {
+                out.extend(&chars[unit_start..=close]);
+                index = close + 1;
+                continue;
+            }
+        }
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'[') {
+            if let Some(end) = dollar_bracket_body_end_chars(&chars, index + 2) {
+                out.extend(&chars[unit_start..end]);
+                index = end;
+                continue;
+            }
+        }
+        if chars[index] == '`' {
+            index += 1;
+            while index < chars.len() && chars[index] != '`' {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    index += 1;
+                }
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            out.extend(&chars[unit_start..index]);
+            continue;
+        }
+        if chars[index] == '\\' {
+            match chars.get(index + 1) {
+                Some('$') => {
+                    out.push(crate::executor::markers::DATA_DOLLAR);
+                    index += 2;
+                }
+                Some('`') => {
+                    out.push(crate::executor::markers::DATA_BACKTICK);
+                    index += 2;
+                }
+                Some('"') => {
+                    out.push(crate::executor::markers::DATA_DQUOTE);
+                    index += 2;
+                }
+                Some('\\') => {
+                    out.push(crate::executor::markers::DATA_BACKSLASH);
+                    index += 2;
+                }
+                // Double-quote line continuation: both characters go
+                // (parse.y read_token_word drops `\<newline>` in `"..."`).
+                Some('\n') => {
+                    index += 2;
+                }
+                // GNU dquote rule: a backslash before any other character
+                // is literal data — keep both and let the next iteration
+                // handle the following character normally.
+                _ => {
+                    out.push('\\');
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if chars[index] == '\'' {
+            out.push(crate::executor::markers::DATA_SQUOTE);
+        } else {
+            out.push(chars[index]);
+        }
+        index += 1;
+    }
+    out
+}
+
 /// Quote-aware skip from an opener (the `{` of `${` or the `(` of `$(`) to
 /// its matching closer at nesting depth 0, honoring `'...'`/`"..."` spans
 /// and backslash escapes outside single quotes (the same state machine GNU

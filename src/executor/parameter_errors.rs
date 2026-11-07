@@ -1529,6 +1529,25 @@ impl Executor {
         self.parse_and_execute_frames.last() == Some(&self.shell_state.subshell_depth.get())
     }
 
+    /// rubash#2960: GNU eval.c:206-207 — reader_loop takes EOF right
+    /// after a command completes when `just_one_command` stands
+    /// (flags.c:184, the `onecmd` option: `set -t`, `set -o onecmd`,
+    /// or the `-t` invocation flag). The check belongs to the
+    /// PRINCIPAL reader only (script file, stdin, host submissions):
+    /// a parse_and_execute body — the `-c` string (shell.c
+    /// run_one_command), an eval string, a sourced file — never
+    /// takes it, and neither does a command-string run. Drivers
+    /// consult this after each completed read unit; the unit that
+    /// set the flag has already completed by then, and a flag a
+    /// sourced/evaluated unit set is live state, so the caller's
+    /// next consultation stops the caller — both halves measured
+    /// against GNU bash 5.3.20.
+    pub fn onecmd_reader_stop(&self) -> bool {
+        !self.command_string_mode()
+            && !self.in_parse_and_execute_frame()
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "onecmd")
+    }
+
     /// rubash#1563: true when this executor is executing a subshell
     /// environment's body — a `( )` region or command-substitution body
     /// on this executor, or a fork copy (pipeline stage, process

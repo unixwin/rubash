@@ -49,7 +49,7 @@ fn shell_spelling_to_native(text: &str) -> PathBuf {
             let mut chars = rest.chars();
             if let (Some(drive), Some('/')) = (chars.next(), chars.next()) {
                 if drive.is_ascii_alphabetic() {
-                    return PathBuf::from(format!("{drive}:{}", chars.as_str()));
+                    return PathBuf::from(format!("{drive}:/{}", chars.as_str()));
                 }
             }
         }
