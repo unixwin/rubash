@@ -2103,8 +2103,17 @@ impl Executor {
             // (rubash#1510).
             self.note_typed_cell_synced(base_name);
             mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base_name);
+            // GNU variables.c:3211-3212 (the tail of the same
+            // bind_variable_internal array arm): a scalar bind over an
+            // existing array is still a scalar bind for marking
+            // purposes, so mark_modified_vars sets att_exported — the
+            // assoc arm below does exactly this. The value itself never
+            // crosses the env boundary (an exported array contributes
+            // no string to a child's environment), so projecting the
+            // storage render into the process env was never the right
+            // shape here (rubash#2963).
             if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "allexport") {
-                set_process_env(base_name, self.shell_state.env_vars[base_name].clone());
+                self.mark_exported(base_name);
             }
             self.exit_code = 0;
             return true;
