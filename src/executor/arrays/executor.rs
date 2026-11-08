@@ -658,6 +658,19 @@ impl Executor {
             // while `'x'` survives as literal text (sq is data in dq context)
             // and evalexp then rejects it as a string operand — `a[' ']`
             // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            // rubash#3023: a `$"..."` span in the raw subscript is a
+            // double-quoted span with quote-syntax markup (the lexer cooks
+            // it that way, but raw subscript text bypasses the lexer).
+            // Drop the dollar before the arith-context pass — otherwise
+            // the `$` glues onto the content and `${a[$"1+2"]}` fails
+            // "operand expected" on the token `$"1+2`.
+            let decoded_locale;
+            let key = if key.contains("$\"") {
+                decoded_locale = crate::executor::arithmetic::decode_locale_quote_spans(key);
+                decoded_locale.as_str()
+            } else {
+                key
+            };
             let expanded = self.expand_arithmetic_special_parameters(key);
             if expanded.len() >= 2 && expanded.starts_with('"') && expanded.ends_with('"') {
                 expanded[1..expanded.len() - 1].to_string()
