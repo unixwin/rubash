@@ -49,7 +49,7 @@ fn shell_spelling_to_native(text: &str) -> PathBuf {
             let mut chars = rest.chars();
             if let (Some(drive), Some('/')) = (chars.next(), chars.next()) {
                 if drive.is_ascii_alphabetic() {
-                    return PathBuf::from(format!("{drive}:{}", chars.as_str()));
+                    return PathBuf::from(format!("{drive}:/{}", chars.as_str()));
                 }
             }
         }
@@ -3480,6 +3480,29 @@ fn issue2859_jobs_face_procsub_child_does_not_count() {
         session.background_job_count(),
         0,
         "procsub child is not a table entry"
+    );
+}
+
+/// rubash#2875: an input process-substitution child must be a real
+/// rubash shell, not the lib-test binary. The `<(` spawn resolved
+/// its exe as `CARGO_BIN_EXE_rubash` -> `current_exe()` with no
+/// `test_rubash_binary_from_current_exe()` fallback (unlike the
+/// `>(...)` sibling and the compound_exec spawns), so under
+/// `cargo test --lib` the child was the test binary invoked with
+/// `-c`: it printed `error: Unrecognized option: 'c'` and wrote
+/// nothing to the pipe, so the body never ran. With the fallback
+/// the child is the real rubash binary and the body executes.
+#[test]
+fn issue2875_input_procsub_child_runs_as_rubash_shell() {
+    let mut session = issue863_gap6_session();
+    issue863_gap6_run(
+        &mut session,
+        "read ISSUE2875_OUT < <(printf 'hello2875\\n')",
+    );
+    assert_eq!(
+        session.variable_value("ISSUE2875_OUT"),
+        Some("hello2875".to_string()),
+        "input-procsub child must execute its body as a shell"
     );
 }
 

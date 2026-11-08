@@ -2258,7 +2258,7 @@ impl Executor {
         // A -t 0 read returns before the prompt would print (read.def
         // early return), so it is suppressed there too.
         if prompt.is_some() && !timeout_zero && self.read_prompt_should_display(cmd, read_fd) {
-            let expanded = self.expand_word(prompt.as_deref().unwrap_or_default());
+            let expanded = self.expand_read_prompt(prompt.as_deref().unwrap_or_default());
             eprint!("{}", expanded);
             let _ = std::io::Write::flush(&mut std::io::stderr());
         }
@@ -2401,7 +2401,7 @@ impl Executor {
             None
         };
         self.read_edit_prompt = if self.read_edit_armed {
-            prompt.as_deref().map(|text| self.expand_word(text))
+            prompt.as_deref().map(|text| self.expand_read_prompt(text))
         } else {
             None
         };
@@ -3014,6 +3014,25 @@ impl Executor {
         );
         let _ = writeln!(stderr, "{READ_USAGE}");
         self.finish_read_error(cmd, stderr, 2)
+    }
+
+    /// GNU builtins/read.def:316 takes the -p prompt as the
+    /// word-expanded argument; read.def:670-674 prints those bytes
+    /// verbatim and read.def:697 hands them to the line editor. The
+    /// expansion pass carries control bytes as raw-byte marker pairs,
+    /// so the display boundary decodes them (rubash#2883, the decode
+    /// half of #2878's prompt-channel treatment). There is NO strip
+    /// step on this channel: unlike PS0/PS1/PS2/PS4, the read prompt
+    /// never passes a template stage that manufactures prompt-ignore
+    /// markers, so a literal 0x01/0x02 in the expanded word is prompt
+    /// DATA (e.g. from $'\001') and GNU's fprintf emits it verbatim —
+    /// the #2883 pin proves a strip would eat it. Pair-encoded
+    /// 0x01/0x02 decode back to the same data bytes and survive.
+    /// Both read-prompt consumers (the stderr print above and the
+    /// editor's `read_edit_prompt`) funnel here.
+    fn expand_read_prompt(&self, text: &str) -> String {
+        let expanded = self.expand_word(text);
+        super::prompt_expansion::decode_prompt_transport(&expanded)
     }
 
     fn read_prompt_should_display(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {

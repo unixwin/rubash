@@ -218,7 +218,7 @@ mod pipeline_exec;
 mod pipeline_stages;
 mod print_comsub;
 
-mod read_helpers;
+pub(crate) mod read_helpers;
 mod read_split;
 mod redirect_inherit;
 mod redirection;
@@ -968,6 +968,13 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// The last value written to the OS environment's
+    /// __RUBASH_CURRENT_FILE mirror (None = never written this process).
+    /// Twin of `line_env_os_value` for the file half of the diagnostic
+    /// frame stamp (rubash#3035): `stamp_current_file` skips the OS
+    /// write when this equals the newly computed frame file, and skips
+    /// the removal when it is already None.
+    file_env_os_value: std::cell::RefCell<Option<String>>,
     /// #682 stamped-by-caller contract: the execute_ast command loop stamps
     /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
     /// about to dispatch (GNU stamps line_number once per command,

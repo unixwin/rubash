@@ -56,6 +56,13 @@ jobs:
         with:
           tool: cargo-nextest
 
+      # rubash#2875: lib tests spawn the built shell (consumer_tests resolve
+      # target/debug/rubash via the test-binary fallback); a bare lib-test
+      # run never builds the bin target, so a pin that needs the binary
+      # fails in CI while passing locally after a build.
+      - name: Build the rubash binary for lib tests
+        run: cargo build --locked
+
       - name: Run Rust library tests
         run: cargo nextest run --lib --profile ci
 
@@ -167,6 +174,11 @@ jobs:
       # engine tests (signal tables, PATH walk, wait decode, fd extras)
       # their first real darwin execution -- cross-target-check only proves
       # they compile FOR darwin.
+      # rubash#2875: lib tests spawn the built shell (see the pre-build step
+      # in the ubuntu job); a bare `cargo test --lib` never builds the bin.
+      - name: Build the rubash binary for lib tests
+        run: cargo build --locked
+
       - name: Run Rust library tests
         run: cargo test --lib
 
@@ -188,6 +200,11 @@ jobs:
       # broken windows-only test signature (4aaedfb8 VarTable, cd.rs)
       # shipped green. Runs the tests too, not just --no-run: these
       # windows-gated unit tests otherwise never execute in CI.
+      # rubash#2875: lib tests spawn the built shell (see the pre-build step
+      # in the ubuntu job); a bare `cargo test --lib` never builds the bin.
+      - name: Build the rubash binary for lib tests
+        run: cargo build --locked
+
       - name: Run Rust library tests
         run: cargo test --lib
 

@@ -3,6 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/trap.def
 
+use super::diagnostic::diagnostic_prefix;
 use crate::shell::var_table::VarTable;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{self, Write};
@@ -325,20 +326,13 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     execute_with_io(args, &mut env_vars, &mut stdout, &mut stderr)
 }
 
-/// Build the shell diagnostic prefix (`<script>: line N: `) from the shell
-/// environment, falling back to `rubash: ` without script context. GNU
-/// trap.def errors go through builtin_error -> error_prolog, which prefixes
-/// `./script: line N:` when running a script file (trap.tests line 118
-/// baseline: `./trap.tests: line 118: trap: cannot specify both -p and -P`).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefix is the shared builtin_error prolog
+// (`super::diagnostic::diagnostic_prefix`): GNU trap.def errors go
+// through builtin_error -> error_prolog, which prefixes
+// `./script: line N:` when running a script file (trap.tests line
+// 118 baseline: `./trap.tests: line 118: trap: cannot specify both
+// -p and -P`), and the shared builder names the frame's definition
+// file (rubash#3035).
 
 pub fn execute_with_io<W, E>(
     args: &[String],
@@ -1176,6 +1170,31 @@ pub(crate) fn reset_for_subshell(env_vars: &mut VarTable) {
 /// [`reset_for_subshell`] (no user commands run inside `read`).
 pub(crate) fn reset_for_subshell_child(env_vars: &mut VarTable) {
     reset_for_subshell_inner(env_vars, true);
+}
+
+/// Background-wrapper respawn (rubash#2982): the `rubash -c` child
+/// re-defines the parent's functions from a textual prelude, so its
+/// function table is incomplete until the prelude has been evaluated —
+/// and under functrace/errtrace reset_for_subshell_child leaves the
+/// DEBUG and ERR traps live, so they can fire while handler functions
+/// (or their callees) do not exist yet, and the failure cascades
+/// through the ERR trap (whose handler is likewise undefined). GNU's
+/// forked async child never has this window: execute_cmd.c:1576
+/// execute_in_subshell copies the table whole, so the traps only ever
+/// fire with every function defined. Force-reset DEBUG and ERR in the
+/// transported table (the spawn site re-arms them after the prelude, so
+/// the body still runs traced exactly as GNU's forked child).
+/// In-process subshells are unaffected — they keep the shared
+/// reset_for_subshell_child rule, and their table is complete from the
+/// start. (The observed trap errors were downstream of the prelude
+/// parse truncation, rubash#2982 defect C1, which left the table
+/// partial when the trap fired before the body; this reset closes the
+/// window as defense-in-depth for the textual respawn.)
+pub(crate) fn reset_traps_for_background_wrapper(env_vars: &mut VarTable) {
+    let mut reset = reset_trap_signals(env_vars);
+    reset.insert("DEBUG".to_string());
+    reset.insert("ERR".to_string());
+    store_reset_traps(env_vars, reset);
 }
 
 fn reset_for_subshell_inner(env_vars: &mut VarTable, inherit_errtrace: bool) {

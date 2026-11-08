@@ -514,12 +514,13 @@ impl Executor {
         if alternate {
             restored.into_owned()
         } else {
-            crate::executor::markers::cow_replace(
+            // E400-aware (rubash#2882): drop only the BARE quoted-null
+            // carrier; a typed `$'\uE002'` rides as an E400-escaped pair
+            // and is user data, not a quoted null.
+            crate::executor::markers::restore_bare_sentinels(
                 &restored,
-                crate::executor::markers::QUOTED_NULL_MARKER_STR,
-                "",
+                &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
             )
-            .into_owned()
         }
     }
 

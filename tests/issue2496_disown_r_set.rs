@@ -28,7 +28,13 @@
 //! bash 5.3.20 oracle binary on 2026-11-02 (identical stdout/stderr
 //! modulo pid values; the `bash: line 1:` prefix is rubash's
 //! established -c rendering, byte-identical to GNU invoked under the
-//! name `bash`). One face is deliberately NOT byte-pinned: whether a
+//! name `bash`). rubash#2935: the helper pins argv[0] to `bash` via
+//! `arg0` — D1 (rubash#2714) renders the invocation name VERBATIM,
+//! exactly as GNU does (oracle probe: `exec -a /x/y/zsh bash -c
+//! '...'` prefixes `/x/y/zsh: line 1:`), so the byte-exact
+//! expectations hold only with argv[0] controlled; spawning by the
+//! absolute CARGO_BIN_EXE path made the prefix the path and reddened
+//! every warning pin in this file. One face is deliberately NOT byte-pinned: whether a
 //! just-completed job still appears in a `jobs` listing as `Done` is
 //! racy IN GNU ITSELF (both listings observed across identical runs —
 //! the completed job is dropped once bash's notify pass reaches it,
@@ -54,10 +60,12 @@
 
 #![cfg(unix)]
 
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 fn rubash(script: &str) -> (String, String, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .arg0("bash")
         .arg("-c")
         .arg(script)
         .output()

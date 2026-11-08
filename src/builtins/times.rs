@@ -18,8 +18,10 @@ const EXECUTION_SUCCESS: i32 = 0;
 /// other option word is an invalid option (usage + `EX_USAGE`); a
 /// bare `-` is an operand, and every operand is ignored.
 ///
-/// The two time lines stay the stub zeros (rubash#2932 tracks the
-/// real `getrusage` values); this phase migrates the scan only.
+/// The payload is GNU builtins/times.def:65-88 (rubash#2932):
+/// `getrusage(RUSAGE_SELF)` prints as the first line,
+/// `getrusage(RUSAGE_CHILDREN)` as the second, each value through
+/// `print_timeval`.
 pub fn execute_with_io<'a>(
     row: &'a BuiltinRow,
     args: &'a [String],
@@ -56,9 +58,36 @@ pub fn execute_with_io<'a>(
         return Ok(diag.status());
     }
 
-    writeln!(stdout, "0m0.000s 0m0.000s")?;
-    writeln!(stdout, "0m0.000s 0m0.000s")?;
+    let (self_user, self_sys, child_user, child_sys) =
+        crate::executor::read_helpers::process_times();
+    writeln!(
+        stdout,
+        "{} {}",
+        format_timeval(self_user),
+        format_timeval(self_sys)
+    )?;
+    writeln!(
+        stdout,
+        "{} {}",
+        format_timeval(child_user),
+        format_timeval(child_sys)
+    )?;
     Ok(EXECUTION_SUCCESS)
+}
+
+/// GNU `print_timeval` (lib/sh/timeval.c:158-171): the format is
+/// `"%ldm%d%c%03lds"` — whole minutes, the remaining whole seconds,
+/// the locale decimal point, and the millisecond remainder TRUNCATED
+/// (tv_usec / 1000) to exactly three digits. The decimal point is the
+/// shell's C-locale `.` (the form every pinned expectation uses).
+fn format_timeval(duration: std::time::Duration) -> String {
+    let secs = duration.as_secs();
+    format!(
+        "{}m{}.{:03}s",
+        secs / 60,
+        secs % 60,
+        duration.subsec_millis()
+    )
 }
 
 #[cfg(test)]
@@ -92,16 +121,37 @@ mod tests {
         )
     }
 
+    /// The shape of the two lines `times` prints with real rusage
+    /// values (rubash#2932): each line is `<t> <t>` with `<t>` in
+    /// print_timeval's `{mins}m{secs}.{millis:03}s` form. The VALUES
+    /// are the process's live CPU times, so only the shape is
+    /// pinnable here; value movement is pinned by
+    /// tests/issue2932_times_real_rusage_regressions.rs.
+    fn assert_times_shape(stdout: &str) {
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert_eq!(lines.len(), 2, "stdout: {stdout}");
+        for line in lines {
+            let fields: Vec<&str> = line.split(' ').collect();
+            assert_eq!(fields.len(), 2, "line: {line}");
+            for field in fields {
+                let (mins, rest) = field.split_once('m').expect("minutes separator");
+                assert!(!mins.is_empty() && mins.bytes().all(|b| b.is_ascii_digit()));
+                let (secs, frac) = rest.split_once('.').expect("decimal point");
+                assert!(!secs.is_empty() && secs.bytes().all(|b| b.is_ascii_digit()));
+                let frac = frac.strip_suffix('s').expect("seconds suffix");
+                assert_eq!(frac.len(), 3, "field: {field}");
+                assert!(frac.bytes().all(|b| b.is_ascii_digit()));
+            }
+        }
+    }
+
     #[test]
     fn prints_two_time_lines() {
-        assert_eq!(
-            run(&[]),
-            (
-                EXECUTION_SUCCESS,
-                "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n".to_string(),
-                String::new()
-            )
-        );
+        let (status, stdout, stderr) = run(&[]);
+
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_times_shape(&stdout);
+        assert!(stderr.is_empty());
     }
 
     #[test]
@@ -132,7 +182,7 @@ mod tests {
         let (status, stdout, stderr) = run(&["extra"]);
 
         assert_eq!(status, EXECUTION_SUCCESS);
-        assert_eq!(stdout, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        assert_times_shape(&stdout);
         assert!(stderr.is_empty());
     }
 
@@ -141,7 +191,7 @@ mod tests {
         let (status, stdout, stderr) = run(&["-"]);
 
         assert_eq!(status, EXECUTION_SUCCESS);
-        assert_eq!(stdout, "0m0.000s 0m0.000s\n0m0.000s 0m0.000s\n");
+        assert_times_shape(&stdout);
         assert!(stderr.is_empty());
     }
 

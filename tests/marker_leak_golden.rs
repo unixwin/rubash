@@ -238,6 +238,159 @@ fn printf_paths_carry_no_markers() {
     assert_clean(&out, "printf");
 }
 
+/// rubash#2882 (PUA sweep F2): U+E002 is QUOTED_NULL_MARKER. A typed
+/// `$'\uE002'` arrives E400-escaped (push_literal_char) and is user
+/// DATA, but blind consumers that `cow_replace`/`contains` the bare
+/// marker ate it: `printf %s "$v"` emitted a stray U+E400 alone,
+/// `echo "$v"` emitted nothing, `"a${v}b"` dropped the char. GNU
+/// protects a user CTLNUL with CTLESC at read time (parse.y
+/// got_character) so dequote passes (subst.c remove_quoted_nulls)
+/// strip only the BARE marker — the char survives every consumer.
+/// Storage was always fine (`declare -p`, `${#v}` correct on the
+/// broken tree too — they are the control cells). The correct output
+/// legitimately CONTAINS U+E002, so these cells assert exact bytes
+/// instead of the no-PUA predicate. Run under LC_ALL=C.UTF-8: in the
+/// POSIX locale GNU itself keeps the literal `\uE002` spelling.
+#[test]
+fn user_e002_quoted_null_char_roundtrips_as_data() {
+    let e002 = "\u{E002}";
+    let run_utf8 = |script: &str| -> Vec<u8> {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", script])
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        child.wait_with_output().expect("wait rubash").stdout
+    };
+    // printf %s of the quoted value: the char, nothing else (the
+    // broken tree emitted a stray U+E400 here).
+    let out = run_utf8("v=$'\\uE002'; printf '%s' \"$v\"");
+    assert_eq!(out, e002.as_bytes(), "printf %s of quoted U+E002 value");
+    // Braced form, same expectation.
+    let out = run_utf8("v=$'\\uE002'; printf '%s' \"${v}\"");
+    assert_eq!(out, e002.as_bytes(), "printf %s of braced U+E002 value");
+    // echo: char + newline (the broken tree emitted just the newline).
+    let out = run_utf8("v=$'\\uE002'; echo \"$v\"");
+    assert_eq!(out, format!("{e002}\n").as_bytes(), "echo of U+E002 value");
+    // Concatenation inside a double-quoted word keeps the char.
+    let out = run_utf8("v=$'\\uE002'; w=\"a${v}b\"; printf '%s' \"$w\"");
+    assert_eq!(
+        out,
+        format!("a{e002}b").as_bytes(),
+        "concatenation a${{v}}b"
+    );
+    let out = run_utf8("v=$'\\uE002'; echo \"x${v}y\"");
+    assert_eq!(out, format!("x{e002}y\n").as_bytes(), "echo concatenation");
+    // Assignment round-trip: the stored value is the char.
+    let out = run_utf8("v=$'\\uE002'; u=$v; printf '%s' \"$u\"");
+    assert_eq!(out, e002.as_bytes(), "assignment round-trip of U+E002");
+    // Two typed chars stay two chars.
+    let out = run_utf8("x=$'\\uE002'$'\\uE002'; printf '%s' \"$x\"");
+    assert_eq!(out, format!("{e002}{e002}").as_bytes(), "double U+E002");
+    // Unquoted expansion: one field carrying the char.
+    let out = run_utf8("v=$'\\uE002'; printf '<%s>\\n' $v");
+    assert_eq!(
+        out,
+        format!("<{e002}>\n").as_bytes(),
+        "unquoted U+E002 field"
+    );
+    // Alternate words, quoted and unquoted (field-split gate shapes).
+    let out = run_utf8("v=$'\\uE002'; e=; printf '%s' \"${e:-$v}\"");
+    assert_eq!(out, e002.as_bytes(), "quoted alternate with U+E002");
+    let out = run_utf8("v=$'\\uE002'; e=; printf '<%s>\\n' ${e:-a${v}b}");
+    assert_eq!(
+        out,
+        format!("<a{e002}b>\n").as_bytes(),
+        "unquoted alternate with U+E002"
+    );
+    // External argv boundary: the child sees the raw char.
+    let out = run_utf8("v=$'\\uE002'; /usr/bin/printf '%s' \"$v\"");
+    assert_eq!(out, e002.as_bytes(), "external printf argv U+E002");
+    // Controls: storage views were already correct — pin them so the
+    // fix cannot regress them. `declare -p` renders the raw char and
+    // must not show the E400 escape introducer; length is 1.
+    let out = run_utf8("v=$'\\uE002'; declare -p v");
+    let text = String::from_utf8_lossy(&out);
+    assert!(
+        text.contains(e002) && !text.contains('\u{E400}'),
+        "declare -p must render the raw U+E002 char: {text:?}"
+    );
+    let out = run_utf8("v=$'\\uE002'; echo \"len=${#v}\"");
+    assert_eq!(out, b"len=1\n".as_slice(), "length of U+E002 value");
+    // NOTE: `case "$v" in *"$v"*)` is not a cell here — the case
+    // pattern's quoted segment was a separate blind consumer of the
+    // pair, filed as rubash#3014; its cells live in
+    // `user_e002_quoted_null_char_matches_case_patterns` below.
+}
+
+/// rubash#3014: the case pattern's QUOTED segment is a pattern-side
+/// consumer of the #2882 class. GNU expands each case pattern with
+/// expand_word_leave_quoted and runs it through
+/// quote_string_for_globbing (execute_cmd.c execute_case_command,
+/// pattern loop): quote_string (pathexp.c) CTLESC-protects each
+/// character of a quoted span — and the E400+E002 transport pair is
+/// ONE character (the typed U+E002), so it takes ONE guard as a unit,
+/// exactly like the raw-byte marker pair. rubash's
+/// escape_case_pattern_literal guarded the pair's halves separately
+/// (CTLESC E400 CTLESC E002), so the matcher's flattening could no
+/// longer read the pair as one data char and every quoted-segment
+/// shape NOMATCHed. Subject side, unquoted pattern form and the
+/// `[[ == ]]` forms were already correct (controls below). All cells
+/// probe-verified against GNU bash 5.3.20 under LC_ALL=C.UTF-8.
+#[test]
+fn user_e002_quoted_null_char_matches_case_patterns() {
+    let run_utf8 = |script: &str| -> String {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", script])
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        let out = child.wait_with_output().expect("wait rubash").stdout;
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let script = concat!(
+        "v=$'\\uE002'\n",
+        "case \"$v\" in \"$v\") echo \"exact-quoted: MATCH\";; *) echo \"exact-quoted: NOMATCH\";; esac\n",
+        "case \"$v\" in *\"$v\"*) echo \"glob-both: MATCH\";; *) echo \"glob-both: NOMATCH\";; esac\n",
+        "case $'\\uE002' in *\"$v\"*) echo \"lit-subj-glob-pat: MATCH\";; *) echo \"lit-subj-glob-pat: NOMATCH\";; esac\n",
+        "w=\"a${v}b\"\n",
+        "case \"$w\" in *\"$v\"*) echo \"concat-subj: MATCH\";; *) echo \"concat-subj: NOMATCH\";; esac\n",
+        "case \"$v\" in *$'\\uE002'*) echo \"ansi-pat: MATCH\";; *) echo \"ansi-pat: NOMATCH\";; esac\n",
+        "case \"$v\" in *\"$(printf %s \"$v\")\"*) echo \"comsub-pat: MATCH\";; *) echo \"comsub-pat: NOMATCH\";; esac\n",
+        "p=\"$v\"\n",
+        "case \"$v\" in *\"$p\"*) echo \"var-pat: MATCH\";; *) echo \"var-pat: NOMATCH\";; esac\n",
+        "case \"$v\" in \"$p\") echo \"var-pat-exact: MATCH\";; *) echo \"var-pat-exact: NOMATCH\";; esac\n",
+        // Controls: unquoted pattern form and the sanity NOMATCH were
+        // already correct on the broken tree, as were the `[[ == ]]`
+        // forms — pin them so this fix cannot regress them.
+        "case \"$v\" in *$v*) echo \"unquoted-pat: MATCH\";; *) echo \"unquoted-pat: NOMATCH\";; esac\n",
+        "case \"ZZZ\" in *\"$v\"*) echo \"sanity: MATCH\";; *) echo \"sanity: NOMATCH\";; esac\n",
+        "if [[ \"$v\" == \"$v\" ]]; then echo \"cond-exact: MATCH\"; else echo \"cond-exact: NOMATCH\"; fi\n",
+        "if [[ \"$v\" == *\"$v\"* ]]; then echo \"cond-glob: MATCH\"; else echo \"cond-glob: NOMATCH\"; fi\n",
+    );
+    let expected = concat!(
+        "exact-quoted: MATCH\n",
+        "glob-both: MATCH\n",
+        "lit-subj-glob-pat: MATCH\n",
+        "concat-subj: MATCH\n",
+        "ansi-pat: MATCH\n",
+        "comsub-pat: MATCH\n",
+        "var-pat: MATCH\n",
+        "var-pat-exact: MATCH\n",
+        "unquoted-pat: MATCH\n",
+        "sanity: NOMATCH\n",
+        "cond-exact: MATCH\n",
+        "cond-glob: MATCH\n",
+    );
+    assert_eq!(run_utf8(script), expected, "case pattern U+E002 cells");
+}
+
 /// rubash#727: the assertion must actually see the registry's codepoints
 /// (U+E000-based, UTF-8 lead byte 0xEE). Before the fix it tested 0xEF and
 /// therefore could not fire on any registered marker.

@@ -56,6 +56,7 @@ use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
+use super::diagnostic::diagnostic_prefix;
 use super::help;
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -776,16 +777,8 @@ where
     }
 }
 
-/// Build the shell diagnostic prefix (`<script>: line N: `) from the shell
-/// environment, falling back to `rubash: ` without script context — GNU
-/// builtin_error prefixes `./script: line N:` when running a script file
-/// (baseline: `./builtins11.sub: line 37: ulimit: -g: invalid option`).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefix is the shared builtin_error prolog
+// (`super::diagnostic::diagnostic_prefix`): GNU prefixes
+// `./script: line N:` when running a script file (baseline:
+// `./builtins11.sub: line 37: ulimit: -g: invalid option`), and the
+// shared builder names the frame's definition file (rubash#3035).
