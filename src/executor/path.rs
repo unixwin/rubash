@@ -376,7 +376,10 @@ pub(crate) fn set_command_lookup_cache(
 /// candidates resolved against the process cwd, which the session owned;
 /// with per-session cwd fields they must anchor explicitly. Absolute
 /// candidates pass through unchanged.
-fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>) -> PathBuf {
+pub(crate) fn anchor_at_session_cwd(
+    candidate: PathBuf,
+    env_vars: &HashMap<String, String>,
+) -> PathBuf {
     if candidate.is_absolute() {
         return candidate;
     }
@@ -387,6 +390,25 @@ fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>)
         }
     }
     candidate
+}
+
+/// G-02 file-operand resolution for the builtins that open a user-named
+/// file in-process — `bind -f` and its `$include` reads (builtins/
+/// bind.def:274 rl_read_init_file; lib/readline/bind.c:1502
+/// parser_include) and the history file faces `-a/-n/-r/-w`
+/// (builtins/history.def:273,295-316): translate the spelling, then
+/// anchor a relative result at the session cwd — GNU's single cwd IS
+/// the session cwd here, so a relative operand names a file in the
+/// directory `cd` moved to, not the process cwd (rubash#3090). The
+/// empty operand passes through untranslated and unanchored so its
+/// open keeps GNU's ENOENT shape instead of resolving to the cwd
+/// directory itself. Diagnostics keep the as-typed spelling; only
+/// opens use this form.
+pub(crate) fn anchored_file_operand(name: &str, env_vars: &HashMap<String, String>) -> PathBuf {
+    if name.is_empty() {
+        return PathBuf::from(name);
+    }
+    anchor_at_session_cwd(shell_path_to_windows(name, env_vars), env_vars)
 }
 
 pub(crate) fn command_lookup_fingerprint(env_vars: &HashMap<String, String>) -> String {

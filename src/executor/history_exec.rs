@@ -471,6 +471,16 @@ pub(in crate::executor) fn execute_history_session(
             // before the path translation and every open below
             // (rubash#3076).
             let path = crate::executor::substitution_metadata::fold_literal_char_escapes(&path);
+            // G-02 (rubash#3090): the file faces open the resolved
+            // name in-process; GNU's single cwd is the session cwd
+            // here (builtins/history.def:273 hands the name to
+            // read_history/write_history verbatim), so a relative name
+            // anchors at the session cwd for the opens below. The
+            // diagnostics keep the translated as-typed `path`.
+            let fs_path =
+                crate::executor::path::anchored_file_operand(&path, &executor.shell_state.env_vars)
+                    .to_string_lossy()
+                    .to_string();
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
             // Windows forms the file APIs need; children see the same file.
             let path =
@@ -483,19 +493,19 @@ pub(in crate::executor) fn execute_history_session(
             // (rubash#1669).
             let write_ts = write_timestamps_of(executor);
             let outcome = match mode {
-                HistoryMode::Append => shell.append_file(&path, write_ts).map(|_| 0),
+                HistoryMode::Append => shell.append_file(&fs_path, write_ts).map(|_| 0),
                 // GNU builtins/history.def WFLAG branch: write_history
                 // does NOT reset history_lines_this_session — only -a
                 // (maybe_append_history) consumes the session counter.
                 // Resetting here starved the exit-time append in
                 // finish_shell of lines already written by -w
                 // (rubash#1049: GNU re-appends them at exit).
-                HistoryMode::Write => shell.write_file(&path, write_ts).map(|_| 0),
+                HistoryMode::Write => shell.write_file(&fs_path, write_ts).map(|_| 0),
                 HistoryMode::Read => shell
-                    .read_file_with_arming(&path, histsize, write_ts)
+                    .read_file_with_arming(&fs_path, histsize, write_ts)
                     .map(|_| 0),
                 HistoryMode::ReadNew => shell
-                    .read_new_file_with_arming(&path, histsize, write_ts)
+                    .read_new_file_with_arming(&fs_path, histsize, write_ts)
                     .map(|_| 0),
                 _ => Ok(0),
             };
