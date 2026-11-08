@@ -25,9 +25,10 @@
 //! restorable for any user. Two cells use the plain/both form and
 //! the hard limit: restoring a lowered HARD limit means raising it
 //! back, which the kernel allows only with CAP_SYS_RESOURCE, so
-//! those cells run only when the test process is root (the product's
-//! own verification environment); the soft cells pin the same
-//! boundary mechanism everywhere else.
+//! those cells run only where a probe shows a hard limit can
+//! actually be raised back (uid 0 inside a user namespace fails
+//! that probe — GNU bash itself cannot raise there either); the
+//! soft cells pin the same boundary mechanism everywhere else.
 //!
 //! Expected outputs are byte-verified against GNU Bash 5.3.20
 //! (self-compiled oracle, script-file probes 2026-11-08). Unix-only:
@@ -55,20 +56,31 @@ fn assert_clean(stderr: &str) {
     assert!(stderr.is_empty(), "stderr not empty: {stderr}");
 }
 
-fn running_as_root() -> bool {
-    Command::new("id")
-        .arg("-u")
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "0")
-        .unwrap_or(false)
+/// Whether this environment lets a process RAISE a hard limit back
+/// after lowering it (the restore direction for a hard-side set).
+/// uid 0 is NOT sufficient evidence — root inside a user namespace
+/// still gets EPERM (verified on the captain's VM: GNU bash itself
+/// cannot raise `ulimit -Hn` back there) — so probe the operation
+/// itself in a throwaway shell: lower the hard limit by one, then
+/// raise it back; both steps must succeed.
+fn hard_limit_is_raisable() -> bool {
+    let (hard, _, _) = rubash("ulimit -Hn");
+    let hard: u64 = match hard.trim().parse() {
+        Ok(value) if value >= 1024 => value,
+        _ => return false,
+    };
+    let probe = format!("ulimit -Hn {} && ulimit -Hn {}", hard - 1, hard);
+    let (_, stderr, status) = rubash(&probe);
+    status == Some(0) && stderr.is_empty()
 }
 
 /// The issue's exact seed: the parent's limit survives the subshell.
-/// (Root-gated: the plain set form lowers the hard limit too, and
-/// only a privileged process can raise it back at the boundary.)
+/// (Raisable-gated: the plain set form lowers the hard limit too,
+/// and the boundary restore must raise it back — only possible
+/// where hard limits can be raised at all; see REPORT.)
 #[test]
 fn subshell_ulimit_seed_shape_does_not_leak() {
-    if !running_as_root() {
+    if !hard_limit_is_raisable() {
         return;
     }
     let (stdout, stderr, _) = rubash("ulimit -n 512\n( ulimit -n 256; ulimit -n )\nulimit -n");
@@ -144,10 +156,10 @@ fn subshell_ulimit_other_resource_does_not_leak() {
 /// The hard limit is process state too: lowering it inside a
 /// subshell must not lower the parent's (the set is one-way for
 /// non-root, so a leak would be unrecoverable for the parent).
-/// Root-gated for the restore reason in the header.
+/// Raisable-gated for the restore reason in the header.
 #[test]
 fn subshell_ulimit_hard_limit_does_not_leak() {
-    if !running_as_root() {
+    if !hard_limit_is_raisable() {
         return;
     }
     // Read the inherited hard limit first; only run the cell when it
