@@ -86,6 +86,7 @@ pub(super) fn assign_redirect_out_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
             command.redirect_in = Some(Box::new(redirect));
         }
+        correct_first_word_end_for_redirect_target(command, target);
         return Some(index + 1);
     }
     let (target_value, target_raw) = dup_close_target(command, &tokens[index].value, target);
@@ -97,6 +98,7 @@ pub(super) fn assign_redirect_out_target(
         fd,
         fd_var,
     );
+    correct_first_word_end_for_redirect_target(command, target);
     Some(index + 1)
 }
 
@@ -143,6 +145,7 @@ pub(super) fn assign_append_target(
         fd,
         redirect_fd_var_prefix(tokens, index),
     );
+    correct_first_word_end_for_redirect_target(command, target);
     Some(index + 1)
 }
 
@@ -189,6 +192,7 @@ pub(super) fn assign_redirect_err_target(
         false,
         tokens[index].value == "2>|",
     )));
+    correct_first_word_end_for_redirect_target(command, target);
     Some(index + 1)
 }
 
@@ -208,6 +212,7 @@ pub(super) fn assign_redirect_err_append_target(
     );
     command.redirects.push(redirect.clone());
     command.redirect_err_append = Some(Box::new(redirect));
+    correct_first_word_end_for_redirect_target(command, target);
     Some(index + 1)
 }
 

@@ -1650,6 +1650,10 @@ impl Executor {
             conditional_command: cmd.conditional_command.clone(),
             brace_group: cmd.brace_group.clone(),
             line: cmd.line,
+            // rubash#3028: the first-element end line is part of the
+            // node's line identity (Simple->line) — carry it like `line`
+            // or the rebuilt command loses the continuation-aware stamp.
+            first_word_end_line: cmd.first_word_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
