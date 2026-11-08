@@ -707,6 +707,11 @@ impl Executor {
             // other entry must not execute under a foreign parent's
             // line number.
             env_vars.remove("__RUBASH_CURRENT_LINE");
+            // rubash#3035: the frame FILE half of the same diagnostic
+            // transport — a validated respawn child keeps the stamped
+            // frame file, any other entry must not execute under a
+            // foreign parent's definition-file name.
+            env_vars.remove("__RUBASH_CURRENT_FILE");
             // dollar_vars[0] slot reset at script entry (shell.c:1613) —
             // see main.rs; the snapshot rides the process env otherwise.
             env_vars.remove("__RUBASH_ARGV0_AFTER_UNSET");
@@ -738,6 +743,7 @@ impl Executor {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
             mirror_env_remove("__RUBASH_TOP_LEVEL_NAME");
             mirror_env_remove("__RUBASH_CURRENT_LINE");
+            mirror_env_remove("__RUBASH_CURRENT_FILE");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
         mirror_env_remove("__RUBASH_SHELL_NAME");
@@ -1199,6 +1205,7 @@ impl Executor {
             debug_driver: None,
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            file_env_os_value: std::cell::RefCell::new(None),
             pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::rc::Rc::new(std::cell::Cell::new(false)),
             return_trap_running: false,
@@ -1236,6 +1243,7 @@ impl Executor {
             no_closing_brace_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_bound_frames: Vec::new(),
             applying_temporary_assignments: false,
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),

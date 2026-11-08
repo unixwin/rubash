@@ -3,7 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
-use std::collections::HashMap;
+use super::diagnostic::diagnostic_prefix;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
@@ -13,18 +13,9 @@ const EX_NOTFOUND: i32 = 127;
 const EX_NOEXEC: i32 = 126;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 
-/// GNU exec.def diagnostics go through builtin_error -> error_prolog, which
-/// prefixes `./script: line N:` when running a script file (mirrors
-/// builtins/trap.rs).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// GNU exec.def diagnostics go through builtin_error -> error_prolog:
+// the shared prolog builder lives in super::diagnostic and names the
+// frame's definition file (rubash#3035).
 
 thread_local! {
     /// The (pid, signal) of the most recent `exec`-spawned child that

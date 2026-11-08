@@ -156,7 +156,7 @@ impl ConditionalArithParser<'_> {
             return Some(0);
         }
         match lvalue {
-            ArithLValue::Scalar(name) => self.variable_value(name),
+            ArithLValue::Scalar { name, .. } => self.variable_value(name),
             ArithLValue::Indexed { name, index, .. } => {
                 let value = self.indexed_element_text(name, *index);
                 // GNU get_array_value -> array_value_internal
@@ -644,6 +644,7 @@ impl ConditionalArithParser<'_> {
         let current = self.lvalue_value(&lvalue)?;
         let updated = bash_arith(current + delta);
         self.set_lvalue(&lvalue, updated);
+        self.record_locale_bind(&lvalue, updated);
         Some(if prefix { updated } else { current })
     }
 
@@ -683,6 +684,7 @@ impl ConditionalArithParser<'_> {
         }
         if op == "=" {
             self.set_lvalue(&lvalue, rhs);
+            self.record_locale_bind(&lvalue, rhs);
             return Some(rhs);
         }
         let current = match precaptured {
@@ -713,6 +715,7 @@ impl ConditionalArithParser<'_> {
             _ => return None,
         };
         self.set_lvalue(&lvalue, value);
+        self.record_locale_bind(&lvalue, value);
         Some(value)
     }
 
@@ -734,7 +737,7 @@ impl ConditionalArithParser<'_> {
 
     fn lvalue_is_writable(&mut self, lvalue: &ArithLValue) -> bool {
         let name = match lvalue {
-            ArithLValue::Scalar(name)
+            ArithLValue::Scalar { name, .. }
             | ArithLValue::Indexed { name, .. }
             | ArithLValue::IndexedRaw { name, .. }
             | ArithLValue::Assoc { name, .. } => name,
@@ -767,9 +770,31 @@ impl ConditionalArithParser<'_> {
         true
     }
 
+    /// GNU expr.c:352: expr_bind_variable's post-bind hook
+    /// (stupidly_hack_special_variables) is keyed on the WRITTEN lhs,
+    /// so only a Scalar lvalue records, with the value the bind just
+    /// stored (rubash#3059). Element lvalues carry the literal text
+    /// `name[sub]` as their GNU lhs, which matches no special_vars
+    /// entry, and a nameref lvalue records under its own name — the
+    /// hook never sees the resolved target.
+    fn record_locale_bind(&self, lvalue: &ArithLValue, stored: i128) {
+        if let ArithLValue::Scalar { written, .. } = lvalue {
+            super::super::record_arith_locale_bind(
+                written,
+                &bash_arith(stored).to_string(),
+                self.env_vars
+                    .get("LC_ALL")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                self.env_vars.attr_of("LC_ALL").array,
+                self.env_vars.attr_of("LC_ALL").assoc,
+            );
+        }
+    }
+
     pub(super) fn set_lvalue(&mut self, lvalue: &ArithLValue, value: i128) {
         match lvalue {
-            ArithLValue::Scalar(name) => self.set_variable(name, value),
+            ArithLValue::Scalar { name, .. } => self.set_variable(name, value),
             ArithLValue::Indexed {
                 name,
                 index,

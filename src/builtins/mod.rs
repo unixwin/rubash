@@ -9,6 +9,7 @@ pub mod colon;
 pub mod command;
 pub mod complete;
 pub mod declare;
+pub(crate) mod diagnostic;
 pub mod disown;
 pub(crate) mod dynamic;
 pub mod echo;

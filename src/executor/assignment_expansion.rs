@@ -1,6 +1,8 @@
 use super::*;
 use crate::executor::embedded_mutations::collect_command_substitution_source;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::{
+    ASSIGN_DATA_DQUOTE, ASSIGN_HOISTED_SQUOTE, DATA_DOLLAR, STORAGE_WORD_PREFIX,
+};
 use crate::lexer::dolbrace::{scan_braced_parameter_body, BraceContext, DolbraceState};
 
 /// Hoisted data-quote sentinels: expand_assignment_value_inner lifts the
@@ -795,7 +797,7 @@ impl Executor {
         if element.starts_with('\'')
             || element.starts_with('"')
             || element.starts_with(DQ_DATA)
-            || element.starts_with('\u{E307}')
+            || element.starts_with(ASSIGN_HOISTED_SQUOTE)
         {
             return token.to_string();
         }
@@ -1109,23 +1111,32 @@ impl Executor {
             }
         }
         let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
-        if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
-            if dbg_aav_enabled() {
-                eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
-            }
-            if compound_assignment {
+        // Compound-claim gate (rubash#3034): the two functions below
+        // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
+        // which only ever runs on a genuine compound assignment — a decision
+        // the parser makes positionally (parse.y:5648-5657: only an unquoted
+        // `(` immediately after `=` starts parse_compound_assignment,
+        // parse.y:7104) and records as COMPOUND_ASSIGNMENT_MARKER. A
+        // parenthesized word WITHOUT the marker is a quoted scalar whose
+        // parens are literal data (subst.c:4357 expand_string_assignment);
+        // claiming it as an element list let the
+        // ARRAY_FIELD_SPLIT_MARKER-tagged field transport (`\x10"..."`)
+        // leak into scalar storage (`y="($x)"` stored `(\x10"v1.0")`,
+        // and the same shape through `y='('$x')'`, argument words
+        // `echo "y=($x)"`, and prefix assignments).
+        if compound_assignment {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+                if dbg_aav_enabled() {
+                    eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
+                }
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
-            return expanded;
-        }
-        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
-            if dbg_aav_enabled() {
-                eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
-            }
-            if compound_assignment {
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
+                if dbg_aav_enabled() {
+                    eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
+                }
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
-            return expanded;
         }
 
         if !compound_assignment && !value.starts_with("$((") && !value.starts_with("$[") {
@@ -1466,11 +1477,32 @@ impl Executor {
             // indistinguishable from rubash#735 user data — the tail strip
             // would preserve it and the guard byte would reach the cell
             // (`v2=$'p\nq'$(echo r)s` stored 6 characters instead of 5).
+            // rubash#3058: the same boundary must also drop bare IFS_GLUE.
+            // A fragment expansion whose site was quoted carries the
+            // QUOTED_EXPANSION_SITE verdict, and the walker IFS-protects
+            // that expansion's result span — every IFS char of the result
+            // preceded by IFS_GLUE — because in word position the portion
+            // "will be split, but this portion should not be" (subst.c:
+            // 11552; protection added via quote_string, subst.c:4773 /
+            // add_quoted_string, subst.c:11862). An assignment RHS is one
+            // W_ASSIGNRHS word that is dequoted into storage without ever
+            // splitting (expand_string_assignment, subst.c:4357), so the
+            // glue is dead transport here: the quoted and unquoted tails of
+            // expand_assignment_value_inner both strip it at this same
+            // boundary, and only this mixed path missed it — the glue rode
+            // the payload splice into the cell verbatim
+            // (`v="$(echo x)/z${v:+":${v}"}"` stored `x/z:/c/aa\x1c bb`,
+            // one glue before every space of the nested result). A bare
+            // IFS_GLUE in walker output is always this protocol byte: a
+            // genuine 0x1C data byte travels as a U+E000 raw-byte pair and
+            // the comsub fragments appended below are payload that never
+            // passes through this strip, so neither can be eaten here.
             let prefix = crate::executor::markers::strip_ansi_c_ifs_guard(
                 &crate::executor::markers::dequote_ctlesc_pairs(
                     &self.expand_embedded_parameters_mut(value.get(cursor..span.start)?),
                 ),
-            );
+            )
+            .replace(crate::executor::markers::IFS_GLUE, "");
             // Walker output is storage-domain text, not source text: its
             // raw-byte marker pairs are transport for payload bytes. GNU's
             // quoted-context splice re-escapes expansion output uniformly
@@ -1499,12 +1531,14 @@ impl Executor {
         }
         // Same guard drop as the prefix fragment above (rubash#796): the
         // suffix's bare guard must not ride the payload splice into an
-        // E400-escaped pair.
+        // E400-escaped pair. Same IFS_GLUE drop as the prefix fragment
+        // above (rubash#3058).
         let suffix = crate::executor::markers::strip_ansi_c_ifs_guard(
             &crate::executor::markers::dequote_ctlesc_pairs(
                 &self.expand_embedded_parameters_mut(value.get(cursor..)?),
             ),
-        );
+        )
+        .replace(crate::executor::markers::IFS_GLUE, "");
         // Same payload provenance as the prefix fragment above (rubash#296).
         word.append_expanded_shell_text(&suffix, true);
         self.last_command_substitution_status.set(word.status);
@@ -1772,7 +1806,7 @@ impl Executor {
             // delivers "$@" either as a bare `$@` (split-form path) or as
             // \u{E302}$@\u{E302} (atomic lexer path, DQ_DATA markers).
             let token_stripped = crate::executor::markers::trim_bare_sentinel_suffix(
-                token.trim_start_matches('\u{E302}'),
+                token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
             );
             // GNU arrayfunc.c:557 expand_compound_array_assignment splits
@@ -1810,7 +1844,7 @@ impl Executor {
                 || (token_is_quoted_wrap && token_stripped == "${@}")
                 || token.strip_prefix(STORAGE_WORD_PREFIX) == Some("${@}");
             let token_raw_core = crate::executor::markers::trim_bare_sentinel_suffix(
-                token_raw.trim_start_matches('\u{E302}'),
+                token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
             );
             let token_raw_single_quoted = token_raw_core.starts_with('\'')
@@ -1882,7 +1916,7 @@ impl Executor {
                 .or_else(|| {
                     whole_word_braced_parameter_body(
                         crate::executor::markers::trim_bare_sentinel_suffix(
-                            token.trim_start_matches('\u{E302}'),
+                            token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
                         ),
                     )
@@ -1919,7 +1953,7 @@ impl Executor {
                 .or_else(|| {
                     whole_word_braced_parameter_body(
                         crate::executor::markers::trim_bare_sentinel_suffix(
-                            token.trim_start_matches('\u{E302}'),
+                            token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
                         ),
                     )
@@ -1977,7 +2011,7 @@ impl Executor {
                     // token_raw, both mean W_QUOTED — one storage element
                     // per member, no field split, no glob (rubash#369).
                     let trimmed = crate::executor::markers::trim_bare_sentinel_suffix(
-                        token.trim_start_matches('\u{E302}'),
+                        token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                         crate::executor::markers::ASSIGN_DATA_DQUOTE,
                     );
                     whole_word_braced_parameter_body(trimmed)
@@ -2095,7 +2129,7 @@ impl Executor {
                     // xx=arrayA[@]). Only match when \u{E302} wrapping is
                     // actually present so unquoted `${!ref}` falls through
                     // to the unquoted indirect branch below.
-                    if token.starts_with('\u{E302}')
+                    if token.starts_with(ASSIGN_DATA_DQUOTE)
                         && crate::executor::markers::ends_with_bare_sentinel(
                             &token,
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
@@ -2103,7 +2137,7 @@ impl Executor {
                     {
                         whole_word_braced_parameter_body(
                             crate::executor::markers::trim_bare_sentinel_suffix(
-                                token.trim_start_matches('\u{E302}'),
+                                token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
                             ),
                         )
@@ -2151,7 +2185,7 @@ impl Executor {
                 // expand_patsub_replacement_text, GNU subst.c
                 // parameter_brace_patsub's own quote pass).
                 let core = crate::executor::markers::trim_bare_sentinel_suffix(
-                    token_raw.trim_start_matches('\u{E302}'),
+                    token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                     crate::executor::markers::ASSIGN_DATA_DQUOTE,
                 );
                 let core = core
@@ -2208,12 +2242,12 @@ impl Executor {
                     // pairs); a quoted element stays one word.
                     let element_quoted = {
                         let core = crate::executor::markers::trim_bare_sentinel_suffix(
-                            token_raw.trim_start_matches('\u{E302}'),
+                            token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
                         );
                         core.starts_with("\\\"")
                             || core.starts_with('"')
-                            || token_raw.starts_with('\u{E302}')
+                            || token_raw.starts_with(ASSIGN_DATA_DQUOTE)
                     };
                     let split_fields = |text: String| -> Vec<String> {
                         if element_quoted {
@@ -2269,10 +2303,10 @@ impl Executor {
                 // field-split path (probed 2026-09-26: `h=(${f[@]#x})` is
                 // correct there, `h=("${f[@]#x}")` collapsed).
                 let core = crate::executor::markers::trim_bare_sentinel_suffix(
-                    token_raw.trim_start_matches('\u{E302}'),
+                    token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                     crate::executor::markers::ASSIGN_DATA_DQUOTE,
                 );
-                let element_quoted = token_raw.starts_with('\u{E302}')
+                let element_quoted = token_raw.starts_with(ASSIGN_DATA_DQUOTE)
                     || core.starts_with("\\\"")
                     || core.starts_with('"');
                 if !element_quoted {
@@ -2395,7 +2429,7 @@ impl Executor {
                     // expand_compound_array_assignment expands each word
                     // through the real expander — new-exp5.sub
                     // `b=("${a[@]:2}")` stores C and D as two elements).
-                    if token_raw.starts_with('\u{E302}')
+                    if token_raw.starts_with(ASSIGN_DATA_DQUOTE)
                         && crate::executor::markers::ends_with_bare_sentinel(
                             &token_raw,
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
@@ -2403,7 +2437,7 @@ impl Executor {
                     {
                         whole_word_braced_parameter_body(
                             crate::executor::markers::trim_bare_sentinel_suffix(
-                                token_raw.trim_start_matches('\u{E302}'),
+                                token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
                             ),
                         )
@@ -2504,7 +2538,7 @@ impl Executor {
                 // handle them here. The token may be `[N]=$0` (subscript
                 // form) or bare `$0`.
                 let core = crate::executor::markers::trim_bare_sentinel_suffix(
-                    token.trim_start_matches('\u{E302}'),
+                    token.trim_start_matches(ASSIGN_DATA_DQUOTE),
                     crate::executor::markers::ASSIGN_DATA_DQUOTE,
                 );
                 let (prefix, param) = match core.split_once('=') {
@@ -2518,11 +2552,11 @@ impl Executor {
                     // stores `$0`, not the script path). token_raw keeps
                     // the backslash; check it before expanding.
                     let raw_param = token_raw
-                        .trim_matches('\u{E302}')
+                        .trim_matches(ASSIGN_DATA_DQUOTE)
                         .split_once('=')
                         .map(|(_, v)| v)
                         .unwrap_or(crate::executor::markers::trim_bare_sentinel_suffix(
-                            token_raw.trim_start_matches('\u{E302}'),
+                            token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
                             crate::executor::markers::ASSIGN_DATA_DQUOTE,
                         ));
                     if raw_param.starts_with("\\$") {
@@ -2708,7 +2742,7 @@ impl Executor {
             return None;
         }
         let core = crate::executor::markers::trim_bare_sentinel_suffix(
-            token_raw.trim_start_matches('\u{E302}'),
+            token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
             crate::executor::markers::ASSIGN_DATA_DQUOTE,
         );
         let body = core.strip_prefix(STORAGE_WORD_PREFIX).unwrap_or(core);
@@ -3374,7 +3408,7 @@ impl Executor {
     /// elements, `h=( ${b[@]+""} )` stores one empty).
     fn braced_alternate_compound_element_fields(&self, token_raw: &str) -> Option<Vec<String>> {
         let core = crate::executor::markers::trim_bare_sentinel_suffix(
-            token_raw.trim_start_matches('\u{E302}'),
+            token_raw.trim_start_matches(ASSIGN_DATA_DQUOTE),
             crate::executor::markers::ASSIGN_DATA_DQUOTE,
         );
         let body = whole_word_braced_parameter_body(core)?;
@@ -3415,7 +3449,7 @@ impl Executor {
         // lexer's E302 wrap); the class claimed here is the quoted at-list.
         let (alt_core, quoted) = if alternate.starts_with('"') && alternate.ends_with('"') {
             (&alternate[1..alternate.len() - 1], true)
-        } else if alternate.starts_with('\u{E302}')
+        } else if alternate.starts_with(ASSIGN_DATA_DQUOTE)
             && crate::executor::markers::ends_with_bare_sentinel(
                 alternate,
                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
@@ -3423,7 +3457,7 @@ impl Executor {
         {
             (
                 crate::executor::markers::trim_bare_sentinel_suffix(
-                    alternate.trim_start_matches('\u{E302}'),
+                    alternate.trim_start_matches(ASSIGN_DATA_DQUOTE),
                     crate::executor::markers::ASSIGN_DATA_DQUOTE,
                 ),
                 true,
@@ -3572,13 +3606,13 @@ impl Executor {
         token: &str,
         force_quoted: bool,
     ) -> Option<Vec<String>> {
-        let dq_wrapped = token.starts_with('\u{E302}')
+        let dq_wrapped = token.starts_with(ASSIGN_DATA_DQUOTE)
             && crate::executor::markers::ends_with_bare_sentinel(
                 &token,
                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
             );
         let core = crate::executor::markers::trim_bare_sentinel_suffix(
-            token.trim_start_matches('\u{E302}'),
+            token.trim_start_matches(ASSIGN_DATA_DQUOTE),
             crate::executor::markers::ASSIGN_DATA_DQUOTE,
         );
         let unquoted = strip_matching_quotes(core);
@@ -3717,13 +3751,13 @@ impl Executor {
             .strip_prefix("+=")
             .map(|rhs| ("+=", rhs))
             .unwrap_or(("=", after.strip_prefix('=')?));
-        let dq_wrapped = rhs.starts_with('\u{E302}')
+        let dq_wrapped = rhs.starts_with(ASSIGN_DATA_DQUOTE)
             && crate::executor::markers::ends_with_bare_sentinel(
                 rhs,
                 crate::executor::markers::ASSIGN_DATA_DQUOTE,
             );
         let core = crate::executor::markers::trim_bare_sentinel_suffix(
-            rhs.trim_start_matches('\u{E302}'),
+            rhs.trim_start_matches(ASSIGN_DATA_DQUOTE),
             crate::executor::markers::ASSIGN_DATA_DQUOTE,
         );
         let unquoted = strip_matching_quotes(core);
@@ -3781,7 +3815,7 @@ impl Executor {
 /// hoist pass's \x1d quoted-RHS marker, raw `"`/`'` quote characters, a
 /// raw backslash escape, or the \x17/\x18 escaped-quote carriers.
 fn compound_element_word_is_quoted(token_raw: &str) -> bool {
-    if token_raw.starts_with(STORAGE_WORD_PREFIX) || token_raw.starts_with('\u{E302}') {
+    if token_raw.starts_with(STORAGE_WORD_PREFIX) || token_raw.starts_with(ASSIGN_DATA_DQUOTE) {
         return true;
     }
     let mut offset = 0usize;
@@ -3855,7 +3889,7 @@ fn compound_element_word_is_quoted(token_raw: &str) -> bool {
                 }
                 continue;
             }
-            '"' | '\'' | '\\' | '\u{E302}' => return true,
+            '"' | '\'' | '\\' | ASSIGN_DATA_DQUOTE => return true,
             ch if ch == crate::executor::markers::ASSIGN_HOISTED_SQUOTE
                 || ch == crate::executor::markers::ASSIGN_HOISTED_BACKSLASH =>
             {
@@ -3998,7 +4032,7 @@ fn find_glued_list_span(chars: &[char], from: usize) -> Option<GluedListSpan> {
             '$' if chars.get(index + 1) == Some(&'{') => {
                 index = skip_braced_case_pattern_unit(chars, index + 1)? + 1;
             }
-            '"' | '\u{E302}' => {
+            '"' | ASSIGN_DATA_DQUOTE => {
                 // A list span anywhere inside this quoted region is a
                 // glued quoted span; the region's own text on either
                 // side of it rides in the fold's text segments (the
@@ -4217,7 +4251,7 @@ fn compound_element_expansion_text(expanded: &str) -> String {
     // the span-aware splitter still sees the quoted region; a blind
     // trim_matches dropped it and the span content field-split
     // (`Z2=("$W"Q)` with W='a b' became two elements, rubash#295).
-    if text.starts_with('\u{E302}')
+    if text.starts_with(ASSIGN_DATA_DQUOTE)
         && crate::executor::markers::ends_with_bare_sentinel(
             &text,
             crate::executor::markers::ASSIGN_DATA_DQUOTE,
@@ -4539,7 +4573,15 @@ fn preserve_prompt_escapes(value: &str) -> String {
             preserved.push(ch);
         }
     }
-    preserved.replace(PROTECTED_PROMPT_ESCAPE, "\\")
+    // E400-aware restore (rubash#3016, same family as #735 and #840
+    // divergence 3): a BARE guard is one this function just introduced
+    // for `\!` / `\#` and maps back to `\`; an `E400 + E316` pair is
+    // user data (typed `$'\uE316'`, E400-escaped at entry by
+    // `push_literal_char`) and copies verbatim. The blind
+    // `.replace(E316, "\\")` this supersedes read the escaped member of
+    // a user pair as live protocol, consumed the E316, and left a stray
+    // E400 that the output decoder folded to a backslash.
+    crate::executor::markers::restore_bare_sentinels(&preserved, &[(PROTECTED_PROMPT_ESCAPE, "\\")])
 }
 
 /// Quote-aware rewrite of $"..." into "..." for assignment expansion

@@ -56,8 +56,11 @@ impl ConditionalArithParser<'_> {
         // GNU expr.c:1350: `[` must immediately follow the name — `a [0]`
         // is STR `a` followed by the junk char `[`.
         if self.peek() != Some(b'[') {
-            let name = self.resolved_lvalue_name(name);
-            return Some(ArithLValue::Scalar(name));
+            let resolved = self.resolved_lvalue_name(name);
+            return Some(ArithLValue::Scalar {
+                name: resolved,
+                written: name.to_string(),
+            });
         }
         self.pos += 1;
 
@@ -178,8 +181,11 @@ impl ConditionalArithParser<'_> {
         // arithmetic operator" (verified: `(( a [0] ))` reports
         // `(error token is "[0] ")`).
         if self.peek() != Some(b'[') {
-            let name = self.resolved_lvalue_name(name);
-            return Some(ArithLValue::Scalar(name));
+            let resolved = self.resolved_lvalue_name(name);
+            return Some(ArithLValue::Scalar {
+                name: resolved,
+                written: name.to_string(),
+            });
         }
         self.pos += 1;
 

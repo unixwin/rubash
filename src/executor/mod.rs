@@ -229,7 +229,9 @@ use crate::shell::state::ShellState;
 use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
-pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+// assoc_value_at is also shared with the locale funnel's scalar
+// projection of a stored binding (rubash#3065).
+pub(crate) use assignment_helpers::{assoc_nbuckets, assoc_value_at, bash_assoc_order};
 // Shared with builtins::declare for `declare -p` $'...' value rendering
 // (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
 pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
@@ -237,7 +239,8 @@ pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
 // builtins::printf, including the drop helper the declare sparse-cell fix
 // needs to preserve the refuse-to-shadow-mirror rule.
 pub(crate) use arrays::{
-    drop_typed_indexed_array, replace_typed_indexed_array, sync_typed_indexed_storage,
+    array_value_at, drop_typed_indexed_array, replace_typed_indexed_array,
+    sync_typed_indexed_storage,
 };
 use builtin_names::*;
 use command_subst_helpers::*;
@@ -598,6 +601,22 @@ pub(in crate::executor) struct SubshellProcessSave {
     pub(in crate::executor) pending_job_completions: Vec<(u32, i32, Option<i32>)>,
     pub(in crate::executor) pending_coproc_retirements: Vec<u32>,
     pub(in crate::executor) procsub_stream_children: HashMap<u32, bool>,
+}
+
+/// rubash#3071: one apply_temporary_assignments frame's record of the
+/// values it actually bound, keyed by the exact assignment word (name
+/// as written, cooked value text) that produced each bind, plus the
+/// env name the value was bound under. The command's word list rides
+/// along as the frame's identity: compose_external_environment may use
+/// a record only for the very command whose apply created the frame
+/// (its spawns run under that frame), never for a different command
+/// that merely executes while the frame is live (a pipeline element
+/// composed by the spawner inside a tempenv'd function call — its RHS
+/// must expand against the live table, not replay the call's binds).
+#[derive(Debug, Default)]
+pub(in crate::executor) struct TempenvBoundFrame {
+    pub(in crate::executor) words: Vec<String>,
+    pub(in crate::executor) records: Vec<(String, String, String, String)>,
 }
 
 /// Command executor
@@ -968,6 +987,13 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// The last value written to the OS environment's
+    /// __RUBASH_CURRENT_FILE mirror (None = never written this process).
+    /// Twin of `line_env_os_value` for the file half of the diagnostic
+    /// frame stamp (rubash#3035): `stamp_current_file` skips the OS
+    /// write when this equals the newly computed frame file, and skips
+    /// the removal when it is already None.
+    file_env_os_value: std::cell::RefCell<Option<String>>,
     /// #682 stamped-by-caller contract: the execute_ast command loop stamps
     /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
     /// about to dispatch (GNU stamps line_number once per command,
@@ -1230,6 +1256,19 @@ pub struct Executor {
     /// restore_temporary_assignments so nested commands truncate the
     /// tempenv-name stack to the boundary recorded by the outer call.
     tempenv_marks: Vec<usize>,
+    /// rubash#3071: bound-value records per tempenv frame, pushed and
+    /// popped in lockstep with tempenv_marks. GNU variables.c:3536
+    /// assign_in_env expands a prefix RHS exactly once and the child
+    /// environment carries that literal result; rubash's spawn-time
+    /// env composition (compose_external_environment) re-expanded the
+    /// raw RHS against the post-bind table, so a self-referencing RHS
+    /// (`v="p${v}q" printenv v`) expanded twice. The records let the
+    /// composition reuse the value the apply already bound instead of
+    /// expanding again; composition paths whose assignments were never
+    /// applied on this executor (the concurrent pipeline spawner) find
+    /// no frame for their command and keep expanding — once, against
+    /// the unbound table, which is exactly their tempenv application.
+    tempenv_bound_frames: Vec<TempenvBoundFrame>,
     /// GNU variables.c:2604-2620 make_local_variable (was_tmpvar): a
     /// `declare`/`typeset`/`local` operand whose name is bound by this
     /// command's own `name=value` prefix promotes the tempenv binding to a
@@ -2100,3 +2139,6 @@ mod tests;
 
 #[cfg(test)]
 mod splits_gate;
+
+#[cfg(test)]
+mod markers_decoder_tests;

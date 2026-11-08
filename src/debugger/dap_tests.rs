@@ -1102,6 +1102,87 @@ fn dap_watch_registration_step_diff_and_banner() {
     assert_eq!(server.join().expect("server thread"), 0);
 }
 
+/// Carrier-carrying values on the watch / hover faces
+/// (rubash#3074): the snapshot holds V's value in storage form
+/// (a `U+E400` carrier pair for the U+E314 char, a `U+E000`
+/// pair for the ESC byte), but every rendered face decodes at
+/// the render boundary — the watch registration's result, the
+/// hover answer for the bare name, and the step-diff banner
+/// all carry the decoded value. The program pins
+/// `LC_ALL=C.UTF-8` on its first line: under a non-UTF-8 locale the
+/// `$'\u...'` escape stays literal by design (GNU u32tocesc fallback,
+/// rubash#353/#1837), which is an environment property of the runner,
+/// not this face's behaviour.
+#[test]
+fn dap_watch_and_hover_render_decoded_carrier_values() {
+    let _span = GateTestSpan::new();
+    let program = program_file(
+        "watchdecode",
+        "LC_ALL=C.UTF-8\nV=$'\\uE314'\nW=1\nV=$'A\\033B'\necho done\n",
+    );
+    let (mut client, server) = start_server(DapLaunchPreset::default());
+    handshake(
+        &mut client,
+        &program,
+        vec![("stopOnEntry", Json::Bool(false))],
+    );
+    client.ok(
+        "setBreakpoints",
+        Json::obj(vec![
+            (
+                "source",
+                Json::obj(vec![("path", Json::from(program.clone()))]),
+            ),
+            (
+                "breakpoints",
+                Json::Array(vec![Json::obj(vec![("line", Json::Int(3))])]),
+            ),
+        ]),
+    );
+    client.ok("configurationDone", Json::obj(vec![]));
+    client.take_event("stopped");
+
+    // The watch registration evaluates to the decoded value.
+    let body = client.ok(
+        "evaluate",
+        Json::obj(vec![
+            ("expression", Json::from("V")),
+            ("context", Json::from("watch")),
+        ]),
+    );
+    assert_eq!(s(&body, "result"), "\u{E314}");
+
+    // A hover over the bare name answers the same decoded value.
+    let body = client.ok(
+        "evaluate",
+        Json::obj(vec![
+            ("expression", Json::from("V")),
+            ("context", Json::from("hover")),
+        ]),
+    );
+    assert_eq!(s(&body, "result"), "\u{E314}");
+
+    // A step that does not touch V: no banner.
+    client.ok("next", Json::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "step");
+
+    // The step over the ESC-carrying assignment fires the diff;
+    // the banner quotes both values decoded.
+    client.ok("next", Json::obj(vec![]));
+    let banner = client.take_event("output");
+    assert_eq!(s(&banner, "category"), "console");
+    assert_eq!(s(&banner, "output"), "watch: V '\u{E314}' → 'A\u{1B}B'\n");
+    let stopped = client.take_event("stopped");
+    assert_eq!(s(&stopped, "reason"), "data breakpoint");
+
+    client.ok("continue", Json::obj(vec![]));
+    let (_, exit_code) = client.collect_outputs_until_terminated();
+    assert_eq!(exit_code, 0);
+    client.ok("disconnect", Json::obj(vec![]));
+    assert_eq!(server.join().expect("server thread"), 0);
+}
+
 /// Write-back over DAP (§7.6 through the session core): a
 /// setVariable at a stop changes the debuggee's variable
 /// through the real assignment path — the script itself prints

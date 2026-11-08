@@ -15,7 +15,7 @@
 //! re-expanded.
 
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::{ASSIGN_HOISTED_SQUOTE, DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// GNU `array_expand_once` (arrayfunc.c:50) / `SET_VFLAGS`
 /// (builtins/common.h:277-289) provenance for a subscript reaching an
@@ -170,6 +170,23 @@ impl Executor {
         // reads data. Resolve the escapes first so the walker never mistakes a
         // quoted `$`, `` ` `` or quote for an expansion (GNU subst.c
         // `expand_word_internal` sees the same already-dequoted characters).
+        //
+        // rubash#3023: a `$"..."` span in raw subscript text is a
+        // double-quoted span with quote-syntax markup (the lexer cooks it
+        // that way, but raw subscript text bypasses the lexer). Drop the
+        // dollar before the walker sees it — otherwise the `$` glues onto
+        // the content (`${a[$"1+2"]}` resolved to `$"1+2` and failed
+        // "operand expected"; assoc keys stored the literal `$"..."`).
+        // Runs after the `$'` decode above: a `$"` inside a decoded `$'...'`
+        // span is single-quoted data, and the helper's sq tracking leaves
+        // it alone.
+        let raw_owned_locale;
+        let raw = if raw.contains("$\"") {
+            raw_owned_locale = super::arithmetic::decode_locale_quote_spans(raw);
+            raw_owned_locale.as_str()
+        } else {
+            raw
+        };
         let masked = mask_subscript_escapes(raw);
         let expanded = self.expand_embedded_parameters(&masked);
         // Expansion-produced whitespace rides the \x1c/E309 data tags so the
@@ -2224,7 +2241,7 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut rest = text;
     let mut saw_span = false;
     while !rest.is_empty() {
-        // '\u{E307}' is the compound-assignment hoisted single-quote
+        // ASSIGN_HOISTED_SQUOTE is the compound-assignment hoisted single-quote
         // sentinel (SQ_DATA, assignment_expansion.rs) and crate::executor::markers::DATA_SQUOTE is the
         // embedded-parameter walker's literal-single-quote data marker —
         // arithmetic input arrives with `'` already converted to `\x17`
@@ -2233,8 +2250,8 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
         // carry the same "no expansion inside" guarantee as a literal `'`.
         let (inner, close) = if let Some(inner) = rest.strip_prefix('\'') {
             (inner, '\'')
-        } else if let Some(inner) = rest.strip_prefix('\u{E307}') {
-            (inner, '\u{E307}')
+        } else if let Some(inner) = rest.strip_prefix(ASSIGN_HOISTED_SQUOTE) {
+            (inner, ASSIGN_HOISTED_SQUOTE)
         } else if let Some(inner) = rest.strip_prefix(crate::executor::markers::DATA_SQUOTE) {
             (inner, crate::executor::markers::DATA_SQUOTE)
         } else {
