@@ -1681,7 +1681,14 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.command_output_redirect_fails_impl(cmd, true);
         }
-        match self.apply_dynamic_fd_var_redirects(cmd, true) {
+        // rubash#2629: this bracket is a verdict-only pass on the
+        // PARENT executor — the stage element's own applier run is
+        // the list's real evaluation (in the forked child, GNU's
+        // model), so the deferred writes this pass's expansions
+        // queue must not survive it (the #2558 pre-scan discipline):
+        // mark the queue and roll it back on every exit.
+        let writes_mark = Self::scan_pending_writes_mark();
+        let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true) {
             Ok(false) => {
                 let result = self.command_output_redirect_fails_impl(cmd, true);
                 self.undo_child_fd_var_redirects();
@@ -1695,7 +1702,9 @@ impl Executor {
                 Ok(true)
             }
             Err(error) => Err(error),
-        }
+        };
+        Self::scan_pending_writes_rollback(writes_mark);
+        verdict
     }
 
     fn command_output_redirect_fails_impl(
@@ -3189,7 +3198,19 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         }
-        let applied = matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
+        // rubash#2629: when an earlier applier run for this same
+        // list already produced the binds (the stage executor's own
+        // apply, or a gate bracket's), rebind from that record
+        // instead of running the applier again — a second run
+        // re-expands the `{var}` target words, and the stage body's
+        // intervening execute_command entries have cleared the
+        // target memo by now, so a side-effect target (`$((i+=1))`
+        // in the filename) would evaluate twice for one element,
+        // where GNU's single do_redirections pass evaluates it
+        // once. The replay falls back to the real applier when no
+        // matching record exists.
+        let applied = self.replay_dynamic_fd_var_snapshot(cmd, true)
+            || matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
         let result = self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         if applied {
             self.undo_child_fd_var_redirects();
