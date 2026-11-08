@@ -233,6 +233,14 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
 /// against WSL GNU Bash 5.3.0, probes q4/q7/q9 under
 /// target/deep201/probes). Only plain simple commands use this; compound
 /// keywords keep their own token line (For->line etc.).
+///
+/// rubash#3028: the newline count below only sees literal newlines in
+/// the word text, so a first word split by backslash-newline
+/// CONTINUATIONS (whose newline bytes the lexer elided) measured 0 and
+/// the stamp kept the start line. The parser now records the exact
+/// value on the node (`CommandNode::first_word_end_line`, from the
+/// lexer's per-token end line); this function prefers it and keeps the
+/// text count as the floor/fallback for unstamped nodes.
 pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode) -> Option<usize> {
     let start = cmd.line?;
     let simple = cmd.for_command.is_none()
@@ -264,7 +272,21 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     } else {
         cmd.words.first().map(|word| word.matches('\n').count())?
     };
-    Some(start + first_word_newlines)
+    let text_based = start + first_word_newlines;
+    // rubash#3028: the parser's first-element end-line stamp is the
+    // exact value — it counts the physical lines the reader crossed
+    // while reading the first element, including backslash-newline
+    // continuations, which the word text no longer contains (the lexer
+    // elides the pair). The text count remains as the floor for nodes
+    // whose stamp is absent or stale (synthetic nodes, bodies re-parsed
+    // from rendered text): it is exact for the quoted-newline shapes
+    // that produced those nodes, and the stamp is exact whenever the
+    // feeder produced the tokens, so the max is the GNU value in both
+    // worlds.
+    match cmd.first_word_end_line {
+        Some(stamped) if stamped >= start => Some(stamped.max(text_based)),
+        _ => Some(text_based),
+    }
 }
 
 /// GNU print_cmd.c prints the command node's OWN redirection list. A

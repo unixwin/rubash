@@ -1240,6 +1240,24 @@ pub struct CommandNode {
     pub coproc_command: Option<Box<CoprocCommand>>,
     /// Script line number where this command starts, when known.
     pub line: Option<usize>,
+    /// rubash#3028: physical line where this command's FIRST element
+    /// (first word, first assignment word, or first redirection
+    /// including its target) finished being read — GNU's
+    /// `simplecmd_lineno`, captured by read_token_word when a
+    /// command-position word completes (parse.y:5849-5851; the
+    /// redirection arm captures it at the element's reduction,
+    /// parse.y:811) and stored as `Simple->line` (command.h:339).
+    /// Execution stamps it into `line_number` (execute_cmd.c:936), so
+    /// it — not `line` — is what a simple command's diagnostics and its
+    /// own `$LINENO` report. A first element split by backslash-newline
+    /// continuations finishes on a later physical line than it starts;
+    /// the lexer carries that end line on the token
+    /// (`Token::end_position`) and the parser records it here (see
+    /// `note_command_line` and the redirect-target corrections).
+    /// None for synthetic commands and for nodes the parser built
+    /// without token provenance; the executor then falls back to
+    /// counting literal newlines in the first word's text.
+    pub first_word_end_line: Option<usize>,
     /// The LOGICAL line this command starts on (the reader's command-list
     /// boundary — commands joined onto the previous line by a
     /// backslash-newline continuation share its logical line while their
@@ -1377,6 +1395,7 @@ impl CommandNode {
             brace_group: None,
             coproc_command: None,
             line: None,
+            first_word_end_line: None,
             logical_line: None,
             end_line: None,
             heredoc_gather_line: None,

@@ -94,6 +94,29 @@ pub fn render_info_args(frame: &FrameSnapshot) -> String {
         .join("\n")
 }
 
+/// The display form of one stored variable value on a debugger
+/// output channel (rubash#3074).
+///
+/// Snapshot values are storage-form strings: bytes the executor
+/// cannot hold literally ride as carrier pairs — a `U+E400` lead
+/// for a value's own PUA char, a `U+E000` lead for a raw C0 byte
+/// (`src/executor/markers.rs`). Every other output channel decodes
+/// those pairs before a value reaches a reader; the debugger
+/// channels are display boundaries of the same kind, so the scalar
+/// text and array element values they render pass through here.
+/// The gate is the shared decodable-transport test, so plain
+/// values render unchanged and a value carrying only one carrier
+/// family still decodes (the rubash#3038 gate lesson). The
+/// snapshot itself is never rewritten — this folds a copy at
+/// render time only.
+pub fn display_value(text: &str) -> String {
+    if crate::executor::markers::contains_decodable_transport(text) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
+}
+
 /// The rendered value of one snapshot variable for the
 /// stop-and-diff watch (design section 5.4): the value the
 /// watch compares across stops and quotes in its banner. A
@@ -102,15 +125,19 @@ pub fn render_info_args(frame: &FrameSnapshot) -> String {
 /// element-0 reading a plain `$NAME` expansion would give, so
 /// an element write is a visible difference. An unset variable
 /// renders as `None` (the watch's "no value" coordinate).
+/// Carrier pairs in the stored text decode at this render
+/// boundary (rubash#3074, see `display_value`); the watch
+/// compares rendered values on both sides, so the decode does
+/// not change which stops read as changed.
 pub fn render_watch_value(variable: &VariableSnapshot) -> Option<String> {
     match &variable.value {
         VariableValue::Unset => None,
-        VariableValue::Scalar(text) => Some(text.clone()),
+        VariableValue::Scalar(text) => Some(display_value(text)),
         VariableValue::Indexed(elements) => Some(format!(
             "({})",
             elements
                 .iter()
-                .map(|(index, value)| format!("[{index}]={value}"))
+                .map(|(index, value)| format!("[{index}]={}", display_value(value)))
                 .collect::<Vec<_>>()
                 .join(" ")
         )),
@@ -118,7 +145,9 @@ pub fn render_watch_value(variable: &VariableSnapshot) -> Option<String> {
             "({})",
             elements
                 .iter()
-                .map(|(key, value)| format!("[{key}]={value}"))
+                .map(|(key, value)| {
+                    format!("[{}]={}", display_value(key), display_value(value))
+                })
                 .collect::<Vec<_>>()
                 .join(" ")
         )),

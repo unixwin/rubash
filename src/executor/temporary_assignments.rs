@@ -103,11 +103,64 @@ impl Executor {
         false
     }
 
+    /// rubash#3071: record one value this apply frame actually bound,
+    /// keyed by the assignment word that produced it. A plain bind's
+    /// recorded value is what keeps the spawn composition from
+    /// expanding the RHS a second time. Append binds are recorded too
+    /// (with the composed window value) but never consulted: both
+    /// composition paths skip appends before any lookup, since the
+    /// table already carries the appended result.
+    fn record_tempenv_bound(
+        &mut self,
+        assignment_name: &str,
+        assignment_value: &str,
+        env_name: &str,
+        bound_value: String,
+    ) {
+        if let Some(frame) = self.tempenv_bound_frames.last_mut() {
+            frame.records.push((
+                assignment_name.to_string(),
+                assignment_value.to_string(),
+                env_name.to_string(),
+                bound_value,
+            ));
+        }
+    }
+
+    /// rubash#3071: the value the innermost tempenv frame bound for
+    /// this exact assignment word of THIS command, if the frame
+    /// belongs to it. The frame's word list is the identity check: a
+    /// command composed while an unrelated frame is live (a pipeline
+    /// element composed by the spawner during a tempenv'd function
+    /// call) must not replay that frame's binds — its RHS expands
+    /// against the live table instead. Within a matching frame, the
+    /// LAST record for the word wins: GNU assign_in_env processes the
+    /// list left to right and a repeated name's later bind supersedes
+    /// (variables.c:3536 + mk_env_string per bind).
+    pub(in crate::executor) fn applied_tempenv_value(
+        &self,
+        cmd: &CommandNode,
+        assignment_name: &str,
+        assignment_value: &str,
+    ) -> Option<(String, String)> {
+        let frame = self.tempenv_bound_frames.last()?;
+        if frame.words != cmd.words {
+            return None;
+        }
+        frame
+            .records
+            .iter()
+            .rev()
+            .find(|(name, value, _, _)| name == assignment_name && value == assignment_value)
+            .map(|(_, _, env_name, bound)| (env_name.clone(), bound.clone()))
+    }
+
     #[allow(clippy::type_complexity)]
     pub(in crate::executor) fn apply_temporary_assignments(
         &mut self,
         assignments: &[(String, String)],
         raw_rhs: Option<&[String]>,
+        words: &[String],
     ) -> (
         Vec<(
             String,
@@ -125,6 +178,20 @@ impl Executor {
         // and the typed shell_state.variables owner, so parameter expansion
         // does not keep seeing a leaked temporary value).
         self.tempenv_marks.push(self.tempenv_names.len());
+        // rubash#3071: the bound-value frame for this apply, popped by
+        // restore_temporary_assignments in lockstep with the mark. The
+        // word list is cloned only when the command carries assignments
+        // at all — the empty-assignments apply (every plain command)
+        // records an empty identity that no env composition can match
+        // (a composing command always has a command word).
+        self.tempenv_bound_frames.push(TempenvBoundFrame {
+            words: if assignments.is_empty() {
+                Vec::new()
+            } else {
+                words.to_vec()
+            },
+            records: Vec::new(),
+        });
         // rubash#2720: while the bind loop below runs, the dynamic
         // assignment hooks stand down (see the field's doc) — a tempenv
         // bind is a fresh plain cell, never a bind of the global dynamic
@@ -339,6 +406,7 @@ impl Executor {
                 unmark_env_name(&mut self.shell_state.env_vars, NAMEREF_VARS, base_name);
                 self.tempenv_names.push(base_name.to_string());
                 self.mark_exported(base_name);
+                self.record_tempenv_bound(name, value, base_name, expanded_value.clone());
                 continue;
             }
             // GNU variables.c assign_in_env: a compound `name=(...)` or
@@ -378,7 +446,7 @@ impl Executor {
                     .insert(base_name.to_string(), window_value.clone());
                 let _ = self.shell_state.variables.set(
                     base_name.to_string(),
-                    crate::shell::Variable::scalar(window_value),
+                    crate::shell::Variable::scalar(window_value.clone()),
                 );
                 // rubash#1525: the compound tempenv binds as a
                 // literal scalar tempvar, PIPESTATUS included.
@@ -403,6 +471,7 @@ impl Executor {
                         ..VarAttrs::default()
                     },
                 );
+                self.record_tempenv_bound(name, value, base_name, window_value);
                 continue;
             }
             // rubash#1525: a tempenv PIPESTATUS bind is a fresh
@@ -433,6 +502,7 @@ impl Executor {
                 self.shell_state.pipestatus_shape = crate::shell::state::PipestatusShape::Scalar;
                 self.tempenv_names.push(base_name.to_string());
                 self.mark_exported(base_name);
+                self.record_tempenv_bound(name, value, base_name, expanded_value.clone());
                 continue;
             }
             // rubash#1556: GNU variables.c:3536 assign_in_env creates
@@ -488,10 +558,10 @@ impl Executor {
                     self.shell_state
                         .env_vars
                         .insert(target.clone(), window_value.clone());
-                    let _ = self
-                        .shell_state
-                        .variables
-                        .set(target.clone(), crate::shell::Variable::scalar(window_value));
+                    let _ = self.shell_state.variables.set(
+                        target.clone(),
+                        crate::shell::Variable::scalar(window_value.clone()),
+                    );
                     set_var_attrs(
                         &mut self.shell_state.env_vars,
                         &target,
@@ -500,7 +570,8 @@ impl Executor {
                             ..VarAttrs::default()
                         },
                     );
-                    self.tempenv_names.push(target);
+                    self.tempenv_names.push(target.clone());
+                    self.record_tempenv_bound(name, value, &target, window_value);
                     continue;
                 }
             }
@@ -622,7 +693,8 @@ impl Executor {
                     );
                     // rubash#1692: the shadow store is a bind too.
                     self.note_locale_assignment(&target);
-                    self.tempenv_names.push(target);
+                    self.tempenv_names.push(target.clone());
+                    self.record_tempenv_bound(name, value, &target, expanded_value.clone());
                     continue;
                 }
             }
@@ -658,10 +730,10 @@ impl Executor {
                     self.shell_state
                         .env_vars
                         .insert(target.clone(), window_value.clone());
-                    let _ = self
-                        .shell_state
-                        .variables
-                        .set(target.clone(), crate::shell::Variable::scalar(window_value));
+                    let _ = self.shell_state.variables.set(
+                        target.clone(),
+                        crate::shell::Variable::scalar(window_value.clone()),
+                    );
                     set_var_attrs(
                         &mut self.shell_state.env_vars,
                         &target,
@@ -670,7 +742,8 @@ impl Executor {
                             ..VarAttrs::default()
                         },
                     );
-                    self.tempenv_names.push(target);
+                    self.tempenv_names.push(target.clone());
+                    self.record_tempenv_bound(name, value, &target, window_value);
                     continue;
                 }
             }
@@ -679,7 +752,8 @@ impl Executor {
             // error) reports and keeps going through the REST of the operand
             // list here; the caller decides posix fatality (execute_cmd.c
             // jump_to_top_level on bash_variable_assignment_error).
-            if !self.apply_shell_assignment(name, expanded_value) {
+            let bind_ok = self.apply_shell_assignment(name, expanded_value.clone());
+            if !bind_ok {
                 assignments_failed = true;
             }
             // GNU variables.c bind_variable (ASS_NAMEREF tempenv path): the
@@ -692,6 +766,22 @@ impl Executor {
                 .unwrap_or_else(|| base_name.to_string());
             self.tempenv_names.push(export_target.clone());
             self.mark_exported(&export_target);
+            // rubash#3071: record what the bind left in the mirror for
+            // a plain-name target — read back rather than trusting the
+            // expanded text, since the permanent funnel may have
+            // evaluated it on the way in (integer cells, dynamic
+            // names). Element binds (either side carries `[`) keep the
+            // composition's existing path: their env face is the whole
+            // cell, not this element value.
+            if bind_ok && !name.contains('[') && !export_target.contains('[') {
+                let bound = self
+                    .shell_state
+                    .env_vars
+                    .get(&export_target)
+                    .cloned()
+                    .unwrap_or(expanded_value);
+                self.record_tempenv_bound(name, value, &export_target, bound);
+            }
         }
         self.applying_temporary_assignments = saved_applying_temporary;
         (previous, assignments_failed)

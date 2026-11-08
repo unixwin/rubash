@@ -12,18 +12,17 @@ pub(crate) use storage::{ansic_quote, ansic_shouldquote};
 // rubash#616 (1a): typed-cell writers shared with builtins::declare and
 // builtins::printf (executor/mod.rs re-exports them at crate visibility).
 pub(super) use storage::{
-    append_indexed_mirror_segments, array_indices, array_store_enabled, array_value_at,
-    array_values, clean_negative_literal_subscript, format_indexed_array_storage,
-    format_indexed_array_values, indexed_array_entries, indexed_array_entries_cached,
-    is_array_storage, is_marked_array_var, normalize_array_expanded_value,
-    parse_array_integer_subscript, parse_array_numeric_subscript, parse_array_subscript,
-    parse_expanded_array_subscript, quote_array_value, resolve_indexed_array_subscript,
-    skipsubscript_close, store_indexed_array, store_indexed_array_state, sync_typed_assoc_array,
-    sync_typed_indexed_array, sync_typed_indexed_element, upsert_typed_assoc_element,
-    AssocElementUpsert,
+    append_indexed_mirror_segments, array_indices, array_store_enabled, array_values,
+    clean_negative_literal_subscript, format_indexed_array_storage, format_indexed_array_values,
+    indexed_array_entries, indexed_array_entries_cached, is_array_storage, is_marked_array_var,
+    normalize_array_expanded_value, parse_array_integer_subscript, parse_array_numeric_subscript,
+    parse_array_subscript, parse_expanded_array_subscript, quote_array_value,
+    resolve_indexed_array_subscript, skipsubscript_close, store_indexed_array,
+    store_indexed_array_state, sync_typed_assoc_array, sync_typed_indexed_array,
+    sync_typed_indexed_element, upsert_typed_assoc_element, AssocElementUpsert,
 };
 pub(crate) use storage::{
-    drop_typed_assoc_array, drop_typed_indexed_array, replace_typed_indexed_array,
+    array_value_at, drop_typed_assoc_array, drop_typed_indexed_array, replace_typed_indexed_array,
     sync_typed_assoc_storage, sync_typed_indexed_storage,
 };
 

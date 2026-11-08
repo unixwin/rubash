@@ -111,7 +111,7 @@ pub(in crate::executor) fn array_indices(value: &str) -> Vec<String> {
         .collect()
 }
 
-pub(in crate::executor) fn array_value_at(value: &str, index: usize) -> Option<String> {
+pub(crate) fn array_value_at(value: &str, index: usize) -> Option<String> {
     indexed_array_entries_cached(value)
         .get(&index)
         .map(|value| normalize_array_expanded_value(value.clone()))

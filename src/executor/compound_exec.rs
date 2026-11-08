@@ -3807,6 +3807,9 @@ impl Executor {
         if !crate::executor::arithmetic::arith_write_log_is_empty() {
             return None;
         }
+        if !crate::executor::arithmetic::arith_locale_bind_log_is_empty() {
+            return None;
+        }
         if self.arith_counter_trap_installed() {
             return None;
         }
@@ -3910,6 +3913,18 @@ impl Executor {
                     .env_vars
                     .insert(var.clone(), new_value.clone());
                 crate::executor::arithmetic::record_arith_write(&var, old_value);
+                crate::executor::arithmetic::record_arith_locale_bind(
+                    &var,
+                    &new_value,
+                    executor
+                        .shell_state
+                        .env_vars
+                        .get("LC_ALL")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    executor.shell_state.env_vars.attr_of("LC_ALL").array,
+                    executor.shell_state.env_vars.attr_of("LC_ALL").assoc,
+                );
                 crate::executor::sync_shell_assignment_process_env(
                     &executor.shell_state.env_vars,
                     &var,

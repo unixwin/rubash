@@ -309,7 +309,9 @@ impl Executor {
         // decode_parameter_word_quotes, whose quote rules would otherwise
         // re-read a data `"` as an opener and drop it plus everything after
         // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
-        let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
+        let expanded = expanded
+            .replace('"', crate::executor::markers::DATA_DQUOTE_STR)
+            .replace('\'', crate::executor::markers::DATA_SQUOTE_STR);
         // GNU subst.c:4462 expand_string_for_rhs with quoted == 0 runs the
         // rhs through expand_word_internal, whose unquoted backslash branch
         // (subst.c:11671-11674) consumes the backslash before ANY character
@@ -413,6 +415,24 @@ impl Executor {
         };
         if !braced_parameter_spans_whole_word(word) {
             return self.expand_embedded_parameters(word);
+        }
+
+        // GNU subst.c:9777-9917 `parameter_brace_expand` dispatches on
+        // the ONE character that ends the parameter name: `/` routes to
+        // pattern substitution (`want_patsub`), and no operator character
+        // inside the pattern or replacement is ever an operator candidate.
+        // The unquoted chain (expand_braced_parameter_word) already claims
+        // the replacement arm first; this quoted chain ran its operator
+        // arms first, so a patsub body whose replacement carries an
+        // operator character (`${foo/[/]-}`: the `-` in `]-`) was
+        // misclaimed by the `-` arm, which re-read `foo/[/]` as an array
+        // element and evaluated the `/` subscript arithmetically
+        // (rubash#3022). Claim the replacement arm here first — it only
+        // fires when the name head is immediately followed by `/`, so no
+        // `:`/`=`/`+`/`-`/`?` operator body can be stolen, and it returns
+        // None for unrecognized names.
+        if let Some(value) = self.expand_braced_replacement_parameter(name) {
+            return value;
         }
 
         if let Some((var_name, default)) =
@@ -1063,6 +1083,15 @@ impl Executor {
         // once (byte-identical to the per-operator splits it replaces —
         // see TopLevelOpIndex).
         let ops = super::expand_braced_ops::TopLevelOpIndex::new(name);
+
+        // GNU subst.c:9777-9917 — same dispatch-order repair as the
+        // `&self` quoted chain above (rubash#3022): claim the pattern
+        // substitution arm before any operator arm, so a replacement
+        // carrying an operator character (`${foo/[/]-}`) cannot be
+        // misclaimed by the `-`/`+`/`=` arms.
+        if let Some(value) = self.expand_braced_replacement_parameter(name) {
+            return value;
+        }
 
         if let Some((var_name, default)) = ops.split_colon_pair(name, b'-') {
             if is_parameter_error_name(var_name) {
@@ -1889,7 +1918,19 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
         if frame.in_double {
             match chars[index] {
                 '\\' => index += 2,
-                '"' => stack.last_mut().unwrap().in_double = false,
+                // rubash#3045: a closing `"` must be CONSUMED here (like
+                // the in_single arm above advances past its closing
+                // `'`). Without the advance the same `"` fell through to
+                // the unquoted arm below, which re-set in_double — so a
+                // `"..."` span inside a `$(...)`/`<(...)` body left
+                // in_double stuck true and the span's closing `)` was
+                // swallowed instead of popping the frame: every later
+                // fragment read as inside_cs and the apply pass skipped
+                // it (`$(echo "${v=x}") ${w=y}` lost the `w` bind).
+                '"' => {
+                    stack.last_mut().unwrap().in_double = false;
+                    index += 1;
+                }
                 '$' if chars.get(index + 1) == Some(&'(') => {
                     stack.push(Frame {
                         in_single: false,
@@ -1919,6 +1960,27 @@ fn scan_word_prefix_quote_state(prefix: &str, quoted_word: bool) -> (bool, bool)
                 break;
             }
             '$' if chars.get(index + 1) == Some(&'(') => {
+                stack.push(Frame {
+                    in_single: false,
+                    in_double: false,
+                });
+                index += 2;
+                continue;
+            }
+            // rubash#3045: process substitution `<(...)` / `>(...)` is a
+            // child-executed span exactly like `$(...)` — GNU
+            // subst.c:6362 process_substitute forks (subst.c:6412
+            // make_child FORK_ASYNC|FORK_PROCSUB) and the parent only
+            // keeps a /dev/fd pathname, so assignments in the body can
+            // never reach the parent. The scan's `inside_cs` contract
+            // ("this fragment sits in a child-executed substitution")
+            // was wrong for it: only `$(` pushed a frame, so the apply
+            // pass bound `${v=...}` text inside a `<(...)` body in the
+            // parent. Track it on the same stack (popped by the generic
+            // `)` arm); the matching `)` restores top-level context.
+            // Deliberately NOT tracked in the double-quote arm above:
+            // `<(...)` is literal inside `"..."`, while `$(...)` runs.
+            '<' | '>' if chars.get(index + 1) == Some(&'(') => {
                 stack.push(Frame {
                     in_single: false,
                     in_double: false,
@@ -2298,6 +2360,19 @@ mod scanner_tests {
         assert!(!dq);
     }
 
+    // rubash#3045: the in-double `"` arm used to clear in_double
+    // without consuming the quote, so a `"..."` span inside a
+    // `$(...)` body left in_double stuck true and its closing `)`
+    // was swallowed — a fragment after the comsub read as inside_cs.
+    #[test]
+    fn cs_closes_after_quoted_span_in_comsub() {
+        let word = "$(echo \"${v=x}\") ${w=y}";
+        let after = word.find("${w").unwrap();
+        let (dq, cs) = scan_word_prefix_quote_state(&word[..after], false);
+        assert!(!cs, "body after a comsub with a quoted span is outer");
+        assert!(!dq);
+    }
+
     #[test]
     fn cs_span_in_quoted_word() {
         let word = format!(
@@ -2335,5 +2410,42 @@ mod scanner_tests {
         let (dq, cs) = scan_word_prefix_quote_state(&word[..start], true);
         assert!(!cs, "body after the CS span is outer");
         assert!(dq);
+    }
+
+    // rubash#3045: `<(...)` / `>(...)` bodies run in a forked child
+    // (GNU subst.c:6362 process_substitute, subst.c:6412 make_child
+    // FORK_PROCSUB), so a `${v=...}` inside one is not a top-level
+    // fragment of the enclosing word — same as `$(...)`.
+    #[test]
+    fn procsub_span_in_plain_word() {
+        let word = "<(echo \"${v=leak}\" >/dev/null) ${w=x}";
+        let leak = word.find("${v").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..leak], false);
+        assert!(cs, "procsub body must be inside_cs");
+        let after = word.find("${w").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..after], false);
+        assert!(!cs, "body after the procsub span is outer");
+    }
+
+    #[test]
+    fn procsub_output_span_in_plain_word() {
+        let word = ">(tee \"${v=leak}\" >/dev/null) ${w=x}";
+        let leak = word.find("${v").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..leak], false);
+        assert!(cs, "output procsub body must be inside_cs");
+        let after = word.find("${w").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..after], false);
+        assert!(!cs, "body after the output procsub span is outer");
+    }
+
+    #[test]
+    fn procsub_nested_in_comsub() {
+        let word = "$(cat <(echo \"${v=leak}\")) ${w=x}";
+        let leak = word.find("${v").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..leak], false);
+        assert!(cs, "procsub nested in comsub must be inside_cs");
+        let after = word.find("${w").unwrap();
+        let (_, cs) = scan_word_prefix_quote_state(&word[..after], false);
+        assert!(!cs, "body after the nested spans is outer");
     }
 }
