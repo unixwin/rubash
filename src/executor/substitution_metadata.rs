@@ -503,6 +503,25 @@ pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     output
 }
 
+/// Fold E400 literal-char escape pairs in text that has been
+/// finalized as a NAME — a filename, a lookup key, or a diagnostic
+/// naming one — back to the raw chars, through the boundary decoder
+/// above; text without the escape introducer passes through
+/// unchanged (rubash#3040). Every name-consumption boundary routes
+/// through this one gate + decoder (rubash#3076 census): PATH and
+/// hash lookup keys, slash-name classification probes, cd/pushd
+/// operands, exec diagnostics, source resolution, test operands,
+/// glob patterns, history/bind/enable file operands, and the
+/// comsub cd fast path — so a stored pair can never reach a
+/// filesystem probe, a cache key, or a diagnostic verbatim.
+pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
+    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
+}
+
 /// Decode marker characters embedded in an otherwise byte-oriented output.
 ///
 /// Echo can receive shell text from a read record, but it also emits raw

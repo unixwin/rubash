@@ -720,7 +720,7 @@ fn assoc_entries_uncached(value: &str) -> Vec<(String, String)> {
     dedupe_assoc_entries(parsed)
 }
 
-pub(in crate::executor) fn assoc_value_at(value: &str, key: &str) -> Option<String> {
+pub(crate) fn assoc_value_at(value: &str, key: &str) -> Option<String> {
     // Read paths borrow the memoized parse instead of re-scanning the
     // storage string (same content-addressed discipline as writes).
     assoc_entries_cached(value)

@@ -639,6 +639,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             } else {
                 // Save current command with pipe flag
                 state.current_cmd.subshell |= state.in_subshell;
+                // rubash#3028: the connector token is this stage's last
+                // token; its line is the stage's parse-end line. The
+                // dangling-pipeline EOF fold anchors its carrier on it
+                // (GNU reports the end-of-input line: the last token's
+                // physical line + 1 — a connector reached via a
+                // continuation sits on the later line).
+                state.current_cmd.end_line = Some(token.position);
                 state.current_cmd.pipe = Some(if token.kind == TokenKind::PipeErr {
                     2
                 } else {
@@ -762,6 +769,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
+                    correct_first_word_end_for_redirect_target(
+                        &mut state.current_cmd,
+                        &tokens[*i + 1],
+                    );
                     *i += 1;
                 } else if let Some(error) = missing_redirect_target_node(
                     tokens,
@@ -916,6 +927,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.heredoc_delimiter =
                         Some(super::redirections::heredoc_delimiter_text(&delimiter));
                 }
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, delimiter_token);
                 *i += 1;
             } else if let Some(error) = missing_redirect_target_node(
                 tokens,
@@ -954,6 +966,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     &tokens[*i + 1].raw,
                     redirect_fd_var_prefix(tokens, *i),
                 );
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[*i + 1]);
                 *i += 1;
             } else if let Some(error) = missing_redirect_target_node(
                 tokens,
@@ -995,6 +1008,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 // list connector on simple commands. Full Bash grammar needs
                 // a list AST with compound commands and proper precedence.
                 state.current_cmd.subshell |= state.in_subshell;
+                // rubash#3028: same parse-end stamp as the Pipe arm —
+                // the dangling and-or EOF fold anchors on it.
+                state.current_cmd.end_line = Some(token.position);
                 state.current_cmd.and_or = Some(token.kind == TokenKind::And);
                 state
                     .ast

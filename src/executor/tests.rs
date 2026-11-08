@@ -65,7 +65,7 @@ mod unit_tests {
 
         assert!(executor.apply_permanent_assignments(&assignments, None));
         assert!(executor.assignment_expansion_memo.borrow().is_empty());
-        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None, &[]);
         assert!(!failed);
         assert!(executor.assignment_expansion_memo.borrow().is_empty());
         executor.restore_temporary_assignments(previous);
@@ -120,7 +120,7 @@ mod unit_tests {
             Some("expanded")
         );
         executor.assignment_expansion_memo.borrow_mut().clear();
-        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None, &[]);
         assert!(!failed);
         assert_eq!(
             executor
@@ -355,6 +355,14 @@ mod unit_tests {
     #[test]
     fn prompt_expansion_runs_starship_ps0_arithmetic_assignment() {
         let mut executor = Executor::new();
+        // GNU short-circuits substring expansion of an UNSET variable before
+        // evaluating the offset (subst.c:9056-9057), so the assignment in the
+        // offset only runs when the variable is already set; pre-set it to 0
+        // (cf. rubash #3024) to exercise the assignment itself.
+        executor
+            .shell_state
+            .env_vars
+            .insert("STARSHIP_START_TIME".to_string(), "0".to_string());
         let rendered = executor
             .expand_prompt_string_mut("${STARSHIP_START_TIME:$((STARSHIP_START_TIME=12345,0)):0}");
 

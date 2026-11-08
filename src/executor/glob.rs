@@ -179,6 +179,12 @@ pub(crate) fn pathname_expand_word(
     if word.is_empty() {
         return PathnameExpansion::NoMatch;
     }
+    // The pattern's literal segments are filename text: fold a
+    // stored E400 pair to the raw char so matching compares against
+    // the real readdir names (rubash#3076). A NoMatch outcome keeps
+    // the CALLER's word, whose own boundary folds apply downstream.
+    let folded_word = crate::executor::substitution_metadata::fold_literal_char_escapes(word);
+    let word = folded_word.as_str();
     // Whitelist admission (rubash#117 discipline): `unquoted_glob_pattern_p`
     // below only reports a pattern when the word holds an unquoted glob
     // metacharacter, and every one of its true arms needs one of these

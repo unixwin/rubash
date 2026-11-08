@@ -586,6 +586,26 @@ impl Executor {
             return None;
         }
 
+        // GNU subst.c:9050-9057 parameter_brace_substring: when the
+        // parameter's value is NULL (unset) — and the name is not exactly
+        // `@` or `*` — the expansion returns NULL before
+        // verify_substring_values ever evaluates the offset/length
+        // arithmetic, so an unset variable with garbage offsets expands to
+        // empty with no diagnostic (rubash#3024: `${foo:t5:h2:l}` with
+        // `foo` unset must print an empty line, rc 0). The offset text is
+        // never expanded: a comsub or `$((i++))` inside the offsets never
+        // runs. A set-but-null variable has a non-NULL value, so its
+        // offsets are still evaluated and bad offsets still error. The
+        // operator-value probe answers exactly GNU's NULL test (None
+        // iff unset — plain names, unset array elements, unset indirect
+        // targets, unset positionals, whole arrays with no elements);
+        // the element fetch is AEPV-memoized, so a side-effecting
+        // subscript still runs once per expansion. The (0, Some(0))
+        // slice of the caller's empty value is the empty string.
+        if !matches!(var_name, "@" | "*") && self.parameter_operator_value(var_name).is_none() {
+            return Some((var_name, 0, Some(0)));
+        }
+
         let offset = if offset_str.is_empty() {
             0
         } else if let Some(lit) = Self::literal_arith_integer_text(offset_str) {
@@ -791,6 +811,29 @@ impl Executor {
             // whitespace-only operand (`${v: }`) is NOT empty — GNU's
             // evalexp reads it as offset 0 (rubash#758).
             return None;
+        }
+
+        // GNU subst.c:9050-9057 parameter_brace_substring: when the
+        // parameter's value is NULL (unset) — and the name is not exactly
+        // `@` or `*` — the expansion returns NULL before
+        // verify_substring_values ever evaluates the offset/length
+        // arithmetic, so an unset variable with garbage offsets expands to
+        // empty with no diagnostic (rubash#3024: `${foo:t5:h2:l}` with
+        // `foo` unset must print an empty line, rc 0). The offset text is
+        // never expanded: a comsub or `$((i++))` inside the offsets never
+        // runs. A set-but-null variable has a non-NULL value, so its
+        // offsets are still evaluated and bad offsets still error. The
+        // operator-value probe answers exactly GNU's NULL test (None
+        // iff unset — plain names, unset array elements, unset indirect
+        // targets, unset positionals, whole arrays with no elements);
+        // the element fetch is AEPV-memoized, so a side-effecting
+        // subscript still runs once per expansion. The (0, Some(0))
+        // slice of the caller's empty value is the empty string.
+        // Placed before the single-quoted-operand check: GNU returns
+        // before verify_substring_values, so an unset variable never
+        // reaches the evalexp that would fail the quoted span either.
+        if !matches!(var_name, "@" | "*") && self.parameter_operator_value(var_name).is_none() {
+            return Some((var_name, 0, Some(0)));
         }
 
         // GNU verify_substring_values hands the RAW operand text to evalexp:

@@ -102,7 +102,7 @@ impl Executor {
             });
             self.defer_locale_assignment_warnings.set(true);
             let (applied, assignments_failed) =
-                self.apply_temporary_assignments(&cmd.assignments, assignment_raws);
+                self.apply_temporary_assignments(&cmd.assignments, assignment_raws, &cmd.words);
             self.defer_locale_assignment_warnings.set(false);
             if tempenv_binds {
                 self.flush_deferred_locale_assignment_binds();
