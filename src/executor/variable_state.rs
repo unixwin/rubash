@@ -781,6 +781,9 @@ impl Executor {
         if let Some(mark) = self.tempenv_marks.pop() {
             self.tempenv_names.truncate(mark);
         }
+        // rubash#3071: the bound-value records die with their frame,
+        // in lockstep with the mark above.
+        self.tempenv_bound_frames.pop();
         // GNU variables.c:5760 { "BASH_COMPAT", sv_shcompat }: reinstalling
         // the saved binding re-runs the hook — flags re-derive from the
         // restored value and a restored invalid value re-reports

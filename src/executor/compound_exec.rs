@@ -3922,6 +3922,8 @@ impl Executor {
                         .get("LC_ALL")
                         .map(String::as_str)
                         .unwrap_or(""),
+                    executor.shell_state.env_vars.attr_of("LC_ALL").array,
+                    executor.shell_state.env_vars.attr_of("LC_ALL").assoc,
                 );
                 crate::executor::sync_shell_assignment_process_env(
                     &executor.shell_state.env_vars,

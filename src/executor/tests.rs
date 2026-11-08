@@ -65,7 +65,7 @@ mod unit_tests {
 
         assert!(executor.apply_permanent_assignments(&assignments, None));
         assert!(executor.assignment_expansion_memo.borrow().is_empty());
-        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None, &[]);
         assert!(!failed);
         assert!(executor.assignment_expansion_memo.borrow().is_empty());
         executor.restore_temporary_assignments(previous);
@@ -120,7 +120,7 @@ mod unit_tests {
             Some("expanded")
         );
         executor.assignment_expansion_memo.borrow_mut().clear();
-        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None);
+        let (previous, failed) = executor.apply_temporary_assignments(&assignments, None, &[]);
         assert!(!failed);
         assert_eq!(
             executor
