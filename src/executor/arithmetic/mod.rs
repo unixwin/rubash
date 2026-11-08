@@ -27,14 +27,19 @@ thread_local! {
 
     /// Locale-family scalar binds performed by the arithmetic evaluator
     /// in the current evaluation window: (written name, stored value,
-    /// LC_ALL value at bind time). GNU expr.c:331 expr_bind_variable
-    /// runs stupidly_hack_special_variables on the written lhs after
-    /// every bind (expr.c:352), so sv_locale (variables.c:6272) fires
-    /// per bind with the value bound at that moment; the journal
-    /// captures both at bind time and the evaluation boundary drains
-    /// it (rubash#3059).
-    static ARITH_LOCALE_BINDS: std::cell::RefCell<Vec<(String, String, String)>> =
-        const { std::cell::RefCell::new(Vec::new()) };
+    /// LC_ALL value at bind time, LC_ALL array mark at bind time,
+    /// LC_ALL assoc mark at bind time). GNU expr.c:331
+    /// expr_bind_variable runs stupidly_hack_special_variables on the
+    /// written lhs after every bind (expr.c:352), so sv_locale
+    /// (variables.c:6272) fires per bind with the value bound at that
+    /// moment; the journal captures both at bind time and the
+    /// evaluation boundary drains it (rubash#3059). The LC_ALL marks
+    /// ride along so the probe table can project a compound LC_ALL
+    /// binding to its scalar value exactly as get_string_value does
+    /// (rubash#3065).
+    static ARITH_LOCALE_BINDS: std::cell::RefCell<
+        Vec<(String, String, String, bool, bool)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
 
     /// The evalerror record left by the most recent evaluation — GNU's
     /// `expression`/`lasttp` globals at the moment evalerror ran
@@ -110,17 +115,28 @@ pub(super) fn record_arith_write(name: &str, old_value: Option<String>) {
 /// Element binds never reach here (their GNU lhs is the literal text
 /// `name[sub]`, which matches no special_vars entry), and neither do
 /// binds the evaluator skipped (noeval, readonly, noassign).
-pub(super) fn record_arith_locale_bind(name: &str, value: &str, lc_all: &str) {
+pub(super) fn record_arith_locale_bind(
+    name: &str,
+    value: &str,
+    lc_all: &str,
+    lc_all_array: bool,
+    lc_all_assoc: bool,
+) {
     if !crate::locale::is_locale_family_name(name) {
         return;
     }
     ARITH_LOCALE_BINDS.with(|log| {
-        log.borrow_mut()
-            .push((name.to_string(), value.to_string(), lc_all.to_string()));
+        log.borrow_mut().push((
+            name.to_string(),
+            value.to_string(),
+            lc_all.to_string(),
+            lc_all_array,
+            lc_all_assoc,
+        ));
     });
 }
 
-fn take_arith_locale_binds() -> Vec<(String, String, String)> {
+fn take_arith_locale_binds() -> Vec<(String, String, String, bool, bool)> {
     ARITH_LOCALE_BINDS.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
@@ -263,8 +279,8 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
     // after EVERY arithmetic bind (expr.c:352); the evaluator records
     // the binds as they complete and the shared locale funnel runs
     // here, at the same boundary that syncs the writes, in bind order.
-    for (name, value, lc_all) in take_arith_locale_binds() {
-        emit_arith_locale_bind(executor, &name, &value, &lc_all);
+    for (name, value, lc_all, lc_all_array, lc_all_assoc) in take_arith_locale_binds() {
+        emit_arith_locale_bind(executor, &name, &value, &lc_all, lc_all_array, lc_all_assoc);
     }
 }
 
@@ -276,13 +292,29 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
 /// variables.c:6272 sv_locale -> locale.c:185 set_locale_var). LANG
 /// never warns (its funnel arm only mirrors the process locale from
 /// the live store), so it goes through the ordinary note path.
-fn emit_arith_locale_bind(executor: &mut Executor, name: &str, value: &str, lc_all: &str) {
+fn emit_arith_locale_bind(
+    executor: &mut Executor,
+    name: &str,
+    value: &str,
+    lc_all: &str,
+    lc_all_array: bool,
+    lc_all_assoc: bool,
+) {
     if name == "LANG" {
         executor.note_locale_assignment(name);
         return;
     }
-    let mut probe_env = HashMap::new();
+    // The probe table carries the bind-time LC_ALL marks so the
+    // funnel's scalar projection sees a compound LC_ALL binding the
+    // way get_string_value does (rubash#3065). The bound name itself
+    // is always a fresh scalar write, so it needs no mark.
+    let mut probe_env = crate::shell::var_table::VarTable::default();
     probe_env.insert("LC_ALL".to_string(), lc_all.to_string());
+    if lc_all_assoc {
+        probe_env.mark_name(crate::executor::types::ASSOC_VARS, "LC_ALL");
+    } else if lc_all_array {
+        probe_env.mark_name(crate::executor::types::ARRAY_VARS, "LC_ALL");
+    }
     probe_env.insert(name.to_string(), value.to_string());
     if let Some(warning) = crate::locale::locale_assignment_warning(name, &probe_env) {
         let line = format!("{}warning: {}\n", executor.diagnostic_prefix(), warning);
@@ -4693,6 +4725,8 @@ fn arith_parse_cache_exec_post_inc(
         var,
         &new_value,
         env_vars.get("LC_ALL").map(String::as_str).unwrap_or(""),
+        env_vars.attr_of("LC_ALL").array,
+        env_vars.attr_of("LC_ALL").assoc,
     );
     sync_shell_assignment_process_env(env_vars, var, &new_value);
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551).
@@ -4758,6 +4792,8 @@ fn arith_parse_cache_exec_add_assign(
         dst,
         &new_value,
         env_vars.get("LC_ALL").map(String::as_str).unwrap_or(""),
+        env_vars.attr_of("LC_ALL").array,
+        env_vars.attr_of("LC_ALL").assoc,
     );
     sync_shell_assignment_process_env(env_vars, dst, &new_value);
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551).
