@@ -51,11 +51,17 @@ fn run(script: &str) -> Outcome {
 fn expect_empty(script: &str, ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.stdout, b"XY\n",
+        out.stdout,
+        b"XY\n",
         "{ctx}: stdout must be just the affixes; got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
-    assert_eq!(out.code, 0, "{ctx}: rc must be 0; stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(
+        out.code,
+        0,
+        "{ctx}: rc must be 0; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(
         out.stderr.is_empty(),
         "{ctx}: stderr must be empty; got {}",
@@ -67,7 +73,8 @@ fn expect_empty(script: &str, ctx: &str) {
 fn expect_arith_error(script: &str, needle: &str, ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 1,
+        out.code,
+        1,
         "{ctx}: rc must be 1; stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -89,7 +96,10 @@ fn unset_bad_offsets_short_circuits_to_empty() {
 
 #[test]
 fn unset_bad_offset_only_short_circuits() {
-    expect_empty("unset foo; echo \"X${foo:bad}Y\"", "unset foo, bad offset only");
+    expect_empty(
+        "unset foo; echo \"X${foo:bad}Y\"",
+        "unset foo, bad offset only",
+    );
 }
 
 #[test]
@@ -122,7 +132,8 @@ fn unset_offset_comsub_never_executes() {
     // command substitution must not run at all (GNU: no MARKER on stderr).
     let out = run("unset foo; echo \"X${foo:$(echo MARKER >&2)}Y\"");
     assert_eq!(
-        out.stdout, b"XY\n",
+        out.stdout,
+        b"XY\n",
         "unset foo, comsub offset: stdout must be just the affixes; got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -140,7 +151,8 @@ fn unset_offset_arith_side_effect_never_runs() {
     // increment: GNU leaves i at 0.
     let out = run("unset foo; i=0; echo \"X${foo:$((i++))}Y\"; echo \"i=$i\"");
     assert_eq!(
-        out.stdout, b"XY\ni=0\n",
+        out.stdout,
+        b"XY\ni=0\n",
         "unset foo, $((i++)) offset: got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -282,7 +294,8 @@ fn nounset_unset_bad_offsets_still_unbound() {
     // never the arithmetic error and never an empty expansion.
     let out = run("set -u; unset foo; echo \"X${foo:t5:h2:l}Y\"");
     assert_eq!(
-        out.code, 127,
+        out.code,
+        127,
         "set -u, unset foo: rc must be 127; stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
