@@ -70,8 +70,8 @@ pub use event::{
 pub use gate::{GateFlag, SESSION_ACTIVE};
 #[allow(unused_imports)]
 pub use inspect::{
-    render_caller, render_caller_bare, render_dynamic_state, render_info_args, render_pipestatus,
-    render_variables, render_watch_value, render_where, VariablePartition,
+    display_value, render_caller, render_caller_bare, render_dynamic_state, render_info_args,
+    render_pipestatus, render_variables, render_watch_value, render_where, VariablePartition,
 };
 pub(crate) use resolution::file_identity;
 #[allow(unused_imports)]
