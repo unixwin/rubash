@@ -878,14 +878,20 @@ impl Executor {
         if base.is_empty() {
             return false;
         }
-        if let Some(prefix) = base.strip_suffix(['@', '*']) {
-            return !prefix.is_empty() && is_shell_name(prefix);
-        }
+        // The body may BE a special parameter (`${!*}`, `${!@}`,
+        // `${!#}`...): subst.c:122 VALID_INDIR_PARAM takes `*`/`@` as
+        // the indirect SOURCE itself. This check must run before the
+        // prefix-list arm below — a body of exactly `*` or `@` also
+        // "strips" to an empty prefix, which shadowed the special and
+        // misreported the form as a bad substitution (rubash#2649).
         if matches!(base, "@" | "*" | "#" | "?" | "$" | "-" | "!" | "0")
             || base.parse::<usize>().is_ok()
             || is_shell_name(base)
         {
             return true;
+        }
+        if let Some(prefix) = base.strip_suffix(['@', '*']) {
+            return !prefix.is_empty() && is_shell_name(prefix);
         }
         // GNU also accepts a valid leading name followed by an operator
         // expression applied to the indirect value (${!x//c/x}, ${!x:-y},
@@ -2205,6 +2211,26 @@ impl Executor {
                                 return Some((t, "invalid variable name".to_string(), 1));
                             }
                         }
+                    }
+                }
+                // GNU subst.c:7883-7952 parameter_brace_expand_indir on a
+                // SPECIAL source: `${!*}` / `${!@}` indirect through the
+                // positional parameters themselves. find_indir expands
+                // the source with PF_ASSIGNRHS + no-split dollar star
+                // (subst.c:7847-7861): `*` joins with IFS[0], `@` joins
+                // with a space. The joined text is then judged exactly
+                // like any other t (subst.c:7947): non-empty and not a
+                // valid brace-expansion word reports
+                // `<t>: invalid variable name`; an empty join (no
+                // positionals) proceeds silently (rubash#2649).
+                if indirect == "*" || indirect == "@" {
+                    let t = if indirect == "*" {
+                        self.positional_params_star_joined()
+                    } else {
+                        self.shell_state.positional_window().join(" ")
+                    };
+                    if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                        return Some((t, "invalid variable name".to_string(), 1));
                     }
                 }
                 if Self::is_indirect_array_operator_expression(indirect) {
