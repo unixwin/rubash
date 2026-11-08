@@ -4916,17 +4916,19 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(2); // EX_USAGE
             }
-            // Register the compspec for every name (complete.def:480-485).
+            // Register the compspec (complete.def:480-485): the loop
+            // runs over `wl ? wl : list` — with -D/-E/-I present the
+            // single pseudo word REPLACES the operand list, so the
+            // operands never land in the regular table (rubash#2719).
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
-                self.shell_state
-                    .completion_specs
-                    .insert(pseudo, spec.clone());
-            }
-            for target in &parsed.operands {
-                self.shell_state
-                    .completion_specs
-                    .insert(target, spec.clone());
+                self.shell_state.completion_specs.insert(pseudo, spec);
+            } else {
+                for target in &parsed.operands {
+                    self.shell_state
+                        .completion_specs
+                        .insert(target, spec.clone());
+                }
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
@@ -5021,7 +5023,14 @@ impl Executor {
                 .into_iter()
                 .map(|(magic, flag)| (flag, magic, flag))
                 .collect();
-            for (report_name, diag_name, key) in pseudo_ref.into_iter().chain(operand_refs) {
+            // `wl ? wl : list` (complete.def:893): with a pseudo flag
+            // present the operands are NOT visited at all (rubash#2719).
+            let targets: Vec<(&str, &str, &str)> = if pseudo_ref.is_empty() {
+                operand_refs
+            } else {
+                pseudo_ref
+            };
+            for (report_name, diag_name, key) in targets {
                 match self.shell_state.completion_specs.get_mut(key) {
                     None => {
                         // complete.def:896-898 progcomp_search miss.
