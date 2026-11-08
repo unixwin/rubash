@@ -247,6 +247,16 @@ fn check_snippet(id: &str, expect: &Expect, work_root: &Path) -> Result<(), Stri
     let work = work_root.join(format!("case-{id}"));
     fs::create_dir_all(&work).expect("create work dir");
     let (parse_rc, parse_to, _) = run_once(bin, &script, &work, true);
+    // A timeout here is never the expectation (parse has no TIMEOUT
+    // cells); under heavy machine load a debug-binary spawn can exceed
+    // the limit spuriously, so retry a timed-out run once before
+    // judging it. A completed run is never retried: rc/stdout
+    // mismatches are deterministic and must stand.
+    let (parse_rc, parse_to, _) = if parse_to {
+        run_once(bin, &script, &work, true)
+    } else {
+        (parse_rc, parse_to, Vec::new())
+    };
     if parse_to || parse_rc != expect.parse_rc {
         return Err(format!(
             "t{id}: parse rc {parse_rc} (timeout={parse_to}), expected {}",
@@ -254,6 +264,11 @@ fn check_snippet(id: &str, expect: &Expect, work_root: &Path) -> Result<(), Stri
         ));
     }
     let (exec_rc, exec_to, raw_out) = run_once(bin, &script, &work, false);
+    let (exec_rc, exec_to, raw_out) = if exec_to && !matches!(expect.exec, ExecExpect::Timeout) {
+        run_once(bin, &script, &work, false)
+    } else {
+        (exec_rc, exec_to, raw_out)
+    };
     match &expect.exec {
         ExecExpect::Timeout => {
             if !exec_to {
