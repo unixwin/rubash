@@ -707,6 +707,11 @@ impl Executor {
             // other entry must not execute under a foreign parent's
             // line number.
             env_vars.remove("__RUBASH_CURRENT_LINE");
+            // rubash#3035: the frame FILE half of the same diagnostic
+            // transport — a validated respawn child keeps the stamped
+            // frame file, any other entry must not execute under a
+            // foreign parent's definition-file name.
+            env_vars.remove("__RUBASH_CURRENT_FILE");
             // dollar_vars[0] slot reset at script entry (shell.c:1613) —
             // see main.rs; the snapshot rides the process env otherwise.
             env_vars.remove("__RUBASH_ARGV0_AFTER_UNSET");
@@ -738,6 +743,7 @@ impl Executor {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
             mirror_env_remove("__RUBASH_TOP_LEVEL_NAME");
             mirror_env_remove("__RUBASH_CURRENT_LINE");
+            mirror_env_remove("__RUBASH_CURRENT_FILE");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
         mirror_env_remove("__RUBASH_SHELL_NAME");
@@ -1053,6 +1059,9 @@ impl Executor {
                 // respawn verbatim; None keeps the arrays unmaterialized
                 // exactly as the parent's fork left them.
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
+                dynamic_cells: std::cell::RefCell::new(
+                    crate::shell::state::DynamicCellState::default(),
+                ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
@@ -1196,6 +1205,7 @@ impl Executor {
             debug_driver: None,
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            file_env_os_value: std::cell::RefCell::new(None),
             pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::rc::Rc::new(std::cell::Cell::new(false)),
             return_trap_running: false,
@@ -1663,6 +1673,12 @@ impl Executor {
         // exists (`declare -p COMP_WORDBREAKS` succeeds) but print_var_list
         // (the `set` listing) skips invisible variables (rubash#1325).
         mark_env_name(env_vars, INVISIBLE_VARS, "COMP_WORDBREAKS");
+        // BASH_ARGV0 carries att_invisible in GNU too (variables.c
+        // table registration): the same two listing rules apply — the
+        // `set` form skips it, and declaration listings render the
+        // bare name (show_var_attributes) while a NAMED lookup still
+        // prints its value (rubash#2973).
+        mark_env_name(env_vars, INVISIBLE_VARS, "BASH_ARGV0");
         // GNU shell.c: a shell whose environment carries no TERM binds
         // TERM="dumb" (plain, unexported) instead of leaving it unset
         // (rubash#1325).
