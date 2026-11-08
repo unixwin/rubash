@@ -14,11 +14,11 @@ use std::process::{Command, Stdio};
 /// MARKERS table through the core shapes, so a new marker gets cells
 /// automatically; this file's job is the per-CHANNEL dimension. The
 /// interactive prompt / `read -p` / history cells live in the PTY sibling
-/// (`tests/marker_leak_golden_pty.rs`). The one §2.1 channel with no cell
-/// anywhere is the debugger/JSON face (sweep Q2: it runs zero decoders and
-/// no user-level repro was ever attempted; driving it needs a DAP session,
-/// not a shell invocation) — recorded here so the gap is explicit, not
-/// silent.
+/// (`tests/marker_leak_golden_pty.rs`). The debugger/JSON face — the one
+/// §2.1 channel a shell invocation cannot reach — is covered by the DAP
+/// cell at the bottom of this file (rubash#3018), which drives a real
+/// `--dap` session over the binary's stdio; with it, every §2.1 channel
+/// carries a cell.
 
 fn run(args: &[&str]) -> Vec<u8> {
     run_full(args, &[]).0
@@ -672,4 +672,792 @@ fn jobs_text_carries_no_markers() {
         String::from_utf8_lossy(&out).contains("done"),
         "job table must complete: {out:?}"
     );
+}
+
+// ======================================================================
+// rubash#3018 — the debugger/JSON (DAP) channel: harness + cell.
+//
+// The harness is a lock-step DAP client over the real binary's stdio
+// (`rubash --dap`, Content-Length framed JSON), shaped like the
+// in-process fixtures of src/debugger/dap_tests.rs but driving the
+// shipped binary the way an editor would. It carries its own minimal
+// JSON value type: the debugger module is crate-private, and the
+// golden file otherwise works on raw bytes.
+// ======================================================================
+
+#[derive(Debug, Clone, PartialEq)]
+enum DapJson {
+    Null,
+    Bool(bool),
+    Num(i64),
+    Str(String),
+    Arr(Vec<DapJson>),
+    Obj(Vec<(String, DapJson)>),
+}
+
+impl DapJson {
+    fn obj(pairs: Vec<(&str, DapJson)>) -> DapJson {
+        DapJson::Obj(
+            pairs
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+        )
+    }
+
+    fn get(&self, key: &str) -> Option<&DapJson> {
+        match self {
+            DapJson::Obj(pairs) => pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            DapJson::Str(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn as_i64(&self) -> Option<i64> {
+        match self {
+            DapJson::Num(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            DapJson::Bool(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn as_arr(&self) -> Option<&[DapJson]> {
+        match self {
+            DapJson::Arr(items) => Some(items),
+            _ => None,
+        }
+    }
+
+    fn stringify(&self) -> String {
+        let mut out = String::new();
+        self.write_to(&mut out);
+        out
+    }
+
+    fn write_to(&self, out: &mut String) {
+        match self {
+            DapJson::Null => out.push_str("null"),
+            DapJson::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
+            DapJson::Num(value) => out.push_str(&value.to_string()),
+            DapJson::Str(text) => write_json_string(text, out),
+            DapJson::Arr(items) => {
+                out.push('[');
+                for (index, item) in items.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    item.write_to(out);
+                }
+                out.push(']');
+            }
+            DapJson::Obj(pairs) => {
+                out.push('{');
+                for (index, (key, value)) in pairs.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    write_json_string(key, out);
+                    out.push(':');
+                    value.write_to(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+fn write_json_string(text: &str, out: &mut String) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+struct DapJsonParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> DapJsonParser<'a> {
+    fn parse(text: &str) -> Option<DapJson> {
+        let mut parser = DapJsonParser {
+            bytes: text.as_bytes(),
+            pos: 0,
+        };
+        let value = parser.value()?;
+        parser.skip_ws();
+        if parser.pos == parser.bytes.len() {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    fn skip_ws(&mut self) {
+        while self.pos < self.bytes.len()
+            && matches!(self.bytes[self.pos], b' ' | b'\t' | b'\n' | b'\r')
+        {
+            self.pos += 1;
+        }
+    }
+
+    fn value(&mut self) -> Option<DapJson> {
+        self.skip_ws();
+        match *self.bytes.get(self.pos)? {
+            b'{' => {
+                self.pos += 1;
+                let mut pairs = Vec::new();
+                self.skip_ws();
+                if self.bytes.get(self.pos) == Some(&b'}') {
+                    self.pos += 1;
+                    return Some(DapJson::Obj(pairs));
+                }
+                loop {
+                    let key = self.string()?;
+                    self.skip_ws();
+                    if self.bytes.get(self.pos) != Some(&b':') {
+                        return None;
+                    }
+                    self.pos += 1;
+                    let value = self.value()?;
+                    pairs.push((key, value));
+                    self.skip_ws();
+                    match self.bytes.get(self.pos) {
+                        Some(b',') => {
+                            self.pos += 1;
+                        }
+                        Some(b'}') => {
+                            self.pos += 1;
+                            return Some(DapJson::Obj(pairs));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b'[' => {
+                self.pos += 1;
+                let mut items = Vec::new();
+                self.skip_ws();
+                if self.bytes.get(self.pos) == Some(&b']') {
+                    self.pos += 1;
+                    return Some(DapJson::Arr(items));
+                }
+                loop {
+                    let value = self.value()?;
+                    items.push(value);
+                    self.skip_ws();
+                    match self.bytes.get(self.pos) {
+                        Some(b',') => {
+                            self.pos += 1;
+                        }
+                        Some(b']') => {
+                            self.pos += 1;
+                            return Some(DapJson::Arr(items));
+                        }
+                        _ => return None,
+                    }
+                }
+            }
+            b'"' => self.string().map(DapJson::Str),
+            b't' => {
+                self.literal("true")?;
+                Some(DapJson::Bool(true))
+            }
+            b'f' => {
+                self.literal("false")?;
+                Some(DapJson::Bool(false))
+            }
+            b'n' => {
+                self.literal("null")?;
+                Some(DapJson::Null)
+            }
+            _ => self.number(),
+        }
+    }
+
+    fn literal(&mut self, word: &str) -> Option<()> {
+        if self.bytes[self.pos..].starts_with(word.as_bytes()) {
+            self.pos += word.len();
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    fn number(&mut self) -> Option<DapJson> {
+        let start = self.pos;
+        while self.pos < self.bytes.len()
+            && matches!(
+                self.bytes[self.pos],
+                b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+            )
+        {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return None;
+        }
+        let text = std::str::from_utf8(&self.bytes[start..self.pos]).ok()?;
+        // The protocol's numeric fields (seq, ids, exit codes) are
+        // integers; a fractional/exponent spelling is not expected
+        // and floors to its integer head rather than failing the
+        // whole conversation.
+        let head = text.split(['.', 'e', 'E']).next()?;
+        head.parse::<i64>().ok().map(DapJson::Num)
+    }
+
+    fn string(&mut self) -> Option<String> {
+        if self.bytes.get(self.pos) != Some(&b'"') {
+            return None;
+        }
+        self.pos += 1;
+        let mut out = String::new();
+        loop {
+            let byte = *self.bytes.get(self.pos)?;
+            self.pos += 1;
+            match byte {
+                b'"' => return Some(out),
+                b'\\' => {
+                    let escape = *self.bytes.get(self.pos)?;
+                    self.pos += 1;
+                    match escape {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let unit = self.hex4()?;
+                            if (0xD800..0xDC00).contains(&unit) {
+                                // High surrogate: a \uXXXX low
+                                // surrogate must follow.
+                                if self.bytes.get(self.pos) == Some(&b'\\')
+                                    && self.bytes.get(self.pos + 1) == Some(&b'u')
+                                {
+                                    self.pos += 2;
+                                    let low = self.hex4()?;
+                                    let combined = 0x10000
+                                        + (((unit - 0xD800) as u32) << 10)
+                                        + (low as u32).saturating_sub(0xDC00);
+                                    out.push(char::from_u32(combined)?);
+                                } else {
+                                    return None;
+                                }
+                            } else {
+                                out.push(char::from_u32(unit as u32)?);
+                            }
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => {
+                    // Raw UTF-8 sequence: copy the whole char.
+                    let start = self.pos - 1;
+                    let width = if byte < 0x80 {
+                        1
+                    } else if byte >> 5 == 0b110 {
+                        2
+                    } else if byte >> 4 == 0b1110 {
+                        3
+                    } else {
+                        4
+                    };
+                    let end = start + width;
+                    let slice = self.bytes.get(start..end)?;
+                    out.push_str(std::str::from_utf8(slice).ok()?);
+                    self.pos = end;
+                }
+            }
+        }
+    }
+
+    fn hex4(&mut self) -> Option<u16> {
+        let slice = self.bytes.get(self.pos..self.pos + 4)?;
+        let text = std::str::from_utf8(slice).ok()?;
+        let value = u16::from_str_radix(text, 16).ok()?;
+        self.pos += 4;
+        Some(value)
+    }
+}
+
+/// One lock-step DAP client over the spawned binary's stdio. Reads
+/// run on a thread feeding chunks over a channel so a stalled
+/// conversation panics with the transcript instead of hanging the
+/// test binary (the dap_tests.rs in-process client does the same).
+struct DapClient {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    chunks: std::sync::mpsc::Receiver<Vec<u8>>,
+    stderr: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    buf: Vec<u8>,
+    backlog: std::collections::VecDeque<DapJson>,
+    seq: i64,
+    /// Every byte the server wrote, framing included.
+    transcript: Vec<u8>,
+}
+
+impl DapClient {
+    fn spawn() -> DapClient {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .arg("--dap")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", "/tmp")
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash --dap");
+        let stdin = child.stdin.take().expect("dap stdin");
+        let mut stdout = child.stdout.take().expect("dap stdout");
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || loop {
+            let mut chunk = [0u8; 16384];
+            match std::io::Read::read(&mut stdout, &mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(chunk[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let mut stderr_pipe = child.stderr.take().expect("dap stderr");
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&stderr);
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stderr_pipe, &mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => sink
+                        .lock()
+                        .expect("stderr sink")
+                        .extend_from_slice(&chunk[..n]),
+                }
+            }
+        });
+        DapClient {
+            child,
+            stdin,
+            chunks: rx,
+            stderr,
+            buf: Vec::new(),
+            backlog: std::collections::VecDeque::new(),
+            seq: 0,
+            transcript: Vec::new(),
+        }
+    }
+
+    fn send_request(&mut self, command: &str, arguments: DapJson) -> i64 {
+        use std::io::Write;
+        self.seq += 1;
+        let message = DapJson::obj(vec![
+            ("seq", DapJson::Num(self.seq)),
+            ("type", DapJson::Str("request".to_string())),
+            ("command", DapJson::Str(command.to_string())),
+            ("arguments", arguments),
+        ]);
+        let body = message.stringify();
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        self.stdin
+            .write_all(frame.as_bytes())
+            .expect("dap client write");
+        self.stdin.flush().expect("dap client flush");
+        self.seq
+    }
+
+    fn try_parse_frame(&mut self) -> Option<DapJson> {
+        let header_end = self
+            .buf
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")?;
+        let header = String::from_utf8_lossy(&self.buf[..header_end]).into_owned();
+        let mut length: Option<usize> = None;
+        for line in header.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("Content-Length") {
+                    length = value.trim().parse::<usize>().ok();
+                }
+            }
+        }
+        let length = length.expect("dap frame without Content-Length");
+        if self.buf.len() < header_end + 4 + length {
+            return None;
+        }
+        let body = self.buf[header_end + 4..header_end + 4 + length].to_vec();
+        self.buf.drain(..header_end + 4 + length);
+        DapJsonParser::parse(&String::from_utf8(body).expect("dap frame body is UTF-8"))
+    }
+
+    fn pump_one(&mut self) -> DapJson {
+        loop {
+            if let Some(message) = self.try_parse_frame() {
+                return message;
+            }
+            match self
+                .chunks
+                .recv_timeout(std::time::Duration::from_secs(120))
+            {
+                Ok(chunk) => {
+                    self.transcript.extend_from_slice(&chunk);
+                    self.buf.extend_from_slice(&chunk);
+                }
+                Err(error) => panic!(
+                    "DAP conversation stalled ({error}); transcript so far: {:?}",
+                    String::from_utf8_lossy(&self.transcript)
+                ),
+            }
+        }
+    }
+
+    fn take_response(&mut self, seq: i64) -> DapJson {
+        loop {
+            if let Some(at) = self
+                .backlog
+                .iter()
+                .position(|m| dap_is_response_for(m, seq))
+            {
+                return self.backlog.remove(at).expect("position checked");
+            }
+            let message = self.pump_one();
+            if dap_is_response_for(&message, seq) {
+                return message;
+            }
+            self.backlog.push_back(message);
+        }
+    }
+
+    /// Read until the named event arrives; returns its body.
+    fn take_event(&mut self, name: &str) -> DapJson {
+        loop {
+            if let Some(at) = self.backlog.iter().position(|m| dap_is_event(m, name)) {
+                let message = self.backlog.remove(at).expect("position checked");
+                return message.get("body").cloned().unwrap_or(DapJson::Null);
+            }
+            let message = self.pump_one();
+            if dap_is_event(&message, name) {
+                return message.get("body").cloned().unwrap_or(DapJson::Null);
+            }
+            self.backlog.push_back(message);
+        }
+    }
+
+    /// Send a request and return its response body, asserting success.
+    fn ok(&mut self, command: &str, arguments: DapJson) -> DapJson {
+        let seq = self.send_request(command, arguments);
+        let response = self.take_response(seq);
+        assert_eq!(
+            response.get("success").and_then(DapJson::as_bool),
+            Some(true),
+            "{command} response: {response:?}"
+        );
+        response.get("body").cloned().unwrap_or(DapJson::Null)
+    }
+
+    /// Read until `terminated`, collecting every `output` event's
+    /// text and the `exited` code on the way.
+    fn collect_until_terminated(&mut self) -> (Vec<String>, i64) {
+        let mut outputs = Vec::new();
+        let mut exit_code: Option<i64> = None;
+        loop {
+            let message = match self.backlog.pop_front() {
+                Some(message) => message,
+                None => self.pump_one(),
+            };
+            if dap_is_event(&message, "output") {
+                let body = message.get("body").expect("output body");
+                outputs.push(
+                    body.get("output")
+                        .and_then(DapJson::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                );
+            } else if dap_is_event(&message, "exited") {
+                exit_code = message
+                    .get("body")
+                    .and_then(|body| body.get("exitCode"))
+                    .and_then(DapJson::as_i64);
+            } else if dap_is_event(&message, "terminated") {
+                break;
+            }
+        }
+        (outputs, exit_code.expect("exited precedes terminated"))
+    }
+
+    fn server_stderr(&self) -> Vec<u8> {
+        self.stderr.lock().expect("stderr sink").clone()
+    }
+}
+
+impl Drop for DapClient {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+fn dap_is_response_for(message: &DapJson, seq: i64) -> bool {
+    message.get("type").and_then(DapJson::as_str) == Some("response")
+        && message.get("request_seq").and_then(DapJson::as_i64) == Some(seq)
+}
+
+fn dap_is_event(message: &DapJson, name: &str) -> bool {
+    message.get("type").and_then(DapJson::as_str) == Some("event")
+        && message.get("event").and_then(DapJson::as_str) == Some(name)
+}
+
+/// Debugger/JSON (DAP) channel — rubash#3018. A real `--dap` session
+/// against a program whose variables carry the marker shapes: a typed
+/// PUA char (U+E314), a raw ESC byte, raw C0 bytes, and an array
+/// holding both. At the breakpoint the cell reads the values back
+/// through the two DAP faces that render values — `variables`
+/// (Globals scope, plus the array's children) and `evaluate` — and
+/// scans the whole wire transcript.
+///
+/// KNOWN BROKEN (found by this cell's lane; full repro and transcript
+/// evidence in the #3018 lane REPORT): the scalar renderings arrive
+/// in internal storage encoding — the U+E400 literal-char pair for
+/// the typed PUA char, U+E000 carrier pairs for the raw ESC/C0
+/// bytes — where every other channel renders the decoded value (the
+/// raw char, the raw bytes: see the echo / printf /
+/// external-boundary cells above). The snapshot face captures
+/// storage forms (`capture_variable`, src/executor/state_views.rs)
+/// and the DAP value renderers print them verbatim; no decode step
+/// runs. The parenthesized array summary is the control: it already
+/// renders decoded, exactly like `declare -p`. Pinned inverted
+/// (registry-test precedent): a fix flips every value assertion
+/// below red.
+#[test]
+fn dap_json_channel_carries_no_markers() {
+    let dir = std::env::temp_dir().join(format!("rubash-golden-dap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let program_path = dir.join("dap_golden.sh");
+    std::fs::write(
+        &program_path,
+        concat!(
+            "pua=$'\\uE314'\n",
+            "esc=$'A\\033B'\n",
+            "c0=$'a\\x11b\\x1fc'\n",
+            "arr=($'\\uE314' $'x\\x11y')\n",
+            "echo done\n",
+        ),
+    )
+    .expect("write dap fixture program");
+    let program = program_path.to_string_lossy().into_owned();
+
+    let mut client = DapClient::spawn();
+    client.ok("initialize", DapJson::obj(vec![]));
+    client.ok(
+        "launch",
+        DapJson::obj(vec![
+            ("program", DapJson::Str(program.clone())),
+            ("stopOnEntry", DapJson::Bool(false)),
+        ]),
+    );
+    client.take_event("initialized");
+    client.ok(
+        "setBreakpoints",
+        DapJson::obj(vec![
+            (
+                "source",
+                DapJson::obj(vec![("path", DapJson::Str(program.clone()))]),
+            ),
+            (
+                "breakpoints",
+                DapJson::Arr(vec![DapJson::obj(vec![("line", DapJson::Num(5))])]),
+            ),
+        ]),
+    );
+    client.ok("configurationDone", DapJson::obj(vec![]));
+    let stopped = client.take_event("stopped");
+    assert_eq!(
+        stopped.get("reason").and_then(DapJson::as_str),
+        Some("breakpoint"),
+        "the session must stop at the fixture breakpoint: {stopped:?}"
+    );
+
+    let trace = client.ok("stackTrace", DapJson::obj(vec![]));
+    let frames = trace
+        .get("stackFrames")
+        .and_then(DapJson::as_arr)
+        .expect("stack frames");
+    let frame_id = frames[0]
+        .get("id")
+        .and_then(DapJson::as_i64)
+        .expect("frame id");
+    let scopes = client.ok(
+        "scopes",
+        DapJson::obj(vec![("frameId", DapJson::Num(frame_id))]),
+    );
+    let scope_list = scopes
+        .get("scopes")
+        .and_then(DapJson::as_arr)
+        .expect("scopes");
+    let globals_ref = scope_list
+        .iter()
+        .find(|scope| scope.get("name").and_then(DapJson::as_str) == Some("Globals"))
+        .and_then(|scope| scope.get("variablesReference").and_then(DapJson::as_i64))
+        .expect("globals scope");
+    let globals = client.ok(
+        "variables",
+        DapJson::obj(vec![("variablesReference", DapJson::Num(globals_ref))]),
+    );
+    let vars = globals
+        .get("variables")
+        .and_then(DapJson::as_arr)
+        .expect("globals variables");
+    let var = |name: &str| {
+        vars.iter()
+            .find(|entry| entry.get("name").and_then(DapJson::as_str) == Some(name))
+            .unwrap_or_else(|| panic!("variable {name} in {vars:?}"))
+    };
+    let value = |name: &str| {
+        var(name)
+            .get("value")
+            .and_then(DapJson::as_str)
+            .unwrap_or_else(|| panic!("value of {name} in {vars:?}"))
+            .to_string()
+    };
+
+    // Scalar values through the variables face: storage encoding
+    // today (see the doc comment); the decoded renderings are what
+    // each message names.
+    assert_eq!(
+        value("pua"),
+        "\u{E400}\u{E314}",
+        "rubash#3018: DAP pua value must render the raw U+E314 char once fixed"
+    );
+    assert_eq!(
+        value("esc"),
+        "A\u{E000}\u{E01C}B",
+        "rubash#3018: DAP esc value must render the raw ESC byte once fixed"
+    );
+    assert_eq!(
+        value("c0"),
+        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
+        "rubash#3018: DAP c0 value must render the raw C0 bytes once fixed"
+    );
+    // Control: the parenthesized array summary already renders
+    // decoded (raw char, $'\021' ansic form) — pin it so a fix
+    // cannot regress the one rendering this channel gets right.
+    assert_eq!(
+        value("arr"),
+        "([0]=\"\u{E314}\" [1]=$'x\\021y')",
+        "DAP array summary must stay in decoded declare form"
+    );
+    // Array children through the variables face: same storage leak.
+    let arr_ref = var("arr")
+        .get("variablesReference")
+        .and_then(DapJson::as_i64)
+        .expect("array variables reference");
+    assert!(arr_ref != 0, "arrays carry a reference");
+    let children = client.ok(
+        "variables",
+        DapJson::obj(vec![("variablesReference", DapJson::Num(arr_ref))]),
+    );
+    let elements = children
+        .get("variables")
+        .and_then(DapJson::as_arr)
+        .expect("array elements");
+    let element = |name: &str| {
+        elements
+            .iter()
+            .find(|entry| entry.get("name").and_then(DapJson::as_str) == Some(name))
+            .and_then(|entry| entry.get("value").and_then(DapJson::as_str))
+            .unwrap_or_else(|| panic!("array element {name} in {elements:?}"))
+            .to_string()
+    };
+    assert_eq!(
+        element("[0]"),
+        "\u{E400}\u{E314}",
+        "rubash#3018: DAP arr[0] must render the raw U+E314 char once fixed"
+    );
+    assert_eq!(
+        element("[1]"),
+        "x\u{E000}\u{E012}y",
+        "rubash#3018: DAP arr[1] must render the raw 0x11 byte once fixed"
+    );
+
+    // The evaluate face renders the same storage forms.
+    let evaluate = |client: &mut DapClient, expression: &str| {
+        let body = client.ok(
+            "evaluate",
+            DapJson::obj(vec![
+                ("expression", DapJson::Str(expression.to_string())),
+                ("context", DapJson::Str("repl".to_string())),
+            ]),
+        );
+        body.get("result")
+            .and_then(DapJson::as_str)
+            .unwrap_or_else(|| panic!("evaluate result for {expression}: {body:?}"))
+            .to_string()
+    };
+    assert_eq!(
+        evaluate(&mut client, "$pua"),
+        "\u{E400}\u{E314}",
+        "rubash#3018: DAP evaluate $pua must render the raw char once fixed"
+    );
+    assert_eq!(
+        evaluate(&mut client, "$esc"),
+        "A\u{E000}\u{E01C}B",
+        "rubash#3018: DAP evaluate $esc must render the raw ESC byte once fixed"
+    );
+    assert_eq!(
+        evaluate(&mut client, "$c0"),
+        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
+        "rubash#3018: DAP evaluate $c0 must render the raw C0 bytes once fixed"
+    );
+
+    // Run the debuggee out: the session genuinely executed — its
+    // stdout arrives as an output event and it exits 0.
+    client.ok("continue", DapJson::obj(vec![]));
+    let (outputs, exit_code) = client.collect_until_terminated();
+    assert_eq!(exit_code, 0, "debuggee must exit 0: outputs {outputs:?}");
+    assert!(
+        outputs.iter().any(|text| text == "done\n"),
+        "debuggee stdout must arrive as an output event: {outputs:?}"
+    );
+    client.ok("disconnect", DapJson::obj(vec![]));
+    let status = client.child.wait().expect("dap server exits");
+    assert!(status.success(), "dap server exit status: {status}");
+
+    // The wire transcript: the named protocol strings never cross
+    // (a straight assertion — that leg is clean today), while the
+    // carrier codepoints DO cross (inverted: a fix must leave the
+    // transcript free of every registry-zone codepoint except the
+    // user's own U+E314 data char in the array summary).
+    assert_no_named_marker(&client.transcript, "dap transcript");
+    let transcript_text = String::from_utf8_lossy(&client.transcript);
+    assert!(
+        transcript_text.contains('\u{E400}') && transcript_text.contains('\u{E000}'),
+        "rubash#3018: DAP transcript must carry no carrier codepoints once fixed"
+    );
+    assert_clean(&client.server_stderr(), "dap server stderr");
+
+    std::fs::remove_dir_all(&dir).ok();
 }
