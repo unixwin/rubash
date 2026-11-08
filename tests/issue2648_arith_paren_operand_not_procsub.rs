@@ -43,12 +43,14 @@ fn run(script: &str) -> Outcome {
 fn expect_value(script: &str, expected: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.stdout, expected,
+        out.stdout,
+        expected,
         "{ctx}: stdout mismatch; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        out.code, 0,
+        out.code,
+        0,
         "{ctx}: rc must be 0; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -71,11 +73,7 @@ fn less_than_paren_operand_is_not_a_process_substitution() {
 
 #[test]
 fn parenthesised_operands_on_both_sides() {
-    expect_value(
-        "echo $(( (2+2)>(2+3) ? 2**0 : 32))",
-        b"32\n",
-        "(2+2)>(2+3)",
-    );
+    expect_value("echo $(( (2+2)>(2+3) ? 2**0 : 32))", b"32\n", "(2+2)>(2+3)");
 }
 
 #[test]
