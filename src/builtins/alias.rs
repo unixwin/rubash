@@ -135,8 +135,12 @@ where
     E: Write,
 {
     if args.is_empty() {
+        // GNU builtins/alias.def unalias_builtin: no arguments is a
+        // usage error — sh_usage + EX_USAGE (2), the same status the
+        // invalid-option arm below returns (rubash#2975). Only a
+        // missing alias NAME is EXECUTION_FAILURE.
         writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
-        return Ok(EXECUTION_FAILURE);
+        return Ok(EX_USAGE);
     }
 
     let mut index = 0;
@@ -173,8 +177,11 @@ where
 
     let args = &args[index..];
     if args.is_empty() {
+        // Same usage status as the no-arguments entry above: an
+        // option-only invocation (`unalias --`) names no alias
+        // (rubash#2975).
         writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
-        return Ok(EXECUTION_FAILURE);
+        return Ok(EX_USAGE);
     }
 
     let mut status = EXECUTION_SUCCESS;

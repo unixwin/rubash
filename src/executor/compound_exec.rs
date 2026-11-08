@@ -1457,6 +1457,14 @@ impl Executor {
         // can land here — no stale OS-env copies.
         let mut child_trap_table = self.shell_state.env_vars.clone();
         crate::builtins::trap::reset_for_subshell_child(&mut child_trap_table);
+        // rubash#2982: the wrapper child re-defines the parent's
+        // functions from a textual prelude — its table is empty until
+        // the prelude is evaluated — so the functrace/errtrace-kept
+        // DEBUG and ERR traps must not arrive live (they would fire
+        // before the first prelude definition, while the handler
+        // functions do not exist yet). Reset them here; the -c source
+        // re-arms them after the prelude (background_trap_rearm_source).
+        crate::builtins::trap::reset_traps_for_background_wrapper(&mut child_trap_table);
         for (key, value) in &child_trap_table {
             if key.starts_with("__RUBASH_TRAP") {
                 env_map.insert(key.clone(), value.clone());
@@ -2873,8 +2881,46 @@ impl Executor {
 
     fn background_command_source(&self, command: &CommandNode) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_source_text(command));
         source
+    }
+
+    /// rubash#2982: re-arm the DEBUG/ERR traps the wrapper child starts
+    /// without (reset_traps_for_background_wrapper) — after the function
+    /// prelude, so the handler functions exist when the traps first
+    /// fire, and before the body, so the body's commands run traced
+    /// exactly as GNU's forked async child (execute_cmd.c:1576
+    /// execute_in_subshell). Only the traps the parent would have
+    /// inherited are re-armed: DEBUG under functrace, ERR under
+    /// errtrace (trap.c:1467 reset_or_restore_signal_handlers /
+    /// trap.c:1526 reset_signal_handlers). The
+    /// re-arm is a single line with no newline, so the prelude
+    /// line-offset math (prelude_newlines) is unaffected.
+    fn background_trap_rearm_source(&self) -> String {
+        let env_vars = &self.shell_state.env_vars;
+        let mut rearm = String::new();
+        if crate::builtins::set::shell_option_enabled(env_vars, "functrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "DEBUG")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} DEBUG; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        if crate::builtins::set::shell_option_enabled(env_vars, "errtrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "ERR")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} ERR; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        rearm
     }
 
     /// rubash#1095: `background_command_source` for an absorbed `( list )`
@@ -2882,6 +2928,7 @@ impl Executor {
     /// spawn itself realized the subshell level (GNU execute_cmd.c:701).
     fn background_command_source_for_body(&self, body: &[CommandNode]) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_sequence_text(body));
         source
     }
@@ -8041,8 +8088,19 @@ fn escape_case_pattern_literal(value: &str) -> String {
     // matching — `z=$'\v\f\a\b'; case "$z" in "$z")` and the
     // `$'\v\f\a\b')` clause of nquote.tests line 79 printed `bad'
     // (nquote snapshot red gate, regression window beb1eca6..d3e8affa).
+    //
+    // The literal-char escape pair is the same shape in the other
+    // registry family: a typed registry-zone char rides transport as
+    // LITERAL_CHAR_ESCAPE + the char (markers.rs push_literal_char) —
+    // ONE user character, so it likewise takes one guard as a unit.
+    // Guarding the halves separately interposed a CTLESC inside the
+    // pair; the matcher's flattening reads a literal-escape pair
+    // greedily as one data char, so it consumed E400+CTLESC as a pair
+    // whose payload is CTLESC itself and the real char (a typed
+    // `$'\uE002'`) could never match (rubash#3014).
     use crate::executor::markers::{
-        CTLESC, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+        CTLESC, LITERAL_CHAR_ESCAPE, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST,
+        RAW_BYTE_MARKER_LAST,
     };
     let mut escaped = String::new();
     let mut chars = value.chars().peekable();
@@ -8054,6 +8112,14 @@ fn escape_case_pattern_literal(value: &str) -> String {
                 if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(payload as u32)) {
                     escaped.push(chars.next().expect("peeked raw-byte payload"));
                 }
+            }
+        }
+        if ch == LITERAL_CHAR_ESCAPE {
+            // Greedy pairing, mirroring flatten_pattern_to_byte_chars:
+            // the payload is part of the same character unit. A lone
+            // trailing escape has no payload and stays a single unit.
+            if let Some(payload) = chars.next() {
+                escaped.push(payload);
             }
         }
     }
