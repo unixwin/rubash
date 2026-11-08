@@ -417,6 +417,24 @@ impl Executor {
             return self.expand_embedded_parameters(word);
         }
 
+        // GNU subst.c:9777-9917 `parameter_brace_expand` dispatches on
+        // the ONE character that ends the parameter name: `/` routes to
+        // pattern substitution (`want_patsub`), and no operator character
+        // inside the pattern or replacement is ever an operator candidate.
+        // The unquoted chain (expand_braced_parameter_word) already claims
+        // the replacement arm first; this quoted chain ran its operator
+        // arms first, so a patsub body whose replacement carries an
+        // operator character (`${foo/[/]-}`: the `-` in `]-`) was
+        // misclaimed by the `-` arm, which re-read `foo/[/]` as an array
+        // element and evaluated the `/` subscript arithmetically
+        // (rubash#3022). Claim the replacement arm here first — it only
+        // fires when the name head is immediately followed by `/`, so no
+        // `:`/`=`/`+`/`-`/`?` operator body can be stolen, and it returns
+        // None for unrecognized names.
+        if let Some(value) = self.expand_braced_replacement_parameter(name) {
+            return value;
+        }
+
         if let Some((var_name, default)) =
             super::expand_braced_ops::split_once_outside_subscript_str(name, ":-")
         {
@@ -1065,6 +1083,15 @@ impl Executor {
         // once (byte-identical to the per-operator splits it replaces —
         // see TopLevelOpIndex).
         let ops = super::expand_braced_ops::TopLevelOpIndex::new(name);
+
+        // GNU subst.c:9777-9917 — same dispatch-order repair as the
+        // `&self` quoted chain above (rubash#3022): claim the pattern
+        // substitution arm before any operator arm, so a replacement
+        // carrying an operator character (`${foo/[/]-}`) cannot be
+        // misclaimed by the `-`/`+`/`=` arms.
+        if let Some(value) = self.expand_braced_replacement_parameter(name) {
+            return value;
+        }
 
         if let Some((var_name, default)) = ops.split_colon_pair(name, b'-') {
             if is_parameter_error_name(var_name) {
