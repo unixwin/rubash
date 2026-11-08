@@ -528,12 +528,17 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                                 // sq-protection tag (\x1c); keep it and mark
                                 // the compound body after it.
                                 let (tag, body) = inner
-                                    .strip_prefix('\u{1c}')
-                                    .map(|body| ("\u{1c}", body))
+                                    .strip_prefix(crate::executor::markers::IFS_GLUE)
+                                    .map(|body| (crate::executor::markers::IFS_GLUE_STR, body))
                                     .unwrap_or(("", inner));
                                 let deferred = body
                                     .strip_prefix('(')
-                                    .map(|rest| format!("{tag}(\u{3}{rest}"))
+                                    .map(|rest| {
+                                        format!(
+                                            "{tag}({}{rest}",
+                                            crate::executor::markers::DEFERRED_COMPOUND_BODY
+                                        )
+                                    })
                                     .unwrap_or_else(|| inner.to_string());
                                 word = format!(
                                     "{lhs}={}{}",
