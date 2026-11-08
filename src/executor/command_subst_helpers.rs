@@ -1,4 +1,6 @@
-use crate::executor::markers::{DATA_DOLLAR, DATA_DQUOTE};
+use crate::executor::markers::{
+    ASSIGN_DATA_DQUOTE, CTLESC, DATA_BACKTICK, DATA_DOLLAR, DATA_DQUOTE, DATA_SQUOTE,
+};
 use crate::executor::substitution_metadata::bytes_to_shell_text;
 use crate::lexer::quotes::{skip_braced_unit_chars, skip_paren_unit_chars, skip_quote_unit_chars};
 
@@ -18,7 +20,7 @@ pub(in crate::executor) fn braced_body_ends_in_single_quote(body: &str) -> bool 
         if single {
             // DATA_SQUOTE (\u{17}) also closes: it is the lexer's data
             // marking of the span's closing quote (see the match below).
-            if ch == '\'' || ch == '\u{17}' {
+            if ch == '\'' || ch == DATA_SQUOTE {
                 single = false;
             }
             continue;
@@ -52,7 +54,7 @@ pub(in crate::executor) fn braced_body_ends_in_single_quote(body: &str) -> bool 
             // because its own span scan closed the expansion earlier —
             // for the extraction verdict it is the span's closing quote
             // (rubash#1109 paired form `${uq:-don'}'t}`).
-            '\u{17}' => single = !single,
+            DATA_SQUOTE => single = !single,
             '"' => double = true,
             _ => {}
         }
@@ -175,7 +177,7 @@ pub(in crate::executor) fn dollar_bracket_no_closing_string(
         // the expression rarely reaches one; the assignment hoist
         // channel's collector is not segment-bounded and consumes its
         // E302 cut survivor as an unterminated quote unit — stop there.
-        if !previous_was_backslash && matches!(ch, '"' | '\'' | '`' | '\u{E302}') {
+        if !previous_was_backslash && matches!(ch, '"' | '\'' | '`' | ASSIGN_DATA_DQUOTE) {
             break;
         }
         string.push(decode_verdict_name_carrier(ch));
@@ -230,12 +232,12 @@ fn open_segment_content_start(prefix: &[char]) -> Option<usize> {
             continue;
         }
         match prefix[index] {
-            '"' | '\u{E302}' => {
+            '"' | ASSIGN_DATA_DQUOTE => {
                 content_start = Some(index + 1);
                 index += 1;
             }
-            '`' | '\u{1a}' => {
-                index = skip_quote_unit_chars(prefix, index, &['`', '\u{1a}'], true);
+            '`' | DATA_BACKTICK => {
+                index = skip_quote_unit_chars(prefix, index, &['`', DATA_BACKTICK], true);
             }
             '$' if prefix.get(index + 1) == Some(&'(') => {
                 index = skip_paren_unit_chars(prefix, index + 1);
@@ -260,15 +262,17 @@ fn dquote_segment_close(prefix: &[char], start: usize) -> Option<usize> {
     let mut index = start;
     while index < prefix.len() {
         match prefix[index] {
-            '\\' | '\u{11}' => index += 2,
-            '`' | '\u{1a}' => index = skip_quote_unit_chars(prefix, index, &['`', '\u{1a}'], true),
+            '\\' | CTLESC => index += 2,
+            '`' | DATA_BACKTICK => {
+                index = skip_quote_unit_chars(prefix, index, &['`', DATA_BACKTICK], true)
+            }
             '$' if prefix.get(index + 1) == Some(&'(') => {
                 index = skip_paren_unit_chars(prefix, index + 1);
             }
             '$' if prefix.get(index + 1) == Some(&'{') => {
                 index = skip_braced_unit_chars(prefix, index + 1);
             }
-            '"' | '\u{E302}' => return Some(index),
+            '"' | ASSIGN_DATA_DQUOTE => return Some(index),
             _ => index += 1,
         }
     }
