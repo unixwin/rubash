@@ -4539,7 +4539,15 @@ fn preserve_prompt_escapes(value: &str) -> String {
             preserved.push(ch);
         }
     }
-    preserved.replace(PROTECTED_PROMPT_ESCAPE, "\\")
+    // E400-aware restore (rubash#3016, same family as #735 and #840
+    // divergence 3): a BARE guard is one this function just introduced
+    // for `\!` / `\#` and maps back to `\`; an `E400 + E316` pair is
+    // user data (typed `$'\uE316'`, E400-escaped at entry by
+    // `push_literal_char`) and copies verbatim. The blind
+    // `.replace(E316, "\\")` this supersedes read the escaped member of
+    // a user pair as live protocol, consumed the E316, and left a stray
+    // E400 that the output decoder folded to a backslash.
+    crate::executor::markers::restore_bare_sentinels(&preserved, &[(PROTECTED_PROMPT_ESCAPE, "\\")])
 }
 
 /// Quote-aware rewrite of $"..." into "..." for assignment expansion

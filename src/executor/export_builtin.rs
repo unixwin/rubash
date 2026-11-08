@@ -80,6 +80,13 @@ impl Executor {
         }
         let mut oob_word = None;
         let mut traced_assignments = Vec::new();
+        // rubash#2973: GNU's export resolves name-only operands
+        // through find_variable, which materializes a dynamic
+        // variable's cell — `export RANDOM` alone makes a later
+        // listing render a drawn value.
+        if !args.iter().any(|arg| arg == "-p") {
+            self.fire_dynamic_operand_lookups(&args);
+        }
         // rubash#1569: the -p listing renders the bindings underneath
         // this command's own tempenv frame, never the tempvars.
         let underlay = self.tempenv_listing_underlay();

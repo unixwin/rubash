@@ -1407,6 +1407,27 @@ impl Executor {
     /// flicker on unreaped corpses. `&mut self` because the read runs
     /// the cleanup pass, mirroring the listing path — it does NOT run
     /// a reap/refresh; the per-command refresh owns that.
+    /// rubash#2849: the interactive reader boundary is GNU's
+    /// death-recording point — jobs.c:4036 `sigchld_handler` calls
+    /// `waitchld (-1, 0)` the moment a child dies, while the shell
+    /// blocks in the reader, and parse.y:2533 `read_command` runs
+    /// `notify_and_cleanup` before the freshly read command
+    /// executes, so every consumer on the new line (the exit scan
+    /// included) reads a current table. Rubash has no async
+    /// handler: the boundary sweep's observation gates emulate the
+    /// waitchld lag for script streams, and a completion the
+    /// shell's own `kill` dealt is additionally held one reader
+    /// command by the fresh-fatal window (rubash#1604) so a
+    /// following `wait` can claim the job itself. At the reader
+    /// boundary that hold has served its purpose — the death is
+    /// already recorded, only its application is stashed — so the
+    /// interactive readers call this before a freshly read group
+    /// executes: the observed refresh applies the recorded death
+    /// exactly where the handler's recording would have landed.
+    pub(crate) fn observe_jobs_at_reader_boundary(&mut self) {
+        let _ = self.refresh_background_jobs_observed();
+    }
+
     pub fn background_job_count(&mut self) -> usize {
         // GNU jobs.c:2254 list_all_jobs calls cleanup_dead_jobs first,
         // so dead jobs already notified are gone before a line is

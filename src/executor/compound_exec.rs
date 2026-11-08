@@ -1457,6 +1457,14 @@ impl Executor {
         // can land here — no stale OS-env copies.
         let mut child_trap_table = self.shell_state.env_vars.clone();
         crate::builtins::trap::reset_for_subshell_child(&mut child_trap_table);
+        // rubash#2982: the wrapper child re-defines the parent's
+        // functions from a textual prelude — its table is empty until
+        // the prelude is evaluated — so the functrace/errtrace-kept
+        // DEBUG and ERR traps must not arrive live (they would fire
+        // before the first prelude definition, while the handler
+        // functions do not exist yet). Reset them here; the -c source
+        // re-arms them after the prelude (background_trap_rearm_source).
+        crate::builtins::trap::reset_traps_for_background_wrapper(&mut child_trap_table);
         for (key, value) in &child_trap_table {
             if key.starts_with("__RUBASH_TRAP") {
                 env_map.insert(key.clone(), value.clone());
@@ -2873,8 +2881,46 @@ impl Executor {
 
     fn background_command_source(&self, command: &CommandNode) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_source_text(command));
         source
+    }
+
+    /// rubash#2982: re-arm the DEBUG/ERR traps the wrapper child starts
+    /// without (reset_traps_for_background_wrapper) — after the function
+    /// prelude, so the handler functions exist when the traps first
+    /// fire, and before the body, so the body's commands run traced
+    /// exactly as GNU's forked async child (execute_cmd.c:1576
+    /// execute_in_subshell). Only the traps the parent would have
+    /// inherited are re-armed: DEBUG under functrace, ERR under
+    /// errtrace (trap.c:1467 reset_or_restore_signal_handlers /
+    /// trap.c:1526 reset_signal_handlers). The
+    /// re-arm is a single line with no newline, so the prelude
+    /// line-offset math (prelude_newlines) is unaffected.
+    fn background_trap_rearm_source(&self) -> String {
+        let env_vars = &self.shell_state.env_vars;
+        let mut rearm = String::new();
+        if crate::builtins::set::shell_option_enabled(env_vars, "functrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "DEBUG")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} DEBUG; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        if crate::builtins::set::shell_option_enabled(env_vars, "errtrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "ERR")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} ERR; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        rearm
     }
 
     /// rubash#1095: `background_command_source` for an absorbed `( list )`
@@ -2882,6 +2928,7 @@ impl Executor {
     /// spawn itself realized the subshell level (GNU execute_cmd.c:701).
     fn background_command_source_for_body(&self, body: &[CommandNode]) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_sequence_text(body));
         source
     }
@@ -7562,7 +7609,13 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                 if quote == '\'' {
                     output.push_str(&decode_ansi_c_escapes(&body));
                 } else {
-                    output.push_str(&expand_word(&body));
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data.
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7585,17 +7638,16 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // comsub scanner (rubash#153: `case 'a'\''`b`'` ran `b`).
                     output.push_str(&body);
                 } else {
-                    // parse.y read_token_word: a `'` inside double quotes is
-                    // literal data; tag it so expand_word's quote removal
-                    // does not collapse it (same protection the pattern
-                    // twin applies). Quotes inside a `${...}`/`$(...)`/
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data. Quotes inside a `${...}`/`$(...)`/
                     // backtick unit belong to the substitution's own
                     // grammar (parse.y:3877 parse_matched_pair) and stay
-                    // raw — `${x#'foo'}` in a double-quoted case word must
-                    // keep stripping the quoted pattern (rubash#258
-                    // BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
-                    output.push_str(&expand_word(&body));
+                    // raw through the cooker (rubash#258 BUG_PSUBSQUOT).
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7734,6 +7786,15 @@ enum CasePatternSegment {
 /// belongs to the pattern — text before the expansion glues onto that
 /// field, text after it belongs to later fields. A one-element
 /// expansion glues whole; an empty one contributes nothing.
+/// Cook one double-quoted case-pattern segment chunk to the lexer's carrier
+/// spelling before expanding it (same DQ-context rule as
+/// quote_aware_glob_rhs, rubash#2981): `\"`/`\$`/`\\`/`` \` `` resolve as
+/// double-quote escapes and `'` travels as DATA_SQUOTE data, instead of the
+/// raw fragment being re-read without its quoting context.
+fn cook_dquoted_case_segment(chunk: &str) -> String {
+    crate::lexer::quotes::cook_double_quoted_segment(chunk)
+}
+
 fn case_pattern_quoted_segment(
     body: &str,
     expand_word: &mut impl FnMut(&str) -> String,
@@ -7743,11 +7804,11 @@ fn case_pattern_quoted_segment(
     let mut rest = body;
     loop {
         let Some((start, end, name)) = find_case_pattern_array_at(rest) else {
-            literal.push_str(&expand_word(rest));
+            literal.push_str(&expand_word(&cook_dquoted_case_segment(rest)));
             return CasePatternSegment::Continues(literal);
         };
         let (first, count) = array_at.get(&name).cloned().unwrap_or_default();
-        literal.push_str(&expand_word(&rest[..start]));
+        literal.push_str(&expand_word(&cook_dquoted_case_segment(&rest[..start])));
         if count == 0 {
             rest = &rest[end..];
             continue;
@@ -7809,14 +7870,14 @@ fn quote_aware_case_pattern(
                     // opens single-quote state: a `'` inside the body is
                     // literal data (GNU case patterns keep it, so
                     // `case $s in "''")` matches the two quote characters).
-                    // A bare `'` pair fed to expand_word_mut collapses to
-                    // the empty string via quote removal, so tag each one
-                    // with the lexer's decoded-quote marker first — the
-                    // same protection escape_decoded_ansi_c_quotes applies.
-                    // Quotes inside a `${...}`/`$(...)`/backtick unit stay
-                    // raw (parse.y:3877 parse_matched_pair owns them;
+                    // The segment expander cooks each chunk to the lexer's
+                    // carrier spelling before expanding (same DQ-context
+                    // rule as quote_aware_glob_rhs, rubash#2981), so the
+                    // `'` travels as DATA_SQUOTE data and `\"`/`\$`/`\\`/
+                    // `` \` `` resolve as double-quote escapes. Quotes
+                    // inside a `${...}`/`$(...)`/backtick unit stay raw
+                    // (parse.y:3877 parse_matched_pair owns them;
                     // rubash#258 BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
                     match case_pattern_quoted_segment(&body, &mut expand_word, array_at) {
                         CasePatternSegment::Continues(literal) => {
                             output.push_str(&escape_case_pattern_literal(&literal));
