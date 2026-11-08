@@ -522,12 +522,12 @@ fn declare_f_carries_no_markers() {
 }
 
 /// Diagnostics (stderr) — bad-substitution display decodes through the
-/// sanctioned decoder; the command-not-found and redirection-error
-/// paths do NOT fold them yet: the command-not-found diagnostic and
-/// the redirect-target filename both carry the E400 pair instead of
-/// the raw char. Those two legs are known-broken inverted pins
-/// (rubash#3040); only the bad-substitution leg is byte-verified
-/// against GNU 5.3.20 on this tree.
+/// sanctioned decoder; the command-not-found diagnostic and the
+/// redirect-target filename fold the E400 literal-char escape pair
+/// back to the raw char at the name boundary (rubash#3040; GNU
+/// execute_cmd.c:5909 printable_filename over the raw word,
+/// redir.c:298 redirection_expand's verbatim filename). All three
+/// legs are byte-verified against GNU 5.3.20 on this tree.
 #[test]
 fn diagnostics_carry_no_markers() {
     // Bad substitution (battery c22 shape).
@@ -548,18 +548,17 @@ fn diagnostics_carry_no_markers() {
     // Command not found (battery c33 shape).
     let (_, err) = run_full(&["-c", "v=$'\\uE314'; \"$v\""], &[]);
     let text = String::from_utf8_lossy(&err);
-    // KNOWN BROKEN (rubash#3040): the diagnostic names the E400 pair
-    // instead of the raw char (GNU: raw char, -c mode). Pinned
-    // inverted (registry-test precedent): a fix flips this red.
+    // rubash#3040: the diagnostic names the raw char, not the E400
+    // literal-char escape pair (GNU: raw char bytes EE 8C 94, -c mode).
     assert!(
-        text.contains('\u{E400}'),
-        "rubash#3040: diagnostic must name the raw char once fixed: {text:?}"
+        text.contains('\u{E314}') && !text.contains('\u{E400}'),
+        "rubash#3040: diagnostic must name the raw char: {text:?}"
     );
     // Redirect target filename.
-    // KNOWN BROKEN (rubash#3040): the redirect creates the file with
-    // the E400 pair in its name (GNU: raw char). The redirect itself
-    // succeeds silently on both shells, so the pin reads the created
-    // filename, not a diagnostic. Pinned inverted: a fix flips red.
+    // rubash#3040: the redirect creates the file under the raw-char
+    // name (GNU: bytes EE 8C 94), not the E400 pair. The redirect
+    // itself succeeds silently on both shells, so the pin reads the
+    // created filename, not a diagnostic.
     let dir = std::env::temp_dir().join(format!("rubash-golden-redir-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let script = format!(
@@ -578,8 +577,8 @@ fn diagnostics_carry_no_markers() {
         .collect();
     assert_eq!(
         names,
-        vec!["\u{E400}\u{E314}".to_string()],
-        "rubash#3040: redirect target must be the raw-char name once fixed: {names:?}"
+        vec!["\u{E314}".to_string()],
+        "rubash#3040: redirect target must be the raw-char name: {names:?}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -1247,19 +1246,15 @@ fn dap_is_event(message: &DapJson, name: &str) -> bool {
 /// (Globals scope, plus the array's children) and `evaluate` — and
 /// scans the whole wire transcript.
 ///
-/// KNOWN BROKEN (found by this cell's lane; full repro and transcript
-/// evidence in the #3018 lane REPORT): the scalar renderings arrive
-/// in internal storage encoding — the U+E400 literal-char pair for
-/// the typed PUA char, U+E000 carrier pairs for the raw ESC/C0
-/// bytes — where every other channel renders the decoded value (the
-/// raw char, the raw bytes: see the echo / printf /
-/// external-boundary cells above). The snapshot face captures
-/// storage forms (`capture_variable`, src/executor/state_views.rs)
-/// and the DAP value renderers print them verbatim; no decode step
-/// runs. The parenthesized array summary is the control: it already
-/// renders decoded, exactly like `declare -p`. Pinned inverted
-/// (registry-test precedent): a fix flips every value assertion
-/// below red.
+/// The snapshot face captures storage forms (`capture_variable`,
+/// src/executor/state_views.rs), so the DAP value renderers decode
+/// at their boundary (rubash#3074): a typed registry-zone char
+/// arrives as a U+E400 literal-char pair and raw C0 bytes as U+E000
+/// carrier pairs, and both fold back to the raw char / raw bytes —
+/// the same rendering every other channel produces (see the echo /
+/// printf / external-boundary cells above). The parenthesized
+/// array summary is the control: it renders decoded, exactly like
+/// `declare -p`.
 #[test]
 fn dap_json_channel_carries_no_markers() {
     let dir = std::env::temp_dir().join(format!("rubash-golden-dap-{}", std::process::id()));
@@ -1352,23 +1347,22 @@ fn dap_json_channel_carries_no_markers() {
             .to_string()
     };
 
-    // Scalar values through the variables face: storage encoding
-    // today (see the doc comment); the decoded renderings are what
-    // each message names.
+    // Scalar values through the variables face render decoded
+    // (see the doc comment).
     assert_eq!(
         value("pua"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP pua value must render the raw U+E314 char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP pua value must render the raw U+E314 char"
     );
     assert_eq!(
         value("esc"),
-        "A\u{E000}\u{E01C}B",
-        "rubash#3018: DAP esc value must render the raw ESC byte once fixed"
+        "A\u{1B}B",
+        "rubash#3074: DAP esc value must render the raw ESC byte"
     );
     assert_eq!(
         value("c0"),
-        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
-        "rubash#3018: DAP c0 value must render the raw C0 bytes once fixed"
+        "a\u{11}b\u{1F}c",
+        "rubash#3074: DAP c0 value must render the raw C0 bytes"
     );
     // Control: the parenthesized array summary already renders
     // decoded (raw char, $'\021' ansic form) — pin it so a fix
@@ -1378,7 +1372,7 @@ fn dap_json_channel_carries_no_markers() {
         "([0]=\"\u{E314}\" [1]=$'x\\021y')",
         "DAP array summary must stay in decoded declare form"
     );
-    // Array children through the variables face: same storage leak.
+    // Array children through the variables face: same decode.
     let arr_ref = var("arr")
         .get("variablesReference")
         .and_then(DapJson::as_i64)
@@ -1402,16 +1396,16 @@ fn dap_json_channel_carries_no_markers() {
     };
     assert_eq!(
         element("[0]"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP arr[0] must render the raw U+E314 char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP arr[0] must render the raw U+E314 char"
     );
     assert_eq!(
         element("[1]"),
-        "x\u{E000}\u{E012}y",
-        "rubash#3018: DAP arr[1] must render the raw 0x11 byte once fixed"
+        "x\u{11}y",
+        "rubash#3074: DAP arr[1] must render the raw 0x11 byte"
     );
 
-    // The evaluate face renders the same storage forms.
+    // The evaluate face renders the same decoded forms.
     let evaluate = |client: &mut DapClient, expression: &str| {
         let body = client.ok(
             "evaluate",
@@ -1427,18 +1421,18 @@ fn dap_json_channel_carries_no_markers() {
     };
     assert_eq!(
         evaluate(&mut client, "$pua"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP evaluate $pua must render the raw char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP evaluate $pua must render the raw char"
     );
     assert_eq!(
         evaluate(&mut client, "$esc"),
-        "A\u{E000}\u{E01C}B",
-        "rubash#3018: DAP evaluate $esc must render the raw ESC byte once fixed"
+        "A\u{1B}B",
+        "rubash#3074: DAP evaluate $esc must render the raw ESC byte"
     );
     assert_eq!(
         evaluate(&mut client, "$c0"),
-        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
-        "rubash#3018: DAP evaluate $c0 must render the raw C0 bytes once fixed"
+        "a\u{11}b\u{1F}c",
+        "rubash#3074: DAP evaluate $c0 must render the raw C0 bytes"
     );
 
     // Run the debuggee out: the session genuinely executed — its
@@ -1454,17 +1448,19 @@ fn dap_json_channel_carries_no_markers() {
     let status = client.child.wait().expect("dap server exits");
     assert!(status.success(), "dap server exit status: {status}");
 
-    // The wire transcript: the named protocol strings never cross
-    // (a straight assertion — that leg is clean today), while the
-    // carrier codepoints DO cross (inverted: a fix must leave the
-    // transcript free of every registry-zone codepoint except the
-    // user's own U+E314 data char in the array summary).
+    // The wire transcript: the named protocol strings never cross,
+    // and no carrier codepoint crosses either — the only
+    // registry-zone codepoint on the wire is the user's own U+E314
+    // data char (the decoded pua value and the array summary).
     assert_no_named_marker(&client.transcript, "dap transcript");
     let transcript_text = String::from_utf8_lossy(&client.transcript);
-    assert!(
-        transcript_text.contains('\u{E400}') && transcript_text.contains('\u{E000}'),
-        "rubash#3018: DAP transcript must carry no carrier codepoints once fixed"
-    );
+    for ch in transcript_text.chars() {
+        let cp = ch as u32;
+        assert!(
+            !(0xE000..=0xE4FF).contains(&cp) || cp == 0xE314,
+            "rubash#3074: DAP transcript carries carrier codepoint U+{cp:04X}: {transcript_text:?}"
+        );
+    }
     assert_clean(&client.server_stderr(), "dap server stderr");
 
     std::fs::remove_dir_all(&dir).ok();

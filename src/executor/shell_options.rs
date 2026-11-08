@@ -3289,6 +3289,23 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_case_word(&mut self, word: &str) -> String {
+        // rubash#3045: a `${var=word}` assignment is a side effect of the
+        // expansion wherever it occurs (GNU subst.c:9777
+        // parameter_brace_expand -> subst.c:10346 `case '='` ->
+        // subst.c:7966 parameter_brace_expand_rhs -> bind_variable; the
+        // case subject reaches that path via execute_cmd.c:3686
+        // expand_word_leave_quoted). The bind lives in the `&mut` apply
+        // pass below, not in the `&self` value render that follows — run
+        // it here, mirroring expand_command_word (command_prepare.rs),
+        // under the same one-word cross-pass scope so the applied-value
+        // memo and the rubash#1169 freeze key exactly as they do for a
+        // plain argument. Without this the subject renders correctly
+        // while the assignment is silently lost.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
+        self.apply_parameter_assignment_expansions_in_word(word);
         let mut expanded = if let Some(value) =
             tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
         {

@@ -3032,6 +3032,17 @@ impl Executor {
             rest.strip_suffix('}')?
         };
 
+        // GNU subst.c:9777-9917 — same dispatch-order repair as
+        // `quoted_braced_alternate_positional_at_values` (rubash#3022):
+        // a body whose name head is immediately followed by `/` is a
+        // pattern substitution, never an operator alternate. The splits
+        // below would re-read the pattern/replacement text as a
+        // parameter name and `parameter_operator_value` would evaluate
+        // it (`${foo/[/]-$@}`: the `-` in `]-` splits off `foo/[/]`).
+        if parse_parameter_replacement(name).is_some() {
+            return None;
+        }
+
         // `+`/`:+` use the word when the parameter is set (non-empty for
         // `:+`); `-`/`:-` use the word when it is unset (or empty for `:-`).
         // `$@`/`$*` inside the word must expand to their own field boundaries
@@ -3437,6 +3448,18 @@ impl Executor {
             return None;
         }
         let inner = &braced[2..braced.len() - 1];
+        // GNU subst.c:9777-9917 — a body whose name head is immediately
+        // followed by `/` is a pattern substitution, never an operator
+        // alternate: the operator splits below would re-read the
+        // pattern/replacement text as a parameter name (`${foo/[/]-}`
+        // splits at the `-` in `]-` and evaluates the `/` subscript
+        // arithmetically; `"${foo/bar-$@}"` whole-word returns the
+        // positional list instead of the patsub result — rubash#3022).
+        // Return None so the word falls through to the normal quoted
+        // expansion path, which claims the replacement arm first.
+        if parse_parameter_replacement(inner).is_some() {
+            return None;
+        }
         // GNU param_expand reads the operator only at the top level of the
         // `${}` body: `+`/`-`/`:` inside `[...]` belong to the array
         // subscript (`${a[i++]:-x}` has no `-` operator). A naive split_once
@@ -3791,8 +3814,11 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let (temporary_assignments, assignments_failed) =
-            self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        let (temporary_assignments, assignments_failed) = self.apply_temporary_assignments(
+            &materialized_cmd.assignments,
+            assignment_raws,
+            &materialized_cmd.words,
+        );
         if let Some(rejection) = redirect_rejection {
             // Only the FatalNounset class routes through the expansion-error
             // classifier (rubash#535): an unbound variable in a function

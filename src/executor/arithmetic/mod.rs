@@ -2474,6 +2474,106 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
     output
 }
 
+/// GNU `$"..."` locale strings in raw subscript text (rubash#3023):
+/// the dollar is part of the quote syntax, not an expansion introducer —
+/// in the C locale the span expands exactly like `"..."` (subst.c
+/// `expand_subscript_string` / `expand_arith_string`; the lexer cooks it
+/// the same way, `lexer/quotes.rs` `$"` arm). Raw subscript text bypasses
+/// the lexer, so the `$` survived into the arith-context rebuild
+/// (`arith_subscript_text`) and the subscript walker
+/// (`expand_subscript_string`), where it glued onto the content:
+/// `$"x y"` became `$x y` (silent index 0), `$"1+2"` became `$1+2`
+/// (index 2), `$"$(...)"` became `$$(...)` (PID + literal), and assoc
+/// keys stored the literal `$"..."` spelling. Rewrite each `$"..."` span
+/// to `"..."`, dropping only the dollar; the quotes stay for the caller's
+/// own double-quote handling. A `$"` inside a single-quoted span is
+/// literal data and is copied verbatim; the close-quote scan honors
+/// `\"` escapes and skips nested `$(...)` / `${...}` / backquotes as
+/// units, so an inner `"` never closes the span early. An unterminated
+/// span keeps its quotes (the caller treats it like an unterminated
+/// `"..."`, exactly as GNU's own word scan does).
+pub(super) fn decode_locale_quote_spans(raw: &str) -> String {
+    if !raw.contains("$\"") {
+        return raw.to_string();
+    }
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let mut in_single = false;
+    // Copy the whole UTF-8 character at `i` (ASCII delimiters are
+    // single-byte; every other byte belongs to a multibyte sequence).
+    let mut push_char = |out: &mut String, i: &mut usize| {
+        let ch = raw[*i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        *i += ch.len_utf8();
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= 0x80 {
+            push_char(&mut out, &mut i);
+            continue;
+        }
+        let ch = b as char;
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                i += 1;
+            }
+            '$' if bytes.get(i + 1) == Some(&b'"') => {
+                // Locale-quote span: drop the dollar, keep the quotes.
+                out.push('"');
+                i += 2;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        out.push('\\');
+                        i += 1;
+                        push_char(&mut out, &mut i);
+                        continue;
+                    }
+                    if c == b'$' && matches!(bytes.get(i + 1), Some(&b'(') | Some(&b'{')) {
+                        let end = assoc_skip_substitution(bytes, i);
+                        out.push_str(&raw[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    if c == b'`' {
+                        let end = assoc_skip_substitution(bytes, i);
+                        out.push_str(&raw[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    if c == b'"' {
+                        out.push('"');
+                        i += 1;
+                        break;
+                    }
+                    if c >= 0x80 {
+                        push_char(&mut out, &mut i);
+                        continue;
+                    }
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// GNU expand_arith_string output form for an indexed-array subscript that
 /// carried no expansion of its own: single quotes stay literal (evalexp
 /// reports `'x'` as "operand expected"), while double quotes and backslash
@@ -2482,6 +2582,17 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
 /// to itself — so rebuilding the arith-context text from the raw spelling
 /// cannot re-run substitutions (`a[$(echo INJ)]=v` still executes once).
 pub(super) fn arith_subscript_text(raw: &str) -> String {
+    // A `$"..."` span is a double-quoted span with quote-syntax markup
+    // (decode_locale_quote_spans): the `"` arm below then decodes its
+    // content exactly like `"..."`, so `$"x y"` reaches evalexp as `x y`
+    // (rubash#3023) instead of `$x y` (a silent index-0 read of `$x`).
+    let decoded;
+    let raw = if raw.contains("$\"") {
+        decoded = decode_locale_quote_spans(raw);
+        decoded.as_str()
+    } else {
+        raw
+    };
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
