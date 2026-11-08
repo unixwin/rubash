@@ -1297,6 +1297,28 @@ fn tokenize_completion_region(region: &str, wordbreaks: &str) -> Vec<(usize, usi
             }
             current_is_break_run = false;
         } else if is_break(c) {
+            // rubash#2846: a leading Windows drive prefix is not a
+            // word break. When the token so far is exactly one ASCII
+            // letter, a `:` from the break set belongs to the word:
+            // `C:/...` completes as one word, the way the host's
+            // token view already sees it. Splitting there completed
+            // only the post-colon fragment and discarded the drive,
+            // so a drive path could never complete. GNU has no drive
+            // letters (bashline.c:313 puts `:` in the default break
+            // set), so this is the engine's platform-semantics
+            // carve-out, not a GNU behavior: it fires only at a
+            // word's first two bytes, and a colon anywhere else —
+            // after a longer head, after the drive colon itself —
+            // breaks exactly as before.
+            if c == ':'
+                && in_token
+                && !current_is_break_run
+                && current.len() == 1
+                && current.as_bytes()[0].is_ascii_alphabetic()
+            {
+                current.push(c);
+                continue;
+            }
             if in_token && !current_is_break_run {
                 tokens.push((current_start, off, std::mem::take(&mut current)));
                 in_token = false;
