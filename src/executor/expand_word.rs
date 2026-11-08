@@ -779,21 +779,27 @@ impl Executor {
         } else {
             raw_value
         };
-        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
-        }
-        if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
+        // Compound-claim gate (rubash#3034): the two functions below
+        // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
+        // which only ever runs on a genuine compound assignment — a decision
+        // the parser makes positionally (parse.y:5648-5657: only an unquoted
+        // `(` immediately after `=` starts parse_compound_assignment,
+        // parse.y:7104) and records as COMPOUND_ASSIGNMENT_MARKER. A
+        // parenthesized word WITHOUT the marker is a quoted scalar whose
+        // parens are literal data (subst.c:4357 expand_string_assignment);
+        // claiming it as an element list let the
+        // ARRAY_FIELD_SPLIT_MARKER-tagged field transport (`\x10"..."`)
+        // leak into scalar storage (`y="($x)"` stored `(\x10"v1.0")`).
+        if compound_assignment {
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
+            {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
         }
         // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes the
         // raw parenthesized text first; the preserve variant keeps element

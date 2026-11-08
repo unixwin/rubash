@@ -1109,23 +1109,32 @@ impl Executor {
             }
         }
         let apply_result = self.apply_parameter_assignment_expansions_in_word(value);
-        if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
-            if dbg_aav_enabled() {
-                eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
-            }
-            if compound_assignment {
+        // Compound-claim gate (rubash#3034): the two functions below
+        // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
+        // which only ever runs on a genuine compound assignment — a decision
+        // the parser makes positionally (parse.y:5648-5657: only an unquoted
+        // `(` immediately after `=` starts parse_compound_assignment,
+        // parse.y:7104) and records as COMPOUND_ASSIGNMENT_MARKER. A
+        // parenthesized word WITHOUT the marker is a quoted scalar whose
+        // parens are literal data (subst.c:4357 expand_string_assignment);
+        // claiming it as an element list let the
+        // ARRAY_FIELD_SPLIT_MARKER-tagged field transport (`\x10"..."`)
+        // leak into scalar storage (`y="($x)"` stored `(\x10"v1.0")`,
+        // and the same shape through `y='('$x')'`, argument words
+        // `echo "y=($x)"`, and prefix assignments).
+        if compound_assignment {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(value, quoted) {
+                if dbg_aav_enabled() {
+                    eprintln!("[ECPAT] value={value:?} expanded={expanded:?}");
+                }
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
-            return expanded;
-        }
-        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
-            if dbg_aav_enabled() {
-                eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
-            }
-            if compound_assignment {
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(value) {
+                if dbg_aav_enabled() {
+                    eprintln!("[EUPCA] value={value:?} expanded={expanded:?}");
+                }
                 return format!("{COMPOUND_ASSIGNMENT_MARKER}{expanded}");
             }
-            return expanded;
         }
 
         if !compound_assignment && !value.starts_with("$((") && !value.starts_with("$[") {
