@@ -1408,7 +1408,7 @@ impl<W: Write + 'static> DapStopLoop<W> {
         match pending {
             PendingReply::Evaluate { seq } => match result {
                 Some(EvaluationResult::Value(value)) => {
-                    let value = value.clone();
+                    let value = super::inspect::display_value(value);
                     self.shared.borrow_mut().transport.response(
                         seq,
                         "evaluate",
@@ -1544,7 +1544,7 @@ fn refreshed_value(session: &DebugSession, parent: &str, element: Option<&str>) 
     let snapshot = session.inspection()?;
     let variable = snapshot.variable(parent)?;
     match (element, &variable.value) {
-        (None, VariableValue::Scalar(value)) => Some(value.clone()),
+        (None, VariableValue::Scalar(value)) => Some(super::inspect::display_value(value)),
         (None, VariableValue::Unset) => Some(String::new()),
         (None, _) => Some(array_display_value(variable)),
         (Some(child), VariableValue::Indexed(elements)) => {
@@ -1552,12 +1552,12 @@ fn refreshed_value(session: &DebugSession, parent: &str, element: Option<&str>) 
             elements
                 .iter()
                 .find(|(at, _)| *at == index)
-                .map(|(_, value)| value.clone())
+                .map(|(_, value)| super::inspect::display_value(value))
         }
         (Some(child), VariableValue::Associative(elements)) => elements
             .iter()
             .find(|(key, _)| key == child)
-            .map(|(_, value)| value.clone()),
+            .map(|(_, value)| super::inspect::display_value(value)),
         _ => None,
     }
 }
@@ -1589,14 +1589,18 @@ fn array_display_value(variable: &VariableSnapshot) -> String {
         VariableValue::Indexed(elements) => {
             let parts: Vec<String> = elements
                 .iter()
-                .map(|(index, value)| format!("[{index}]={}", quote(value)))
+                .map(|(index, value)| {
+                    format!("[{index}]={}", quote(&super::inspect::display_value(value)))
+                })
                 .collect();
             format!("({})", parts.join(" "))
         }
         VariableValue::Associative(elements) => {
             let parts: Vec<String> = elements
                 .iter()
-                .map(|(key, value)| format!("[{key}]={}", quote(value)))
+                .map(|(key, value)| {
+                    format!("[{key}]={}", quote(&super::inspect::display_value(value)))
+                })
                 .collect();
             format!("({})", parts.join(" "))
         }
@@ -2229,7 +2233,7 @@ impl<W: Write + 'static> DapStopLoop<W> {
                         for (index, value) in elements {
                             rendered.push(Json::obj(vec![
                                 ("name", Json::from(format!("[{index}]"))),
-                                ("value", Json::from(value.clone())),
+                                ("value", Json::from(super::inspect::display_value(value))),
                                 ("evaluateName", Json::from(format!("${parent}[{index}]"))),
                                 ("variablesReference", Json::Int(0)),
                             ]));
@@ -2239,7 +2243,7 @@ impl<W: Write + 'static> DapStopLoop<W> {
                         for (key, value) in elements {
                             rendered.push(Json::obj(vec![
                                 ("name", Json::from(key.clone())),
-                                ("value", Json::from(value.clone())),
+                                ("value", Json::from(super::inspect::display_value(value))),
                                 ("evaluateName", Json::from(format!("${parent}[{key}]"))),
                                 ("variablesReference", Json::Int(0)),
                             ]));
@@ -2258,7 +2262,7 @@ impl<W: Write + 'static> DapStopLoop<W> {
     fn render_variable(&mut self, variable: &VariableSnapshot) -> Json {
         let (value, reference) = match &variable.value {
             VariableValue::Unset => (String::new(), 0),
-            VariableValue::Scalar(text) => (text.clone(), 0),
+            VariableValue::Scalar(text) => (super::inspect::display_value(text), 0),
             VariableValue::Indexed(_) | VariableValue::Associative(_) => (
                 array_display_value(variable),
                 self.alloc_ref(VarRefKey::ArrayOf(variable.name.clone())),

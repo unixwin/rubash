@@ -66,9 +66,29 @@ fn redirect_operand_literal(expanded: &str) -> String {
     if !crate::executor::markers::contains_word_marker_bytes(expanded) {
         return expanded.to_string();
     }
-    crate::executor::markers::decode_word_position_carriers(
+    let decoded = crate::executor::markers::decode_word_position_carriers(
         &expanded.replace(crate::executor::markers::CTLESC, ""),
-    )
+    );
+    // The operand is now a FILENAME: GNU redir.c:298
+    // redirection_expand returns the string do_redirection_internal
+    // opens verbatim, so a stored value's E400 literal-char escape
+    // pairs — transport for the raw chars — fold here through the
+    // same boundary decoder the argv/env crossings use (rubash#2881,
+    // rubash#3040); left in, the pair lands in the on-disk name.
+    fold_filename_literal_char_escapes(&decoded)
+}
+
+/// Fold E400 literal-char escape pairs in text that has been
+/// finalized as a filename (or as a diagnostic naming the operand)
+/// back to the raw chars, through the #2881 boundary decoder; text
+/// without the escape introducer passes through unchanged
+/// (rubash#3040).
+fn fold_filename_literal_char_escapes(text: &str) -> String {
+    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
 }
 
 impl Executor {
@@ -411,6 +431,10 @@ impl Executor {
             // site (redirect gate / compound binding), mirroring the
             // argument-word failglob port (command_prepare.rs).
             glob::PathnameExpansion::Fail(pattern) => {
+                // The diagnostic names the operand being finalized as
+                // a filename, so its E400 pairs fold like the literal
+                // outcomes above (rubash#3040).
+                let pattern = fold_filename_literal_char_escapes(&pattern);
                 // GNU performs ONE do_redirections per command, so the
                 // word expands (and reports) exactly once. Rubash's
                 // multi-phase redirect pipeline can expand the same operand
@@ -443,36 +467,60 @@ impl Executor {
             return value;
         }
 
-        if let Some(name) = word
-            .strip_prefix("${")
-            .and_then(|rest| rest.strip_suffix('}'))
-        {
-            // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: `${` +
-            // blank/newline/`|` is a bash-5.3 nofork command substitution
-            // (`${ cmd; }` / `${| cmd; }`), executed by function_substitute
-            // (subst.c:6917) rather than the parameter machinery. The body
-            // must be a terminated command list (`;`/newline before `}`).
-            if let Some(introducer) = name.chars().next() {
-                if crate::executor::command_substitution::funsub_introducer(introducer).is_some() {
-                    let body = &name[1..];
-                    if crate::executor::command_substitution::funsub_body_is_terminated(body) {
-                        let valsub = introducer == '|';
-                        return protect_command_substitution_output(
-                            &substitution_result_visible_text(
-                                &self.function_substitute(body, valsub),
-                            ),
-                        );
+        // rubash#3045: take the whole-word `${...}` arm only when the word
+        // IS one `${...}` fragment. The naive strip_prefix/strip_suffix
+        // below pairs the first `${` with the LAST `}` — for a
+        // multi-fragment word ending in `}` (`${a:-d}/${a:=x}`) it
+        // mis-extracts the body as `a:-d}/${a:=x` and, worse, installs a
+        // spurious fragment site (word, 0) before delegating to the
+        // embedded walker, which then keys the same fragments one level
+        // deeper ([0, 0] / [0, 1]). The cross-pass memos the apply pass
+        // keys at [0] / [1] — the rubash#1169 frozen-fragment map and the
+        // `:=` applied-value memo — then miss on the render, so an
+        // earlier fragment re-derives against the post-assignment value
+        // and a `$(...)` alternate can re-execute. The same
+        // strip-prefix/strip-suffix pitfall is documented at
+        // parameter_ops.rs:345-351; use the brace-matching whole-word
+        // check here, so multi-fragment words fall through to the
+        // embedded walker (which is also the arm's own delegation for
+        // them, via expand_braced_parameter_word) with no spurious
+        // site. Genuine whole-word fragments — including the `${ cmd; }`
+        // / `${| cmd; }` nofork forms above, whose braces match at the
+        // word end — still take this arm unchanged.
+        if braced_parameter_spans_whole_word(word) {
+            if let Some(name) = word
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_suffix('}'))
+            {
+                // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: `${` +
+                // blank/newline/`|` is a bash-5.3 nofork command substitution
+                // (`${ cmd; }` / `${| cmd; }`), executed by function_substitute
+                // (subst.c:6917) rather than the parameter machinery. The body
+                // must be a terminated command list (`;`/newline before `}`).
+                if let Some(introducer) = name.chars().next() {
+                    if crate::executor::command_substitution::funsub_introducer(introducer)
+                        .is_some()
+                    {
+                        let body = &name[1..];
+                        if crate::executor::command_substitution::funsub_body_is_terminated(body) {
+                            let valsub = introducer == '|';
+                            return protect_command_substitution_output(
+                                &substitution_result_visible_text(
+                                    &self.function_substitute(body, valsub),
+                                ),
+                            );
+                        }
                     }
                 }
+                // When the word IS the `${}` fragment being expanded (no
+                // enclosing fragment site), record site (word, 0) so the
+                // `:=`/`-=` layered re-checks dedup subscript side effects
+                // (SUB_RES_XPASS). An active site means the `${` walker arm
+                // already named this fragment — keep it.
+                let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
+                    .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
+                return self.expand_braced_parameter_word(word, name);
             }
-            // When the word IS the `${}` fragment being expanded (no
-            // enclosing fragment site), record site (word, 0) so the
-            // `:=`/`-=` layered re-checks dedup subscript side effects
-            // (SUB_RES_XPASS). An active site means the `${` walker arm
-            // already named this fragment — keep it.
-            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
-                .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
-            return self.expand_braced_parameter_word(word, name);
         }
 
         if let Some(name) = word.strip_prefix('$') {
