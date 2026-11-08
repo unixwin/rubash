@@ -345,6 +345,13 @@ where
 
     if let Some(command) = command {
         let Some(program) = crate::executor::path::find_user_command(command, env_vars) else {
+            // The failure report names and probes the real file: fold
+            // the stored E400 pair to the raw char for every probe and
+            // diagnostic in this block (rubash#3076). The success path
+            // keeps `command` as invoked (argv0 seeding).
+            let folded_command =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(command);
+            let command = folded_command.as_str();
             // GNU builtins/exec.def:151: a slash-containing operand bypasses
             // search_for_command and is handed to shell_execve directly, so
             // the diagnostic is the execve errno text (exec.def:231 ->
