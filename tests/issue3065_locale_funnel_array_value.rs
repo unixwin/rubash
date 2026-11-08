@@ -27,9 +27,17 @@
 //! stupidly_hack_special_variables call, builtins/declare.def:1105),
 //! while rubash's declare channel fires once — that count gap is the
 //! declare-channel family tracked by #3066 (same missing declare-side
-//! hack call as the declare conversion bind). The declare cell below
-//! pins only this issue's face: the value every warning names is the
-//! projection, never the storage render.
+//! hack call as the declare conversion bind).
+//!
+//! Scope split (captain review of PR #3080, 2026-11-08): three cells
+//! originally drafted here exposed sibling gaps with different
+//! mechanisms and were moved to #3097 with their assertions intact —
+//! the element-assign and for-bind channels never fire the funnel for
+//! an array locale variable at all, and the declare channel's funnel
+//! call projects through `attr_of` while declare maintains array-ness
+//! in the mark sets, so its warnings still name the storage render
+//! (the declare VALUE face lives in #3097 too; only the fire count
+//! stays with #3066).
 //!
 //! All expectations are the literal GNU bash 5.3.20 outputs for the
 //! same script files in a locale-clean environment (only C/POSIX
@@ -174,35 +182,6 @@ fn issue3065_assoc_projects_zero_key() {
 }
 
 #[test]
-fn issue3065_element_assign_and_append_use_new_projection() {
-    // Element assignment rebinds element 0; the funnel reads the NEW
-    // projection. Append leaves element 0 alone: no warning at all.
-    let (path, _stdout, stderr, code) =
-        run_script("elem-assign", "LC_ALL=(C); LC_ALL[0]=bogus_XX; :\n");
-    assert_eq!(code, Some(0));
-    assert_eq!(stderr, warn(&path, 1, "LC_ALL", "bogus_XX"));
-
-    let (_path, _stdout, stderr, code) =
-        run_script("append", "LC_ALL=(C); LC_ALL+=(bogus_XX); :\n");
-    assert_eq!(code, Some(0));
-    assert_eq!(stderr, "");
-}
-
-#[test]
-fn issue3065_for_and_export_channels_project() {
-    // A for bind stores a scalar into element 0 of the array; GNU
-    // warns once with that value. Export's bind hook likewise.
-    let (path, _stdout, stderr, code) =
-        run_script("for", "LC_ALL=(C); for LC_ALL in bogus_XX; do :; done\n");
-    assert_eq!(code, Some(0));
-    assert_eq!(stderr, warn(&path, 1, "LC_ALL", "bogus_XX"));
-
-    let (path, _stdout, stderr, code) = run_script("export", "export LC_ALL=(bogus_XX); :\n");
-    assert_eq!(code, Some(0));
-    assert_eq!(stderr, warn(&path, 1, "LC_ALL", "bogus_XX"));
-}
-
-#[test]
 fn issue3065_arith_category_gate_reads_projected_lc_all() {
     // The arithmetic channel's probe snapshot of LC_ALL projects too:
     // element 0 "" leaves the category gate open, so the LC_CTYPE
@@ -216,24 +195,6 @@ fn issue3065_arith_category_gate_reads_projected_lc_all() {
         run_script("arith-suppress", "LC_ALL=(bogus_XX); ((LC_CTYPE = 5)); :\n");
     assert_eq!(code, Some(0));
     assert_eq!(stderr, warn(&path, 1, "LC_ALL", "bogus_XX"));
-}
-
-#[test]
-fn issue3065_declare_compound_names_projection_never_storage() {
-    // Value face only (fire count is the #3066 declare family — see
-    // the module header): every warning declare emits for a compound
-    // bind names the projection; none may carry the storage render.
-    let (_path, _stdout, stderr, code) =
-        run_script("declare-compound", "declare LC_ALL=(bogus_XX); :\n");
-    assert_eq!(code, Some(0));
-    assert!(
-        stderr.contains("cannot change locale (bogus_XX)"),
-        "expected a warning naming the projection, got: {stderr}"
-    );
-    assert!(
-        !stderr.contains('\u{1d}') && !stderr.contains("[0]="),
-        "warning leaked the storage render: {stderr}"
-    );
 }
 
 #[test]
