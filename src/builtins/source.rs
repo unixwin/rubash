@@ -146,7 +146,12 @@ where
             return Ok(());
         }
     };
-    let filename = invocation.filename;
+    // Every diagnostic below names this filename and the reader is
+    // seeded with it: fold a stored E400 pair to the raw char once,
+    // here (rubash#3076; resolution folded in invocation.rs).
+    let folded_filename =
+        crate::executor::substitution_metadata::fold_literal_char_escapes(invocation.filename);
+    let filename = folded_filename.as_str();
 
     if let Some(process_source) = filename
         .strip_prefix("<(")

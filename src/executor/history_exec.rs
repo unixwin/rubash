@@ -466,6 +466,11 @@ pub(in crate::executor) fn execute_history_session(
                 );
                 return Ok(null_filename_status);
             }
+            // The resolved filename (operand or $HISTFILE) names a
+            // real file: fold a stored E400 pair to the raw char
+            // before the path translation and every open below
+            // (rubash#3076).
+            let path = crate::executor::substitution_metadata::fold_literal_char_escapes(&path);
             // Translate Git-Bash/POSIX spellings (/c/..., /dev/null) to the
             // Windows forms the file APIs need; children see the same file.
             let path =
