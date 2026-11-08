@@ -1172,6 +1172,31 @@ pub(crate) fn reset_for_subshell_child(env_vars: &mut VarTable) {
     reset_for_subshell_inner(env_vars, true);
 }
 
+/// Background-wrapper respawn (rubash#2982): the `rubash -c` child
+/// re-defines the parent's functions from a textual prelude, so its
+/// function table is incomplete until the prelude has been evaluated —
+/// and under functrace/errtrace reset_for_subshell_child leaves the
+/// DEBUG and ERR traps live, so they can fire while handler functions
+/// (or their callees) do not exist yet, and the failure cascades
+/// through the ERR trap (whose handler is likewise undefined). GNU's
+/// forked async child never has this window: execute_cmd.c:1576
+/// execute_in_subshell copies the table whole, so the traps only ever
+/// fire with every function defined. Force-reset DEBUG and ERR in the
+/// transported table (the spawn site re-arms them after the prelude, so
+/// the body still runs traced exactly as GNU's forked child).
+/// In-process subshells are unaffected — they keep the shared
+/// reset_for_subshell_child rule, and their table is complete from the
+/// start. (The observed trap errors were downstream of the prelude
+/// parse truncation, rubash#2982 defect C1, which left the table
+/// partial when the trap fired before the body; this reset closes the
+/// window as defense-in-depth for the textual respawn.)
+pub(crate) fn reset_traps_for_background_wrapper(env_vars: &mut VarTable) {
+    let mut reset = reset_trap_signals(env_vars);
+    reset.insert("DEBUG".to_string());
+    reset.insert("ERR".to_string());
+    store_reset_traps(env_vars, reset);
+}
+
 fn reset_for_subshell_inner(env_vars: &mut VarTable, inherit_errtrace: bool) {
     let mut reset = reset_trap_signals(env_vars);
     for signal in trap_list(env_vars) {

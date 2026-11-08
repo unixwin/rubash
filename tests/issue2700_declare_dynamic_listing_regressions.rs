@@ -21,10 +21,12 @@
 //! merge adjudicates them by that class instead of mark sets the
 //! dynamics never carry.
 //!
-//! Two documented exclusions from the byte-compared name sets, both
-//! pre-existing faces outside this finding: ours lists THIS_SH (a
-//! pending product decision) and does not materialize OLDPWD at
-//! startup (GNU lists it in -p).
+//! One documented exclusion from the byte-compared name sets, a
+//! pre-existing face outside this finding: ours lists THIS_SH (a
+//! pending product decision). (A second exclusion used to cover
+//! OLDPWD, which ours did not surface in unfiltered listings; the
+//! rubash#2972 candidate-chain completion lists the startup
+//! exported-unset cell exactly like GNU, so the exclusion is gone.)
 //!
 //! Expectations byte-verified against the GNU bash 5.3.20 oracle with
 //! script-file and -c probes.
@@ -89,17 +91,18 @@ fn names(list: &[&str]) -> BTreeSet<String> {
 fn issue2700_filtered_listings_cover_the_dynamic_registry() {
     let dir = scratch("filtered");
     // D1: declare -i — GNU lists BASHPID EUID HISTCMD OPTIND PPID
-    // RANDOM SRANDOM UID, plus SECONDS once SECONDS has been read:
-    // GNU's att_integer on SECONDS is LAZY (get_seconds earns it via
-    // set_int_value, variables.c:1294-1295), while `declare -p SECONDS`
-    // renders -i unconditionally. Rubash models the class statically
-    // (SECONDS is an integer variable), so SECONDS is always listed.
+    // RANDOM SRANDOM UID, plus SECONDS only once SECONDS has been
+    // read: GNU's att_integer on SECONDS is LAZY (get_seconds earns
+    // it via set_int_value, variables.c:1294-1295), while
+    // `declare -p SECONDS` renders -i unconditionally. This pin
+    // originally modeled the class statically (SECONDS always
+    // listed); rubash#2973 replaced that with the stateful cell
+    // model, so the unread SECONDS this script lists is absent —
+    // the GNU shape, byte-verified against the oracle.
     let out = run_script(&dir, "declare -i\n");
     assert_eq!(
         listing_names(&out),
-        names(&[
-            "BASHPID", "EUID", "HISTCMD", "OPTIND", "PPID", "RANDOM", "SECONDS", "SRANDOM", "UID"
-        ]),
+        names(&["BASHPID", "EUID", "HISTCMD", "OPTIND", "PPID", "RANDOM", "SRANDOM", "UID"]),
         "declare -i listing: {out}"
     );
     // D2 + D3: declare -a — GROUPS present, BASH_LINENO renders its
@@ -184,6 +187,7 @@ fn issue2700_full_listings_match_gnus_registry_visibility() {
             "IFS",
             "LINENO",
             "MACHTYPE",
+            "OLDPWD",
             "OPTERR",
             "OPTIND",
             "OSTYPE",

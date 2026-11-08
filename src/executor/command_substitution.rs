@@ -857,6 +857,34 @@ impl Executor {
             }
             return String::new();
         }
+        // GNU dispatches a simple command function-first: execute_cmd.c
+        // execute_simple_command finds a function before any builtin or
+        // PATH search, and subst.c:7143 command_substitute runs the body
+        // through parse_and_execute, so the same order applies inside
+        // $(...). None of the shortcut arms below consults the function
+        // table — the hardcoded true/false/:/pwd/cd arms, the
+        // echo/printf/cat faces, and the external spawner would all run
+        // the builtin/external instead of a function of the same name
+        // (rubash#2984: `$(host)` in bats-format-junit ran /usr/bin/host
+        // and its usage text polluted the junit stderr assertions).
+        // Decline the whole family to the real parser/executor when the
+        // body's first word names a defined function — the same
+        // function-first ordering the typed evaluator's
+        // run_function_command_substitution provides. A false positive is
+        // impossible (the check is an exact table lookup) and routing to
+        // the real executor is always correct, only slower. Aliases are
+        // not spliced here, so an alias for a function whose name also
+        // resolves externally stays on the shortcut path; the typed
+        // evaluator, which splices before its function check, owns that
+        // edge.
+        if let Some(name) = comsub_first_word(source) {
+            if self.shell_state.functions.contains_key(name) {
+                if let Some(output) = self.command_list_substitution_output(source, context) {
+                    return output;
+                }
+                return String::new();
+            }
+        }
         // GNU execute_cmd.c:4648-4649: every simple command — `true`,
         // `false`, `:` included — prints its xtrace head line AND fires an
         // inherited DEBUG trap inside the substitution child (the comsub
@@ -3022,6 +3050,25 @@ fn command_substitution_body_is_trivial(source: &str) -> bool {
                 | b'_' | b'-' | b'+' | b'=' | b'.' | b',' | b'/' | b':' | b'@'
                 | b'%' | b'^')
         })
+}
+
+/// First word of a command-substitution body for the function-first
+/// disqualification above: the leading whitespace-delimited token with one
+/// layer of matching quotes stripped (`"host"` and `'host'` still name the
+/// function `host`). Only the exact name is looked up, so a token that is
+/// not a plain name can never false-positive into the decline.
+fn comsub_first_word(source: &str) -> Option<&str> {
+    let first = source.trim_start().split_whitespace().next()?;
+    let first = first
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| {
+            first
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or(first);
+    (!first.is_empty()).then_some(first)
 }
 
 fn strip_command_substitution_comments(source: &str) -> String {

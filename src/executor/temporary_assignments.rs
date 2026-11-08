@@ -1593,6 +1593,15 @@ impl Executor {
                 .env_vars
                 .insert(SECONDS_OFFSET.to_string(), (assigned - elapsed).to_string());
             set_process_env(base_name, assigned.to_string());
+            // The assignment stores the literal into the dynamic
+            // cell (variables.c bind_variable): a listing before the
+            // next read renders it — WITHOUT the integer attribute,
+            // which only a getter fire earns (rubash#2973).
+            self.shell_state
+                .dynamic_cells
+                .borrow_mut()
+                .values
+                .insert(base_name.to_string(), value.to_string());
             return true;
         }
         if base_name == "RANDOM" && !append && !dynamic_plain {
@@ -1632,6 +1641,13 @@ impl Executor {
                 self.shell_state.random_state.rseed.set(0);
                 self.shell_state.random_state.last_value.set(0);
             }
+            // assign_random leaves the assigned literal in the cell
+            // until the next read draws (rubash#2973).
+            self.shell_state
+                .dynamic_cells
+                .borrow_mut()
+                .values
+                .insert(base_name.to_string(), value.clone());
             set_process_env(base_name, value);
             return true;
         }
