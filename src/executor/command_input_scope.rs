@@ -454,8 +454,15 @@ impl Executor {
         // had already closed it — GNU's undo chain likewise ends at
         // the binding the parent held before the whole list.
         self.restore_dynamic_close_snapshots(saved_dynamic_closes);
-        for (name, fd) in &bound_dynamic_fds {
-            self.close_bound_dynamic_fd(name, *fd)?;
+        // rubash#2775: GNU registers the undo for a REDIR_VARASSIGN
+        // entry only `if (varassign_redir_autoclose)` (redir.c:972,
+        // twins 1091/1153), so with varredir_close OFF the scope's
+        // `{var}` bindings persist past the compound command, like a
+        // plain command's; only the option's ON arm closes them here.
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close") {
+            for (name, fd) in &bound_dynamic_fds {
+                self.close_bound_dynamic_fd(name, *fd)?;
+            }
         }
         result
     }
@@ -613,8 +620,16 @@ impl Executor {
         saved_dynamic_closes: Vec<SavedDynamicClose>,
     ) {
         self.restore_dynamic_close_snapshots(saved_dynamic_closes);
-        for (name, fd) in bound_dynamic_fds {
-            let _ = self.close_bound_dynamic_fd(name, *fd);
+        // rubash#2775: the bound descriptors close on unwind only
+        // under varredir_close — with the option off GNU has no undo
+        // record for the varassign at all (redir.c:972), on failure
+        // paths as on success paths. The close snapshots above are a
+        // different undo family (the pass's closes of the CALLER's
+        // descriptors) and replay unconditionally.
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close") {
+            for (name, fd) in bound_dynamic_fds {
+                let _ = self.close_bound_dynamic_fd(name, *fd);
+            }
         }
     }
 
