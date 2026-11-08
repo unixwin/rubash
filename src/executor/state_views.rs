@@ -301,8 +301,8 @@ impl Executor {
         let env_vars = &self.shell_state.env_vars;
         let empty = std::collections::HashSet::new();
         let mut names = crate::builtins::declare::declaration_names_to_print(
-            env_vars, false, false, false, false, false, false, false, false, &empty, &empty,
-            &empty,
+            env_vars, false, false, false, false, false, false, false, false, false, false, &empty,
+            &empty, &empty,
         );
         // The listing merges the dynamic views whose cells live
         // outside the table (declare_local.rs's listing rule).
@@ -313,15 +313,13 @@ impl Executor {
                 names.push(name.to_string());
             }
         }
-        // Declared-but-unset globals have no table cell, and the
-        // builtin's bare listing (whose name set this is) currently
-        // omits them — GNU's listing includes them (variables.c
-        // print_var_list walks every shell_variable). The inspection
-        // set is the visible set (§7.2), so the declared-unset marks
-        // merge in here; each name still renders through the shared
-        // printer. The builtin's own listing is unchanged (recorded
-        // as a divergence in the cluster REPORT, not silently
-        // "fixed" from the view side).
+        // Declared-but-unset globals have no table cell. The
+        // builtin's bare listing includes them since rubash#2972
+        // (declaration_names_to_print chains the declared-unset
+        // marks, matching variables.c print_var_list walking every
+        // shell_variable); this merge stays as a belt-and-braces
+        // union so the inspection set (§7.2) can never be narrower
+        // than the builtin's own listing.
         for name in env_vars.marked_names(DECLARED_UNSET_VARS) {
             if !name.starts_with("__RUBASH_") && !names.iter().any(|listed| listed == &name) {
                 names.push(name);
