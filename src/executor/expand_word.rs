@@ -868,7 +868,11 @@ impl Executor {
         let expanded = if compound_assignment {
             self.expand_embedded_parameters_compound(value)
         } else if tilde_first {
-            self.expand_embedded_parameters(&self.expand_assignment_tilde(value))
+            // rubash#2651: the tilde pass result is data for the rest
+            // of the walk (GNU subst.c:11862 add_quoted_string); the
+            // protected form carrier-encodes the resolved prefixes so
+            // this second walk cannot rescan them.
+            self.expand_embedded_parameters(&self.expand_assignment_tilde_protected(value))
         } else {
             self.expand_embedded_parameters(value)
         };
