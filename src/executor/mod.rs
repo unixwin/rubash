@@ -600,6 +600,22 @@ pub(in crate::executor) struct SubshellProcessSave {
     pub(in crate::executor) procsub_stream_children: HashMap<u32, bool>,
 }
 
+/// rubash#3071: one apply_temporary_assignments frame's record of the
+/// values it actually bound, keyed by the exact assignment word (name
+/// as written, cooked value text) that produced each bind, plus the
+/// env name the value was bound under. The command's word list rides
+/// along as the frame's identity: compose_external_environment may use
+/// a record only for the very command whose apply created the frame
+/// (its spawns run under that frame), never for a different command
+/// that merely executes while the frame is live (a pipeline element
+/// composed by the spawner inside a tempenv'd function call — its RHS
+/// must expand against the live table, not replay the call's binds).
+#[derive(Debug, Default)]
+pub(in crate::executor) struct TempenvBoundFrame {
+    pub(in crate::executor) words: Vec<String>,
+    pub(in crate::executor) records: Vec<(String, String, String, String)>,
+}
+
 /// Command executor
 #[derive(Debug)]
 pub struct Executor {
@@ -1237,6 +1253,19 @@ pub struct Executor {
     /// restore_temporary_assignments so nested commands truncate the
     /// tempenv-name stack to the boundary recorded by the outer call.
     tempenv_marks: Vec<usize>,
+    /// rubash#3071: bound-value records per tempenv frame, pushed and
+    /// popped in lockstep with tempenv_marks. GNU variables.c:3536
+    /// assign_in_env expands a prefix RHS exactly once and the child
+    /// environment carries that literal result; rubash's spawn-time
+    /// env composition (compose_external_environment) re-expanded the
+    /// raw RHS against the post-bind table, so a self-referencing RHS
+    /// (`v="p${v}q" printenv v`) expanded twice. The records let the
+    /// composition reuse the value the apply already bound instead of
+    /// expanding again; composition paths whose assignments were never
+    /// applied on this executor (the concurrent pipeline spawner) find
+    /// no frame for their command and keep expanding — once, against
+    /// the unbound table, which is exactly their tempenv application.
+    tempenv_bound_frames: Vec<TempenvBoundFrame>,
     /// GNU variables.c:2604-2620 make_local_variable (was_tmpvar): a
     /// `declare`/`typeset`/`local` operand whose name is bound by this
     /// command's own `name=value` prefix promotes the tempenv binding to a

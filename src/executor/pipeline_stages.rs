@@ -755,8 +755,11 @@ impl Executor {
         let assignment_raws = (materialized_command.assignment_raws.len()
             == materialized_command.assignments.len())
         .then(|| materialized_command.assignment_raws.as_slice());
-        let (temporary_assignments, assignments_failed) = subshell
-            .apply_temporary_assignments(&materialized_command.assignments, assignment_raws);
+        let (temporary_assignments, assignments_failed) = subshell.apply_temporary_assignments(
+            &materialized_command.assignments,
+            assignment_raws,
+            &materialized_command.words,
+        );
         // GNU variables.c push_context: the call tempenv becomes the
         // function's variable context — recorded so a posix special
         // builtin's merged tempenv inside the body can tell a context
