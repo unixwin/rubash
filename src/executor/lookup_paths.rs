@@ -244,8 +244,7 @@ impl Executor {
         // once) only when executable; the PATH enumeration below
         // never applies to it (GNU absolute_program).
         if crate::executor::path::has_path_separator(name) {
-            if crate::executor::path::slash_name_is_describable(name, &self.shell_state.env_vars)
-            {
+            if crate::executor::path::slash_name_is_describable(name, &self.shell_state.env_vars) {
                 paths.push(name.to_string());
             }
             return paths;

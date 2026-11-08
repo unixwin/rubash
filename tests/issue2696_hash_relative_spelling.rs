@@ -77,21 +77,13 @@ fn hash_records_the_as_found_relative_spelling() {
     );
     // The `hash` listing names the recorded spelling, never the
     // absolutized form.
-    assert!(
-        out.stdout.contains("./rel1/foo"),
-        "stdout={:?}",
-        out.stdout
-    );
+    assert!(out.stdout.contains("./rel1/foo"), "stdout={:?}", out.stdout);
     assert!(
         !out.stdout.contains(&format!("{}/rel1/foo", root.display())),
         "absolutized spelling leaked: stdout={:?}",
         out.stdout
     );
-    assert!(
-        out.stdout.ends_with("rc=127\n"),
-        "stdout={:?}",
-        out.stdout
-    );
+    assert!(out.stdout.ends_with("rc=127\n"), "stdout={:?}", out.stdout);
     // The post-cd failure is the verbatim recorded name failing
     // ENOENT (line 6), not "command not found".
     assert_eq!(
@@ -104,13 +96,12 @@ fn hash_records_the_as_found_relative_spelling() {
 #[test]
 fn hash_records_absolute_element_verbatim() {
     let root = fixture("absolute");
-    let body = format!(
-        "PATH=\"$FIX/rel1:/usr/bin:/bin\"\nfoo\ntype foo\n"
-    );
+    let body = format!("PATH=\"$FIX/rel1:/usr/bin:/bin\"\nfoo\ntype foo\n");
     let out = run(&root, &body);
     let abs = format!("{}/rel1/foo", root.display());
     assert!(
-        out.stdout.contains(&format!("FOO-RAN\nfoo is hashed ({abs})\n")),
+        out.stdout
+            .contains(&format!("FOO-RAN\nfoo is hashed ({abs})\n")),
         "stdout={:?}",
         out.stdout
     );

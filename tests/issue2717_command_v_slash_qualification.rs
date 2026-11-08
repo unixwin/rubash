@@ -63,7 +63,11 @@ fn write(path: &Path, content: &str, mode: u32) {
 fn fixture(tag: &str) -> PathBuf {
     let root = scratch(tag);
     write(&root.join("seed.txt"), "data\n", 0o644);
-    write(&root.join("rel1").join("foo"), "#!/bin/sh\necho FOO-RAN\n", 0o755);
+    write(
+        &root.join("rel1").join("foo"),
+        "#!/bin/sh\necho FOO-RAN\n",
+        0o755,
+    );
     std::fs::create_dir_all(root.join("somedir")).expect("somedir");
     write(&root.join("noexecdir").join("bar"), "x\n", 0o644);
     root
@@ -118,7 +122,11 @@ fn path_found_non_executable_keeps_lose_on_report() {
     // GNU reports the file_to_lose_on hit (rc 0). The reported
     // spelling is the walk's join; only the qualification (found,
     // rc 0) is pinned here.
-    assert!(out.stdout.contains("noexecdir/bar"), "stdout={:?}", out.stdout);
+    assert!(
+        out.stdout.contains("noexecdir/bar"),
+        "stdout={:?}",
+        out.stdout
+    );
     assert!(out.stdout.ends_with("rc=0\n"), "stdout={:?}", out.stdout);
     assert_eq!(out.stderr, "");
     assert_eq!(out.rc, 0);

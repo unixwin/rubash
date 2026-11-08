@@ -3675,13 +3675,12 @@ impl Executor {
                 "diagnostic prefix contains an interior NUL",
             )
         })?;
-        let fail_enoent_c =
-            CString::new(fail_enoent_text).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "diagnostic text contains an interior NUL",
-                )
-            })?;
+        let fail_enoent_c = CString::new(fail_enoent_text).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "diagnostic text contains an interior NUL",
+            )
+        })?;
 
         // ---- fork: the parent returns the pid at once, no sync. ----
         let pid = unsafe { libc::fork() };
@@ -4728,7 +4727,11 @@ fn spawn_error_diagnostic(
     // no libc dependency is needed for this classification.
     const OS_ERROR_FILE_NOT_FOUND: i32 = 2;
     if error.raw_os_error() != Some(OS_ERROR_FILE_NOT_FOUND) {
-        return (crate::posix_errors::message(error).to_string(), EX_NOEXEC, false);
+        return (
+            crate::posix_errors::message(error).to_string(),
+            EX_NOEXEC,
+            false,
+        );
     }
     // errno == ENOENT: the status is EX_NOTFOUND unless the file itself
     // proves the #! bad-interpreter refusal (EX_NOEXEC). The probes

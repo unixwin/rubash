@@ -113,9 +113,6 @@ fn exec_directory_through_path_element_stays_not_found_127() {
     let root = fixture("pathdir");
     let out = run(&root, "PATH=./pdir:/usr/bin:/bin\nexec dircmd\n");
     assert_eq!(out.stdout, "");
-    assert_eq!(
-        out.stderr,
-        "case.sh: line 2: exec: dircmd: not found\n"
-    );
+    assert_eq!(out.stderr, "case.sh: line 2: exec: dircmd: not found\n");
     assert_eq!(out.rc, 127);
 }
