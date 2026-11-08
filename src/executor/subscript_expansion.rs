@@ -15,7 +15,7 @@
 //! re-expanded.
 
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::{ASSIGN_HOISTED_SQUOTE, DATA_DOLLAR, STORAGE_WORD_PREFIX};
 
 /// GNU `array_expand_once` (arrayfunc.c:50) / `SET_VFLAGS`
 /// (builtins/common.h:277-289) provenance for a subscript reaching an
@@ -2224,7 +2224,7 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
     let mut rest = text;
     let mut saw_span = false;
     while !rest.is_empty() {
-        // '\u{E307}' is the compound-assignment hoisted single-quote
+        // ASSIGN_HOISTED_SQUOTE is the compound-assignment hoisted single-quote
         // sentinel (SQ_DATA, assignment_expansion.rs) and crate::executor::markers::DATA_SQUOTE is the
         // embedded-parameter walker's literal-single-quote data marker —
         // arithmetic input arrives with `'` already converted to `\x17`
@@ -2233,8 +2233,8 @@ pub(in crate::executor) fn wholly_single_quoted_literal(text: &str) -> Option<St
         // carry the same "no expansion inside" guarantee as a literal `'`.
         let (inner, close) = if let Some(inner) = rest.strip_prefix('\'') {
             (inner, '\'')
-        } else if let Some(inner) = rest.strip_prefix('\u{E307}') {
-            (inner, '\u{E307}')
+        } else if let Some(inner) = rest.strip_prefix(ASSIGN_HOISTED_SQUOTE) {
+            (inner, ASSIGN_HOISTED_SQUOTE)
         } else if let Some(inner) = rest.strip_prefix(crate::executor::markers::DATA_SQUOTE) {
             (inner, crate::executor::markers::DATA_SQUOTE)
         } else {

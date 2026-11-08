@@ -61,7 +61,10 @@ where
                 format_array_value(value)
             )
         }
-    } else if value.starts_with(concat!("\u{1d}", "(")) {
+    } else if value
+        .strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX_STR)
+        .is_some_and(|rest| rest.starts_with('('))
+    {
         let attrs = declaration_array_attrs(attrs);
         writeln!(
             stdout,
