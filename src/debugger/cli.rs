@@ -406,7 +406,7 @@ impl CliStopLoop {
         match &outcome.result {
             EvaluationResult::Value(value) => {
                 if purpose == PendingEval::Print {
-                    self.line(value);
+                    self.line(&super::inspect::display_value(value));
                 }
             }
             EvaluationResult::Status(status) => {
