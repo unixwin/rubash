@@ -1108,13 +1108,17 @@ fn dap_watch_registration_step_diff_and_banner() {
 /// pair for the ESC byte), but every rendered face decodes at
 /// the render boundary — the watch registration's result, the
 /// hover answer for the bare name, and the step-diff banner
-/// all carry the decoded value.
+/// all carry the decoded value. The program pins
+/// `LC_ALL=C.UTF-8` on its first line: under a non-UTF-8 locale the
+/// `$'\u...'` escape stays literal by design (GNU u32tocesc fallback,
+/// rubash#353/#1837), which is an environment property of the runner,
+/// not this face's behaviour.
 #[test]
 fn dap_watch_and_hover_render_decoded_carrier_values() {
     let _span = GateTestSpan::new();
     let program = program_file(
         "watchdecode",
-        "V=$'\\uE314'\nW=1\nV=$'A\\033B'\necho done\n",
+        "LC_ALL=C.UTF-8\nV=$'\\uE314'\nW=1\nV=$'A\\033B'\necho done\n",
     );
     let (mut client, server) = start_server(DapLaunchPreset::default());
     handshake(
@@ -1131,7 +1135,7 @@ fn dap_watch_and_hover_render_decoded_carrier_values() {
             ),
             (
                 "breakpoints",
-                Json::Array(vec![Json::obj(vec![("line", Json::Int(2))])]),
+                Json::Array(vec![Json::obj(vec![("line", Json::Int(3))])]),
             ),
         ]),
     );

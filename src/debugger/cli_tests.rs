@@ -210,13 +210,20 @@ continue
 /// evaluation outcome — renders the decoded value, never the
 /// storage-form carrier pairs. `info variables` prints the
 /// declaration text, which the shared printer already renders
-/// decoded; it is pinned here in its decoded form.
+/// decoded; it is pinned here in its decoded form. The program pins
+/// `LC_ALL=C.UTF-8` on its first line: under a non-UTF-8 locale the
+/// `$'\u...'` escape stays literal by design (GNU u32tocesc fallback,
+/// rubash#353/#1837), which is an environment property of the runner,
+/// not this face's behaviour.
 #[test]
 fn print_renders_decoded_carrier_values() {
     let _span = GateTestSpan::new();
-    let (dir, program) = program_file("printdecode", "pua=$'\\uE314'\nesc=$'A\\033B'\necho done\n");
+    let (dir, program) = program_file(
+        "printdecode",
+        "LC_ALL=C.UTF-8\npua=$'\\uE314'\nesc=$'A\\033B'\necho done\n",
+    );
     let commands = "\
-break 3
+break 4
 continue
 print pua
 print $pua
