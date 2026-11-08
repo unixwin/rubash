@@ -47,6 +47,37 @@ impl Executor {
         {
             return Ok(false);
         }
+        // rubash#3004: the emulations stand in for the PATH binary, and
+        // the spawn funnel hands that binary pair-DECODED argv (path.rs
+        // decode_bytes; GNU execute_cmd.c:6139 shell_execve passes the
+        // raw word bytes). Cooked words are transport text — a user
+        // carrier byte rides the raw-byte marker pair (markers.rs
+        // storage contract) — so decode the words once here; otherwise
+        // a filename operand reaches the filesystem with the pair's
+        // UTF-8 bytes as its name (a \x1c name landed on disk under its
+        // U+E000-pair spelling, which is also how t9902's fixture
+        // creation under the shell under test went wrong). Words with
+        // no transport pair pass through uncloned.
+        let decoded_cmd;
+        let cmd = if cmd
+            .words
+            .iter()
+            .any(|word| crate::executor::markers::contains_decodable_transport(word))
+        {
+            decoded_cmd = {
+                let mut decoded = cmd.clone();
+                for word in &mut decoded.words {
+                    *word =
+                        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
+                            word,
+                        );
+                }
+                decoded
+            };
+            &decoded_cmd
+        } else {
+            cmd
+        };
         let emulated = matches!(
             name,
             "/bin/pwd"
