@@ -1973,6 +1973,7 @@ impl Executor {
             no_closing_brace_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_bound_frames: Vec::new(),
             applying_temporary_assignments: false,
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),

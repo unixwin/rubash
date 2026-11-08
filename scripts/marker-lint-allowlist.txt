@@ -20,6 +20,12 @@ src/builtins/echo.rs | L3 | contains:PROTECTED_BACKSLASH | presence gate only: a
 src/builtins/echo.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/builtins/echo.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/builtins/echo.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/debugger/cli_tests.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/debugger/cli_tests.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/debugger/cli_tests.rs | L1 | \\u\{0*E400\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/debugger/cli_tests.rs | L2 | \\u\{0*1B\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/debugger/dap_tests.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/debugger/dap_tests.rs | L2 | \\u\{0*1B\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/debugger/json.rs | L2 | \\u\{0*1\} | test data: expected values / probe inputs spelled with marker literals in test code
 src/executor/alias_helpers.rs | L2 | \\u\{0*1F\} | glob character-class range table (cntrl class endpoint): data, not a marker reference
 src/executor/alias_helpers.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data

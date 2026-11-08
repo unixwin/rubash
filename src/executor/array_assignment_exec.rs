@@ -334,8 +334,20 @@ impl Executor {
                 index
             } else {
                 let eval_text;
+                let decoded_locale;
                 let mut eval_input = match raw_subscript {
                     Some(raw) if raw.contains('\'') => {
+                        // rubash#3023: a `$"..."` span in the raw subscript
+                        // is a double-quoted span with quote-syntax markup;
+                        // drop the dollar before the arith-context pass, or
+                        // the `$` glues onto the content (`a[$"x"'y']`
+                        // reached evalexp as `$"x'y'` instead of `x'y'`).
+                        let raw = if raw.contains("$\"") {
+                            decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
+                            decoded_locale.as_str()
+                        } else {
+                            raw
+                        };
                         eval_text = self.expand_arithmetic_special_parameters(raw);
                         eval_text.as_str()
                     }
@@ -752,6 +764,7 @@ impl Executor {
             index
         } else {
             let eval_text;
+            let decoded_locale;
             let mut eval_input = match raw_subscript {
                 // A single-quoted span survives GNU's arith-context expansion
                 // as literal text but does NOT protect the `$x` inside it —
@@ -760,7 +773,18 @@ impl Executor {
                 // time, so rebuild via the same expand_arithmetic_special_
                 // parameters pass the `${a[...]}` read path uses (sq -> \x17
                 // data, `$x`/`$((...))`/`$(...)` expand, dq removed).
+                // rubash#3023: a `$"..."` span in the raw subscript is a
+                // double-quoted span with quote-syntax markup; drop the
+                // dollar before the arith-context pass, or the `$` glues
+                // onto the content (`a[$"x"'y']` reached evalexp as
+                // `$"x'y'` instead of `x'y'`).
                 Some(raw) if raw.contains('\'') => {
+                    let raw = if raw.contains("$\"") {
+                        decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
+                        decoded_locale.as_str()
+                    } else {
+                        raw
+                    };
                     eval_text = self.expand_arithmetic_special_parameters(raw);
                     eval_text.as_str()
                 }

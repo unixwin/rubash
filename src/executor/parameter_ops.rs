@@ -598,7 +598,20 @@ pub(in crate::executor) fn is_parameter_error_name(name: &str) -> bool {
             .is_some_and(|name| !name.is_empty() && is_shell_name(name))
         || matches!(name, "#" | "@" | "*" | "?" | "$" | "-" | "0")
         || name.parse::<usize>().is_ok()
-        || parse_array_subscript(name).is_some()
+        // Array references, including `arr[@]`/`arr[*]` (subst.c:9954-9957).
+        // GNU arrayfunc.c:1297-1313 `tokenize_array_reference` requires
+        // the base before `[` to pass `valid_identifier` — a base like
+        // `foo/` is not an array name. `parse_array_subscript` alone does
+        // not check the base, so it accepted `foo/[/]` (pattern-
+        // substitution text: `${foo/[/]-}`) as an array reference and the
+        // operator arms re-read it as an array element, evaluating the `/`
+        // subscript arithmetically (rubash#3022). Require a legal
+        // identifier base, allowing the `!`-indirect form GNU accepts
+        // (`${!arr[0]-def}`), while `${#arr[0]-def}`, `${1[0]-def}` and
+        // `${@[0]-def}` are all bad substitution in GNU.
+        || parse_array_subscript(name).is_some_and(|(base, _)| {
+            is_shell_name(base) || base.strip_prefix('!').is_some_and(is_shell_name)
+        })
 }
 
 pub(in crate::executor) fn has_indirect_parameter_word_operator(name: &str) -> bool {
