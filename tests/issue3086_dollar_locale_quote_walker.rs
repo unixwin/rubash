@@ -42,13 +42,15 @@ fn run(script: &str) -> Outcome {
 fn expect_value(script: &str, expected_stdout: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 0,
+        out.code,
+        0,
         "{ctx}: rc must be 0; stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        out.stdout, expected_stdout,
+        out.stdout,
+        expected_stdout,
         "{ctx}: stdout mismatch; got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );

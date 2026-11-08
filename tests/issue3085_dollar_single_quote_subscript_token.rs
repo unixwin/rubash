@@ -47,7 +47,8 @@ fn run(script: &str) -> Outcome {
 fn expect_token_error(script: &str, needle: &str, ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 1,
+        out.code,
+        1,
         "{ctx}: rc must be 1; stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
@@ -71,12 +72,14 @@ fn expect_token_error(script: &str, needle: &str, ctx: &str) {
 fn expect_value(script: &str, expected_stdout: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 0,
+        out.code,
+        0,
         "{ctx}: rc must be 0; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert_eq!(
-        out.stdout, expected_stdout,
+        out.stdout,
+        expected_stdout,
         "{ctx}: stdout mismatch; got {:?}",
         String::from_utf8_lossy(&out.stdout)
     );
@@ -164,7 +167,8 @@ fn assoc_write_dollar_single_quote_key_decodes_bare() {
     // by the declare dump on the next line.
     let out = run("declare -A m; m[$'x y']=b; echo \"rc=$?\"; declare -p m");
     assert_eq!(
-        out.code, 0,
+        out.code,
+        0,
         "C8: rc must be 0; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );

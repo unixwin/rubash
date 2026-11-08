@@ -45,7 +45,8 @@ fn run(script: &str) -> Outcome {
 fn expect_diag(script: &str, needle: &str, ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.code, 1,
+        out.code,
+        1,
         "{ctx}: rc must be 1; stdout: {:?} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
