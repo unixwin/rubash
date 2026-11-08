@@ -1565,6 +1565,104 @@ fn alias_value_first_word(value: &str) -> &str {
     &trimmed[..end]
 }
 
+/// The rebuilt command context after an alias hop governed the
+/// resolution (rubash#2610): GNU's programmable_completions splices
+/// the alias value into pcomp_line in place of the command word and
+/// restarts the whole lookup, so the governing spec's generators run
+/// against the REBUILT line — build_arg_list (pcomplete.c:1004)
+/// hands the rebuilt first word as $1, and bind_compfunc_variables
+/// binds COMP_WORDS / COMP_CWORD / COMP_LINE from the rebuilt text.
+/// `words` is the rebuilt segment word list, `line` the rebuilt
+/// segment text, and `point` the segment point shifted by the total
+/// length difference (pcomp_ind += lendiff per hop).
+#[derive(Debug, Clone)]
+pub(crate) struct RebuiltCommandLine {
+    pub(crate) words: Vec<String>,
+    pub(crate) line: String,
+    pub(crate) point: usize,
+}
+
+/// [`resolve_compspec`] plus the alias-hop rebuild context: when the
+/// governing spec was reached through the progcomp_alias retry chain,
+/// the second element carries the rebuilt command line the spec's
+/// -F/-C generators must be bound with. All other arms (verbatim /
+/// basename / -D / -E / -I) bind the line as typed and yield None.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_compspec_with_rebuild<'a>(
+    specs: &'a CompletionRegistry,
+    words: &[String],
+    cur_idx: usize,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
+    segment_line: &str,
+    segment_point: usize,
+    wordbreaks: &str,
+) -> Option<(&'a Compspec, Option<RebuiltCommandLine>)> {
+    if words.is_empty() || cur_idx == 0 {
+        return resolve_compspec(specs, words, cur_idx, aliases, progcomp_alias)
+            .map(|cs| (cs, None));
+    }
+    let ocmd = words[0].as_str();
+    if let Some(cs) = lookup_command_compspec(specs, ocmd) {
+        return Some((cs, None));
+    }
+    if let Some(cs) = specs.get("-D") {
+        return Some((cs, None));
+    }
+    if !progcomp_alias {
+        return None;
+    }
+    // The alias retry chain, tracked over the word list and the
+    // segment text so a governing hop can hand the rebuilt line to
+    // the caller (the spec-only chain in resolve_command_compspec
+    // walks the same visited set over first words alone).
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(ocmd.to_string());
+    let mut cur_words: Vec<String> = words.to_vec();
+    let mut cur_line = segment_line.to_string();
+    let mut cur_point = segment_point as isize;
+    loop {
+        let alias = aliases.get(cur_words[0].as_str())?;
+        let value = alias.value.clone();
+        // Splice the alias value into the line in place of the
+        // current first word's token span (pcomp_line rebuild).
+        let tokens = tokenize_completion_region(&cur_line, wordbreaks);
+        let (span_start, span_end, _) = tokens.first()?;
+        let (span_start, span_end) = (*span_start, *span_end);
+        let value_words: Vec<String> = tokenize_completion_region(&value, wordbreaks)
+            .into_iter()
+            .map(|(_, _, text)| text)
+            .collect();
+        if value_words.is_empty() {
+            return None;
+        }
+        let mut new_words = value_words;
+        new_words.extend_from_slice(&cur_words[1..]);
+        let hop = new_words[0].clone();
+        if !visited.insert(hop.clone()) {
+            return None;
+        }
+        cur_point += value.len() as isize - (span_end - span_start) as isize;
+        cur_line = format!(
+            "{}{}{}",
+            &cur_line[..span_start],
+            value,
+            &cur_line[span_end..]
+        );
+        cur_words = new_words;
+        if let Some(cs) = lookup_command_compspec(specs, &hop) {
+            return Some((
+                cs,
+                Some(RebuiltCommandLine {
+                    words: cur_words,
+                    line: cur_line,
+                    point: cur_point.max(0) as usize,
+                }),
+            ));
+        }
+    }
+}
+
 /// Host completion hook. Given the in-progress command `line` and the `cursor`
 /// position, return completion candidates for the word under the cursor,
 /// honoring the compspec registered for the command (if any) and falling back

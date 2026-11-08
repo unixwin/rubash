@@ -5440,33 +5440,75 @@ impl Executor {
         );
         let (words, cur_idx, cur_word) =
             (split.words.clone(), split.cur_idx, split.cur_word.clone());
-        let spec = crate::builtins::complete::resolve_compspec(
+        let wordbreaks = crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars);
+        let (spec, rebuilt) = crate::builtins::complete::resolve_compspec_with_rebuild(
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
             &self.shell_state.aliases,
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
-        )
-        .cloned()?;
+            &split.segment_line,
+            split.segment_point,
+            &wordbreaks,
+        )?;
+        let spec = spec.clone();
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
             return None;
         }
-        let (cmd_name, prev_word, bind_words, cword): (String, String, Vec<String>, i64) =
-            if words.is_empty() {
-                ("_EmptycmD_".to_string(), String::new(), Vec::new(), -1)
+        // rubash#2610: when an alias hop governed, GNU restarts the
+        // lookup on the rebuilt line, so the generators bind the
+        // REBUILT word list (build_arg_list's $1/$3 come from it) and
+        // the rebuilt line text/point (bind_compfunc_variables).
+        let (cmd_name, prev_word, bind_words, cword, bind_line, bind_point): (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            String,
+            usize,
+        ) = if words.is_empty() {
+            (
+                "_EmptycmD_".to_string(),
+                String::new(),
+                Vec::new(),
+                -1,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        } else if let Some(rebuilt) = rebuilt {
+            let new_cword = cur_idx + (rebuilt.words.len() - words.len());
+            let prev = if new_cword >= 1 {
+                rebuilt
+                    .words
+                    .get(new_cword - 1)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
-                let prev = if cur_idx >= 1 {
-                    words.get(cur_idx - 1).cloned().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                (
-                    words.first().cloned().unwrap_or_default(),
-                    prev,
-                    words.clone(),
-                    cur_idx as i64,
-                )
+                String::new()
             };
+            (
+                rebuilt.words.first().cloned().unwrap_or_default(),
+                prev,
+                rebuilt.words,
+                new_cword as i64,
+                rebuilt.line,
+                rebuilt.point,
+            )
+        } else {
+            let prev = if cur_idx >= 1 {
+                words.get(cur_idx - 1).cloned().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (
+                words.first().cloned().unwrap_or_default(),
+                prev,
+                words.clone(),
+                cur_idx as i64,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        };
         let mut dynamic = crate::builtins::complete::CompgenDynamic::default();
         // pcomplete.c:1520-1531 gen_progcomp_completions: the governing
         // compspec's COPY becomes `pcomp_curcs` (with `pcomp_curcmd` =
@@ -5485,8 +5527,8 @@ impl Executor {
         if let Some(funcname) = spec.funcname.as_deref() {
             dynamic.function_candidates = self.run_completion_function_live(
                 funcname,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5497,8 +5539,8 @@ impl Executor {
         if let Some(command) = spec.command.as_deref() {
             dynamic.command_candidates = self.run_completion_command_live(
                 command,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
