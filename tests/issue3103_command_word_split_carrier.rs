@@ -108,6 +108,48 @@ fn command_args_split_keeps_carrier_bytes() {
 }
 
 #[test]
+fn no_split_point_value_stays_byte_identical() {
+    // Companion mechanism cell: the value carries carrier bytes but NO
+    // IFS byte (IFS=':' here), so the split must return exactly one
+    // field, byte-identical. On the unfixed tree the byte-domain
+    // splitter's re-encode dropped the pair tagging, the would-change
+    // gate then misfired (field != expanded), and the materialize /
+    // binding finalizers ate \x1c as IFS_GLUE and folded \x1f to '$'
+    // even though nothing was ever split.
+    for (octal, byte) in [("034", 0x1cu8), ("037", 0x1f)] {
+        let script = format!(
+            "raw=$(printf 'x\\{octal}y'); \
+             show() {{ printf '<%s>' \"$1\"; }}; \
+             a() {{ local IFS=':'; show $1; }}; \
+             a \"$raw\""
+        );
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"<x");
+        expected.push(byte);
+        expected.extend_from_slice(b"y>");
+        expect(
+            &script,
+            &expected,
+            &format!("no-split args value must keep data byte 0x{byte:02x}"),
+        );
+    }
+    expect(
+        "raw=$(printf 'x\\034y\\037z'); \
+         p() { local IFS=':'; set -- $1; printf '<%s>' \"$1\"; }; \
+         p \"$raw\"",
+        b"<x\x1cy\x1fz>",
+        "no-split set -- value must keep both carrier bytes",
+    );
+    expect(
+        "raw=$(printf 'x\\034y\\037z'); \
+         h() { local IFS=':'; for w in $1; do printf '<%s>' \"$w\"; done; }; \
+         h \"$raw\"",
+        b"<x\x1cy\x1fz>",
+        "no-split for-list value must keep both carrier bytes",
+    );
+}
+
+#[test]
 fn combined_value_matches_gnu_probe() {
     // The original #3103 evidence shape verbatim (probe-ml2): one value
     // carrying \x1c in the first field and \x1f in the second.
