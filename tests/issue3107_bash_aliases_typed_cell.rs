@@ -91,6 +91,32 @@ fn alias_overwrite_and_unalias_resync_materialized_cell() {
 }
 
 #[test]
+fn command_lookup_resyncs_materialized_bash_cmds_cell() {
+    // An ordinary external-command lookup inserts into hashed_filenames
+    // (hashcmd.c phash_insert) without any hash builtin running; the
+    // materialized BASH_CMDS cell must still track the owner table.
+    let (stdout, stderr, code, _) = run_script(
+        "lookup",
+        "declare -p BASH_CMDS\n\
+         ls >/dev/null\n\
+         declare -p BASH_CMDS\n\
+         printf '%s\\n' \"${BASH_CMDS[ls]}\"\n",
+    );
+    assert_success(&stdout, &stderr, code);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "stdout={stdout:?}");
+    assert_eq!(lines[0], "declare -A BASH_CMDS=()");
+    let Some(path) = lines[1]
+        .strip_prefix("declare -A BASH_CMDS=([ls]=\"")
+        .and_then(|rest| rest.strip_suffix("\" )"))
+    else {
+        panic!("stdout={stdout:?}");
+    };
+    assert!(path.ends_with("/ls"), "stdout={stdout:?}");
+    assert_eq!(lines[2], path, "stdout={stdout:?}");
+}
+
+#[test]
 fn hash_writes_resync_materialized_bash_cmds_cell() {
     let (stdout, stderr, code, _) = run_script(
         "hash-writes",
