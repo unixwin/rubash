@@ -470,8 +470,23 @@ impl Executor {
             // `:=`/`-=` layered re-checks dedup subscript side effects
             // (SUB_RES_XPASS). An active site means the `${` walker arm
             // already named this fragment — keep it.
-            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
-                .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
+            //
+            // rubash#3027: the `${`/`}` strip above also matches a word
+            // holding SEVERAL `${...}` fragments (`${a:+b}${a=b}` strips
+            // to the bogus name `a:+b}${a=b`), and
+            // expand_braced_parameter_word correctly declines such a word
+            // to the embedded walker — but this guard stayed alive for
+            // the whole walk, so the walker installed its own per-fragment
+            // guards underneath it and every fragment keyed one level
+            // deeper ([0, frag]) than the assignment pre-scan's freeze
+            // ([frag]). The freeze was therefore never found and the
+            // pre-scan's `${a=b}` bind leaked backwards into `${a:+b}`.
+            // Only a word that really is one fragment may claim site 0
+            // here — the same spans-whole-word gate the mutable whole-word
+            // entry (parameter_words.rs) applies before its own guard.
+            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active()
+                && braced_parameter_spans_whole_word(word))
+            .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
             return self.expand_braced_parameter_word(word, name);
         }
 
