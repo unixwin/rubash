@@ -63,7 +63,12 @@ src/executor/alias_helpers.rs::for ch in &text\[cursor\.min\(text\.len\(\)\)\.\.
 src/executor/arithmetic/expression.rs::is_shell_name_char\(\*ch as char\)
 src/executor/arithmetic/factor.rs::(is_shell_name_(char|start)\(ch as char\)|arithmetic_digit_value\(ch as char|peek\(\)\? as char)
 src/executor/arithmetic/lvalue.rs::(is_shell_name_char\(ch as char\)|peek\(\)\? as char)
-src/executor/arithmetic/mod.rs::(pair\[[0-9]+\] as char|as_bytes\(\)\[\*index\] as char|\(c as char\))
+# arithmetic/mod.rs: `decode_locale_quote_spans` (#3023) widens `b` only
+# after the `if b >= 0x80 { push_char(...); continue; }` guard directly
+# above, so the widened byte is ASCII by construction — never a UTF-8
+# continuation byte. The widened char is compared for equality only
+# (`'`, `$`, `"` dispatch), never passed to a predicate.
+src/executor/arithmetic/mod.rs::(pair\[[0-9]+\] as char|as_bytes\(\)\[\*index\] as char|\(c as char\)|let ch = b as char)
 src/executor/arithmetic/value.rs::is_shell_name_char\(bytes\[end\] as char\)
 src/executor/arrays/storage.rs::(out\.push\(byte as char\)|b'0' \+ .*as char)
 # builtin_matrix.rs: the widened bytes are option letters from

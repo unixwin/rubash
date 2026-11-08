@@ -170,6 +170,23 @@ impl Executor {
         // reads data. Resolve the escapes first so the walker never mistakes a
         // quoted `$`, `` ` `` or quote for an expansion (GNU subst.c
         // `expand_word_internal` sees the same already-dequoted characters).
+        //
+        // rubash#3023: a `$"..."` span in raw subscript text is a
+        // double-quoted span with quote-syntax markup (the lexer cooks it
+        // that way, but raw subscript text bypasses the lexer). Drop the
+        // dollar before the walker sees it — otherwise the `$` glues onto
+        // the content (`${a[$"1+2"]}` resolved to `$"1+2` and failed
+        // "operand expected"; assoc keys stored the literal `$"..."`).
+        // Runs after the `$'` decode above: a `$"` inside a decoded `$'...'`
+        // span is single-quoted data, and the helper's sq tracking leaves
+        // it alone.
+        let raw_owned_locale;
+        let raw = if raw.contains("$\"") {
+            raw_owned_locale = super::arithmetic::decode_locale_quote_spans(raw);
+            raw_owned_locale.as_str()
+        } else {
+            raw
+        };
         let masked = mask_subscript_escapes(raw);
         let expanded = self.expand_embedded_parameters(&masked);
         // Expansion-produced whitespace rides the \x1c/E309 data tags so the
