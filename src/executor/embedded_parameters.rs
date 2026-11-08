@@ -116,7 +116,8 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, false, true);
+        let result =
+            self.expand_embedded_parameters_inner(word, false, false, false, false, true, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -137,7 +138,8 @@ impl Executor {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result = self.expand_embedded_parameters_inner(word, false, false, true, false, false);
+        let result =
+            self.expand_embedded_parameters_inner(word, false, false, true, false, false, false);
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -197,7 +199,8 @@ impl Executor {
         // prior command's status. Snapshot and restore the overlay too so
         // the prompt pass is transparent to both read paths.
         let word_comsub_exit_before = self.word_expansion_comsub_exit.replace(None);
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, true, false);
+        let result =
+            self.expand_embedded_parameters_inner(word, false, false, false, true, false, false);
         self.last_command_substitution_status
             .set(comsub_status_before);
         self.word_expansion_comsub_exit.set(word_comsub_exit_before);
@@ -228,7 +231,38 @@ impl Executor {
     // inside quotes is marked \x1c so the field splitter keeps it glued
     // (posixexp2 37), while bare spaces stay splittable.
     pub(in crate::executor) fn expand_embedded_parameters_protect_ifs(&self, word: &str) -> String {
-        self.expand_embedded_parameters_with_context_inner(word, false, true)
+        self.expand_embedded_parameters_with_context_inner(word, false, true, false)
+    }
+
+    /// Alternate-word-half variant on the non-mut path (rubash#3088):
+    /// like `expand_embedded_parameters_protect_ifs`, but expansion-result
+    /// backslashes and single-quoted-span backslashes ride as the U+E30D
+    /// carrier through the caller's final unescape pass, which would
+    /// otherwise fold them as source escapes (GNU subst.c:4773/4807:
+    /// assembled data is never re-scanned as escape syntax). Live source
+    /// escapes still resolve in that pass — the fall-through backslash
+    /// arm stays unprotected, so source `\\` still collapses to one `\`
+    /// and `\q` still drops its backslash. The caller restores the
+    /// carrier after its pass.
+    pub(in crate::executor) fn expand_embedded_parameters_protect_ifs_and_data(
+        &self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_with_context_inner(word, false, true, true)
+    }
+
+    /// Non-mut data-protecting walk without IFS marking (rubash#3088):
+    /// the same expansion-result / single-quoted-span backslash
+    /// protection as `expand_embedded_parameters_protect_ifs_and_data`,
+    /// for callers whose final unescape pass is the double-quote one
+    /// (`unescape_parameter_operator_result`) rather than the unquoted
+    /// one — the `&self` quoted chain's operator arms. The caller
+    /// restores the carrier after its pass.
+    pub(in crate::executor) fn expand_embedded_parameters_protect_data(
+        &self,
+        word: &str,
+    ) -> String {
+        self.expand_embedded_parameters_with_context_inner(word, false, false, true)
     }
 
     pub(in crate::executor) fn expand_embedded_parameters_for_heredoc(&self, word: &str) -> String {
@@ -236,7 +270,7 @@ impl Executor {
     }
 
     fn expand_embedded_parameters_with_context(&self, word: &str, heredoc: bool) -> String {
-        self.expand_embedded_parameters_with_context_inner(word, heredoc, false)
+        self.expand_embedded_parameters_with_context_inner(word, heredoc, false, false)
     }
 
     fn expand_embedded_parameters_with_context_inner(
@@ -244,14 +278,22 @@ impl Executor {
         word: &str,
         heredoc: bool,
         protect_ifs: bool,
+        protect_data: bool,
     ) -> String {
         let depth = EXPAND_DEPTH.with(|d| d.get());
         if depth >= MAX_EXPAND_DEPTH {
             return word.to_string();
         }
         EXPAND_DEPTH.with(|d| d.set(depth + 1));
-        let result =
-            self.expand_embedded_parameters_inner(word, heredoc, protect_ifs, false, false, false);
+        let result = self.expand_embedded_parameters_inner(
+            word,
+            heredoc,
+            protect_ifs,
+            false,
+            false,
+            false,
+            protect_data,
+        );
         EXPAND_DEPTH.with(|d| d.set(depth));
         result
     }
@@ -264,6 +306,7 @@ impl Executor {
         preserve_quotes: bool,
         double_quoted: bool,
         protect_results: bool,
+        protect_data: bool,
     ) -> String {
         // TODO(subst.c/subst.h): This is a narrow parameter-expansion subset.
         // GNU Bash handles quoting state, operators like ${name:-word},
@@ -479,8 +522,11 @@ impl Executor {
                     // read_token_word hands it to add_quoted_string
                     // CTLESC-protected); in the protecting walk its
                     // backslashes ride as the carrier like any other
-                    // data backslash.
-                    if protect_results && quoted_ch == '\\' {
+                    // data backslash. rubash#3088: the alternate-word
+                    // walk also protects them (`protect_data`) — a
+                    // literal span's `\\` is data, not a source escape
+                    // to be collapsed by the caller's final unescape.
+                    if (protect_results || protect_data) && quoted_ch == '\\' {
                         output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                     } else {
                         output.push(quoted_ch);
@@ -618,7 +664,10 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('*') => {
@@ -627,7 +676,10 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('#') => {
@@ -722,8 +774,10 @@ impl Executor {
                             if preserve_quotes {
                                 push_preserved_expansion_output(&mut output, &value, in_double);
                             } else {
-                                output
-                                    .push_str(&protect_result_backslashes(&value, protect_results));
+                                output.push_str(&protect_result_backslashes(
+                                    &value,
+                                    protect_results || protect_data,
+                                ));
                             }
                             continue;
                         }
@@ -874,7 +928,10 @@ impl Executor {
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
                     } else {
-                        output.push_str(&protect_result_backslashes(&value, protect_results));
+                        output.push_str(&protect_result_backslashes(
+                            &value,
+                            protect_results || protect_data,
+                        ));
                     }
                 }
                 Some('(') => {
@@ -1238,7 +1295,10 @@ impl Executor {
                         if preserve_quotes {
                             push_preserved_expansion_output(&mut output, value, in_double);
                         } else {
-                            output.push_str(&protect_result_backslashes(value, protect_results));
+                            output.push_str(&protect_result_backslashes(
+                                value,
+                                protect_results || protect_data,
+                            ));
                         }
                     }
                 }
@@ -1261,7 +1321,10 @@ impl Executor {
                         } else if preserve_quotes {
                             push_preserved_expansion_output(&mut output, &value, in_double);
                         } else {
-                            output.push_str(&protect_result_backslashes(&value, protect_results));
+                            output.push_str(&protect_result_backslashes(
+                                &value,
+                                protect_results || protect_data,
+                            ));
                         }
                     }
                 }
