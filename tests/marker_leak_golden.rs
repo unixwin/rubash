@@ -522,12 +522,12 @@ fn declare_f_carries_no_markers() {
 }
 
 /// Diagnostics (stderr) — bad-substitution display decodes through the
-/// sanctioned decoder; the command-not-found and redirection-error
-/// paths do NOT fold them yet: the command-not-found diagnostic and
-/// the redirect-target filename both carry the E400 pair instead of
-/// the raw char. Those two legs are known-broken inverted pins
-/// (rubash#3040); only the bad-substitution leg is byte-verified
-/// against GNU 5.3.20 on this tree.
+/// sanctioned decoder; the command-not-found diagnostic and the
+/// redirect-target filename fold the E400 literal-char escape pair
+/// back to the raw char at the name boundary (rubash#3040; GNU
+/// execute_cmd.c:5909 printable_filename over the raw word,
+/// redir.c:298 redirection_expand's verbatim filename). All three
+/// legs are byte-verified against GNU 5.3.20 on this tree.
 #[test]
 fn diagnostics_carry_no_markers() {
     // Bad substitution (battery c22 shape).
@@ -548,18 +548,17 @@ fn diagnostics_carry_no_markers() {
     // Command not found (battery c33 shape).
     let (_, err) = run_full(&["-c", "v=$'\\uE314'; \"$v\""], &[]);
     let text = String::from_utf8_lossy(&err);
-    // KNOWN BROKEN (rubash#3040): the diagnostic names the E400 pair
-    // instead of the raw char (GNU: raw char, -c mode). Pinned
-    // inverted (registry-test precedent): a fix flips this red.
+    // rubash#3040: the diagnostic names the raw char, not the E400
+    // literal-char escape pair (GNU: raw char bytes EE 8C 94, -c mode).
     assert!(
-        text.contains('\u{E400}'),
-        "rubash#3040: diagnostic must name the raw char once fixed: {text:?}"
+        text.contains('\u{E314}') && !text.contains('\u{E400}'),
+        "rubash#3040: diagnostic must name the raw char: {text:?}"
     );
     // Redirect target filename.
-    // KNOWN BROKEN (rubash#3040): the redirect creates the file with
-    // the E400 pair in its name (GNU: raw char). The redirect itself
-    // succeeds silently on both shells, so the pin reads the created
-    // filename, not a diagnostic. Pinned inverted: a fix flips red.
+    // rubash#3040: the redirect creates the file under the raw-char
+    // name (GNU: bytes EE 8C 94), not the E400 pair. The redirect
+    // itself succeeds silently on both shells, so the pin reads the
+    // created filename, not a diagnostic.
     let dir = std::env::temp_dir().join(format!("rubash-golden-redir-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let script = format!(
@@ -578,8 +577,8 @@ fn diagnostics_carry_no_markers() {
         .collect();
     assert_eq!(
         names,
-        vec!["\u{E400}\u{E314}".to_string()],
-        "rubash#3040: redirect target must be the raw-char name once fixed: {names:?}"
+        vec!["\u{E314}".to_string()],
+        "rubash#3040: redirect target must be the raw-char name: {names:?}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }

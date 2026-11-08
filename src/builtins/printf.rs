@@ -17,8 +17,8 @@ mod spec;
 pub(crate) mod time;
 mod value;
 
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use escape::expand_format_escape;
 use identifier::valid_identifier;
 use spec::{parse_format_spec, resolve_dynamic_format_args, valid_format_specifier};
@@ -580,7 +580,16 @@ fn assign_printf_indexed_element(
         .unwrap_or_default();
     entries.insert(index, output);
     env_vars.insert(name.to_string(), format_indexed_storage(entries));
-    mark_printf_var(env_vars, "__RUBASH_ARRAY_VARS", name);
+    // rubash#3061: the array attribute lives in the VarTable's
+    // structured flag map — for the ten attribute keys that map is
+    // authoritative and NO serialized string is maintained, so the
+    // mark must go through mark_name (as declare/read do). The old
+    // raw-string write into the values map was invisible to attr_of,
+    // and a scalar read-back of the variable then returned the raw
+    // storage render instead of projecting element 0 (GNU
+    // printf.def:112 binds via builtin_bind_variable, the same
+    // variables.c path as a plain `x[0]=...` assignment).
+    env_vars.mark_name(crate::executor::types::ARRAY_VARS, name);
 }
 
 fn assign_printf_assoc_element(
@@ -811,21 +820,6 @@ fn split_storage_words(value: &str) -> Vec<String> {
 
 fn is_marked(env_vars: &crate::shell::var_table::VarTable, marker: &str, name: &str) -> bool {
     env_vars.is_marked(marker, name)
-}
-
-fn mark_printf_var(env_vars: &mut crate::shell::var_table::VarTable, marker: &str, name: &str) {
-    if is_marked(env_vars, marker, name) {
-        return;
-    }
-    env_vars
-        .entry(marker.to_string())
-        .and_modify(|value| {
-            if !value.is_empty() {
-                value.push(DATA_DOLLAR);
-            }
-            value.push_str(name);
-        })
-        .or_insert_with(|| name.to_string());
 }
 
 fn render(
