@@ -23,7 +23,21 @@ impl Executor {
         cmd: &CommandNode,
         command_builtin: bool,
     ) -> Result<(), ExecuteError> {
-        let expanded = self.expand_command_words(cmd)?;
+        // The node reaching this function is already word-expanded: the
+        // general simple-command path expands every command once before
+        // dispatch (GNU execute_cmd.c:4612 expand_words), and the
+        // `builtin`/`command` re-dispatches hand over already-expanded
+        // operands (the `logout` call site builds concrete words). GNU
+        // source.def uses the words as given — expanding a second time
+        // here treats already-expanded DATA as SYNTAX: a quote/`$`
+        // character produced by an expansion (a filename containing `"`,
+        // `'`, or `$`) is re-read as a quote delimiter / expansion
+        // introducer and removed by quote-removal, so `source "$F"` on a
+        // file named `a"b.src` reported `ab.src: No such file or
+        // directory` (rubash#2984 #2: the nested junit run's
+        // `.src` for the `xml-escape-"<>'&.bats` fixture never sourced).
+        // Do not call expand_command_words here.
+        let expanded = cmd;
         if expanded.words.get(1).is_none() {
             // GNU builtins/source.def:143-144: `source`/`.` with no filename
             // reports "filename argument required" + usage via builtin_error/
