@@ -3791,8 +3791,11 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let (temporary_assignments, assignments_failed) =
-            self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        let (temporary_assignments, assignments_failed) = self.apply_temporary_assignments(
+            &materialized_cmd.assignments,
+            assignment_raws,
+            &materialized_cmd.words,
+        );
         if let Some(rejection) = redirect_rejection {
             // Only the FatalNounset class routes through the expansion-error
             // classifier (rubash#535): an unbound variable in a function
