@@ -71,9 +71,15 @@ impl Executor {
                 // $0 bottom entry, which a script parent's respawn
                 // child never has in its raw stack; the inherited view
                 // goes beneath.
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed (same rule as the
+                // dynamic_stack_array_values view).
                 let inherited = self.shell_state.inherited_fork_frames.as_ref();
                 let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
-                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                if !self.has_script_main_frame()
+                    && !inherited_main
+                    && self.bash_source_bottom_is_seed(&stack)
+                {
                     stack.pop();
                 }
                 if let Some(inherited) = inherited {

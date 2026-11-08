@@ -661,6 +661,7 @@ impl Executor {
         let saved_pipestatus = self.shell_state.pipestatus.clone();
         let saved_positional_params = self.shell_state.positional_window_cloned();
         let saved_bash_source_stack = self.shell_state.bash_source_stack.clone();
+        let saved_bash_source_seed = self.shell_state.bash_source_seed.clone();
         let saved_bash_lineno_stack = self.shell_state.bash_lineno_stack.clone();
         let saved_bash_argc_stack = self.shell_state.bash_argc_stack.clone();
         let saved_bash_argv_stack = self.shell_state.bash_argv_stack.clone();
@@ -1232,6 +1233,7 @@ impl Executor {
         self.tempenv_promoted_names = saved_tempenv_promoted;
         self.tempenv_previous = saved_tempenv_previous;
         self.shell_state.bash_source_stack = saved_bash_source_stack;
+        self.shell_state.bash_source_seed = saved_bash_source_seed;
         self.shell_state.bash_lineno_stack = saved_bash_lineno_stack;
         self.shell_state.bash_argc_stack = saved_bash_argc_stack;
         self.shell_state.bash_argv_stack = saved_bash_argv_stack;

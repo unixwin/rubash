@@ -1332,6 +1332,22 @@ impl Executor {
                 .contains_key(crate::script_driver::READ_STDIN_MARKER)
     }
 
+    /// rubash#3125: the bottom entry of a BASH_SOURCE stack is the
+    /// `$0` seed only when it equals the seed value recorded at
+    /// seeding time (`set_env(__RUBASH_SCRIPT_NAME)`). Seeding
+    /// replaces the whole stack with one element and real frames only
+    /// ever enter at index 0, so the seed — when one was installed —
+    /// is always the bottom entry (`stack.last()`); a stack whose
+    /// bottom differs from the recorded seed, or any stack in a
+    /// session that never seeded (`bash_source_seed` is None, e.g.
+    /// interactive), holds only real frames there.
+    pub(in crate::executor) fn bash_source_bottom_is_seed(&self, stack: &[String]) -> bool {
+        self.shell_state
+            .bash_source_seed
+            .as_ref()
+            .is_some_and(|seed| stack.last().is_some_and(|bottom| bottom == seed))
+    }
+
     /// GNU keeps a bottom BASH_LINENO frame of "0" for the main script frame
     /// in script-file mode only: dbg-support.tests reports
     /// BASH_LINENO=("0") at the top level and BASH_LINENO[3]=0 inside nested
@@ -1522,9 +1538,16 @@ impl Executor {
                 // installed on the respawn birth path), so the pop must
                 // not eat one; the inherited view — already rendered
                 // by the parent — goes beneath the child's own frames.
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed — an interactive session
+                // never seeds, so its bottom entry is a real
+                // sourced-file frame and must survive.
                 let inherited = self.shell_state.inherited_fork_frames.as_ref();
                 let inherited_main = inherited.is_some_and(|frames| frames.has_main_frame);
-                if !self.has_script_main_frame() && !inherited_main && !stack.is_empty() {
+                if !self.has_script_main_frame()
+                    && !inherited_main
+                    && self.bash_source_bottom_is_seed(&stack)
+                {
                     stack.pop();
                 }
                 if let Some(inherited) = inherited {
@@ -1714,7 +1737,12 @@ impl Executor {
                 // (probe: `bash -c 't2; ...'` → BASH_SOURCE=(bash), top
                 // level ()). The bottom sits at the end because function
                 // calls insert at index 0.
-                if !self.has_script_main_frame() && !stack.is_empty() {
+                // rubash#3125: pop the bottom entry only when it
+                // really is the recorded seed (same rule as the
+                // direct arm above); a never-seeded session — e.g.
+                // interactive, or a respawn child — holds only real
+                // frames at the bottom.
+                if !self.has_script_main_frame() && self.bash_source_bottom_is_seed(&stack) {
                     stack.pop();
                 }
                 return Some(format_indexed_array_values(stack));
