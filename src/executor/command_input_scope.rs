@@ -311,6 +311,19 @@ impl Executor {
         // a mid-list apply or open failure — replays them all.
         let mut bound_dynamic_fds: Vec<(String, u32)> = Vec::new();
         let mut saved_dynamic_closes: Vec<SavedDynamicClose> = Vec::new();
+        // rubash#2615: the undo saves this list's fixed entries earn
+        // (see Executor::fd_walk_undo_save_slots), materialized into
+        // the fd table for the body's duration — GNU's saves are real
+        // dups that stay open while the compound command runs, so a
+        // `{var}` allocation inside the body counts them exactly
+        // like one in the list itself. Only saves of a binding the
+        // persistent table holds at the entry's position can be
+        // materialized (a save of a same-list file bind has no table
+        // entry to clone during this pass; it still counts for the
+        // pass's own allocations through occupied_slots). Each entry
+        // is (save slot, entry to hold there), removed at scope end
+        // if the body left it untouched.
+        let mut materialized_saves: Vec<(u32, FdEntry)> = Vec::new();
         let mut apply_error: Option<ExecuteError> = None;
         // rubash#2612: the walk space of this list (see FdWalkBinding
         // in trap_exec.rs). This loop used to service the `{var}`
@@ -413,6 +426,24 @@ impl Executor {
                     }
                 }
             } else {
+                // rubash#2615: fold this fixed entry's undo saves
+                // into the walk's occupied set (as the applier loop
+                // does) and remember the ones the table can
+                // materialize for the body's duration.
+                for (slot, source) in
+                    self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                    if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
+                        self.fd_walk_resolve(&walk_space, source)
+                    {
+                        if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
+                                materialized_saves.push((slot, entry));
+                            }
+                        }
+                    }
+                }
                 self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
             }
         }
@@ -445,7 +476,34 @@ impl Executor {
                 return Err(error);
             }
         };
+        // rubash#2615: materialize the list's undo saves for the
+        // body's duration (see the pass above). A slot the binders
+        // bound for real in the meantime keeps the real bind — GNU's
+        // walk would have clobbered the save with that same bind.
+        let mut inserted_saves: Vec<(u32, FdEntry)> = Vec::new();
+        for (slot, entry) in &materialized_saves {
+            let occupied_now = self.fd_table.entries.get(slot).is_some_and(|current| {
+                !current.closed && (current.read.is_some() || current.write.is_some())
+            });
+            if !occupied_now {
+                self.fd_table.entries.insert(*slot, entry.clone());
+                inserted_saves.push((*slot, entry.clone()));
+            }
+        }
         let result = self.with_command_input_redirects_inner(cmd, execute);
+        // The saves die with the command's redirections: remove
+        // exactly the entries still holding the inserted clone (a
+        // body that rebound the slot owns its binding now).
+        for (slot, entry) in &inserted_saves {
+            let untouched = self.fd_table.entries.get(slot).is_some_and(|current| {
+                current.closed == entry.closed
+                    && current.read == entry.read
+                    && current.write == entry.write
+            });
+            if untouched {
+                self.fd_table.entries.remove(slot);
+            }
+        }
         self.restore_compound_output_redirects(saved_output);
         self.restore_compound_numbered_input_redirects(saved_numbered);
         // The dynamic-close snapshots replay AFTER the numbered saved
@@ -1467,7 +1525,47 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<Vec<SavedOutputFd>, ExecuteError> {
+        // rubash#2615: GNU's do_redirections for this scope's list (a
+        // function call's list, execute_cmd.c:5606; a compound's
+        // alike) registers an undo save for every fixed entry that
+        // rebinds an open descriptor, and the save stays in the
+        // descriptor space for the body's whole duration — a `{var}`
+        // allocation inside the body counts it, exactly like one in
+        // the list itself (see Executor::fd_walk_undo_save_slots).
+        // Compute the saves with a walk over the list before binding
+        // and materialize the ones whose source the persistent table
+        // holds, mirroring the command-input scope pass; the slots'
+        // pre-scope state is captured into `saved` first, so the
+        // scope restore returns each slot to exactly what it held.
+        let mut walk_space = super::trap_exec::FdWalkSpace::new();
+        let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut materialized_saves: Vec<(u32, FdEntry)> = Vec::new();
+        for redirect in &cmd.redirects {
+            if let Some(fd) = redirect.fd {
+                occupied_slots.insert(fd);
+            }
+            if redirect.fd_var.is_none() {
+                for (slot, source) in
+                    self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                {
+                    occupied_slots.insert(slot);
+                    if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
+                        self.fd_walk_resolve(&walk_space, source)
+                    {
+                        if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
+                                materialized_saves.push((slot, entry));
+                            }
+                        }
+                    }
+                }
+                self.fd_walk_record_fixed_entry(&mut walk_space, redirect);
+            }
+        }
         let mut saved: Vec<SavedOutputFd> = Vec::new();
+        for (slot, _entry) in &materialized_saves {
+            self.save_compound_output_fd(&mut saved, *slot);
+        }
         if let Err(error) = self.open_compound_output_redirects_in(
             cmd,
             0,
@@ -1477,6 +1575,17 @@ impl Executor {
         ) {
             self.restore_compound_output_redirects(saved);
             return Err(error);
+        }
+        // Materialize the saves the real binds did not take over: a
+        // slot the list itself bound keeps the real bind — GNU's walk
+        // would have clobbered the save with that same bind.
+        for (slot, entry) in &materialized_saves {
+            let occupied_now = self.fd_table.entries.get(slot).is_some_and(|current| {
+                !current.closed && (current.read.is_some() || current.write.is_some())
+            });
+            if !occupied_now {
+                self.fd_table.entries.insert(*slot, entry.clone());
+            }
         }
         Ok(saved)
     }
