@@ -16,8 +16,8 @@
 //!   const) — never write a raw `'\x1f'` / `'\u{E302}'` literal.
 //! - A new marker = a new const + encode/decode pair + a boundary entry in
 //!   `MARKERS`, plus golden coverage: the registry-driven typed-data
-//!   test in this module iterates `MARKERS` through the core shapes (a
-//!   new marker gets cells automatically), and
+//!   test in `tests/marker_registry_roundtrips.rs` iterates `MARKERS`
+//!   through the core shapes (a new marker gets cells automatically), and
 //!   `tests/marker_leak_golden.rs` (+ its PTY sibling) asserts one cell
 //!   per output channel that
 //!   sentinel never appears in stdout / `declare -p` / xtrace output on
@@ -522,7 +522,11 @@ pub(crate) fn decode_word_position_carriers(value: &str) -> String {
 ///   the word-text decode chains this predicate gates.
 /// - CASE_PATTERN_* (NUL prefix): parser reader-state sentinels; NUL
 ///   cannot appear in transport text.
-pub(in crate::executor) fn contains_word_marker_bytes(value: &str) -> bool {
+// `pub(crate)` (not `pub(in crate::executor)`): the registry file is
+// also compiled into the `tests/marker_registry_roundtrips.rs` crate via
+// `#[path]`, where no `crate::executor` module exists. Still
+// crate-internal — no public surface.
+pub(crate) fn contains_word_marker_bytes(value: &str) -> bool {
     value
         .bytes()
         .any(|byte| (0x11..=0x1f).contains(&byte) || byte == 0xEE)
@@ -554,8 +558,8 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 //
 // The named half of the carrier protocol: every `__RUBASH_*` key the
 // engine writes into a child/subshell environment (or reads back
-// from one) is enumerated here. EXACT lines are complete keys;
-// FAMILY lines are literal prefixes whose full keys are composed
+// from one) is enumerated here. EXACT entries are complete keys;
+// family entries are literal prefixes whose full keys are composed
 // at runtime. The env_namespace_census_is_complete test scans
 // src/ for `__RUBASH_...` tokens and fails on any token that is
 // neither an EXACT entry nor FAMILY-covered, and on any EXACT
@@ -1670,193 +1674,6 @@ mod tests {
         );
     }
 
-    /// `user_reachable` is machine-read (746 case 728.1): a user-reachable
-    /// marker either is a single C0/ASCII byte — covered by the raw-byte
-    /// pair re-encode, asserted for every possible byte below — or a PUA
-    /// codepoint inside the E400 literal-char-escape zone, which is how
-    /// user data is disambiguated at entry (#735). A `user_reachable: true`
-    /// row outside both shapes has no re-encode story and must not exist.
-    #[test]
-    fn user_reachable_rows_have_an_entry_reencode_story() {
-        for byte in 0..=255u8 {
-            let encoded = encode_raw_byte_marker(byte);
-            let decoded =
-                crate::executor::substitution_metadata::decode_raw_byte_markers(encoded.as_bytes());
-            assert_eq!(decoded, vec![byte], "raw-byte pair lost byte {byte:#04x}");
-        }
-        for m in MARKERS {
-            if !m.user_reachable {
-                continue;
-            }
-            assert!(
-                m.code <= 0xff || is_marker_zone_char(char::from_u32(m.code).unwrap()),
-                "{} claims user_reachable at U+{:04X} but has no entry re-encode",
-                m.name,
-                m.code
-            );
-        }
-    }
-
-    /// `boundaries` is machine-read (746 case 728.1): a row that claims an
-    /// output/storage/reparse decode must be named by the decode machinery
-    /// that owns it — decode_to_visible_text for Output rows (the
-    /// sanctioned transport→visible decoder, governance 3.2), or an
-    /// explicitly listed owner for markers consumed by their own boundary
-    /// helper (echo's $'...' fast path, substitution_metadata, ...). The
-    /// owner lists are pinned: adding a row with a boundary requires
-    /// naming its decoder here, which is exactly the audit trail #728
-    /// asked for.
-    #[test]
-    fn boundary_claims_name_a_decoder() {
-        // Markers decode_to_visible_text consumes (verified live below).
-        const VISIBLE_DECODER_OUTPUTS: [&str; 22] = [
-            "RAW_BYTE_MARKER_ESCAPE",
-            "CTLESC",
-            "PARAM_NAME_END_MARKER",
-            "DATA_BACKSLASH",
-            "PROTECTED_ESCAPED_SQUOTE",
-            "DATA_SQUOTE",
-            "DATA_DQUOTE",
-            "PATTERN_LITERAL_BACKSLASH",
-            "DATA_BACKTICK",
-            "QUOTED_WORD_PREFIX",
-            "IFS_GLUE",
-            "STORAGE_WORD_PREFIX",
-            "DATA_DOLLAR",
-            "DEFERRED_COMPOUND_BODY",
-            "ARRAYREF_FLAG",
-            "PATSUB_QUOTED_VALUE_START",
-            "PATSUB_QUOTED_VALUE_END",
-            "PATSUB_QUOTED_AMP",
-            "PATSUB_QUOTED_BACKSLASH",
-            "QUOTED_NULL_MARKER",
-            "FAILED_SUBSCRIPT_SENTINEL",
-            "LITERAL_CHAR_ESCAPE",
-        ];
-        // Markers whose named boundary is consumed by their own helper
-        // (documented at the row): owner decode fn, not the visible decoder.
-        const OWN_BOUNDARY_DECODERS: [&str; 41] = [
-            "PROTECTED_BACKSLASH",         // builtins/echo.rs $'...' fast path
-            "PROTECTED_LITERAL_BACKSLASH", // embedded_parameters walker tail
-            "PROTECTED_LITERAL_DOLLAR",    // embedded_parameters walker tail
-            "ANSI_C_QUOTE_MARKER", // decode_word_position_carriers / eval_source_for_reparse
-            "ANSI_C_DQUOTE_MARKER", // (also in the visible decoder list)
-            "ANSI_C_IFS_GUARD",    // markers::strip_ansi_c_ifs_guard
-            // The backslash/IFS guard family (rubash#2885 E8): each
-            // guard is a protect-prefix consumed with its data char by
-            // its owning walker, and by the visible decoder's guard
-            // arm (locale.rs) as the output-side backstop.
-            "PARAM_WORD_BACKSLASH_GUARD", // parameter_words walker + locale.rs guard arm
-            "ESCAPED_IFS_GUARD", // command_prepare field-split restore + locale.rs guard arm
-            "PROMPT_ESCAPE_GUARD", // assignment_expansion preserve/restore + locale.rs guard arm
-            "CASE_PATTERN_BACKSLASH_GUARD", // compound_exec case-pattern walker + locale.rs guard arm
-            "SUBSCRIPT_CARRIER",            // substitution_metadata subscript decode
-            "PARSE_ERROR_FIELD_SEP",        // parse_error payload split
-            "HEREDOC_WARNED_BODY_PREFIX",   // execution_misc heredoc body strip
-            "QUOTED_WORD_VALUE_PREFIX",     // expand/tilde QUOTED_ASSIGNMENT_VALUE
-            "HASH_ENV_FIELD_SEP",           // builtins/hash env serialization
-            "DIR_STACK_FIELD_SEP",          // builtins/pushd env serialization
-            "PROMPT_IGNORE_START",          // readline prompt-ignore layer
-            "PROMPT_IGNORE_END",            // readline prompt-ignore layer
-            "PREEXPANDED_STDIN_BODY",       // execution_misc body consumer + parser raw-byte pair
-            "ARRAY_FIELD_SPLIT_MARKER",     // declare/storage/array element split
-            "QUOTED_HEREDOC_MARKER", // execution_misc.rs body strip (QUOTED_HEREDOC_MARKER replace)
-            "COMPOUND_ASSIGNMENT_MARKER", // types.rs compound-operand strip
-            "COMSUB_PAYLOAD_SENTINEL", // execution_misc decode_command_substitution_payload
-            "CASE_PATTERN_EXPECT",   // parser/support.rs boundary-stack sentinel
-            "CASE_PATTERN_MAY_OPEN", // parser/support.rs boundary-stack sentinel
-            "CASE_PATTERN_PAREN",    // parser/support.rs boundary-stack sentinel
-            // The ASSIGN_* family restores through the assignment_expansion
-            // storage-restore chain (rubash#295/#218 restore tails; the
-            // #811 fragment-boundary strip).
-            "ASSIGN_DATA_SQUOTE",
-            "ASSIGN_DATA_DQUOTE",
-            "ASSIGN_DATA_BACKTICK",
-            "ASSIGN_ESCAPED_DQUOTE",
-            "ASSIGN_ESCAPED_SQUOTE",
-            "ASSIGN_ESCAPED_BACKSLASH",
-            "ASSIGN_HOISTED_SQUOTE",
-            "ASSIGN_HOISTED_BACKSLASH",
-            "COMPOUND_EXPANSION_WS_TAG",
-            "ASSIGN_SQ_DOLLAR",
-            "ASSIGN_SQ_BACKTICK",
-            "ASSIGN_SQ_BACKSLASH",
-            "ASSIGN_EXPANSION_BACKSLASH",
-            "ASSIGN_EXPANSION_DQUOTE",
-            "ASSIGN_EXPANSION_SQUOTE",
-        ];
-        // Multi-char string rows register their FIRST codepoint; keep the
-        // table honest against the consts.
-        for (name, first) in [
-            ("FAILED_SUBSCRIPT_SENTINEL", FAILED_SUBSCRIPT_SENTINEL),
-            ("QUOTED_HEREDOC_MARKER", QUOTED_HEREDOC_MARKER),
-            ("COMSUB_PAYLOAD_SENTINEL", COMSUB_PAYLOAD_SENTINEL_STR),
-            ("COMPOUND_ASSIGNMENT_MARKER", COMPOUND_ASSIGNMENT_MARKER),
-            ("GROUP_REDIRECT_INJECTED_MARK", GROUP_REDIRECT_INJECTED_MARK),
-            ("CASE_PATTERN_EXPECT", CASE_PATTERN_EXPECT),
-            ("CASE_PATTERN_MAY_OPEN", CASE_PATTERN_MAY_OPEN),
-            ("CASE_PATTERN_PAREN", CASE_PATTERN_PAREN),
-        ] {
-            let row = MARKERS
-                .iter()
-                .find(|m| m.name == name)
-                .unwrap_or_else(|| panic!("{name} missing from MARKERS"));
-            assert_eq!(
-                row.code,
-                first.chars().next().unwrap() as u32,
-                "{name} registered codepoint does not match its const"
-            );
-        }
-        for m in MARKERS {
-            if m.boundaries.is_empty() {
-                continue;
-            }
-            let named = VISIBLE_DECODER_OUTPUTS.contains(&m.name)
-                || OWN_BOUNDARY_DECODERS.contains(&m.name);
-            assert!(
-                named,
-                "{} claims boundaries {:?} but no decoder owns it (rubash#728)",
-                m.name, m.boundaries
-            );
-            // Live check for the visible-decoder claims: a bare marker char
-            // must not survive decode_to_visible_text unchanged. The E000
-            // introducer decodes as a PAIR (E000+E001 = byte 0x01); a bare
-            // introducer is a documented recovery passthrough.
-            if VISIBLE_DECODER_OUTPUTS.contains(&m.name) {
-                if m.name == "RAW_BYTE_MARKER_ESCAPE" {
-                    let pair = format!(
-                        "{}{}",
-                        char::from_u32(m.code).unwrap(),
-                        char::from_u32(RAW_BYTE_MARKER_FIRST).unwrap()
-                    );
-                    let decoded = crate::locale::decode_to_visible_text(&pair);
-                    // E000 + E001 is byte 0x00 (payload = FIRST + byte).
-                    assert_eq!(
-                        decoded, "\u{0}",
-                        "RAW_BYTE_MARKER_ESCAPE pair must decode to its byte"
-                    );
-                } else if m.name == "LITERAL_CHAR_ESCAPE" {
-                    // E400 + c restores c (bare E400 is a documented literal
-                    // passthrough).
-                    let pair = format!("{}x", char::from_u32(m.code).unwrap());
-                    assert_eq!(
-                        crate::locale::decode_to_visible_text(&pair),
-                        "x",
-                        "LITERAL_CHAR_ESCAPE pair must restore the escaped char"
-                    );
-                } else if let Some(ch) = char::from_u32(m.code) {
-                    let text = ch.to_string();
-                    let decoded = crate::locale::decode_to_visible_text(&text);
-                    assert_ne!(
-                        decoded, text,
-                        "{} claims Output/Storage decode but decode_to_visible_text passes it through",
-                        m.name
-                    );
-                }
-            }
-        }
-    }
-
     /// rubash#728 §3 — `contains_word_marker_bytes` documents a scope, so
     /// the "false negative is impossible" claim is now falsifiable: every
     /// char-marker below U+0100 must either live in the predicate's C0
@@ -1990,9 +1807,19 @@ mod tests {
         for line in block.lines() {
             let line = line.trim_start_matches('/').trim();
             if let Some(rest) = line.strip_prefix("EXACT ") {
-                exact.insert(rest.split_whitespace().next().unwrap().to_string());
+                let token = rest.split_whitespace().next().unwrap();
+                assert!(
+                    token.starts_with("__RUBASH_"),
+                    "census line is not an entry: {line}"
+                );
+                exact.insert(token.to_string());
             } else if let Some(rest) = line.strip_prefix("FAMILY ") {
-                families.push(rest.split_whitespace().next().unwrap().to_string());
+                let token = rest.split_whitespace().next().unwrap();
+                assert!(
+                    token.starts_with("__RUBASH_"),
+                    "census line is not an entry: {line}"
+                );
+                families.push(token.to_string());
             }
         }
         assert!(
@@ -2072,149 +1899,6 @@ mod tests {
                 found.iter().any(|t| t.starts_with(prefix.as_str())),
                 "census FAMILY prefix {prefix} covers no occurring token — remove it"
             );
-        }
-    }
-
-    /// rubash#2885 E6 — the registry-driven typed-data cells. Every
-    /// codepoint in the table is typed as user data (`v=$'…'`) and must
-    /// round-trip byte-for-byte through the three core shapes — the
-    /// sweep battery collected the same cells from GNU bash 5.3.20
-    /// (52/54 codepoints GNU-identical on the #2885 base). Because the
-    /// cells iterate `MARKERS`, a newly registered marker gets coverage
-    /// automatically; the per-CHANNEL dimension lives in
-    /// `tests/marker_leak_golden.rs` (+ its PTY sibling).
-    ///
-    /// Known-broken cells are pinned in `TYPED_DATA_EXCEPTIONS` with
-    /// their tracking issue and asserted to still differ — when the fix
-    /// lands, this test goes red and the exception must be removed.
-    #[test]
-    fn registry_typed_data_roundtrips_core_shapes() {
-        use std::collections::BTreeSet;
-        use std::process::{Command, Stdio};
-
-        /// (codepoint, shape) cells known to diverge from GNU, with the
-        /// issue that owns the fix. Shape ids: 1 = `printf '%s' "$v"`,
-        /// 2 = `echo "$v"`, 3 = `w="a${v}b"` (assignment-concat).
-        const TYPED_DATA_EXCEPTIONS: &[(u32, u8, &str)] = &[
-            // QUOTED_NULL_MARKER: bare U+E002 is consumed as the
-            // empty-token sentinel at word boundaries (#2882, sweep F2).
-            (0xE002, 1, "rubash#2882"),
-            (0xE002, 2, "rubash#2882"),
-            (0xE002, 3, "rubash#2882"),
-            // PROMPT_ESCAPE_GUARD: the assignment storage chain folds a
-            // typed U+E316 to a backslash in shape 3 (found by this
-            // test's probe; candidate finding in the #2885 lane REPORT).
-            (0xE316, 3, "rubash#2885-report-candidate"),
-        ];
-
-        let bin = std::env::var_os("CARGO_BIN_EXE_rubash")
-            .map(std::path::PathBuf::from)
-            .or_else(|| {
-                let exe = std::env::current_exe().ok()?;
-                let deps = exe.parent()?;
-                let root = deps.parent()?;
-                let candidate = root.join("rubash");
-                candidate.exists().then_some(candidate)
-            })
-            .expect("built rubash binary for the registry cells");
-
-        let mut codes: BTreeSet<u32> = BTreeSet::new();
-        for info in MARKERS {
-            let cp = info.code as u32;
-            if cp == 0 {
-                // NUL sentinels (CASE_PATTERN_*): a NUL cannot be
-                // typed into a shell string in GNU either — there is
-                // no typed-data shape to gate.
-                continue;
-            }
-            if info.name == "QUOTED_HEREDOC_MARKER" {
-                // String marker: its `code` is the '_' of the named
-                // string "__RUBASH_HD1__"; the golden's named-string
-                // leak scan covers it.
-                continue;
-            }
-            codes.insert(cp);
-        }
-        assert!(
-            codes.len() >= 40,
-            "registry scan must see the marker population, saw {} codepoints",
-            codes.len()
-        );
-        for &(cp, _, _) in TYPED_DATA_EXCEPTIONS {
-            assert!(
-                codes.contains(&cp),
-                "exception table names U+{cp:04X}, which is not a registry codepoint"
-            );
-        }
-
-        for cp in codes {
-            let ch = char::from_u32(cp).expect("registry code is a char");
-            let escape = if cp < 0x100 {
-                format!("\\x{cp:02x}")
-            } else {
-                format!("\\u{cp:04X}")
-            };
-            let script = format!(
-                "v=$'{escape}'; printf '%s' \"$v\"; printf '\\n@@2@@\\n'; \
-                 echo \"$v\"; printf '@@3@@\\n'; w=\"a${{v}}b\"; \
-                 printf '%s' \"$w\"; printf '\\n@@END@@\\n'"
-            );
-            let out = Command::new(&bin)
-                .args(["-c", &script])
-                .env("LC_ALL", "C.UTF-8")
-                .stdin(Stdio::null())
-                .output()
-                .expect("run registry cell");
-            assert!(
-                out.status.success(),
-                "registry cell U+{cp:04X} ran clean: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            let stdout = out.stdout;
-            let mut segs = stdout.split(|b| *b == b'\n');
-            // Segment layout: [S1] @@2@@ [S2] @@3@@ [S3] @@END@@ []
-            let s1 = segs.next().unwrap_or_default().to_vec();
-            assert_eq!(
-                segs.next(),
-                Some("@@2@@".as_bytes()),
-                "cell frame for U+{cp:04X}: {stdout:?}"
-            );
-            let s2 = segs.next().unwrap_or_default().to_vec();
-            assert_eq!(
-                segs.next(),
-                Some("@@3@@".as_bytes()),
-                "cell frame for U+{cp:04X}: {stdout:?}"
-            );
-            let s3 = segs.next().unwrap_or_default().to_vec();
-
-            let mut expected_char = [0u8; 4];
-            let char_bytes = ch.encode_utf8(&mut expected_char).as_bytes().to_vec();
-            let shapes: [(u8, Vec<u8>, Vec<u8>); 3] = [
-                (1, s1, char_bytes.clone()),
-                (2, s2, char_bytes.clone()),
-                (
-                    3,
-                    s3,
-                    [b"a".as_slice(), &char_bytes, b"b".as_slice()].concat(),
-                ),
-            ];
-            for (shape, got, want) in shapes {
-                let exception = TYPED_DATA_EXCEPTIONS
-                    .iter()
-                    .find(|&&(ecp, eshape, _)| ecp == cp && eshape == shape);
-                match exception {
-                    Some((_, _, tracker)) => assert_ne!(
-                        got, want,
-                        "U+{cp:04X} shape {shape} now round-trips — remove its \
-                         exception (tracked by {tracker})"
-                    ),
-                    None => assert_eq!(
-                        got, want,
-                        "typed U+{cp:04X} must round-trip through shape {shape} \
-                         (GNU-collected cell, rubash#2885 E6)"
-                    ),
-                }
-            }
         }
     }
 }
