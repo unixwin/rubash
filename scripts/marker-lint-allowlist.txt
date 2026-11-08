@@ -191,7 +191,6 @@ src/executor/parameter_words.rs | L3 | replace:PROTECTED_LITERAL_BACKSLASH | own
 src/executor/pipeline_exec.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/pipeline_stages.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/pipeline_stages.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
-src/executor/prompt_expansion.rs | L3 | contains:RAW_BYTE_MARKER_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
 src/executor/prompt_expansion.rs | L3 | trim_start_matches:ARRAY_FIELD_SPLIT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
 src/executor/public_accessors.rs | L2 | \\u\{0*1\} | field separator of the shadow-word record written by the lexer placeholder pushes (domain-local 0x01)
 src/executor/read_builtin.rs | L2 | \\u\{0*\} | the read -d delimiter byte itself (NUL default): data, not a sentinel reference
