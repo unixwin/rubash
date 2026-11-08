@@ -278,11 +278,75 @@ fn user_e002_quoted_null_char_roundtrips_as_data() {
     );
     let out = run_utf8("v=$'\\uE002'; echo \"len=${#v}\"");
     assert_eq!(out, b"len=1\n".as_slice(), "length of U+E002 value");
-    // NOTE: `case "$v" in *"$v"*)` is deliberately NOT a cell here —
-    // the case pattern's quoted segment is a separate blind consumer
-    // of the pair (subject side and unquoted pattern form verified
-    // good; `[[ "$v" == *"$v"* ]]` matches). Recorded as a residual
-    // face in the #2882 lane REPORT for the captain to file/assign.
+    // NOTE: `case "$v" in *"$v"*)` is not a cell here — the case
+    // pattern's quoted segment was a separate blind consumer of the
+    // pair, filed as rubash#3014; its cells live in
+    // `user_e002_quoted_null_char_matches_case_patterns` below.
+}
+
+/// rubash#3014: the case pattern's QUOTED segment is a pattern-side
+/// consumer of the #2882 class. GNU expands each case pattern with
+/// expand_word_leave_quoted and runs it through
+/// quote_string_for_globbing (execute_cmd.c execute_case_command,
+/// pattern loop): quote_string (pathexp.c) CTLESC-protects each
+/// character of a quoted span — and the E400+E002 transport pair is
+/// ONE character (the typed U+E002), so it takes ONE guard as a unit,
+/// exactly like the raw-byte marker pair. rubash's
+/// escape_case_pattern_literal guarded the pair's halves separately
+/// (CTLESC E400 CTLESC E002), so the matcher's flattening could no
+/// longer read the pair as one data char and every quoted-segment
+/// shape NOMATCHed. Subject side, unquoted pattern form and the
+/// `[[ == ]]` forms were already correct (controls below). All cells
+/// probe-verified against GNU bash 5.3.20 under LC_ALL=C.UTF-8.
+#[test]
+fn user_e002_quoted_null_char_matches_case_patterns() {
+    let run_utf8 = |script: &str| -> String {
+        let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+            .args(["-c", script])
+            .env("LC_ALL", "C.UTF-8")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn rubash");
+        let out = child.wait_with_output().expect("wait rubash").stdout;
+        String::from_utf8_lossy(&out).into_owned()
+    };
+    let script = concat!(
+        "v=$'\\uE002'\n",
+        "case \"$v\" in \"$v\") echo \"exact-quoted: MATCH\";; *) echo \"exact-quoted: NOMATCH\";; esac\n",
+        "case \"$v\" in *\"$v\"*) echo \"glob-both: MATCH\";; *) echo \"glob-both: NOMATCH\";; esac\n",
+        "case $'\\uE002' in *\"$v\"*) echo \"lit-subj-glob-pat: MATCH\";; *) echo \"lit-subj-glob-pat: NOMATCH\";; esac\n",
+        "w=\"a${v}b\"\n",
+        "case \"$w\" in *\"$v\"*) echo \"concat-subj: MATCH\";; *) echo \"concat-subj: NOMATCH\";; esac\n",
+        "case \"$v\" in *$'\\uE002'*) echo \"ansi-pat: MATCH\";; *) echo \"ansi-pat: NOMATCH\";; esac\n",
+        "case \"$v\" in *\"$(printf %s \"$v\")\"*) echo \"comsub-pat: MATCH\";; *) echo \"comsub-pat: NOMATCH\";; esac\n",
+        "p=\"$v\"\n",
+        "case \"$v\" in *\"$p\"*) echo \"var-pat: MATCH\";; *) echo \"var-pat: NOMATCH\";; esac\n",
+        "case \"$v\" in \"$p\") echo \"var-pat-exact: MATCH\";; *) echo \"var-pat-exact: NOMATCH\";; esac\n",
+        // Controls: unquoted pattern form and the sanity NOMATCH were
+        // already correct on the broken tree, as were the `[[ == ]]`
+        // forms — pin them so this fix cannot regress them.
+        "case \"$v\" in *$v*) echo \"unquoted-pat: MATCH\";; *) echo \"unquoted-pat: NOMATCH\";; esac\n",
+        "case \"ZZZ\" in *\"$v\"*) echo \"sanity: MATCH\";; *) echo \"sanity: NOMATCH\";; esac\n",
+        "if [[ \"$v\" == \"$v\" ]]; then echo \"cond-exact: MATCH\"; else echo \"cond-exact: NOMATCH\"; fi\n",
+        "if [[ \"$v\" == *\"$v\"* ]]; then echo \"cond-glob: MATCH\"; else echo \"cond-glob: NOMATCH\"; fi\n",
+    );
+    let expected = concat!(
+        "exact-quoted: MATCH\n",
+        "glob-both: MATCH\n",
+        "lit-subj-glob-pat: MATCH\n",
+        "concat-subj: MATCH\n",
+        "ansi-pat: MATCH\n",
+        "comsub-pat: MATCH\n",
+        "var-pat: MATCH\n",
+        "var-pat-exact: MATCH\n",
+        "unquoted-pat: MATCH\n",
+        "sanity: NOMATCH\n",
+        "cond-exact: MATCH\n",
+        "cond-glob: MATCH\n",
+    );
+    assert_eq!(run_utf8(script), expected, "case pattern U+E002 cells");
 }
 
 /// rubash#727: the assertion must actually see the registry's codepoints
