@@ -1896,6 +1896,7 @@ impl Executor {
                                 .positional_window()
                                 .join(&self.ifs_first_char_separator()),
                             fields,
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 }
@@ -2056,7 +2057,11 @@ impl Executor {
                             } else {
                                 // Same glued transport as the storage arm
                                 // below (compound_field_split_transport).
-                                values.extend(compound_field_split_transport(&joined, fields));
+                                values.extend(compound_field_split_transport(
+                                    &joined,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                         }
                         continue;
@@ -2097,6 +2102,7 @@ impl Executor {
                                 members,
                                 self.shell_state.env_vars.get("IFS").map(String::as_str),
                             ),
+                            &self.ifs_first_char_separator(),
                         ));
                     }
                 } else {
@@ -2637,7 +2643,11 @@ impl Executor {
                                 // it unsplit, arrayfunc.c:630; indexed storage
                                 // re-splits per field, arrayfunc.c:610) — see
                                 // compound_field_split_transport.
-                                values.extend(compound_field_split_transport(&value, fields));
+                                values.extend(compound_field_split_transport(
+                                    &value,
+                                    fields,
+                                    &self.ifs_first_char_separator(),
+                                ));
                             }
                             continue;
                         }
@@ -2674,7 +2684,11 @@ impl Executor {
                                 } else {
                                     // Same glued transport as the $N arm above
                                     // (compound_field_split_transport).
-                                    values.extend(compound_field_split_transport(&value, fields));
+                                    values.extend(compound_field_split_transport(
+                                        &value,
+                                        fields,
+                                        &self.ifs_first_char_separator(),
+                                    ));
                                 }
                             }
                         }
@@ -3153,6 +3167,7 @@ impl Executor {
             // transport then falls back to synthetic separators.
             .map(|field| decode_compound_expansion_carriers(&field))
             .collect::<Vec<_>>(),
+            &self.ifs_first_char_separator(),
         )
     }
 
@@ -3665,6 +3680,7 @@ impl Executor {
                 &value,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
             ),
+            &self.ifs_first_char_separator(),
         ))
     }
 
