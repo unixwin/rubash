@@ -96,7 +96,11 @@ pub(in crate::executor) fn parse_indirect_pattern_removal(
 /// stripping to empty). Mirrors the greedy pairing of
 /// shell_text_to_raw_bytes.
 fn marker_pair_split_points(value: &str) -> Vec<usize> {
-    if !value.contains('\u{E000}') && !value.contains('\u{E400}') {
+    if !value.contains(
+        char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE)
+            .expect("sentinel is valid"),
+    ) && !value.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE)
+    {
         return Vec::new();
     }
     let mut points = Vec::new();

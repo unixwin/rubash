@@ -575,7 +575,7 @@ pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
     ]
     .iter()
     .collect::<String>();
-    text.replace(&pair, "\u{5}")
+    text.replace(&pair, crate::executor::markers::PREEXPANDED_STDIN_BODY_STR)
 }
 
 pub(in crate::executor) fn unterminated_heredoc_body_line_count(body: &str) -> usize {
