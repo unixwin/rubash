@@ -733,7 +733,7 @@ fn stored_scalar_value(env_vars: &crate::shell::var_table::VarTable, name: &str)
     if attrs.assoc {
         crate::executor::assoc_value_at(value, "0")
     } else if attrs.array {
-        crate::executor::arrays::array_value_at(value, 0)
+        crate::executor::array_value_at(value, 0)
     } else {
         Some(value.clone())
     }

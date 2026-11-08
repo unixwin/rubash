@@ -239,7 +239,8 @@ pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
 // builtins::printf, including the drop helper the declare sparse-cell fix
 // needs to preserve the refuse-to-shadow-mirror rule.
 pub(crate) use arrays::{
-    drop_typed_indexed_array, replace_typed_indexed_array, sync_typed_indexed_storage,
+    array_value_at, drop_typed_indexed_array, replace_typed_indexed_array,
+    sync_typed_indexed_storage,
 };
 use builtin_names::*;
 use command_subst_helpers::*;
