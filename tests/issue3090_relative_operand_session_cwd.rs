@@ -99,10 +99,7 @@ fn bind_f_include_relative_to_session_cwd() {
     // The included file's `set` only lands if the include read was
     // anchored at the session cwd too (GNU default is bell-style
     // audible; `none` proves the include was read).
-    assert!(
-        stdout.contains("set bell-style none"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("set bell-style none"), "stdout: {stdout}");
 }
 
 #[test]
