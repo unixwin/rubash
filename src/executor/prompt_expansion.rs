@@ -1337,8 +1337,16 @@ where
 /// (subst.c command_substitute → the prompt string bytes), so a PS0 like
 /// `$(printf '\033]3008;…\033\\')` must reach the terminal as real ESC
 /// bytes, not U+E000/U+E01C PUA pairs that render as `]3008;…` text.
+/// The same pass carries typed registry-zone chars from stored values as
+/// E400 literal-char pairs (markers::push_literal_char): a stored
+/// `$'\uE314'` reaches the expansion result as E400+E314, and GNU renders
+/// the raw char (parse.y:6689 inserts the stored value verbatim), so the
+/// E400 pair must fold here too. The gate therefore opens on EITHER
+/// transport family — gating on the raw-byte marker alone left the E400
+/// pair unfolded whenever no unrelated raw-byte pair happened to be
+/// present in the same prompt (rubash#3038).
 pub(in crate::executor) fn decode_prompt_transport(text: &str) -> String {
-    if !text.contains(char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).unwrap()) {
+    if !crate::executor::markers::contains_decodable_transport(text) {
         return text.to_string();
     }
     let decoded = crate::executor::substitution_metadata::decode_raw_byte_markers(text.as_bytes());

@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::DATA_DOLLAR;
+use crate::executor::markers::{CTLESC, DATA_DOLLAR};
 
 // Private markers used by the patsub replacement pipeline. They survive
 // expand_embedded_parameters untouched and are resolved by
@@ -997,7 +997,7 @@ fn dollar_bracket_end(chars: &[char], open: usize) -> usize {
             // backslash unit, so the char after it delimits freely —
             // the same reading the shared collector makes, so the two
             // scans agree on where the span ends (rubash#2374).
-            '\\' | '\u{11}' => index += 2,
+            '\\' | CTLESC => index += 2,
             '\'' | crate::executor::markers::DATA_SQUOTE => {
                 index += 1;
                 while index < chars.len()
@@ -1023,7 +1023,7 @@ fn dollar_bracket_end(chars: &[char], open: usize) -> usize {
                 index += 1;
                 while index < chars.len() {
                     match chars[index] {
-                        '\\' | '\u{11}' => index += 2,
+                        '\\' | CTLESC => index += 2,
                         ch if closers.contains(&ch) => {
                             index += 1;
                             break;

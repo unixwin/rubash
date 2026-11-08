@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
+use crate::executor::markers::{PREEXPANDED_STDIN_BODY, STORAGE_WORD_PREFIX_STR};
 use crate::lexer::{Token, TokenKind};
 
 /// The stored here-document delimiter: GNU make_cmd.c:540
@@ -960,12 +960,12 @@ pub(super) fn fill_pending_heredoc_body_in_commands(
 /// here-string word, which expand_here_string_mut probes with the same
 /// sentinel check.
 fn encode_stdin_body_enq(text: &str) -> String {
-    if !text.contains('\u{5}') {
+    if !text.contains(PREEXPANDED_STDIN_BODY) {
         return text.to_string();
     }
     let mut output = String::with_capacity(text.len());
     for ch in text.chars() {
-        if ch == '\u{5}' {
+        if ch == PREEXPANDED_STDIN_BODY {
             output.push(
                 char::from_u32(crate::executor::substitution_metadata::RAW_BYTE_MARKER_ESCAPE)
                     .expect("sentinel is valid"),

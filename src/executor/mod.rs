@@ -2107,3 +2107,6 @@ mod tests;
 
 #[cfg(test)]
 mod splits_gate;
+
+#[cfg(test)]
+mod markers_decoder_tests;
