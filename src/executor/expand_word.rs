@@ -66,9 +66,29 @@ fn redirect_operand_literal(expanded: &str) -> String {
     if !crate::executor::markers::contains_word_marker_bytes(expanded) {
         return expanded.to_string();
     }
-    crate::executor::markers::decode_word_position_carriers(
+    let decoded = crate::executor::markers::decode_word_position_carriers(
         &expanded.replace(crate::executor::markers::CTLESC, ""),
-    )
+    );
+    // The operand is now a FILENAME: GNU redir.c:298
+    // redirection_expand returns the string do_redirection_internal
+    // opens verbatim, so a stored value's E400 literal-char escape
+    // pairs — transport for the raw chars — fold here through the
+    // same boundary decoder the argv/env crossings use (rubash#2881,
+    // rubash#3040); left in, the pair lands in the on-disk name.
+    fold_filename_literal_char_escapes(&decoded)
+}
+
+/// Fold E400 literal-char escape pairs in text that has been
+/// finalized as a filename (or as a diagnostic naming the operand)
+/// back to the raw chars, through the #2881 boundary decoder; text
+/// without the escape introducer passes through unchanged
+/// (rubash#3040).
+fn fold_filename_literal_char_escapes(text: &str) -> String {
+    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
 }
 
 impl Executor {
@@ -411,6 +431,10 @@ impl Executor {
             // site (redirect gate / compound binding), mirroring the
             // argument-word failglob port (command_prepare.rs).
             glob::PathnameExpansion::Fail(pattern) => {
+                // The diagnostic names the operand being finalized as
+                // a filename, so its E400 pairs fold like the literal
+                // outcomes above (rubash#3040).
+                let pattern = fold_filename_literal_char_escapes(&pattern);
                 // GNU performs ONE do_redirections per command, so the
                 // word expands (and reports) exactly once. Rubash's
                 // multi-phase redirect pipeline can expand the same operand
