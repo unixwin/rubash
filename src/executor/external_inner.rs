@@ -1090,10 +1090,20 @@ impl Executor {
                     &display,
                 );
             } else {
+                // rubash#2696: the plain walk records the as-written
+                // join (see recorded_resolution_spelling), not the
+                // anchored display — the standard-path branch above
+                // keeps `display` because its walk never consulted
+                // the environment PATH this spelling describes.
+                let recorded = crate::executor::path::recorded_resolution_spelling(
+                    &cmd.words[0],
+                    &program,
+                    &self.shell_state.env_vars,
+                );
                 crate::builtins::hash::record_command_resolution(
                     &mut self.shell_state.env_vars,
                     &cmd.words[0],
-                    &display,
+                    &recorded,
                 );
             }
         }
@@ -3642,6 +3652,7 @@ impl Executor {
         let fail_prefix = format!("{}{}: ", self.error_prefix(), exec_path.display());
         let (enoent_message, enoent_status) = spawn_error_diagnostic(
             &exec_path.to_path_buf(),
+            cwd,
             &std::io::Error::from_raw_os_error(libc::ENOENT),
         );
         let fail_prefix_c = CString::new(fail_prefix.clone()).map_err(|_| {
@@ -4368,7 +4379,7 @@ impl Executor {
         // EX_NOEXEC); an existing executable non-#! file is "cannot
         // execute: required file not found" (EX_NOTFOUND); anything else
         // keeps the plain errno text via file_error.
-        let (message, status) = spawn_error_diagnostic(program, &error);
+        let (message, status) = spawn_error_diagnostic(program, &self.shell_state.cwd, &error);
         writeln!(
             &mut stderr,
             "{}{}: {}",
@@ -4676,7 +4687,7 @@ impl Drop for ForegroundBuiltinSigintGuard {
 /// body (the caller prepends the report prolog and the resolved pathname)
 /// and the exit status. Non-ENOENT failures are EX_NOEXEC with the plain
 /// errno text, exactly the historical behavior of this call site.
-fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32) {
+fn spawn_error_diagnostic(program: &PathBuf, cwd: &Path, error: &io::Error) -> (String, i32) {
     const EX_NOTFOUND: i32 = 127;
     const EX_NOEXEC: i32 = 126;
     // ENOENT on unix and ERROR_FILE_NOT_FOUND on Windows share the value 2;
@@ -4686,13 +4697,24 @@ fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32)
         return (crate::posix_errors::message(error).to_string(), EX_NOEXEC);
     }
     // errno == ENOENT: the status is EX_NOTFOUND unless the file itself
-    // proves the #! bad-interpreter refusal (EX_NOEXEC).
-    let metadata = std::fs::metadata(program).ok();
+    // proves the #! bad-interpreter refusal (EX_NOEXEC). The probes
+    // below must stat the file the CHILD tried to exec: children are
+    // born in the session cwd (G-02), so a relative program (a
+    // hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
+    // anchors there — probing it against the process cwd stats a
+    // different file and misclassifies a missing recorded target as
+    // a bad interpreter.
+    let probe = if program.is_absolute() {
+        program.clone()
+    } else {
+        cwd.join(program)
+    };
+    let metadata = std::fs::metadata(&probe).ok();
     let executable = metadata
         .as_ref()
         .is_some_and(|meta| meta.is_file() && file_has_exec_bit(meta));
     if executable {
-        if let Ok(sample) = std::fs::read(program) {
+        if let Ok(sample) = std::fs::read(&probe) {
             if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
                 let line_end = sample
                     .iter()

@@ -1306,6 +1306,39 @@ pub(crate) fn exec_name_for_program(
     (anchored == program).then_some(as_written)
 }
 
+/// rubash#2696: the spelling a PATH resolution of `name` to `program`
+/// RECORDS in the hash table. GNU's walk builds ONE string — the
+/// as-written `<elem>/<name>` join (findcmd.c sh_makepath) — and that
+/// single string is what phash_insert records, what `hash` and `type`
+/// print, and what shell_execve later executes verbatim. When the
+/// as-written join anchors (at the session cwd) onto exactly
+/// `program`, the search itself produced this file, so the join is
+/// the recorded spelling; the anchored absolute display would lose a
+/// relative element (`./rel1` recorded as `/cwd/./rel1/foo`) and with
+/// it the post-cd verbatim-exec behavior. Any resolution the walk did
+/// not itself produce (a hash-table re-record, an emulated stand-in
+/// whose program came from elsewhere) keeps the anchored display
+/// form. Non-unix keeps the existing rendering (the #2302/#2317
+/// status quo for Windows display forms).
+pub(crate) fn recorded_resolution_spelling(
+    name: &str,
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    #[cfg(unix)]
+    {
+        if let Some(as_written) = find_user_command_as_written(name, env_vars) {
+            if as_written.contains('/') {
+                let anchored = anchor_at_session_cwd(PathBuf::from(&as_written), env_vars);
+                if anchored == program {
+                    return as_written;
+                }
+            }
+        }
+    }
+    super::execution_misc::shell_display_path(&program.to_string_lossy().replace('\\', "/"))
+}
+
 /// rubash#2442: the one filename-resolution funnel every external
 /// spawn route passes through. GNU has exactly one resolution point
 /// per disk command — execute_disk_command's `search_for_command`
