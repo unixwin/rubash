@@ -1271,6 +1271,19 @@ pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
     out
 }
 
+/// Presence gate for the decode boundaries served by
+/// substitution_metadata::decode_raw_byte_markers: true when `text`
+/// carries EITHER transport family that decoder folds — a raw-byte
+/// marker pair (RAW_BYTE_MARKER_ESCAPE introducer) or an E400
+/// literal-char pair. The check itself transforms nothing; a hit routes
+/// into the pair-aware decoder. Gating a boundary on the raw-byte
+/// family alone leaves E400 pairs unfolded whenever no unrelated
+/// raw-byte pair is present in the same text (rubash#3038).
+pub(crate) fn contains_decodable_transport(text: &str) -> bool {
+    text.contains(char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("raw-byte escape is a valid char"))
+        || text.contains(LITERAL_CHAR_ESCAPE)
+}
+
 /// E400-aware ANSI_C_IFS_GUARD handling (rubash#735).
 ///
 /// The guard (U+E401) marks lexer-decoded `$'...'` blanks. User data U+E401

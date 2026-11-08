@@ -470,15 +470,15 @@ fn ps4_template_decodes_expansion_introduced_markers() {
 /// rendering path. A stored ESC, a comsub ESC, a TAB carried by a value
 /// (the sweep's open Q1: the ANSI_C_IFS_GUARD must not survive into the
 /// rendered prompt), and a typed PUA value all render as their real
-/// bytes/chars. (The typed-PUA leg is a known-broken inverted pin,
-/// rubash#3038; the other legs assert the correct rendering.)
+/// bytes/chars. (The typed-PUA leg pins rubash#3038: the E400 pair for
+/// the stored char must fold at the prompt transport decode.)
 #[test]
 fn prompts_via_public_api_carry_no_markers() {
     use rubash::api::{RunOptions, Session};
     let mut session = Session::builder().build().expect("session builds");
     session
         .run(
-            "esc=$(printf 'A\\033B'); tab=$'A\\tB'; pua=$'\\uE314'",
+            "esc=$(printf 'A\\033B'); tab=$'A\\tB'; pua=$'\\uE314'; mix=$'\\uE314\\x1b'",
             &RunOptions::default(),
         )
         .expect("seed values run");
@@ -490,14 +490,22 @@ fn prompts_via_public_api_carry_no_markers() {
         !rendered.contains('\u{E401}'),
         "Q1: ANSI_C_IFS_GUARD must not survive into a rendered prompt: {rendered:?}"
     );
-    // KNOWN BROKEN (rubash#3038): expand_prompt does not decode the
-    // E400 pair for PARAM_WORD_BACKSLASH_GUARD — it renders the pair
-    // where GNU renders the raw char. Pinned inverted (registry-test
-    // precedent): a fix flips this red.
+    // rubash#3038: expand_prompt must decode the E400 pair for the
+    // stored PARAM_WORD_BACKSLASH_GUARD char — GNU renders the raw
+    // char (parse.y:6689 inserts the stored value verbatim).
     assert_eq!(
         session.expand_prompt("<$pua>"),
-        "<\u{E400}\u{E314}>",
-        "rubash#3038: pua leg must render the raw char once fixed"
+        "<\u{E314}>",
+        "rubash#3038: pua leg must render the raw char"
+    );
+    // Gate-independence (rubash#3038): a value carrying BOTH transports
+    // (E400 pair for the typed char, raw-byte pair for the ESC byte)
+    // renders both raw — the E400 fold must not depend on an unrelated
+    // raw-byte pair being present in the same prompt.
+    assert_eq!(
+        session.expand_prompt("<$mix>"),
+        "<\u{E314}\u{1b}>",
+        "rubash#3038: mixed value must render both raw chars"
     );
 }
 
