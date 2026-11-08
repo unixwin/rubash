@@ -324,6 +324,9 @@ pub(crate) fn clear_command_lookup_cache(env_vars: &HashMap<String, String>) {
 /// invalidated together or the next `find_user_command(name)` returns the
 /// stale cached path.
 pub(crate) fn remove_command_lookup_cache(name: &str, env_vars: &HashMap<String, String>) {
+    // Cache keys are folded names (see find_user_command, rubash#3076).
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
     let scope = session_scope(env_vars);
     let mut stores = command_lookup_stores();
     let (cache, mirror) = session_slice_and_mirror(&mut stores, &scope);
@@ -344,6 +347,9 @@ pub(crate) fn set_command_lookup_cache(
     path: Option<PathBuf>,
     env_vars: &HashMap<String, String>,
 ) {
+    // Cache keys are folded names (see find_user_command, rubash#3076).
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
     let scope = session_scope(env_vars);
     let mut stores = command_lookup_stores();
     let mirror = session_hashed_mirror(&mut stores, &scope);
@@ -550,6 +556,12 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     if name.is_empty() {
         return None;
     }
+    // The name is finalized here: GNU findcmd.c:348 search_for_command
+    // walks $PATH with the word's raw bytes, so a stored E400
+    // literal-char escape pair folds to the raw char before ANY cache
+    // consult, hash-mirror key, or filesystem probe below (rubash#3076).
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
 
     // GNU findcmd.c:348-427 search_for_command(): when hashing is disabled
     // (`set +h`, findcmd.c:356 hashing_enabled) or PATH is in the command's
@@ -688,7 +700,8 @@ pub(crate) fn find_user_command_without_hash(
     env_vars: &HashMap<String, String>,
 ) -> Option<PathBuf> {
     let fingerprint = command_lookup_fingerprint(env_vars);
-    find_user_command_uncached(name, env_vars, &fingerprint)
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    find_user_command_uncached(&folded_name, env_vars, &fingerprint)
 }
 
 /// GNU findcmd.c:373 `file_status(hashed_file)` checks FS_EXISTS|FS_EXECABLE.
@@ -1253,6 +1266,10 @@ pub fn find_user_command_as_written(
     name: &str,
     env_vars: &HashMap<String, String>,
 ) -> Option<String> {
+    // Folded like find_user_command (rubash#3076): the recorded join
+    // names the raw file, never the stored pair.
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
     if name.is_empty() || has_path_separator(name) {
         return None;
     }
@@ -1316,7 +1333,10 @@ pub(crate) fn spawn_exec_name(
     env_vars: &HashMap<String, String>,
 ) -> Option<String> {
     if name.contains('/') {
-        Some(name.to_string())
+        // The typed word IS the execve filename (findcmd.c:385-387):
+        // fold a stored E400 pair to the raw char, or the child spawn
+        // aims at a file that does not exist (rubash#3076).
+        Some(crate::executor::substitution_metadata::fold_literal_char_escapes(name))
     } else {
         exec_name_for_program(name, program, env_vars)
     }

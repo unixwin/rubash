@@ -169,6 +169,10 @@ where
     }
 
     if let Some(file) = load_file {
+        // The -f operand is a pathname: fold a stored E400 pair so
+        // the dlopen probe and its diagnostics name the raw file
+        // (rubash#3076).
+        let file = crate::executor::substitution_metadata::fold_literal_char_escapes(&file);
         let names: Vec<String> = operands.iter().map(|name| name.to_string()).collect();
         let loadables_path = env_vars.get("BASH_LOADABLES_PATH").map(String::as_str);
         match dynamic::load_builtin(&file, &names, loadables_path, cwd, special_only, disable) {
