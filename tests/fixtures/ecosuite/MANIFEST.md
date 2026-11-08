@@ -62,7 +62,7 @@ live-session rendering, network-heavy installs. Per the 2026-11-06 ruling
 (manual local runs are acceptable coverage when recorded), those faces sit on
 one recorded list with a named procedure per face and a run log: the list
 lives in the ecosuite warehouse as `MANUAL-RUNS.md` (warehouse-local git,
-`ecosuite` commit `e941c48`), and covers:
+`ecosuite` commit `483c2bb`), and covers:
 
 - fzf: the real junegunn/fzf `shell/key-bindings.bash` /
   `shell/completion.bash` (never vendored or sourced by any harness) + live
