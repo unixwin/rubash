@@ -2,6 +2,112 @@ use super::parse_loop::offending_line_text;
 use super::*;
 use crate::lexer::{Token, TokenKind};
 
+/// rubash#2918: a coproc body is re-parsed on a token SLICE (the split
+/// brace body, the subshell body, the command-sequence body) or on a
+/// re-lexed token stream (the folded brace-group token), so a parse
+/// error produced by the inner parse stored its
+/// `__RUBASH_PARSE_SOURCE__` echo from that fragment alone — for
+/// `coproc {;}` the echo was the bare `` `;' ``. GNU's
+/// report_syntax_error (parse.y:6833) echoes the whole physical input
+/// line via print_offending_line (parse.y:6814) over shell_input_line,
+/// and the outer parse still holds every token of that line, so
+/// recompute the stored echo from the outer stream at the blamed
+/// line. Only the echo text changes; the blamed token and line were
+/// already correct.
+fn reattach_coproc_body_error_lines(body: &mut [CommandNode], tokens: &[Token], anchor: usize) {
+    for command in body.iter_mut() {
+        reattach_coproc_error_line(command, tokens, anchor);
+    }
+}
+
+fn reattach_coproc_error_line(command: &mut CommandNode, tokens: &[Token], anchor: usize) {
+    if command.has_parse_error_marker() && command.has_assignment("__RUBASH_PARSE_SOURCE__") {
+        let blamed_line = command
+            .get_assignment("__RUBASH_PARSE_ERROR_NEAR__")
+            .and_then(|spec| {
+                spec.rsplit(crate::executor::markers::PARSE_ERROR_FIELD_SEP)
+                    .next()
+                    .and_then(|field| field.trim().parse::<usize>().ok())
+            })
+            .or(command.line)
+            .unwrap_or_else(|| tokens.get(anchor).map(|token| token.position).unwrap_or(1));
+        // The blamed line's tokens all sit in the outer stream; any one
+        // of them anchors offending_line_text's walk to the line start.
+        // Fall back to the body anchor when the blamed line came from a
+        // re-lexed stream whose line numbers are body-relative.
+        let outer_index = tokens
+            .iter()
+            .position(|token| token.position == blamed_line)
+            .unwrap_or(anchor);
+        let line_text = offending_line_text(tokens, outer_index, None, 0);
+        for (name, value) in command.assignments.iter_mut() {
+            if name == "__RUBASH_PARSE_SOURCE__" {
+                *value = line_text;
+                break;
+            }
+        }
+    }
+    // Descend the compound payloads (the same child lists as
+    // nodes.rs `command_child_lists_mut`, minus process-substitution
+    // bodies: comsub diagnostics travel their own channel — see
+    // report_comsub_body_parse_error — and are not this fix's surface).
+    if let Some(pipeline) = &mut command.pipeline_command {
+        reattach_coproc_body_error_lines(&mut pipeline.stages, tokens, anchor);
+    }
+    if let Some(list) = &mut command.and_or_list {
+        reattach_coproc_body_error_lines(&mut list.commands, tokens, anchor);
+    }
+    if let Some(background) = &mut command.background_command {
+        reattach_coproc_error_line(&mut background.command, tokens, anchor);
+    }
+    if let Some(time) = &mut command.time_command {
+        reattach_coproc_error_line(&mut time.command, tokens, anchor);
+    }
+    if let Some(inverted) = &mut command.inverted_command {
+        reattach_coproc_error_line(&mut inverted.command, tokens, anchor);
+    }
+    if let Some(subshell) = &mut command.subshell_command {
+        reattach_coproc_body_error_lines(&mut subshell.body, tokens, anchor);
+    }
+    if let Some(group) = &mut command.brace_group {
+        reattach_coproc_body_error_lines(&mut group.body, tokens, anchor);
+    }
+    if let Some(if_command) = &mut command.if_command {
+        reattach_coproc_body_error_lines(&mut if_command.condition, tokens, anchor);
+        reattach_coproc_body_error_lines(&mut if_command.then_body, tokens, anchor);
+        for branch in &mut if_command.elif_branches {
+            reattach_coproc_body_error_lines(&mut branch.condition, tokens, anchor);
+            reattach_coproc_body_error_lines(&mut branch.body, tokens, anchor);
+        }
+        if let Some(else_body) = &mut if_command.else_body {
+            reattach_coproc_body_error_lines(else_body, tokens, anchor);
+        }
+    }
+    if let Some(loop_command) = &mut command.loop_command {
+        reattach_coproc_body_error_lines(&mut loop_command.condition, tokens, anchor);
+        reattach_coproc_body_error_lines(&mut loop_command.body, tokens, anchor);
+    }
+    if let Some(for_command) = &mut command.for_command {
+        reattach_coproc_body_error_lines(&mut for_command.body, tokens, anchor);
+    }
+    if let Some(select_command) = &mut command.select_command {
+        reattach_coproc_body_error_lines(&mut select_command.body, tokens, anchor);
+    }
+    if let Some(case_command) = &mut command.case_command {
+        for clause in &mut case_command.clauses {
+            reattach_coproc_body_error_lines(&mut clause.body, tokens, anchor);
+        }
+    }
+    if let Some(function) = &mut command.function_command {
+        reattach_coproc_body_error_lines(&mut function.body, tokens, anchor);
+    }
+    if let Some(coproc) = &mut command.coproc_command {
+        if let Some(body) = &mut coproc.body {
+            reattach_coproc_body_error_lines(body, tokens, anchor);
+        }
+    }
+}
+
 pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(CommandNode, usize)> {
     // Parse `coproc [NAME] command [args...]` or `coproc [NAME] { body; }` or `coproc [NAME] ( body )`
     let mut i = start + 1; // skip `coproc`
@@ -71,7 +177,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     if let Some(token) = tokens.get(i) {
         // Brace group body (single token from lexer)
         if is_brace_group_token(token) {
-            let body = parse_inline_brace_body(token);
+            let mut body = parse_inline_brace_body(token);
+            reattach_coproc_body_error_lines(&mut body, tokens, i);
             // rubash#2890: an empty brace body is a syntax error (see
             // the split-token arm below).
             if body.is_empty() {
@@ -92,7 +199,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         }
 
         if is_keyword(tokens, i, "{") {
-            let (body, close_i) = parse_split_brace_body(tokens, i)?;
+            let (mut body, close_i) = parse_split_brace_body(tokens, i)?;
+            reattach_coproc_body_error_lines(&mut body, tokens, i);
             // rubash#2890: GNU's compound_list (parse.y:1262) has no
             // empty production — the brace body of a coproc must hold
             // at least one command, so `coproc { }` is a syntax error
@@ -116,7 +224,11 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             return Some(finish_coproc_command(command, tokens, close_i + 1));
         }
 
-        if let Some((body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
+        if let Some((mut body_command, body_end)) = parse_coproc_compound_body(tokens, i) {
+            // The compound sub-parsers slice their inner bodies out of
+            // the full stream, so their error nodes carry fragment
+            // echoes too — reattach them the same way.
+            reattach_coproc_error_line(&mut body_command, tokens, i);
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
             command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -131,7 +243,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
             return Some(finish_coproc_command(command, tokens, body_end));
         }
 
-        if let Some((body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
+        if let Some((mut body, body_end)) = parse_coproc_command_sequence_body(tokens, i) {
+            reattach_coproc_body_error_lines(&mut body, tokens, i);
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|t| t.position);
             command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -175,7 +288,8 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
                 i += 1;
             }
             if i < tokens.len() {
-                let body = parse(&tokens[body_start..i]).commands;
+                let mut body = parse(&tokens[body_start..i]).commands;
+                reattach_coproc_body_error_lines(&mut body, tokens, body_start);
                 let mut command = CommandNode::new();
                 command.line = tokens.get(start).map(|t| t.position);
                 command.logical_line = tokens.get(start).map(|t| t.logical_line);
@@ -635,7 +749,16 @@ fn parse_inline_brace_body(token: &Token) -> Vec<CommandNode> {
         .trim();
     // rubash#1544: folded-body re-lex under the fold pass's posix
     // mode, locked (see Token::posix_gate).
-    let body_tokens = crate::lexer::tokenize_locked_body(inner, token.posix_gate);
+    // rubash#2918: the re-lex starts at the brace token's own line —
+    // the line-agnostic form numbers the body from 1, so a parse
+    // error inside a folded body on a later script line reported
+    // line 1 (the parse_loop region scan re-bases the same way,
+    // `token.position + brace_line - 1`).
+    let body_tokens = crate::lexer::tokenize_locked_body_with_initial_posix_and_line(
+        inner,
+        token.posix_gate,
+        token.position,
+    );
     parse(&body_tokens).commands
 }
 

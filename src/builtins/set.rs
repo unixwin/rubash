@@ -594,8 +594,16 @@ fn shell_quote(value: &str, posix_mode: bool) -> String {
     // variable quoting 1/3). The dollar-quote branch is gated on
     // posixly_correct == 0 (variables.c:1131): POSIX mode single-quotes
     // the raw value instead (audit B4-F11).
-    if !posix_mode && ansic_shouldquote(value) {
-        return ansic_quote_value(value);
+    //
+    // The ansic pair must be the shared byte-stream ports
+    // (executor::ansic_shouldquote / ansic_quote, strtrans.c:341/230):
+    // GNU tests the raw bytes, and in rubash storage part of the C0
+    // range and raw high bytes ride as U+E000 raw-byte marker pairs,
+    // which a char-level scan of the stored text reads as printable
+    // PUA — the ports decode the pairs before judging (rubash#3017).
+    // The declare/array faces already render through the same ports.
+    if !posix_mode && crate::executor::ansic_shouldquote(value) {
+        return crate::executor::ansic_quote(value);
     }
     if !contains_shell_metas(value) {
         return value.to_string();
@@ -605,40 +613,6 @@ fn shell_quote(value: &str, posix_mode: bool) -> String {
     }
     let escaped = value.replace('\'', "'\\''");
     format!("'{}'", escaped)
-}
-
-/// GNU ansic_shouldquote: any non-printing character forces the dollar-quote
-/// form. Printable ASCII and printable Unicode text stay unquoted here.
-fn ansic_shouldquote(value: &str) -> bool {
-    value.chars().any(|ch| ch.is_control())
-}
-
-/// GNU ansic_quote with flags=0: dollar-quote wrapping, escaping ESC, the
-/// C-style escapes, backslash, and single quote; other non-printing
-/// characters become three-digit octal escapes.
-fn ansic_quote_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 4);
-    out.push_str("$'");
-    for ch in value.chars() {
-        match ch {
-            '\u{1b}' => out.push_str("\\E"),
-            '\u{7}' => out.push_str("\\a"),
-            '\u{b}' => out.push_str("\\v"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\\' => out.push_str("\\\\"),
-            _ if ch.is_control() => {
-                let byte = ch as u32;
-                out.push_str(&format!("\\{:03o}", byte));
-            }
-            _ => out.push(ch),
-        }
-    }
-    out.push('\'');
-    out
 }
 
 /// GNU sh_contains_shell_metas: IFS whitespace, quoting characters, shell

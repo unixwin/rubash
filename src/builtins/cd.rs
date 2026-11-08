@@ -11,6 +11,7 @@ use std::collections::HashMap;
 // instead of trusting a possibly-forged $PWD (rubash#2408).
 pub(crate) mod paths;
 
+use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 
 use paths::{
@@ -26,33 +27,10 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
-/// GNU builtins/common.c:83-94 builtin_error_prolog: the shell name, the
-/// executing line for scripts, then the builtin name.
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
-
-/// GNU error.c:453 err_readonly (report_error family): the bare
-/// `VAR: readonly variable` bind diagnostic honors gnu_errfmt
-/// (rubash#1038), unlike the builtin_error lines sharing this file.
-fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{script}:{line}: ");
-        }
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefixes are the shared builders in
+// super::diagnostic (GNU builtins/common.c:83-94 builtin_error_prolog
+// and the error.c:453 err_readonly twin), which name the frame's
+// definition file (rubash#3035).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
