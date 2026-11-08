@@ -1247,19 +1247,15 @@ fn dap_is_event(message: &DapJson, name: &str) -> bool {
 /// (Globals scope, plus the array's children) and `evaluate` — and
 /// scans the whole wire transcript.
 ///
-/// KNOWN BROKEN (found by this cell's lane; full repro and transcript
-/// evidence in the #3018 lane REPORT): the scalar renderings arrive
-/// in internal storage encoding — the U+E400 literal-char pair for
-/// the typed PUA char, U+E000 carrier pairs for the raw ESC/C0
-/// bytes — where every other channel renders the decoded value (the
-/// raw char, the raw bytes: see the echo / printf /
-/// external-boundary cells above). The snapshot face captures
-/// storage forms (`capture_variable`, src/executor/state_views.rs)
-/// and the DAP value renderers print them verbatim; no decode step
-/// runs. The parenthesized array summary is the control: it already
-/// renders decoded, exactly like `declare -p`. Pinned inverted
-/// (registry-test precedent): a fix flips every value assertion
-/// below red.
+/// The snapshot face captures storage forms (`capture_variable`,
+/// src/executor/state_views.rs), so the DAP value renderers decode
+/// at their boundary (rubash#3074): a typed registry-zone char
+/// arrives as a U+E400 literal-char pair and raw C0 bytes as U+E000
+/// carrier pairs, and both fold back to the raw char / raw bytes —
+/// the same rendering every other channel produces (see the echo /
+/// printf / external-boundary cells above). The parenthesized
+/// array summary is the control: it renders decoded, exactly like
+/// `declare -p`.
 #[test]
 fn dap_json_channel_carries_no_markers() {
     let dir = std::env::temp_dir().join(format!("rubash-golden-dap-{}", std::process::id()));
@@ -1352,23 +1348,22 @@ fn dap_json_channel_carries_no_markers() {
             .to_string()
     };
 
-    // Scalar values through the variables face: storage encoding
-    // today (see the doc comment); the decoded renderings are what
-    // each message names.
+    // Scalar values through the variables face render decoded
+    // (see the doc comment).
     assert_eq!(
         value("pua"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP pua value must render the raw U+E314 char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP pua value must render the raw U+E314 char"
     );
     assert_eq!(
         value("esc"),
-        "A\u{E000}\u{E01C}B",
-        "rubash#3018: DAP esc value must render the raw ESC byte once fixed"
+        "A\u{1B}B",
+        "rubash#3074: DAP esc value must render the raw ESC byte"
     );
     assert_eq!(
         value("c0"),
-        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
-        "rubash#3018: DAP c0 value must render the raw C0 bytes once fixed"
+        "a\u{11}b\u{1F}c",
+        "rubash#3074: DAP c0 value must render the raw C0 bytes"
     );
     // Control: the parenthesized array summary already renders
     // decoded (raw char, $'\021' ansic form) — pin it so a fix
@@ -1378,7 +1373,7 @@ fn dap_json_channel_carries_no_markers() {
         "([0]=\"\u{E314}\" [1]=$'x\\021y')",
         "DAP array summary must stay in decoded declare form"
     );
-    // Array children through the variables face: same storage leak.
+    // Array children through the variables face: same decode.
     let arr_ref = var("arr")
         .get("variablesReference")
         .and_then(DapJson::as_i64)
@@ -1402,16 +1397,16 @@ fn dap_json_channel_carries_no_markers() {
     };
     assert_eq!(
         element("[0]"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP arr[0] must render the raw U+E314 char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP arr[0] must render the raw U+E314 char"
     );
     assert_eq!(
         element("[1]"),
-        "x\u{E000}\u{E012}y",
-        "rubash#3018: DAP arr[1] must render the raw 0x11 byte once fixed"
+        "x\u{11}y",
+        "rubash#3074: DAP arr[1] must render the raw 0x11 byte"
     );
 
-    // The evaluate face renders the same storage forms.
+    // The evaluate face renders the same decoded forms.
     let evaluate = |client: &mut DapClient, expression: &str| {
         let body = client.ok(
             "evaluate",
@@ -1427,18 +1422,18 @@ fn dap_json_channel_carries_no_markers() {
     };
     assert_eq!(
         evaluate(&mut client, "$pua"),
-        "\u{E400}\u{E314}",
-        "rubash#3018: DAP evaluate $pua must render the raw char once fixed"
+        "\u{E314}",
+        "rubash#3074: DAP evaluate $pua must render the raw char"
     );
     assert_eq!(
         evaluate(&mut client, "$esc"),
-        "A\u{E000}\u{E01C}B",
-        "rubash#3018: DAP evaluate $esc must render the raw ESC byte once fixed"
+        "A\u{1B}B",
+        "rubash#3074: DAP evaluate $esc must render the raw ESC byte"
     );
     assert_eq!(
         evaluate(&mut client, "$c0"),
-        "a\u{E000}\u{E012}b\u{E000}\u{E020}c",
-        "rubash#3018: DAP evaluate $c0 must render the raw C0 bytes once fixed"
+        "a\u{11}b\u{1F}c",
+        "rubash#3074: DAP evaluate $c0 must render the raw C0 bytes"
     );
 
     // Run the debuggee out: the session genuinely executed — its
@@ -1454,17 +1449,19 @@ fn dap_json_channel_carries_no_markers() {
     let status = client.child.wait().expect("dap server exits");
     assert!(status.success(), "dap server exit status: {status}");
 
-    // The wire transcript: the named protocol strings never cross
-    // (a straight assertion — that leg is clean today), while the
-    // carrier codepoints DO cross (inverted: a fix must leave the
-    // transcript free of every registry-zone codepoint except the
-    // user's own U+E314 data char in the array summary).
+    // The wire transcript: the named protocol strings never cross,
+    // and no carrier codepoint crosses either — the only
+    // registry-zone codepoint on the wire is the user's own U+E314
+    // data char (the decoded pua value and the array summary).
     assert_no_named_marker(&client.transcript, "dap transcript");
     let transcript_text = String::from_utf8_lossy(&client.transcript);
-    assert!(
-        transcript_text.contains('\u{E400}') && transcript_text.contains('\u{E000}'),
-        "rubash#3018: DAP transcript must carry no carrier codepoints once fixed"
-    );
+    for ch in transcript_text.chars() {
+        let cp = ch as u32;
+        assert!(
+            !(0xE000..=0xE4FF).contains(&cp) || cp == 0xE314,
+            "rubash#3074: DAP transcript carries carrier codepoint U+{cp:04X}: {transcript_text:?}"
+        );
+    }
     assert_clean(&client.server_stderr(), "dap server stderr");
 
     std::fs::remove_dir_all(&dir).ok();

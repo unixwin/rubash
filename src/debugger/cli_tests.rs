@@ -204,6 +204,48 @@ continue
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// Carrier-carrying values on the CLI faces (rubash#3074):
+/// `print` of a carrier-carrying variable — by bare name
+/// through the snapshot view and by `$name` through the
+/// evaluation outcome — renders the decoded value, never the
+/// storage-form carrier pairs. `info variables` prints the
+/// declaration text, which the shared printer already renders
+/// decoded; it is pinned here in its decoded form.
+#[test]
+fn print_renders_decoded_carrier_values() {
+    let _span = GateTestSpan::new();
+    let (dir, program) = program_file("printdecode", "pua=$'\\uE314'\nesc=$'A\\033B'\necho done\n");
+    let commands = "\
+break 3
+continue
+print pua
+print $pua
+print $esc
+info variables
+continue
+";
+    let (status, transcript) = run_cli(&program, commands);
+    assert_eq!(status, 0, "the session runs to a clean exit: {transcript}");
+    for needle in [
+        "pua = \u{E314}",
+        "(rubash-dbg) \u{E314}\n",
+        "(rubash-dbg) A\u{1B}B\n",
+        "declare -- pua=\"\u{E314}\"",
+    ] {
+        assert!(
+            transcript.contains(needle),
+            "transcript must contain {needle:?}:\n{transcript}"
+        );
+    }
+    for carrier in ['\u{E000}', '\u{E400}'] {
+        assert!(
+            !transcript.contains(carrier),
+            "transcript must not carry the storage-form lead {carrier:?}:\n{transcript}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 #[test]
 fn kill_ends_the_session_without_the_exit_path() {
     let _span = GateTestSpan::new();
