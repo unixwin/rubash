@@ -503,19 +503,28 @@ pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     output
 }
 
-/// Fold E400 literal-char escape pairs in text that has been
-/// finalized as a NAME — a filename, a lookup key, or a diagnostic
-/// naming one — back to the raw chars, through the boundary decoder
-/// above; text without the escape introducer passes through
-/// unchanged (rubash#3040). Every name-consumption boundary routes
-/// through this one gate + decoder (rubash#3076 census): PATH and
-/// hash lookup keys, slash-name classification probes, cd/pushd
-/// operands, exec diagnostics, source resolution, test operands,
-/// glob patterns, history/bind/enable file operands, and the
-/// comsub cd fast path — so a stored pair can never reach a
-/// filesystem probe, a cache key, or a diagnostic verbatim.
+/// Fold carrier pairs in text that has been finalized as a NAME —
+/// a filename, a lookup key, or a diagnostic naming one — back to
+/// the raw chars / byte chars, through the boundary decoder above;
+/// text with neither transport family passes through unchanged.
+/// The gate is the shared double-family gate (rubash#3038): the
+/// decoder folds BOTH the E400 literal-char escape pairs
+/// (rubash#3040) and the U+E000 raw-byte marker pairs — gating on
+/// the E400 introducer alone left every boundary below unfolded
+/// whenever a name carried only a raw-byte pair, so a stored byte
+/// (e.g. 0x1C from `$(printf 'a\034b')`) reached filesystem probes,
+/// cache keys, and diagnostics as its pair spelling (rubash#3104,
+/// the E000-domain counterpart of the rubash#3076 census). Every
+/// name-consumption boundary routes through this one gate +
+/// decoder: PATH and hash lookup keys, slash-name classification
+/// probes, cd/pushd operands, exec diagnostics, source resolution,
+/// test operands, glob patterns, history/bind/enable file
+/// operands, the comsub cd fast path, redirect operand
+/// finalization, and the `$(< file)` reader — so a stored pair of
+/// either family can never reach a filesystem probe, a cache key,
+/// or a diagnostic verbatim.
 pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
-    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+    if crate::executor::markers::contains_decodable_transport(text) {
         decode_raw_byte_markers_to_byte_chars(text)
     } else {
         text.to_string()

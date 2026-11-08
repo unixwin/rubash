@@ -190,7 +190,10 @@ fn redirect_var_target_lands_raw_byte_name() {
 #[test]
 fn redirect_comsub_target_lands_raw_byte_name() {
     let root = fixture("redircomsub");
-    let out = run(&root, "printf Y > \"$(printf 'r\\0342')\"; echo \"rc=$?\"\n");
+    let out = run(
+        &root,
+        "printf Y > \"$(printf 'r\\0342')\"; echo \"rc=$?\"\n",
+    );
     assert_eq!(out.stdout, b"rc=0\n");
     let names = entry_names(&root);
     assert!(
@@ -380,7 +383,10 @@ fn glob_literal_segment_matches_byte_named_entry() {
 #[test]
 fn bind_f_reads_byte_named_file() {
     let root = fixture("bindf");
-    let out = run(&root, "n=$(printf 'b\\034f'); bind -f \"$n\"; echo \"rc=$?\"\n");
+    let out = run(
+        &root,
+        "n=$(printf 'b\\034f'); bind -f \"$n\"; echo \"rc=$?\"\n",
+    );
     assert_eq!(out.stdout, b"rc=0\n");
     no_pair(&out);
 }
@@ -410,7 +416,10 @@ fn history_write_lands_raw_byte_name() {
 #[test]
 fn comsub_readfile_reads_byte_named_file() {
     let root = fixture("readfile");
-    let out = run(&root, "n=$(printf 'a\\034b'); v=$(< \"$n\"); echo \"[$v]\"\n");
+    let out = run(
+        &root,
+        "n=$(printf 'a\\034b'); v=$(< \"$n\"); echo \"[$v]\"\n",
+    );
     assert_eq!(out.stdout, b"[AB]\n");
     no_pair(&out);
 }
