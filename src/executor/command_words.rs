@@ -388,6 +388,36 @@ impl Executor {
             || word.starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
             || word.starts_with(STORAGE_WORD_PREFIX)
             || super::command_prepare::raw_word_suppresses_pathname_expansion(raw, metadata);
+        // rubash#3045: a `${var=word}` assignment is a side effect of the
+        // expansion wherever it occurs (GNU subst.c:9777
+        // parameter_brace_expand -> subst.c:10346 `case '='` ->
+        // subst.c:7966 parameter_brace_expand_rhs -> bind_variable; the
+        // for list reaches that path via execute_cmd.c:3014
+        // expand_words_no_vars -> subst.c:13219 expand_word_list_internal
+        // -> subst.c:13062 shell_expand_word_list). The bind lives in the
+        // `&mut` apply pass, not in the `&self` value render — run it
+        // ONCE here, before every expansion arm below, mirroring
+        // expand_command_word (command_prepare.rs), under the same
+        // one-word cross-pass scope so the applied-value memo and the
+        // rubash#1169 freeze key exactly as they do for a plain argument.
+        // It must be here and not in expand_for_brace_word_values: the
+        // `$@`/array-at early arms below (quoted_positional_at_*,
+        // array_at_word_values) return before the brace path, and their
+        // segment renders expand literal affixes (`${v=mix}"$@"`,
+        // `"${a[@]}"${v=mix}`) without any apply — the bind was silently
+        // lost for every mixed word they claim. Running it once at the
+        // top covers all arms (their renders reuse the memo under this
+        // scope); a second run in the brace path would re-freeze earlier
+        // fragments against the post-assignment value. The single-quote
+        // fast path above returns first, so literal words never reach
+        // this scan; `<(...)` bodies are skipped by the scan itself
+        // (scan_word_prefix_quote_state tracks them like `$(...)` —
+        // GNU subst.c:6362 process_substitute forks).
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
+        self.apply_parameter_assignment_expansions_in_word(word);
         // GNU subst.c param_expand expands a for-list word exactly like a
         // command word, so the braced-alternate word-list fan-outs apply
         // here too (braced_alternate_word_values): `${b[@]+"${b[@]:0:2}"}`
@@ -580,6 +610,16 @@ impl Executor {
             }
             _ => expand_input,
         };
+        // rubash#3045: the `${var=word}` apply pass runs once in the
+        // caller (expand_for_word_values_impl) under its cross-pass
+        // scope, covering every arm — including the `$@`/array-at early
+        // arms that return before this function. Do NOT re-run it here:
+        // a second run would re-freeze earlier fragments against the
+        // post-assignment value. The render below reuses the memo under
+        // the caller's scope; a `${...}` inside a `<(...)` body was
+        // already skipped by the caller's apply (the scan tracks
+        // procsub spans like `$(...)`), and the materialized text is a
+        // /dev/fd pathname, so nothing here needs a second pass.
         let expanded = self.expand_word(expand_input);
         if for_word_has_unquoted_expansion(word, raw) {
             // Field splitting follows $IFS (builtins/eval.def word_list /

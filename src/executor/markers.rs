@@ -15,7 +15,11 @@
 //! - Business code must `use crate::executor::markers::*` (or name the
 //!   const) — never write a raw `'\x1f'` / `'\u{E302}'` literal.
 //! - A new marker = a new const + encode/decode pair + a boundary entry in
-//!   `MARKERS`, plus a `tests/marker_leak_golden.rs` case asserting the
+//!   `MARKERS`, plus golden coverage: the registry-driven typed-data
+//!   test in `tests/marker_registry_roundtrips.rs` iterates `MARKERS`
+//!   through the core shapes (a new marker gets cells automatically), and
+//!   `tests/marker_leak_golden.rs` (+ its PTY sibling) asserts one cell
+//!   per output channel that
 //!   sentinel never appears in stdout / `declare -p` / xtrace output on
 //!   marker-free input (the #824 audit moved leak detection out of the
 //!   shared decoder's output — there the codepoints are indistinguishable
@@ -44,6 +48,19 @@
 //! codepoints verbatim: the shared decoder's output carries no "leaked
 //! marker" assertions — on that boundary they could only fire on
 //! well-formed user data, which is exactly the #824 panic family.
+//!
+//! A row whose `boundaries` is empty claims no decode boundary: the
+//! carrier is internal-only (consumed inside its owning subsystem and
+//! never crossing output, storage, or reparse text). Such rows must be
+//! listed in the `INTERNAL_ONLY_ROWS` table in this module's tests
+//! (rubash#2885 E8); an unlisted empty row fails there, and a listed
+//! row that gains a claim must be removed from the table.
+//!
+//! The `__RUBASH_*` environment-serialization namespace — the named
+//! half of this protocol — is censused in the ENV NAMESPACE CENSUS
+//! block directly above the `MARKERS` table, and the
+//! `env_namespace_census_is_complete` test keeps that census
+//! exhaustive against the source tree.
 
 /// Decode boundary at which a carrier is restored.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -505,7 +522,11 @@ pub(crate) fn decode_word_position_carriers(value: &str) -> String {
 ///   the word-text decode chains this predicate gates.
 /// - CASE_PATTERN_* (NUL prefix): parser reader-state sentinels; NUL
 ///   cannot appear in transport text.
-pub(in crate::executor) fn contains_word_marker_bytes(value: &str) -> bool {
+// `pub(crate)` (not `pub(in crate::executor)`): the registry file is
+// also compiled into the `tests/marker_registry_roundtrips.rs` crate via
+// `#[path]`, where no `crate::executor` module exists. Still
+// crate-internal — no public surface.
+pub(crate) fn contains_word_marker_bytes(value: &str) -> bool {
     value
         .bytes()
         .any(|byte| (0x11..=0x1f).contains(&byte) || byte == 0xEE)
@@ -532,6 +553,166 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // ==========================================================================
 // Registry table — drives golden assertions and audits.
 // ==========================================================================
+
+// ENV NAMESPACE CENSUS (rubash#2885 E8)
+//
+// The named half of the carrier protocol: every `__RUBASH_*` key the
+// engine writes into a child/subshell environment (or reads back
+// from one) is enumerated here. EXACT entries are complete keys;
+// family entries are literal prefixes whose full keys are composed
+// at runtime. The env_namespace_census_is_complete test scans
+// src/ for `__RUBASH_...` tokens and fails on any token that is
+// neither an EXACT entry nor FAMILY-covered, and on any EXACT
+// entry that no longer occurs - a new serialization key must be
+// registered here in the same change that introduces it.
+// (Keys composed without a literal `__RUBASH_` fragment in source
+// would evade the scan; the namespace is written with literal
+// prefixes by convention - keep it that way.)
+//
+// FAMILY __RUBASH_SETOPT_ - shopt option state: prefix + option name, one key per option
+// FAMILY __RUBASH_FD_ - per-fd state: prefix + role infix (PATH_/WPATH_/HANDLE_/WHANDLE_/TARGET_/ACCESS_/FILE_/PIPE_/CLOSED_/STDIN_/OUTPUT_/TERMINAL_/DYNAMIC_INPUT_) + fd index
+// FAMILY __RUBASH_TRAP_ - per-trap state: prefix + signal/trap name (SIG* spelling, legacy bare name, or signal number)
+// FAMILY __RUBASH_ULIMIT_ - ulimit state: prefix + limit letter
+// FAMILY __RUBASH_PARSE_ERROR_ - parse-error payload fields: prefix + field name (fields joined by PARSE_ERROR_FIELD_SEP)
+// FAMILY __RUBASH_PARSE_SOURCE__ - parse-source span table: prefix + span id
+// FAMILY __RUBASH_PARSE_ - parse-state serialization keys (umbrella; PARSE_ERROR_ / PARSE_SOURCE__ subfamilies above)
+// FAMILY __RUBASH_CSB1_ - comsub payload serialization v1: prefix + slot/index suffix
+// FAMILY __RUBASH_COPROC_ - coproc plumbing: prefix + role/index suffix
+// FAMILY __RUBASH_ALIAS_ - alias state: prefix + generation/line suffix
+// FAMILY __RUBASH_FORK_ - fork/subshell state snapshot prefix literal (snapshot keys are the EXACT FORK_* entries)
+//
+// EXACT __RUBASH_ALIAS_STREAMED - state key (alias streamed) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARGV0_AFTER_UNSET - state key (argv0 after unset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARGV_DIALECT - argv dialect selection for respawned children (R2 frozen switch, see AGENTS.md)
+// EXACT __RUBASH_ARITH_EXP_EXPANDED - state key (arith exp expanded) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARITH_NAMEREF_ERROR - state key (arith nameref error) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARITH_NOASSIGN_ERROR - state key (arith noassign error) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARITH_READONLY_ERROR - state key (arith readonly error) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARITH_SUBSCRIPT_EXPR - state key (arith subscript expr) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ARRAY_VARS - serialized variable-name set (array) for child/subshell state transfer
+// EXACT __RUBASH_ASSOC_128_VARS - serialized variable-name set (assoc 128) for child/subshell state transfer
+// EXACT __RUBASH_ASSOC_VARS - serialized variable-name set (assoc) for child/subshell state transfer
+// EXACT __RUBASH_ASYNC_CHILD - state key (async child) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_BACKGROUND_WRAPPER - state key (background wrapper) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_BG_BASHPID_BASE - state key (bg bashpid base) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_BG_DEPTH - state key (bg depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CA1__ - RETIRED string spelling of the compound-assignment marker; typeable user text since retirement - do not re-register
+// EXACT __RUBASH_CAPCASE_VARS - serialized variable-name set (capcase) for child/subshell state transfer
+// EXACT __RUBASH_CMD_FILE - state key (cmd file) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CMD_START_LINE - state key (cmd start line) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CNF_HANDLER_RUNNING - state key (cnf handler running) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_COMPATIBLE_SHELL_PATH - state key (compatible shell path) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_COMPOUND_SYNTAX_ERROR - state key (compound syntax error) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_COMPOUND_SYNTAX_ERROR__ - state key (compound syntax error  ) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_COMSUB_BODY - state key (comsub body) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_COPROC_CHILD - state key (coproc child) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CURRENT_COMMAND - state key (current command) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CURRENT_FILE - state key (current file) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CURRENT_FUNCTION - state key (current function) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CURRENT_LINE - state key (current line) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_DEBUGGER_ATTEMPTED - state key (debugger attempted) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_DEBUGGER_MODE - state key (debugger mode) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_DECLARED_UNSET_VARS - serialized variable-name set (declared unset) for child/subshell state transfer
+// EXACT __RUBASH_DIR_STACK - state key (dir stack) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_DISABLED_BUILTINS - state key (disabled builtins) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ERREXIT - state key (errexit) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_EVAL_CONTEXT - state key (eval context) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_EXPORTED_FUNCTIONS - state key (exported functions) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_EXPORTED_VARS - serialized variable-name set (exported) for child/subshell state transfer
+// EXACT __RUBASH_EXTGLOB_ENABLED_LINE - state key (extglob enabled line) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FD0_MIRROR_FACT - fd-0 mirror fact for spawn reconstruction
+// EXACT __RUBASH_FD0_STAGE_PIPE - fd-0 staging pipe marker for spawn reconstruction
+// EXACT __RUBASH_FD_PROCESS_STDIN - state key (fd process stdin) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FD_STDERR - state key (fd stderr) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FD_STDOUT - state key (fd stdout) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FILE_MODES - state key (file modes) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FORK_ARGV_BOTTOM - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_BASH_ARGC - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_BASH_ARGV - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_BASH_LINENO - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_BASH_SOURCE - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_FN_SPANS - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_FUNCNAME - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_IN_FUNCTION - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_LOGIN_SHELL - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_MAIN_FRAME - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_PIPESTATUS - fork/subshell state snapshot member
+// EXACT __RUBASH_FORK_ROOT_SPANS - fork/subshell state snapshot member
+// EXACT __RUBASH_FUNCTION_STDIN - state key (function stdin) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FUNCTION_STDIN_OFFSET - state key (function stdin offset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_FUNC_TRACE_FUNCTIONS - state key (func trace functions) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_GAP12_JOURNAL - GAP-12 Session env-journal channel (host<->engine journal state)
+// EXACT __RUBASH_GAP12_U3 - GAP-12 Session env-journal update channel U3
+// EXACT __RUBASH_GETOPTS_OFFSET - state key (getopts offset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_GETOPTS_OPTIND - state key (getopts optind) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_HASH_TABLE - state key (hash table) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_HD1__ - string spelling of QUOTED_HEREDOC_MARKER (the one registered string marker)
+// EXACT __RUBASH_INHERIT_PROCESS_STDIN - state key (inherit process stdin) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_INITIAL_PATH - state key (initial path) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_INTEGER_VARS - serialized variable-name set (integer) for child/subshell state transfer
+// EXACT __RUBASH_INTERACTIVE - state key (interactive) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_INTERACTIVE_FLAG_OFF - state key (interactive flag off) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_INVISIBLE_VARS - serialized variable-name set (invisible) for child/subshell state transfer
+// EXACT __RUBASH_IN_SOURCE - state key (in source) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ISSUE2084_HOSTVAR - host-variable surface pinned by rubash#2084 (Session API acceptance fixture name)
+// EXACT __RUBASH_IS_C - child-invocation mode flag (invoked as C helper personality)
+// EXACT __RUBASH_LAST_COMMAND - state key (last command) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_LINE_OFFSET - state key (line offset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_LOCAL_EXPORT_ENV - state key (local export env) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_LOGIN_SHELL - state key (login shell) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_LOWERCASE_VARS - serialized variable-name set (lowercase) for child/subshell state transfer
+// EXACT __RUBASH_NAMEREF_VARS - serialized variable-name set (nameref) for child/subshell state transfer
+// EXACT __RUBASH_NO_EDITING - state key (no editing) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_NO_PROFILE - state key (no profile) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_NO_RC - state key (no rc) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_PARSE - state key (parse) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_PARSE_ERROR - state key (parse error) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_PC_NOHIST - state key (pc nohist) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_PHYSICAL_PWD - state key (physical pwd) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_PIPESSTATUS_STATE - legacy spelling of the PIPESTATUS state key (kept for compat)
+// EXACT __RUBASH_PIPESTATUS_STATE - PIPESTATUS array state for respawned children
+// EXACT __RUBASH_POSITIONAL_PARAMS - state key (positional params) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_POSIX_MODE - state key (posix mode) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_POSIX_TOOLS_DIR - state key (posix tools dir) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_READONLY_FUNCTIONS - state key (readonly functions) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_READONLY_VARS - serialized variable-name set (readonly) for child/subshell state transfer
+// EXACT __RUBASH_READ_STDIN - state key (read stdin) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_RETURN_TRAP_FUNCTION - state key (return trap function) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SCRIPT_NAME - state key (script name) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SECONDS_OFFSET - state key (seconds offset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SESSION_SCOPE - state key (session scope) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHELL_NAME - state key (shell name) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHELL_PID - state key (shell pid) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHELL_ROOT - state key (shell root) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHELL_START_EPOCH - state key (shell start epoch) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHOPT_CHECKHASH - state key (shopt checkhash) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SHOPT_STATE - state key (shopt state) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SIGNAL_TRAP_DEPTH - state key (signal trap depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SIGNAL_TRAP_STATUS - state key (signal trap status) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SOURCED_RC - state key (sourced rc) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SPAWNER_PID - state key (spawner pid) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_STARTUP_FILES_DONE - state key (startup files done) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_STATE_FILE - state key (state file) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_SUBSHELL_DEPTH - state key (subshell depth) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TEMP_PATH - state key (temp path) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TOP_LEVEL_NAME - state key (top level name) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TRACE_VARS - serialized variable-name set (trace) for child/subshell state transfer
+// EXACT __RUBASH_TRANSPORT - transport-mode flag for respawned children (marker pair transport on/off)
+// EXACT __RUBASH_TRAP - trap table serialization (whole-table key)
+// EXACT __RUBASH_TRAPS - trap name set serialization
+// EXACT __RUBASH_TRAP_CONTEXT - state key (trap context) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TRAP_DEBUG - state key (trap debug) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TRAP_EXIT - state key (trap exit) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TRAP_ORIG_IGN - state key (trap orig ign) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_TRAP_RESET - state key (trap reset) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_UMASK - state key (umask) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_UNSET_DYNAMIC_VARS - serialized variable-name set (unset dynamic) for child/subshell state transfer
+// EXACT __RUBASH_UNSTREAMED_FUNCTION_BODIES - state key (unstreamed function bodies) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_UPPERCASE_VARS - serialized variable-name set (uppercase) for child/subshell state transfer
+// EXACT __RUBASH_X - arithmetic dynamic-variable probe list member (never a real variable)
+// EXACT __RUBASH_XTRACE - state key (xtrace) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_ZSH_OPTIONS - state key (zsh options) - serialized across the respawn/subshell boundary; see the owning subsystem
+// END ENV NAMESPACE CENSUS
 
 pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
@@ -663,25 +844,25 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "PATSUB_QUOTED_VALUE_START",
         code: PATSUB_QUOTED_VALUE_START as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Output],
         user_reachable: true,
     },
     MarkerInfo {
         name: "PATSUB_QUOTED_VALUE_END",
         code: PATSUB_QUOTED_VALUE_END as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Output],
         user_reachable: true,
     },
     MarkerInfo {
         name: "PATSUB_QUOTED_AMP",
         code: PATSUB_QUOTED_AMP as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Output],
         user_reachable: true,
     },
     MarkerInfo {
         name: "PATSUB_QUOTED_BACKSLASH",
         code: PATSUB_QUOTED_BACKSLASH as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Output],
         user_reachable: true,
     },
     MarkerInfo {
@@ -801,25 +982,25 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "PARAM_WORD_BACKSLASH_GUARD",
         code: PARAM_WORD_BACKSLASH_GUARD as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: false,
     },
     MarkerInfo {
         name: "ESCAPED_IFS_GUARD",
         code: ESCAPED_IFS_GUARD as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: false,
     },
     MarkerInfo {
         name: "PROMPT_ESCAPE_GUARD",
         code: PROMPT_ESCAPE_GUARD as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: false,
     },
     MarkerInfo {
         name: "CASE_PATTERN_BACKSLASH_GUARD",
         code: CASE_PATTERN_BACKSLASH_GUARD as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: false,
     },
     MarkerInfo {
@@ -831,7 +1012,7 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "DIR_STACK_FIELD_SEP",
         code: DIR_STACK_FIELD_SEP as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: true,
     },
     // --- rubash#728: the registry must enumerate every carrier const the
@@ -906,7 +1087,7 @@ pub(crate) const MARKERS: &[MarkerInfo] = &[
     MarkerInfo {
         name: "HASH_ENV_FIELD_SEP",
         code: HASH_ENV_FIELD_SEP as u32,
-        boundaries: &[],
+        boundaries: &[Boundary::Storage],
         user_reachable: true,
     },
     MarkerInfo {
@@ -1088,6 +1269,19 @@ pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
         }
     }
     out
+}
+
+/// Presence gate for the decode boundaries served by
+/// substitution_metadata::decode_raw_byte_markers: true when `text`
+/// carries EITHER transport family that decoder folds — a raw-byte
+/// marker pair (RAW_BYTE_MARKER_ESCAPE introducer) or an E400
+/// literal-char pair. The check itself transforms nothing; a hit routes
+/// into the pair-aware decoder. Gating a boundary on the raw-byte
+/// family alone leaves E400 pairs unfolded whenever no unrelated
+/// raw-byte pair is present in the same text (rubash#3038).
+pub(crate) fn contains_decodable_transport(text: &str) -> bool {
+    text.contains(char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("raw-byte escape is a valid char"))
+        || text.contains(LITERAL_CHAR_ESCAPE)
 }
 
 /// E400-aware ANSI_C_IFS_GUARD handling (rubash#735).
@@ -1494,185 +1688,6 @@ mod tests {
         );
     }
 
-    /// `user_reachable` is machine-read (746 case 728.1): a user-reachable
-    /// marker either is a single C0/ASCII byte — covered by the raw-byte
-    /// pair re-encode, asserted for every possible byte below — or a PUA
-    /// codepoint inside the E400 literal-char-escape zone, which is how
-    /// user data is disambiguated at entry (#735). A `user_reachable: true`
-    /// row outside both shapes has no re-encode story and must not exist.
-    #[test]
-    fn user_reachable_rows_have_an_entry_reencode_story() {
-        for byte in 0..=255u8 {
-            let encoded = encode_raw_byte_marker(byte);
-            let decoded =
-                crate::executor::substitution_metadata::decode_raw_byte_markers(encoded.as_bytes());
-            assert_eq!(decoded, vec![byte], "raw-byte pair lost byte {byte:#04x}");
-        }
-        for m in MARKERS {
-            if !m.user_reachable {
-                continue;
-            }
-            assert!(
-                m.code <= 0xff || is_marker_zone_char(char::from_u32(m.code).unwrap()),
-                "{} claims user_reachable at U+{:04X} but has no entry re-encode",
-                m.name,
-                m.code
-            );
-        }
-    }
-
-    /// `boundaries` is machine-read (746 case 728.1): a row that claims an
-    /// output/storage/reparse decode must be named by the decode machinery
-    /// that owns it — decode_to_visible_text for Output rows (the
-    /// sanctioned transport→visible decoder, governance 3.2), or an
-    /// explicitly listed owner for markers consumed by their own boundary
-    /// helper (echo's $'...' fast path, substitution_metadata, ...). The
-    /// owner lists are pinned: adding a row with a boundary requires
-    /// naming its decoder here, which is exactly the audit trail #728
-    /// asked for.
-    #[test]
-    fn boundary_claims_name_a_decoder() {
-        // Markers decode_to_visible_text consumes (verified live below).
-        const VISIBLE_DECODER_OUTPUTS: [&str; 22] = [
-            "RAW_BYTE_MARKER_ESCAPE",
-            "CTLESC",
-            "PARAM_NAME_END_MARKER",
-            "DATA_BACKSLASH",
-            "PROTECTED_ESCAPED_SQUOTE",
-            "DATA_SQUOTE",
-            "DATA_DQUOTE",
-            "PATTERN_LITERAL_BACKSLASH",
-            "DATA_BACKTICK",
-            "QUOTED_WORD_PREFIX",
-            "IFS_GLUE",
-            "STORAGE_WORD_PREFIX",
-            "DATA_DOLLAR",
-            "DEFERRED_COMPOUND_BODY",
-            "ARRAYREF_FLAG",
-            "PATSUB_QUOTED_VALUE_START",
-            "PATSUB_QUOTED_VALUE_END",
-            "PATSUB_QUOTED_AMP",
-            "PATSUB_QUOTED_BACKSLASH",
-            "QUOTED_NULL_MARKER",
-            "FAILED_SUBSCRIPT_SENTINEL",
-            "LITERAL_CHAR_ESCAPE",
-        ];
-        // Markers whose named boundary is consumed by their own helper
-        // (documented at the row): owner decode fn, not the visible decoder.
-        const OWN_BOUNDARY_DECODERS: [&str; 37] = [
-            "PROTECTED_BACKSLASH",         // builtins/echo.rs $'...' fast path
-            "PROTECTED_LITERAL_BACKSLASH", // embedded_parameters walker tail
-            "PROTECTED_LITERAL_DOLLAR",    // embedded_parameters walker tail
-            "ANSI_C_QUOTE_MARKER", // decode_word_position_carriers / eval_source_for_reparse
-            "ANSI_C_DQUOTE_MARKER", // (also in the visible decoder list)
-            "ANSI_C_IFS_GUARD",    // markers::strip_ansi_c_ifs_guard
-            "SUBSCRIPT_CARRIER",   // substitution_metadata subscript decode
-            "PARSE_ERROR_FIELD_SEP", // parse_error payload split
-            "HEREDOC_WARNED_BODY_PREFIX", // execution_misc heredoc body strip
-            "QUOTED_WORD_VALUE_PREFIX", // expand/tilde QUOTED_ASSIGNMENT_VALUE
-            "HASH_ENV_FIELD_SEP",  // builtins/hash env serialization
-            "DIR_STACK_FIELD_SEP", // builtins/pushd env serialization
-            "PROMPT_IGNORE_START", // readline prompt-ignore layer
-            "PROMPT_IGNORE_END",   // readline prompt-ignore layer
-            "PREEXPANDED_STDIN_BODY", // execution_misc body consumer + parser raw-byte pair
-            "ARRAY_FIELD_SPLIT_MARKER", // declare/storage/array element split
-            "QUOTED_HEREDOC_MARKER", // execution_misc.rs body strip (QUOTED_HEREDOC_MARKER replace)
-            "COMPOUND_ASSIGNMENT_MARKER", // types.rs compound-operand strip
-            "COMSUB_PAYLOAD_SENTINEL", // execution_misc decode_command_substitution_payload
-            "CASE_PATTERN_EXPECT", // parser/support.rs boundary-stack sentinel
-            "CASE_PATTERN_MAY_OPEN", // parser/support.rs boundary-stack sentinel
-            "CASE_PATTERN_PAREN",  // parser/support.rs boundary-stack sentinel
-            // The ASSIGN_* family restores through the assignment_expansion
-            // storage-restore chain (rubash#295/#218 restore tails; the
-            // #811 fragment-boundary strip).
-            "ASSIGN_DATA_SQUOTE",
-            "ASSIGN_DATA_DQUOTE",
-            "ASSIGN_DATA_BACKTICK",
-            "ASSIGN_ESCAPED_DQUOTE",
-            "ASSIGN_ESCAPED_SQUOTE",
-            "ASSIGN_ESCAPED_BACKSLASH",
-            "ASSIGN_HOISTED_SQUOTE",
-            "ASSIGN_HOISTED_BACKSLASH",
-            "COMPOUND_EXPANSION_WS_TAG",
-            "ASSIGN_SQ_DOLLAR",
-            "ASSIGN_SQ_BACKTICK",
-            "ASSIGN_SQ_BACKSLASH",
-            "ASSIGN_EXPANSION_BACKSLASH",
-            "ASSIGN_EXPANSION_DQUOTE",
-            "ASSIGN_EXPANSION_SQUOTE",
-        ];
-        // Multi-char string rows register their FIRST codepoint; keep the
-        // table honest against the consts.
-        for (name, first) in [
-            ("FAILED_SUBSCRIPT_SENTINEL", FAILED_SUBSCRIPT_SENTINEL),
-            ("QUOTED_HEREDOC_MARKER", QUOTED_HEREDOC_MARKER),
-            ("COMSUB_PAYLOAD_SENTINEL", COMSUB_PAYLOAD_SENTINEL_STR),
-            ("COMPOUND_ASSIGNMENT_MARKER", COMPOUND_ASSIGNMENT_MARKER),
-            ("GROUP_REDIRECT_INJECTED_MARK", GROUP_REDIRECT_INJECTED_MARK),
-            ("CASE_PATTERN_EXPECT", CASE_PATTERN_EXPECT),
-            ("CASE_PATTERN_MAY_OPEN", CASE_PATTERN_MAY_OPEN),
-            ("CASE_PATTERN_PAREN", CASE_PATTERN_PAREN),
-        ] {
-            let row = MARKERS
-                .iter()
-                .find(|m| m.name == name)
-                .unwrap_or_else(|| panic!("{name} missing from MARKERS"));
-            assert_eq!(
-                row.code,
-                first.chars().next().unwrap() as u32,
-                "{name} registered codepoint does not match its const"
-            );
-        }
-        for m in MARKERS {
-            if m.boundaries.is_empty() {
-                continue;
-            }
-            let named = VISIBLE_DECODER_OUTPUTS.contains(&m.name)
-                || OWN_BOUNDARY_DECODERS.contains(&m.name);
-            assert!(
-                named,
-                "{} claims boundaries {:?} but no decoder owns it (rubash#728)",
-                m.name, m.boundaries
-            );
-            // Live check for the visible-decoder claims: a bare marker char
-            // must not survive decode_to_visible_text unchanged. The E000
-            // introducer decodes as a PAIR (E000+E001 = byte 0x01); a bare
-            // introducer is a documented recovery passthrough.
-            if VISIBLE_DECODER_OUTPUTS.contains(&m.name) {
-                if m.name == "RAW_BYTE_MARKER_ESCAPE" {
-                    let pair = format!(
-                        "{}{}",
-                        char::from_u32(m.code).unwrap(),
-                        char::from_u32(RAW_BYTE_MARKER_FIRST).unwrap()
-                    );
-                    let decoded = crate::locale::decode_to_visible_text(&pair);
-                    // E000 + E001 is byte 0x00 (payload = FIRST + byte).
-                    assert_eq!(
-                        decoded, "\u{0}",
-                        "RAW_BYTE_MARKER_ESCAPE pair must decode to its byte"
-                    );
-                } else if m.name == "LITERAL_CHAR_ESCAPE" {
-                    // E400 + c restores c (bare E400 is a documented literal
-                    // passthrough).
-                    let pair = format!("{}x", char::from_u32(m.code).unwrap());
-                    assert_eq!(
-                        crate::locale::decode_to_visible_text(&pair),
-                        "x",
-                        "LITERAL_CHAR_ESCAPE pair must restore the escaped char"
-                    );
-                } else if let Some(ch) = char::from_u32(m.code) {
-                    let text = ch.to_string();
-                    let decoded = crate::locale::decode_to_visible_text(&text);
-                    assert_ne!(
-                        decoded, text,
-                        "{} claims Output/Storage decode but decode_to_visible_text passes it through",
-                        m.name
-                    );
-                }
-            }
-        }
-    }
-
     /// rubash#728 §3 — `contains_word_marker_bytes` documents a scope, so
     /// the "false negative is impossible" claim is now falsifiable: every
     /// char-marker below U+0100 must either live in the predicate's C0
@@ -1736,5 +1751,168 @@ mod tests {
             return u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32);
         }
         inner.chars().next()
+    }
+
+    /// rubash#2885 E8 — every MARKERS row either claims at least one
+    /// decode boundary or is explicitly listed here as internal-only,
+    /// with the reason. An unlisted empty row means a carrier exists
+    /// whose boundary story nobody has written down — the #2879
+    /// sweep's unclaimed-row gap. A listed row that gains a claim
+    /// must be removed (the staleness assert below enforces it).
+    #[test]
+    fn every_row_claims_boundaries_or_is_listed_internal() {
+        const INTERNAL_ONLY_ROWS: [&str; 5] = [
+            // Parse-time site marker for ${...} quoting decisions;
+            // consumed during parse, never enters stored/output text.
+            "QUOTED_EXPANSION_SITE",
+            // Prefix of the executor's group-redirect state string;
+            // an internal state encoding read back by the same
+            // subsystem, not a value/output carrier.
+            "GROUP_REDIRECT_INJECTED_MARK",
+            // parser/support.rs boundary-stack sentinels (NUL-prefixed
+            // strings); they live on the parser's own stack and never
+            // enter stored or output text.
+            "CASE_PATTERN_EXPECT",
+            "CASE_PATTERN_MAY_OPEN",
+            "CASE_PATTERN_PAREN",
+        ];
+        for m in MARKERS {
+            if m.boundaries.is_empty() {
+                assert!(
+                    INTERNAL_ONLY_ROWS.contains(&m.name),
+                    "{} claims no boundary and is not listed internal-only (rubash#2885 E8)",
+                    m.name
+                );
+            }
+        }
+        for name in INTERNAL_ONLY_ROWS {
+            let row = MARKERS
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap_or_else(|| panic!("{name} listed internal-only but not in MARKERS"));
+            assert!(
+                row.boundaries.is_empty(),
+                "{name} now claims {:?} — remove it from INTERNAL_ONLY_ROWS",
+                row.boundaries
+            );
+        }
+    }
+
+    /// rubash#2885 E8 — the ENV NAMESPACE CENSUS block above the
+    /// MARKERS table enumerates every `__RUBASH_*` env-serialization
+    /// key in the tree. This test scans src/ for such tokens: each
+    /// must be an EXACT census entry or covered by a FAMILY prefix,
+    /// each EXACT entry must still occur, and each FAMILY prefix must
+    /// cover at least one occurring token.
+    #[test]
+    fn env_namespace_census_is_complete() {
+        use std::collections::BTreeSet;
+        let own = include_str!("markers.rs");
+        let block_start = own
+            .find("// ENV NAMESPACE CENSUS (rubash#2885 E8)")
+            .expect("census block present");
+        let block_end = own[block_start..]
+            .find("// END ENV NAMESPACE CENSUS")
+            .map(|i| block_start + i)
+            .expect("census block terminated");
+        let block = &own[block_start..block_end];
+        let mut exact: BTreeSet<String> = BTreeSet::new();
+        let mut families: Vec<String> = Vec::new();
+        for line in block.lines() {
+            let line = line.trim_start_matches('/').trim();
+            if let Some(rest) = line.strip_prefix("EXACT ") {
+                let token = rest.split_whitespace().next().unwrap();
+                assert!(
+                    token.starts_with("__RUBASH_"),
+                    "census line is not an entry: {line}"
+                );
+                exact.insert(token.to_string());
+            } else if let Some(rest) = line.strip_prefix("FAMILY ") {
+                let token = rest.split_whitespace().next().unwrap();
+                assert!(
+                    token.starts_with("__RUBASH_"),
+                    "census line is not an entry: {line}"
+                );
+                families.push(token.to_string());
+            }
+        }
+        assert!(
+            exact.len() >= 100 && families.len() >= 8,
+            "census parse looks empty ({} exact, {} family)",
+            exact.len(),
+            families.len()
+        );
+
+        fn scan_tokens(text: &str, found: &mut BTreeSet<String>) {
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i + 9 < bytes.len() {
+                if &bytes[i..i + 9] == b"__RUBASH_" {
+                    let mut j = i + 9;
+                    let mut has_alnum = false;
+                    while j < bytes.len()
+                        && (bytes[j].is_ascii_uppercase()
+                            || bytes[j].is_ascii_digit()
+                            || bytes[j] == b'_')
+                    {
+                        has_alnum |= bytes[j] != b'_';
+                        j += 1;
+                    }
+                    if has_alnum {
+                        found.insert(text[i..j].to_string());
+                    }
+                    i = j.max(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut found: BTreeSet<String> = BTreeSet::new();
+        let mut stack = vec![manifest.join("src")];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read src tree") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    if path.ends_with("src/executor/markers.rs") {
+                        // The census block itself spells every entry;
+                        // blank it so only real uses count.
+                        let mut blanked = own.to_string();
+                        blanked.replace_range(block_start..block_end, " ");
+                        scan_tokens(&blanked, &mut found);
+                    } else {
+                        let text = std::fs::read_to_string(&path).expect("read source");
+                        scan_tokens(&text, &mut found);
+                    }
+                }
+            }
+        }
+        assert!(
+            found.len() >= 100,
+            "namespace scan looks empty ({} tokens)",
+            found.len()
+        );
+        for token in &found {
+            assert!(
+                exact.contains(token)
+                    || families.iter().any(|p| token.starts_with(p.as_str())),
+                "{token} occurs in src/ but is neither an EXACT census entry nor FAMILY-covered (rubash#2885 E8)"
+            );
+        }
+        for name in &exact {
+            assert!(
+                found.contains(name),
+                "census EXACT entry {name} no longer occurs in src/ — remove it or restore the use"
+            );
+        }
+        for prefix in &families {
+            assert!(
+                found.iter().any(|t| t.starts_with(prefix.as_str())),
+                "census FAMILY prefix {prefix} covers no occurring token — remove it"
+            );
+        }
     }
 }

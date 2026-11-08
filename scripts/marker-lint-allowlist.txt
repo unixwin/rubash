@@ -1,0 +1,267 @@
+# Marker-lint allowlist (rubash#2885 E7). One entry per line:
+#   path | RULE | matcher | justification
+# L1/L2: matcher is a regex matched against the comment-stripped line.
+# L3: matcher is METHOD:CONST (e.g. replace:CTLESC).
+# Every entry was adjudicated site-by-site in the #2885 lane; a new
+# hit fails the lint — route it through a pair-aware helper in
+# src/executor/markers.rs instead of adding an entry by reflex.
+
+src/api/consumer_tests.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/api/consumer_tests.rs | L2 | \\u\{0*17\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/api/consumer_tests.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/api/consumer_tests.rs | L2 | \\u\{0*1F\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/builtins/declare.rs | L3 | trim_start_matches:ARRAY_FIELD_SPLIT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/builtins/declare/assign.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/declare/assign.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/declare/assign.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/declare/assign.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/declare/storage/words.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/echo.rs | L3 | contains:PROTECTED_BACKSLASH | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/builtins/echo.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/echo.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/builtins/echo.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/debugger/json.rs | L2 | \\u\{0*1\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/alias_helpers.rs | L2 | \\u\{0*1F\} | glob character-class range table (cntrl class endpoint): data, not a marker reference
+src/executor/alias_helpers.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/alias_helpers.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/arithmetic/mod.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_BACKSLASH | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_BACKTICK | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_DOLLAR | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_DOLLAR_STR | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_DQUOTE | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic/mod.rs | L3 | replace:DATA_SQUOTE | test code: needle operations over fixture strings in the test module
+src/executor/arithmetic_aliases.rs | L3 | contains:COMPOUND_ASSIGNMENT_MARKER | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/arithmetic_aliases.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/arrays.rs | L3 | replace:DATA_BACKSLASH | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:DATA_BACKTICK | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:DATA_DOLLAR | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:DATA_DQUOTE | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:DATA_SQUOTE | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:IFS_GLUE | test code: needle operations over fixture strings in the test module
+src/executor/arrays.rs | L3 | replace:PARAM_NAME_END_MARKER | test code: needle operations over fixture strings in the test module
+src/executor/arrays/executor.rs | L3 | trim_end_matches:PARAM_NAME_END_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/arrays/storage.rs | L3 | contains:CTLESC | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:ANSI_C_IFS_GUARD | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:ASSIGN_DATA_DQUOTE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:DATA_DQUOTE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:DATA_SQUOTE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | contains:PROTECTED_ESCAPED_SQUOTE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/assignment_expansion.rs | L3 | cow_replace:DATA_DQUOTE_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | cow_replace:DATA_SQUOTE_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | cow_replace:IFS_GLUE_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | replace:PROTECTED_ESCAPED_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_expansion.rs | L3 | trim_matches:ASSIGN_DATA_DQUOTE | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/assignment_expansion.rs | L3 | trim_start_matches:ASSIGN_DATA_DQUOTE | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/assignment_helpers.rs | L3 | replace:COMPOUND_ASSIGNMENT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/assignment_helpers.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_helpers.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_helpers.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_helpers.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_helpers.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/assignment_helpers.rs | L3 | replace:PARAM_NAME_END_MARKER | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/builtin_diag.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/builtin_diag.rs | L1 | \\u\{0*E00D\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/builtin_diag.rs | L3 | contains:RAW_BYTE_MARKER_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_execute.rs | L2 | \\u\{0*1\} | field separator of the shadow-word record written by the lexer placeholder pushes (domain-local 0x01)
+src/executor/command_prepare.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
+src/executor/command_prepare.rs | L3 | contains:ANSI_C_IFS_GUARD | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_prepare.rs | L3 | contains:COMPOUND_ASSIGNMENT_MARKER | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_prepare.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_prepare.rs | L3 | cow_replace:DATA_BACKSLASH_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | cow_replace:DATA_BACKTICK_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | cow_replace:DATA_DOLLAR_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | cow_replace:PARAM_NAME_END_MARKER_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_prepare.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution_pipelines.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_substitution_pipelines.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution_values.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_substitution_values.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution_values.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution_values.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_substitution_values.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/command_words.rs | L3 | contains:ANSI_C_IFS_GUARD | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_words.rs | L3 | contains:COMPOUND_ASSIGNMENT_MARKER | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_words.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/command_words.rs | L3 | replace:COMPOUND_ASSIGNMENT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/compound_exec.rs | L1 | \\u\{0*E000\} | Unicode private-use block bounds (U+E000..=U+F8FF) in a char-class test, not a marker reference
+src/executor/compound_exec.rs | L1 | \\u\{0*E317\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec.rs | L2 | \\u\{0*17\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/compound_exec.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/conditional.rs | L2 | \\u\{0*14\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/conditional.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/conditional/pattern.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/conditional/pattern.rs | L1 | \\u\{0*E012\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/conditional/pattern.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/conditional/pattern.rs | L3 | contains:COMSUB_PAYLOAD_SENTINEL | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/declare_local.rs | L3 | contains:COMPOUND_ASSIGNMENT_MARKER | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/embedded_mutations.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
+src/executor/embedded_mutations.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/embedded_mutations.rs | L3 | cow_replace:DATA_BACKSLASH_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | cow_replace:DATA_BACKTICK_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | cow_replace:DATA_DOLLAR_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | cow_replace:PARAM_NAME_END_MARKER_STR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:ASSIGN_DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:ASSIGN_DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:ASSIGN_DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:ASSIGN_HOISTED_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_mutations.rs | L3 | replace:PROTECTED_BACKSLASH | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_mutations.rs | L3 | replace:PROTECTED_ESCAPED_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:DATA_BACKSLASH | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:DATA_BACKTICK_STR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:DATA_DOLLAR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:DATA_DQUOTE | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:DATA_SQUOTE | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:PARAM_NAME_END_MARKER | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_BACKSLASH_STR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_LITERAL_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/embedded_parameters.rs | L3 | replace:PROTECTED_LITERAL_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/env_helpers.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/env_helpers.rs | L1 | \\u\{0*E01C\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/env_helpers.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/env_helpers.rs | L1 | \\u\{0*E400\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/env_helpers.rs | L2 | \\u\{0*1B\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/execution_misc.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/execution_misc.rs | L3 | contains:COMSUB_PAYLOAD_SENTINEL | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/execution_misc.rs | L3 | contains:RAW_BYTE_MARKER_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/execution_misc.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/execution_misc.rs | L3 | trim_matches:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/execution_misc.rs | L3 | trim_start_matches:QUOTED_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/execution_misc.rs | L3 | trim_start_matches:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/expand_braced_replacement.rs | L3 | contains:PATSUB_QUOTED_AMP | leak self-check computed over strip_escape_pairs output; pair-aware by construction
+src/executor/expand_braced_replacement.rs | L3 | contains:PATSUB_QUOTED_BACKSLASH | leak self-check computed over strip_escape_pairs output; pair-aware by construction
+src/executor/expand_braced_replacement.rs | L3 | contains:PATSUB_QUOTED_VALUE_END | leak self-check computed over strip_escape_pairs output; pair-aware by construction
+src/executor/expand_braced_replacement.rs | L3 | contains:PATSUB_QUOTED_VALUE_START | leak self-check computed over strip_escape_pairs output; pair-aware by construction
+src/executor/expand_braced_replacement.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/expand_braced_replacement.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/expand_braced_replacement.rs | L3 | replace:QUOTED_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/expand_word.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/expand_word.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/markers_decoder_tests.rs | L2 | \\u\{0*0\} | test data: expected value of the E000+E001 decoder pair (byte 0x00), not a carrier literal used as code
+src/executor/parameter_decode.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/parameter_decode.rs | L3 | contains:RAW_BYTE_MARKER_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/parameter_ops.rs | L3 | contains:PROTECTED_ESCAPED_SQUOTE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/parameter_ops.rs | L3 | replace:PROTECTED_ESCAPED_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:DATA_BACKTICK | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:DATA_SQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_patterns.rs | L3 | replace:PATTERN_LITERAL_BACKSLASH | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/parameter_patterns.rs | L3 | replace:QUOTED_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/parameter_patterns.rs | L3 | trim_matches:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/parameter_replace.rs | L3 | contains:DATA_BACKSLASH | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/parameter_replace.rs | L3 | contains:PATTERN_LITERAL_BACKSLASH | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/parameter_replace.rs | L3 | replace:DATA_BACKSLASH | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/parameter_replace.rs | L3 | replace:PATTERN_LITERAL_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_replace.rs | L3 | replace:PATTERN_LITERAL_BACKSLASH_STR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/executor/parameter_words.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_words.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/parameter_words.rs | L3 | replace:PROTECTED_LITERAL_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/pipeline_exec.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/pipeline_stages.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/pipeline_stages.rs | L3 | replace:PROTECTED_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/prompt_expansion.rs | L3 | trim_start_matches:ARRAY_FIELD_SPLIT_MARKER | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/public_accessors.rs | L2 | \\u\{0*1\} | field separator of the shadow-word record written by the lexer placeholder pushes (domain-local 0x01)
+src/executor/read_builtin.rs | L2 | \\u\{0*\} | the read -d delimiter byte itself (NUL default): data, not a sentinel reference
+src/executor/splits_gate.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/splits_gate.rs | L1 | \\u\{0*E401\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/splits_gate.rs | L2 | \\u\{0*1C\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/subscript_expansion.rs | L3 | contains:ANSI_C_IFS_GUARD | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/subscript_expansion.rs | L3 | contains:COMPOUND_EXPANSION_WS_TAG | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/subscript_expansion.rs | L3 | contains:CTLESC | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/subscript_expansion.rs | L3 | contains:IFS_GLUE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/subscript_expansion.rs | L3 | replace:IFS_GLUE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/executor/substitution_metadata.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/substitution_metadata.rs | L1 | \\u\{0*E0A0\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/substitution_metadata.rs | L1 | \\u\{0*E0B0\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/substitution_metadata.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/substitution_metadata.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/support_names.rs | L3 | trim_start_matches:QUOTED_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/support_names.rs | L3 | trim_start_matches:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/temporary_assignments.rs | L3 | trim_matches:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/executor/tests.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/executor/tests.rs | L1 | \\u\{0*E01C\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/expand/braces.rs | L2 | \\u\{0*1F\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/classification.rs | L3 | replace:ANSI_C_QUOTE_MARKER_STR | carrier-to-carrier re-encoding inside the owning walker; bare-carrier invariant as the restore chains
+src/lexer/continuation.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
+src/lexer/heredoc.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/lexer/quotes.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
+src/lexer/skip.rs | L2 | \\u\{0*1\} | inert placeholder byte in the reserved-word shadow copy (domain-local 0x01; not the readline PROMPT_IGNORE_START protocol)
+src/lexer/tests.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/tests.rs | L1 | \\u\{0*E010\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/tests.rs | L2 | \\u\{0*1A\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/tests.rs | L2 | \\u\{0*1B\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/tests.rs | L2 | \\u\{0*1C\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/lexer/tests.rs | L3 | contains:DATA_DOLLAR | test code: needle operations over fixture strings in the test module
+src/locale.rs | L1 | \\u\{0*E000\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E002\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E010\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E011\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E012\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E042\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E0A0\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E101\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E141\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E301\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E302\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E303\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E304\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E305\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E306\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E307\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E308\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E309\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E314\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L1 | \\u\{0*E400\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*11\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*13\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*14\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*16\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*17\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*18\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1A\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1B\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1C\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1D\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1F\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*1\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/locale.rs | L2 | \\u\{0*3\} | test data: expected values / probe inputs spelled with marker literals in test code
+src/parser/assignment.rs | L3 | replace:STORAGE_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
+src/parser/case_command.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/parser/conditional_command.rs | L2 | \\u\{0*1\} | field separator inside an internal diagnostic record string (domain-local 0x01)
+src/parser/conditional_command.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/parser/redirections.rs | L3 | contains:PREEXPANDED_STDIN_BODY | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/parser/redirections.rs | L3 | replace:PARAM_NAME_END_MARKER | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
+src/script_driver.rs | L2 | \\u\{0*1F\} | field separator of the __RUBASH_SETOPT_* env serialization; 0x1F as a domain-local unit separator (not DATA_DOLLAR semantics)
+src/script_driver.rs | L3 | replace:DATA_DOLLAR | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
