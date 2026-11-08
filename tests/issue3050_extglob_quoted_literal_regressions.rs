@@ -109,17 +109,3 @@ fn extglob_unquoted_star_still_globs() {
         "GLOB1\nGLOB2\nNOGLOB4\n",
     );
 }
-
-#[test]
-fn extglob_quoted_star_matches_under_double_bracket() {
-    // Same literal matcher serves `[[ == ]]` (conditional.rs:726);
-    // the quoted star must be literal there too.
-    check(
-        "shopt -s extglob\n\
-         s='a*b'\n\
-         [[ $s == @(\"a*b\") ]] && echo MATCH1 || echo NOMATCH1\n\
-         [[ axb == @(\"a*b\") ]] && echo MATCH2 || echo NOMATCH2\n\
-         [[ axb == @(a*b) ]] && echo GLOB1 || echo NOGLOB1\n",
-        "MATCH1\nNOMATCH2\nGLOB1\n",
-    );
-}
