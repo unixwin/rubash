@@ -893,7 +893,7 @@ pub(crate) fn apply_completion_actions_with_settings(
                 SHOPT_COMPLETIONS.iter().map(|s| s.to_string()).collect(),
             )),
             "signal" => candidates.extend(plain(signal_completion_candidates())),
-            "user" => candidates.extend(plain(user_completion_candidates(env_vars))),
+            "user" => candidates.extend(plain(user_completion_candidates_for_word(env_vars, word))),
             "variable" => candidates.extend(plain(variable_completion_candidates(
                 env_vars,
                 underlay,
@@ -2517,6 +2517,26 @@ fn user_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String>
     #[cfg(windows)]
     {
         env_account_candidates(env_vars, &["USER", "LOGNAME", "USERNAME"])
+    }
+}
+
+/// The CA_USER generator for a concrete word (rubash#2737):
+/// rl_username_completion_function (lib/readline/complete.c:2377)
+/// treats a leading `~` as a prefix sigil — it is stripped for the
+/// database match and re-applied to every generated candidate, so
+/// the word `~ro` generates `~root`. Callers prefix-filter the
+/// generated texts against the full word, so the sigil has to ride
+/// the candidates themselves; a plain word generates bare names.
+/// (bash_groupname_completion_function has no such sigil rule.)
+fn user_completion_candidates_for_word(
+    env_vars: &HashMap<String, String>,
+    word: &str,
+) -> Vec<String> {
+    let names = user_completion_candidates(env_vars);
+    if word.starts_with('~') {
+        names.into_iter().map(|name| format!("~{name}")).collect()
+    } else {
+        names
     }
 }
 
