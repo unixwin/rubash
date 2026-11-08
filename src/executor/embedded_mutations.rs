@@ -478,7 +478,18 @@ impl Executor {
         // escape syntax. The assignment-RHS entry keeps restore=false:
         // its caller's own later unescape pass needs the marker alive, and
         // that caller restores it (rubash#218).
-        let expanded = if restore_rhs_data {
+        //
+        // rubash#2999: the alternate entry also restores here. Its
+        // single-quote arm rides literal backslashes as the same marker
+        // (protect_rhs_data=false there, so no other carrier can be
+        // present), but its consumers — the whole-word `${}` path via the
+        // non-mut `expand_word`, the `=` RHS store, the compound store —
+        // never restore it, so an unrestored marker would leak into final
+        // text. Restoring at this boundary is the exact inverse of that
+        // arm: a comsub-suffixed alternate half is re-protected by the
+        // enclosing walker's `${` splice (protect_rhs_value) before the
+        // enclosing trailing pass, so the fold stays fixed there too.
+        let expanded = if restore_rhs_data || alternate {
             crate::executor::markers::restore_bare_sentinels(
                 &expanded,
                 &[(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH, "\\")],
@@ -712,7 +723,27 @@ impl Executor {
                     if alternate && matches!(quoted_ch, ' ' | '\t' | '\n') {
                         output.push(crate::executor::markers::IFS_GLUE);
                     }
-                    output.push(quoted_ch);
+                    // rubash#2999: the non-mut walker's #2216 twin for
+                    // raw single-quoted spans. A span's backslashes are
+                    // literal data (GNU subst.c:11882-11886 hands the
+                    // whole span to add_quoted_string); in the
+                    // protecting walk — and in the alternate walk, whose
+                    // word halves face the same trailing unescape pass
+                    // (`${x-'a\$b'$(...)}`) — they ride as the carrier
+                    // so that pass cannot fold them with the following
+                    // data `$`. The carrier restores at the mut_inner
+                    // boundary (the ordinary walk when restore_rhs_data,
+                    // the alternate walk for its own entry); a
+                    // comsub-suffixed alternate half is re-protected by
+                    // the enclosing walker's `${` splice before the
+                    // enclosing trailing pass. Compound RHS never reaches
+                    // this arm (its own branch above keeps the span
+                    // verbatim for the storage tokenizer).
+                    if (protect_rhs_data || alternate) && quoted_ch == '\\' {
+                        output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                    } else {
+                        output.push(quoted_ch);
+                    }
                 }
                 // An empty single-quoted span is a quoted null (subst.c
                 // 11940-11944: c = CTLNUL; goto add_character).
@@ -878,6 +909,24 @@ impl Executor {
                             chars.next();
                             if in_dquote_span {
                                 output.push(crate::executor::markers::DATA_BACKSLASH);
+                            } else if protect_rhs_data && !heredoc {
+                                // rubash#2999: in a protecting walk over a
+                                // lexer-cooked word a `\\` pair is literal
+                                // single-quote data — the lexer already
+                                // resolved every live `\\` escape into
+                                // DATA_BACKSLASH, so collapsing the pair
+                                // here eats one literal backslash (GNU
+                                // subst.c:11882-11886: a single-quoted
+                                // span reaches add_quoted_string
+                                // CTLESC-protected, never re-scanned as
+                                // escape syntax). Carry both backslashes
+                                // so the trailing unescape pass cannot
+                                // eat them; mut_inner restores the carrier
+                                // after that pass. Heredoc text is raw:
+                                // `\\` there is live escape syntax
+                                // collapsing to one `\`, keep it.
+                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                                output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
                             } else {
                                 output.push('\\');
                             }
@@ -1018,7 +1067,23 @@ impl Executor {
                 // an expansion introducer; a literal char here means the
                 // flag has nothing to attach to — drop it.
                 quoted_site = false;
-                output.push(ch);
+                // rubash#2999: the non-mut walker's #2216 twin. A
+                // backslash that reaches this fall-through was not
+                // consumed as an escape by the arms above — for a
+                // lexer-cooked word it is literal data (a
+                // single-quoted span's `\`, a trailing backslash). In
+                // the protecting walk it rides as the carrier so the
+                // trailing unescape pass cannot fold it with the
+                // following data `$` (DATA_DOLLAR decodes mid-walk,
+                // so the assembled string would otherwise hold a fake
+                // `\$` pair); mut_inner restores it after that pass.
+                // GNU subst.c:4773/4807: assembled data is never
+                // re-scanned as escape syntax.
+                if protect_rhs_data && ch == '\\' {
+                    output.push(crate::executor::markers::ASSIGN_EXPANSION_BACKSLASH);
+                } else {
+                    output.push(ch);
+                }
                 continue;
             }
 
