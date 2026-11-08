@@ -607,6 +607,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_COMSUB_BODY - state key (comsub body) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_COPROC_CHILD - state key (coproc child) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_CURRENT_COMMAND - state key (current command) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_CURRENT_FILE - state key (current file) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_CURRENT_FUNCTION - state key (current function) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_CURRENT_LINE - state key (current line) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_DEBUGGER_ATTEMPTED - state key (debugger attempted) - serialized across the respawn/subshell boundary; see the owning subsystem

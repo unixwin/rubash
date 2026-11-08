@@ -432,9 +432,10 @@ fn set_listing_carries_no_markers() {
     );
     let out = run(&["-c", "v=$'a\\x11b\\x1fc'; set | grep '^v='"]);
     assert_clean(&out, "set listing (C0 scalar)");
-    assert!(
-        out.starts_with(b"v=a\x11b\x1fc"),
-        "set listing must carry the decoded raw bytes, not transport pairs: {out:?}"
+    assert_eq!(
+        out,
+        "v=$'a\\021b\\037c'\n".as_bytes(),
+        "set listing must render C0 scalars ansic-quoted like GNU (rubash#3017/#3044), not raw bytes or transport pairs: {out:?}"
     );
 }
 

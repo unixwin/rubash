@@ -66,15 +66,9 @@ fn registry_typed_data_roundtrips_core_shapes() {
     /// issue that owns the fix. Shape ids: 1 = `printf '%s' "$v"`,
     /// 2 = `echo "$v"`, 3 = `w="a${v}b"` (assignment-concat).
     const TYPED_DATA_EXCEPTIONS: &[(u32, u8, &str)] = &[
-        // QUOTED_NULL_MARKER: bare U+E002 is consumed as the
-        // empty-token sentinel at word boundaries (#2882, sweep F2).
-        (0xE002, 1, "rubash#2882"),
-        (0xE002, 2, "rubash#2882"),
-        (0xE002, 3, "rubash#2882"),
-        // PROMPT_ESCAPE_GUARD: the assignment storage chain folds a
-        // typed U+E316 to a backslash in shape 3 (found by this
-        // test's probe; rubash#3016, filed by the captain and API-verified).
-        (0xE316, 3, "rubash#3016"),
+        // (empty: the #2882 E002 cells and the #3016 E316 shape-3 cell
+        // round-trip since those fixes merged; exceptions are added
+        // here only with a live tracking issue.)
     ];
 
     // Cargo sets CARGO_BIN_EXE_<name> for integration tests when the

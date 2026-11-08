@@ -60,12 +60,9 @@ fn pty_prompt_and_history_channels_carry_no_markers() {
     ]);
 }
 
-/// Sweep s4 / F4 (rubash#2883): expansion results are not prompt-decoded,
-/// so today a `read -p` prompt built from a value stores the transport
-/// pair instead of rendering the raw ESC. The leg is enrolled now and
-/// goes live when #2883 lands — un-ignore it in that PR.
+/// Sweep s4 / F4 (rubash#2883): expansion results are prompt-decoded
+/// since #3001 landed the read -p decode, so this leg is live.
 #[test]
-#[ignore = "pending rubash#2883 (read -p expansion prompt-decode)"]
 fn pty_read_p_prompt_decodes_expansion_results() {
     assert_legs(&["read_p_esc"]);
 }
