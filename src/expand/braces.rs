@@ -170,10 +170,10 @@ fn valid_seqterm(amble: &str) -> bool {
 
 /// UTF-8 bytes of markers.rs ASSIGN_DATA_DQUOTE (U+E302) — the stored form
 /// of a `"` in de-quoted assignment text.
-const DQUOTE_CARRIER: &[u8] = "\u{E302}".as_bytes();
+const DQUOTE_CARRIER: &[u8] = crate::executor::markers::ASSIGN_DATA_DQUOTE_STR.as_bytes();
 /// UTF-8 bytes of markers.rs ASSIGN_DATA_SQUOTE (U+E301) — the stored form
 /// of a `'` in de-quoted assignment text.
-const SQUOTE_CARRIER: &[u8] = "\u{E301}".as_bytes();
+const SQUOTE_CARRIER: &[u8] = crate::executor::markers::ASSIGN_DATA_SQUOTE_STR.as_bytes();
 
 /// True for a `$` byte OR its cooked-word carrier DATA_DOLLAR (U+001F,
 /// markers.rs): quoting already turned this dollar into data, so the brace

@@ -3807,6 +3807,9 @@ impl Executor {
         if !crate::executor::arithmetic::arith_write_log_is_empty() {
             return None;
         }
+        if !crate::executor::arithmetic::arith_locale_bind_log_is_empty() {
+            return None;
+        }
         if self.arith_counter_trap_installed() {
             return None;
         }
@@ -3910,6 +3913,16 @@ impl Executor {
                     .env_vars
                     .insert(var.clone(), new_value.clone());
                 crate::executor::arithmetic::record_arith_write(&var, old_value);
+                crate::executor::arithmetic::record_arith_locale_bind(
+                    &var,
+                    &new_value,
+                    executor
+                        .shell_state
+                        .env_vars
+                        .get("LC_ALL")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                );
                 crate::executor::sync_shell_assignment_process_env(
                     &executor.shell_state.env_vars,
                     &var,
@@ -8088,8 +8101,19 @@ fn escape_case_pattern_literal(value: &str) -> String {
     // matching — `z=$'\v\f\a\b'; case "$z" in "$z")` and the
     // `$'\v\f\a\b')` clause of nquote.tests line 79 printed `bad'
     // (nquote snapshot red gate, regression window beb1eca6..d3e8affa).
+    //
+    // The literal-char escape pair is the same shape in the other
+    // registry family: a typed registry-zone char rides transport as
+    // LITERAL_CHAR_ESCAPE + the char (markers.rs push_literal_char) —
+    // ONE user character, so it likewise takes one guard as a unit.
+    // Guarding the halves separately interposed a CTLESC inside the
+    // pair; the matcher's flattening reads a literal-escape pair
+    // greedily as one data char, so it consumed E400+CTLESC as a pair
+    // whose payload is CTLESC itself and the real char (a typed
+    // `$'\uE002'`) could never match (rubash#3014).
     use crate::executor::markers::{
-        CTLESC, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+        CTLESC, LITERAL_CHAR_ESCAPE, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST,
+        RAW_BYTE_MARKER_LAST,
     };
     let mut escaped = String::new();
     let mut chars = value.chars().peekable();
@@ -8101,6 +8125,14 @@ fn escape_case_pattern_literal(value: &str) -> String {
                 if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(payload as u32)) {
                     escaped.push(chars.next().expect("peeked raw-byte payload"));
                 }
+            }
+        }
+        if ch == LITERAL_CHAR_ESCAPE {
+            // Greedy pairing, mirroring flatten_pattern_to_byte_chars:
+            // the payload is part of the same character unit. A lone
+            // trailing escape has no payload and stays a single unit.
+            if let Some(payload) = chars.next() {
+                escaped.push(payload);
             }
         }
     }

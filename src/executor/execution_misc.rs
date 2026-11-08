@@ -9,6 +9,15 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 pub(crate) fn printable_filename(name: &str) -> String {
     if word_needs_ansic_quote(name) {
         ansic_quote_with_markers(name)
+    } else if name.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        // The name arrives in transport form: a typed registry-zone
+        // char rides as an E400 literal-char escape pair
+        // (push_literal_char). GNU's printable_filename judges the raw
+        // word (execute_cmd.c:5909 over general.c:1040), so the pair
+        // folds back to the raw char through the same boundary decoder
+        // the argv/env crossings use (rubash#2881, rubash#3040) —
+        // otherwise the diagnostic names the pair instead of the char.
+        super::substitution_metadata::decode_raw_byte_markers_to_byte_chars(name)
     } else {
         name.to_string()
     }
@@ -575,7 +584,7 @@ pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
     ]
     .iter()
     .collect::<String>();
-    text.replace(&pair, "\u{5}")
+    text.replace(&pair, crate::executor::markers::PREEXPANDED_STDIN_BODY_STR)
 }
 
 pub(in crate::executor) fn unterminated_heredoc_body_line_count(body: &str) -> usize {

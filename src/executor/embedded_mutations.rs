@@ -1,5 +1,5 @@
 use super::*;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use crate::executor::markers::{ASSIGN_DATA_DQUOTE, CTLESC, DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::parameter_core::word_contains_current_shell_command_substitution;
 
 // The quoted-null carrier (GNU subst.c CTLNUL): an empty quoted span
@@ -645,11 +645,15 @@ impl Executor {
                 // Compound RHS: emit the data-double-quote carrier the
                 // storage tokenizer recognizes instead of a bare quote
                 // that would reopen a quoted span during the re-split.
-                output.push(if preserve_quotes { '\u{E302}' } else { '"' });
+                output.push(if preserve_quotes {
+                    ASSIGN_DATA_DQUOTE
+                } else {
+                    '"'
+                });
                 continue;
             }
 
-            if ch == '\u{E302}' {
+            if ch == ASSIGN_DATA_DQUOTE {
                 // DATA_DOUBLE_QUOTE (assignment_expansion.rs): the compound
                 // hoist encodes the lexer's \x18 quote sentinels as E302 so
                 // they pass through untouched. They still delimit a "..."
@@ -3053,7 +3057,7 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
             // substring, subst.c:1512-1518); what the pair MEANS is
             // decided later by expand_arith_string's route, not by
             // the extraction (rubash#2374).
-            '\\' | '\u{11}' => {
+            '\\' | CTLESC => {
                 expression.push(ch);
                 match chars.next() {
                     Some(next) => expression.push(next),
@@ -3122,7 +3126,7 @@ fn collect_dollar_bracket_arithmetic_expansion_inner(
                 expression.push(ch);
                 loop {
                     match chars.next() {
-                        Some(pass @ ('\\' | '\u{11}')) => {
+                        Some(pass @ ('\\' | CTLESC)) => {
                             expression.push(pass);
                             match chars.next() {
                                 Some(next) => expression.push(next),
