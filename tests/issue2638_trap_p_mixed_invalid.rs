@@ -123,10 +123,8 @@ fn issue2638_numeric_signal_spec_is_per_item_too() {
 fn issue2638_all_invalid_reports_each_and_prints_nothing() {
     // Regression lock (both shells agree): every invalid operand gets
     // its own diagnostic, nothing is printed, rc=1.
-    let (stdout, _stderr, code) = run_script(
-        "all-invalid",
-        "trap -p BADSIG1 BADSIG2 2>&1; echo rc=$?\n",
-    );
+    let (stdout, _stderr, code) =
+        run_script("all-invalid", "trap -p BADSIG1 BADSIG2 2>&1; echo rc=$?\n");
     assert_eq!(
         stdout,
         "S: line 1: trap: BADSIG1: invalid signal specification\nS: line 1: trap: BADSIG2: invalid signal specification\nrc=1\n"

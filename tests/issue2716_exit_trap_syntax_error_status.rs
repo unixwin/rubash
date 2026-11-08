@@ -112,8 +112,7 @@ fn issue2716_status_from_last_compound_survives_trap_syntax_error() {
     // Chain: the pending status is produced by a compound command
     // after the trap is armed; the trap's parse failure must not
     // overwrite it.
-    let (_stdout, stderr, code) =
-        run_script("chain", "trap 'echo (' EXIT\n( exit 6 )\n");
+    let (_stdout, stderr, code) = run_script("chain", "trap 'echo (' EXIT\n( exit 6 )\n");
     assert_eq!(code, Some(6));
     assert_exit_trap_diagnostics(&stderr);
 }
