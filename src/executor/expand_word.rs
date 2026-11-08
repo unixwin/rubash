@@ -75,20 +75,7 @@ fn redirect_operand_literal(expanded: &str) -> String {
     // pairs — transport for the raw chars — fold here through the
     // same boundary decoder the argv/env crossings use (rubash#2881,
     // rubash#3040); left in, the pair lands in the on-disk name.
-    fold_filename_literal_char_escapes(&decoded)
-}
-
-/// Fold E400 literal-char escape pairs in text that has been
-/// finalized as a filename (or as a diagnostic naming the operand)
-/// back to the raw chars, through the #2881 boundary decoder; text
-/// without the escape introducer passes through unchanged
-/// (rubash#3040).
-fn fold_filename_literal_char_escapes(text: &str) -> String {
-    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
-        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(text)
-    } else {
-        text.to_string()
-    }
+    crate::executor::substitution_metadata::fold_literal_char_escapes(&decoded)
 }
 
 impl Executor {
@@ -434,7 +421,8 @@ impl Executor {
                 // The diagnostic names the operand being finalized as
                 // a filename, so its E400 pairs fold like the literal
                 // outcomes above (rubash#3040).
-                let pattern = fold_filename_literal_char_escapes(&pattern);
+                let pattern =
+                    crate::executor::substitution_metadata::fold_literal_char_escapes(&pattern);
                 // GNU performs ONE do_redirections per command, so the
                 // word expands (and reports) exactly once. Rubash's
                 // multi-phase redirect pipeline can expand the same operand

@@ -65,14 +65,20 @@ impl<'a> SourceInvocation<'a> {
     }
 
     pub(super) fn resolve_path(&self, executor: &Executor) -> Option<PathBuf> {
+        // The filename is finalized here: GNU source.def searches and
+        // opens the name's raw bytes, so a stored E400 pair folds
+        // before the PATH search and the cwd probe (rubash#3076).
+        let folded_filename =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(self.filename);
+        let filename = folded_filename.as_str();
         if let Some(path) = &self.path {
-            return source_path_search(path, self.filename, executor);
+            return source_path_search(path, filename, executor);
         }
 
-        if should_search_source_path(executor, self.filename) {
+        if should_search_source_path(executor, filename) {
             if let Some(path) = executor
                 .get_env("PATH")
-                .and_then(|path| source_path_search(path, self.filename, executor))
+                .and_then(|path| source_path_search(path, filename, executor))
             {
                 return Some(path);
             }
@@ -83,13 +89,13 @@ impl<'a> SourceInvocation<'a> {
         // that flag in POSIX mode.  A plain name there is looked up via $PATH
         // only (source_uses_path is forced on); names with a directory
         // component are still opened directly (absolute_program path).
-        let plain_name = !self.filename.contains('/') && !self.filename.contains('\\');
+        let plain_name = !filename.contains('/') && !filename.contains('\\');
         if plain_name && executor.get_env("__RUBASH_POSIX_MODE") == Some("1") {
             return None;
         }
 
         // G-02: the current-directory fallback anchors at the session cwd.
-        let source_path = shell_path_to_windows(self.filename, executor.env_vars());
+        let source_path = shell_path_to_windows(filename, executor.env_vars());
         let source_path = if source_path.is_absolute() {
             source_path
         } else {

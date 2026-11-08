@@ -5093,6 +5093,12 @@ pub(crate) fn slash_command_execve_error_message(
     // `a\b` is an ordinary name that goes through the PATH search and
     // earns "command not found", not the execve classification
     // (rubash#1482).
+    // The classification probes the real file: fold the stored E400
+    // pair to the raw char first, or an existing non-executable file
+    // stats as missing and earns 127 instead of GNU's 126
+    // (rubash#3076).
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
     let has_separator = if cfg!(windows) {
         name.contains('/') || name.contains('\\')
     } else {
