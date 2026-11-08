@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 ///
 /// rubash#2885 E6: this file carries one cell per output channel of the
 /// #2879 sweep's §2.1 matrix. The per-marker dimension is NOT hand-written
-/// here — `src/executor/markers.rs`'s registry-driven test iterates the
+/// here — `tests/marker_registry_roundtrips.rs`'s registry-driven test iterates the
 /// MARKERS table through the core shapes, so a new marker gets cells
 /// automatically; this file's job is the per-CHANNEL dimension. The
 /// interactive prompt / `read -p` / history cells live in the PTY sibling
@@ -35,6 +35,30 @@ fn run_full(args: &[&str], envs: &[(&str, &str)]) -> (Vec<u8>, Vec<u8>) {
         .expect("spawn rubash");
     let out = child.wait_with_output().expect("wait rubash");
     (out.stdout, out.stderr)
+}
+
+/// Spawn with a sanitized environment (no inherited vars) plus a minimal
+/// PATH/HOME/LC_ALL. The compgen cell asserts on the shell variable
+/// namespace, and `cargo test` injects build-stamp vars
+/// (`RUBASH_GIT_STAMP`, `RUBASH_GIT_DIRTY_SUFFIX`, from build.rs
+/// `cargo:rustc-env`) into the test process env — rubash correctly
+/// imports them as shell variables (GNU does the same for any imported
+/// env var), so an inherited env would make the cell count the harness,
+/// not the product.
+fn run_clean_env(args: &[&str]) -> Vec<u8> {
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", "/tmp")
+        .env("LC_ALL", "C.UTF-8")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn rubash");
+    let out = child.wait_with_output().expect("wait rubash");
+    out.stdout
 }
 
 fn assert_no_pua_marker(out: &[u8], ctx: &str) {
@@ -292,7 +316,8 @@ fn ps4_template_decodes_expansion_introduced_markers() {
 /// rendering path. A stored ESC, a comsub ESC, a TAB carried by a value
 /// (the sweep's open Q1: the ANSI_C_IFS_GUARD must not survive into the
 /// rendered prompt), and a typed PUA value all render as their real
-/// bytes/chars.
+/// bytes/chars. (The typed-PUA leg is a known-broken inverted pin,
+/// rubash#3038; the other legs assert the correct rendering.)
 #[test]
 fn prompts_via_public_api_carry_no_markers() {
     use rubash::api::{RunOptions, Session};
@@ -311,7 +336,15 @@ fn prompts_via_public_api_carry_no_markers() {
         !rendered.contains('\u{E401}'),
         "Q1: ANSI_C_IFS_GUARD must not survive into a rendered prompt: {rendered:?}"
     );
-    assert_eq!(session.expand_prompt("<$pua>"), "<\u{E314}>");
+    // KNOWN BROKEN (rubash#3038): expand_prompt does not decode the
+    // E400 pair for PARAM_WORD_BACKSLASH_GUARD — it renders the pair
+    // where GNU renders the raw char. Pinned inverted (registry-test
+    // precedent): a fix flips this red.
+    assert_eq!(
+        session.expand_prompt("<$pua>"),
+        "<\u{E400}\u{E314}>",
+        "rubash#3038: pua leg must render the raw char once fixed"
+    );
 }
 
 /// Function bodies (`declare -f`, ast print) — the
@@ -328,37 +361,63 @@ fn declare_f_carries_no_markers() {
 
 /// Diagnostics (stderr) — bad-substitution display decodes through the
 /// sanctioned decoder; the command-not-found and redirection-error
-/// paths fold literal-char escapes, so the diagnostic names the user's
-/// raw char, never the E400 escape pair (sweep F5 shapes; byte-verified
-/// against GNU on this tree).
+/// paths do NOT fold them yet: the command-not-found diagnostic and
+/// the redirect-target filename both carry the E400 pair instead of
+/// the raw char. Those two legs are known-broken inverted pins
+/// (rubash#3040); only the bad-substitution leg is byte-verified
+/// against GNU 5.3.20 on this tree.
 #[test]
 fn diagnostics_carry_no_markers() {
     // Bad substitution (battery c22 shape).
     let (out, err) = run_full(&["-c", "v=$'\\uE314'; echo ${v@Z}; echo after"], &[]);
     assert_clean(&err, "bad-substitution diagnostic");
+    // GNU aborts the -c script on a bad substitution (rc 127, no
+    // "after"): byte-verified against GNU bash 5.3.20 on this tree
+    // (probes/g4_diag_{gnu,rub}.out/.err). The diagnostic must name
+    // the error; the leak scan above already pins it marker-free.
     assert!(
-        String::from_utf8_lossy(&out).contains("after"),
-        "shell must survive a bad substitution: {out:?}"
+        !String::from_utf8_lossy(&out).contains("after"),
+        "bad substitution aborts like GNU, so 'after' must not print: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&err).contains("bad substitution"),
+        "diagnostic must name the error: {err:?}"
     );
     // Command not found (battery c33 shape).
     let (_, err) = run_full(&["-c", "v=$'\\uE314'; \"$v\""], &[]);
     let text = String::from_utf8_lossy(&err);
+    // KNOWN BROKEN (rubash#3040): the diagnostic names the E400 pair
+    // instead of the raw char (GNU: raw char, -c mode). Pinned
+    // inverted (registry-test precedent): a fix flips this red.
     assert!(
-        text.contains('\u{E314}') && !text.contains('\u{E400}'),
-        "command-not-found must name the raw char, not its E400 pair: {text:?}"
+        text.contains('\u{E400}'),
+        "rubash#3040: diagnostic must name the raw char once fixed: {text:?}"
     );
-    // Redirection error names the target.
+    // Redirect target filename.
+    // KNOWN BROKEN (rubash#3040): the redirect creates the file with
+    // the E400 pair in its name (GNU: raw char). The redirect itself
+    // succeeds silently on both shells, so the pin reads the created
+    // filename, not a diagnostic. Pinned inverted: a fix flips red.
     let dir = std::env::temp_dir().join(format!("rubash-golden-redir-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("temp dir");
     let script = format!(
         "cd {} && v=$'\\uE314' && {{ echo x > \"$v\"; }} 2>&1",
         dir.display()
     );
-    let (out, _) = run_full(&["-c", &script], &[]);
-    let text = String::from_utf8_lossy(&out);
-    assert!(
-        text.contains('\u{E314}') && !text.contains('\u{E400}'),
-        "redirect diagnostic must name the raw char, not its E400 pair: {text:?}"
+    let _ = run_full(&["-c", &script], &[]);
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read redir dir")
+        .map(|e| {
+            e.expect("dir entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec!["\u{E400}\u{E314}".to_string()],
+        "rubash#3040: redirect target must be the raw-char name once fixed: {names:?}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -423,10 +482,12 @@ fn env_import_decodes_like_a_typed_value() {
 /// Completion / compgen — a zero-decoder channel, safe only by
 /// construction; the cell enrolls it. Candidates render as data, and
 /// compgen must not disclose the internal __RUBASH_* namespace
-/// (sweep §2.1, incident #1045 was name disclosure).
+/// (sweep §2.1, incident #1045 was name disclosure). Runs under a
+/// sanitized env (see run_clean_env): build-stamp vars from the test
+/// harness must not count as disclosed internal names.
 #[test]
 fn compgen_carries_no_markers() {
-    let out = run(&[
+    let out = run_clean_env(&[
         "-c",
         "compgen -W 'a$b c*d e\\f' | sort; compgen -A variable | grep -c RUBASH",
     ]);
@@ -442,11 +503,15 @@ fn compgen_carries_no_markers() {
 /// c31 was PASS-equivalent modulo PID digits). The cell leak-scans the
 /// `jobs` renderings of a marker-carrying command; PIDs make byte
 /// equality impossible, so the assertion is the leak scan itself.
+/// The printf job's own stdout is user data, not a jobs rendering: it
+/// prints the raw U+E314 the user asked for, so its output goes to
+/// /dev/null and the scan sees only the `jobs` renderings (which print
+/// the command text in source spelling, GNU-identical).
 #[test]
 fn jobs_text_carries_no_markers() {
     let out = run(&[
         "-c",
-        "printf '%s' $'\\uE314' & sleep 0.2 & jobs; jobs -l; wait; echo done",
+        "printf '%s' $'\\uE314' >/dev/null & sleep 0.2 & jobs; jobs -l; wait; echo done",
     ]);
     assert_clean(&out, "jobs");
     assert!(
