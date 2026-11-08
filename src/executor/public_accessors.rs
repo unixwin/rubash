@@ -1360,6 +1360,28 @@ impl Executor {
             || self.shell_state.completion_specs.get("-I").is_some()
     }
 
+    /// Whether the special compspec of one class is registered
+    /// (rubash#2738): the selective form of
+    /// [`Executor::has_compspec`], which ORs the command's own
+    /// registration and all three special slots together. A host
+    /// gate for the positions the command name cannot name — the
+    /// `-E` empty line and the `-I` initial word — needs to open
+    /// for exactly the governing class without also paying for the
+    /// others, so this answers for a single slot: `-D`
+    /// ([`SpecialCompspecKind::Default`]), `-E`
+    /// ([`SpecialCompspecKind::Empty`]) or `-I`
+    /// ([`SpecialCompspecKind::Initial`]). Like the name form this
+    /// is a pure registration query; whether a spec *governs* a
+    /// concrete position is [`Executor::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: crate::api::SpecialCompspecKind) -> bool {
+        let key = match kind {
+            crate::api::SpecialCompspecKind::Default => "-D",
+            crate::api::SpecialCompspecKind::Empty => "-E",
+            crate::api::SpecialCompspecKind::Initial => "-I",
+        };
+        self.shell_state.completion_specs.get(key).is_some()
+    }
+
     /// Whether a compspec governs completion at `(line, cursor)` — the
     /// position-aware form of [`Executor::has_compspec`] (rubash#2856,
     /// B5-11). The host's routing gate for [`Executor::complete_line`]
