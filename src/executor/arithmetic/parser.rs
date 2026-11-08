@@ -303,7 +303,16 @@ impl ConditionalArithParser<'_> {
 
 #[derive(Clone)]
 pub(super) enum ArithLValue {
-    Scalar(String),
+    Scalar {
+        /// The resolved bind target (nameref chains are followed at
+        /// lvalue parse time).
+        name: String,
+        /// The name exactly as written in the expression. GNU
+        /// expr_bind_variable's post-bind hook is keyed on the written
+        /// lhs (expr.c:352), never on the resolved target, so
+        /// bind-consequence records must use this spelling.
+        written: String,
+    },
     Indexed {
         name: String,
         index: i128,

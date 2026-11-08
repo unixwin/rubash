@@ -1,6 +1,6 @@
 use super::storage::quote_assoc_display_key;
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
+use crate::executor::markers::{PARAM_NAME_END_MARKER, STORAGE_WORD_PREFIX};
 use crate::executor::NamerefResolution;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, assoc_nbuckets,
@@ -1227,11 +1227,11 @@ impl Executor {
         // trailing PARAM_NAME_END_MARKER is the quote-boundary marker the
         // lexer leaves on a quoted unbraced `$name` (`"$ref"` arrives as
         // `$ref\x13`), and it counts as quoting for the [*] join.
-        let quoted_array_word = quoted_array_word || word.ends_with('\u{13}');
+        let quoted_array_word = quoted_array_word || word.ends_with(PARAM_NAME_END_MARKER);
         let bare_name = word
             .strip_prefix('$')
             .filter(|name| !name.starts_with('{'))
-            .map(|name| name.trim_end_matches('\u{13}'))
+            .map(|name| name.trim_end_matches(PARAM_NAME_END_MARKER))
             .filter(|name| is_shell_name(name));
         if let Some(name) = bare_name {
             if let NamerefResolution::Target(target) = self.nameref_resolution(name) {

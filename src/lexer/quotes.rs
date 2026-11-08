@@ -1,6 +1,8 @@
 use super::ansi::decode_ansi_c_quoted;
 use super::dolbrace::{scan_braced_parameter, BraceContext, DolbraceState};
-use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
+use crate::executor::markers::{
+    CTLESC, DATA_BACKTICK, DATA_DOLLAR, DATA_DOLLAR_STR, DATA_DQUOTE, DATA_SQUOTE,
+};
 
 /// Emitted by quote removal right before a quote boundary that terminates
 /// an unbraced `$name` parameter. Quote removal deletes the quote, which
@@ -821,10 +823,10 @@ fn dollar_bracket_body_end_chars(chars: &[char], start: usize) -> Option<usize> 
     let mut index = start;
     while index < chars.len() {
         match chars[index] {
-            '\\' | '\u{11}' => index += 2,
-            '\'' | '\u{17}' => {
+            '\\' | CTLESC => index += 2,
+            '\'' | DATA_SQUOTE => {
                 index += 1;
-                while index < chars.len() && chars[index] != '\'' && chars[index] != '\u{17}' {
+                while index < chars.len() && chars[index] != '\'' && chars[index] != DATA_SQUOTE {
                     index += 1;
                 }
                 if index >= chars.len() {
@@ -832,16 +834,16 @@ fn dollar_bracket_body_end_chars(chars: &[char], start: usize) -> Option<usize> 
                 }
                 index += 1;
             }
-            '"' | '`' | '\u{18}' | '\u{1a}' => {
+            '"' | '`' | DATA_DQUOTE | DATA_BACKTICK => {
                 let closers: &[char] = match chars[index] {
-                    '`' | '\u{1a}' => &['`', '\u{1a}'],
-                    _ => &['"', '\u{18}'],
+                    '`' | DATA_BACKTICK => &['`', DATA_BACKTICK],
+                    _ => &['"', DATA_DQUOTE],
                 };
                 index += 1;
                 let mut closed = false;
                 while index < chars.len() {
                     match chars[index] {
-                        '\\' | '\u{11}' => index += 2,
+                        '\\' | CTLESC => index += 2,
                         ch if closers.contains(&ch) => {
                             index += 1;
                             closed = true;
@@ -883,7 +885,7 @@ pub(crate) fn skip_quote_unit_chars(
 ) -> usize {
     let mut index = open + 1;
     while index < chars.len() {
-        if backslash_passes && matches!(chars[index], '\\' | '\u{11}') {
+        if backslash_passes && matches!(chars[index], '\\' | CTLESC) {
             index += 2;
             continue;
         }
@@ -900,12 +902,16 @@ pub(crate) fn skip_paren_unit_chars(chars: &[char], open: usize) -> usize {
     let mut index = open + 1;
     while index < chars.len() {
         match chars[index] {
-            '\\' | '\u{11}' => index += 2,
-            '\'' | '\u{17}' => {
-                index = skip_quote_unit_chars(chars, index, &['\'', '\u{17}'], false)
+            '\\' | CTLESC => index += 2,
+            '\'' | DATA_SQUOTE => {
+                index = skip_quote_unit_chars(chars, index, &['\'', DATA_SQUOTE], false)
             }
-            '"' | '\u{18}' => index = skip_quote_unit_chars(chars, index, &['"', '\u{18}'], true),
-            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '"' | DATA_DQUOTE => {
+                index = skip_quote_unit_chars(chars, index, &['"', DATA_DQUOTE], true)
+            }
+            '`' | DATA_BACKTICK => {
+                index = skip_quote_unit_chars(chars, index, &['`', DATA_BACKTICK], true)
+            }
             '(' => {
                 depth += 1;
                 index += 1;
@@ -928,12 +934,16 @@ pub(crate) fn skip_braced_unit_chars(chars: &[char], open: usize) -> usize {
     let mut index = open + 1;
     while index < chars.len() {
         match chars[index] {
-            '\\' | '\u{11}' => index += 2,
-            '\'' | '\u{17}' => {
-                index = skip_quote_unit_chars(chars, index, &['\'', '\u{17}'], false)
+            '\\' | CTLESC => index += 2,
+            '\'' | DATA_SQUOTE => {
+                index = skip_quote_unit_chars(chars, index, &['\'', DATA_SQUOTE], false)
             }
-            '"' | '\u{18}' => index = skip_quote_unit_chars(chars, index, &['"', '\u{18}'], true),
-            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '"' | DATA_DQUOTE => {
+                index = skip_quote_unit_chars(chars, index, &['"', DATA_DQUOTE], true)
+            }
+            '`' | DATA_BACKTICK => {
+                index = skip_quote_unit_chars(chars, index, &['`', DATA_BACKTICK], true)
+            }
             '{' => {
                 depth += 1;
                 index += 1;
@@ -957,8 +967,10 @@ fn dquote_segment_end_chars(chars: &[char], start: usize) -> usize {
     let mut index = start;
     while index < chars.len() {
         match chars[index] {
-            '\\' | '\u{11}' => index += 2,
-            '`' | '\u{1a}' => index = skip_quote_unit_chars(chars, index, &['`', '\u{1a}'], true),
+            '\\' | CTLESC => index += 2,
+            '`' | DATA_BACKTICK => {
+                index = skip_quote_unit_chars(chars, index, &['`', DATA_BACKTICK], true)
+            }
             '$' if chars.get(index + 1) == Some(&'(') => {
                 index = skip_paren_unit_chars(chars, index + 1);
             }
