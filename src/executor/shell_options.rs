@@ -3500,7 +3500,9 @@ impl Executor {
                     return Some(input);
                 }
                 if let Some(body) = redirect.body.clone() {
-                    if let Some(word) = body.strip_prefix('\u{1d}') {
+                    if let Some(word) =
+                        body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                    {
                         // rubash#1965: a STORAGE_WORD_PREFIX here-string body
                         // is already-decoded text whose $'...' blanks carry
                         // the ANSI_C_IFS_GUARD carrier. The canonical funnel
@@ -3605,7 +3607,9 @@ impl Executor {
                         return Some(input);
                     }
                     if let Some(body) = redirect.body.as_deref() {
-                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                        if let Some(word) =
+                            body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                        {
                             // rubash#1965: the same storage arm as the mut
                             // ladder above — its decode-or-expand result must
                             // pass the value-boundary ANSI_C_IFS_GUARD strip
@@ -3659,7 +3663,9 @@ impl Executor {
                         }
                     }
                     if let Some(body) = redirect.body.as_deref() {
-                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                        if let Some(word) =
+                            body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                        {
                             let mut input = decode_ansi_c_quoted_word(word)
                                 .unwrap_or_else(|| self.expand_word(word));
                             input.push('\n');

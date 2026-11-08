@@ -379,6 +379,40 @@ fn printf_attribute_value(
     }
 }
 
+/// GNU printf.def PRETURN: `builtin_bind_variable (vname, ...)` then
+/// `stupidly_hack_special_variables (vname)` — the special-variable
+/// consequences key on the literal `-v` OPERAND name, never on the
+/// nameref-resolved target. For the locale family the consequence is
+/// sv_locale (variables.c:6272 -> locale.c set_locale_var): the
+/// process-env mirror every other bind channel runs (rubash#1531) plus
+/// the one shared setlocale attempt/warning funnel (rubash#1692,
+/// `crate::locale::locale_assignment_warning`). A bind THROUGH a
+/// nameref (`declare -n r=LC_ALL; printf -v r <bad>`) stores into
+/// LC_ALL silently in GNU precisely because the hack sees `r`; an
+/// array-element operand (`LC_ALL[0]`) is not a family name either.
+/// rubash#3009: printf's own bind path ran neither consequence.
+fn note_printf_locale_bind(
+    env_vars: &crate::shell::var_table::VarTable,
+    operand: &str,
+    stderr: &mut dyn Write,
+) -> io::Result<()> {
+    if !crate::locale::is_locale_family_name(operand) {
+        return Ok(());
+    }
+    if let Some(value) = env_vars.get(operand).cloned() {
+        crate::executor::local_helpers::sync_shell_assignment_process_env(env_vars, operand, value);
+    }
+    if let Some(warning) = crate::locale::locale_assignment_warning(operand, env_vars) {
+        writeln!(
+            stderr,
+            "{}warning: {}",
+            diagnostic_prefix(env_vars),
+            warning
+        )?;
+    }
+    Ok(())
+}
+
 fn assign_printf_output(
     env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
@@ -386,6 +420,9 @@ fn assign_printf_output(
     mut variables: Option<&mut VariableStore>,
     stderr: &mut dyn Write,
 ) -> io::Result<Option<i32>> {
+    // The -v operand as written; GNU's special-variable hack keys on
+    // it (see note_printf_locale_bind), not on the resolved name.
+    let operand = name;
     // GNU printf.def -v: the value is a C string, truncated at the first
     // NUL byte (rubash#1418).
     let output = match output.find('\0') {
@@ -416,6 +453,7 @@ fn assign_printf_output(
         if name == "PATH" {
             crate::builtins::hash::flush_command_hash_table(env_vars);
         }
+        note_printf_locale_bind(env_vars, operand, stderr)?;
         return Ok(None);
     }
     let resolved = resolve_printf_bind_name(env_vars, name);
@@ -483,6 +521,7 @@ fn assign_printf_output(
             )?;
             return Ok(Some(1));
         }
+        note_printf_locale_bind(env_vars, operand, stderr)?;
         return Ok(None);
     }
 
@@ -496,6 +535,7 @@ fn assign_printf_output(
     if name == "PATH" {
         crate::builtins::hash::flush_command_hash_table(env_vars);
     }
+    note_printf_locale_bind(env_vars, operand, stderr)?;
     Ok(None)
 }
 

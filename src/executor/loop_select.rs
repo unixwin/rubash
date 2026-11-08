@@ -242,6 +242,13 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(for_command.variable.clone(), value.clone());
+                // rubash#3060: this arm performs the store itself (the
+                // nameref-cell write bypasses apply_shell_assignment),
+                // so the bind's sv_locale note lives here — GNU
+                // execute_cmd.c:3097-3100 runs
+                // stupidly_hack_special_variables(identifier) for the
+                // ASS_NAMEREF cell bind too.
+                self.note_locale_assignment(&for_command.variable);
                 for_command.variable.clone()
             } else {
                 // GNU execute_cmd.c:3081-3095: an att_noassign loop
@@ -293,9 +300,14 @@ impl Executor {
                 &for_command.variable,
                 &value,
             );
-            // rubash#1692: the loop-variable bind is bind_variable —
-            // sv_locale fires on it like any other bind.
-            self.note_locale_assignment(&for_command.variable);
+            // rubash#3060: no locale note at this level — a bind is
+            // noted exactly once, by the code that performs the store.
+            // The plain arm delegates the store to
+            // apply_shell_assignment, whose tail notes it
+            // (temporary_assignments.rs, rubash#1692); the nameref-cell
+            // arm above stores directly and notes at its insert. The
+            // unconditional note that stood here fired sv_locale a
+            // second time for every plain-arm iteration.
 
             // GNU execute_for_command (execute_cmd.c:3201+) runs the body by
             // POINTER — the COMMAND list make_cmd.c allocated once at parse

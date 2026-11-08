@@ -309,7 +309,9 @@ impl Executor {
         // decode_parameter_word_quotes, whose quote rules would otherwise
         // re-read a data `"` as an opener and drop it plus everything after
         // (array6.sub: `X${dbg-'x"'}Y` -> `Ax"Y`, not `AxY`).
-        let expanded = expanded.replace('"', "\u{18}").replace('\'', "\u{17}");
+        let expanded = expanded
+            .replace('"', crate::executor::markers::DATA_DQUOTE_STR)
+            .replace('\'', crate::executor::markers::DATA_SQUOTE_STR);
         // GNU subst.c:4462 expand_string_for_rhs with quoted == 0 runs the
         // rhs through expand_word_internal, whose unquoted backslash branch
         // (subst.c:11671-11674) consumes the backslash before ANY character

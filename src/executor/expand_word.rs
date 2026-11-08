@@ -66,9 +66,29 @@ fn redirect_operand_literal(expanded: &str) -> String {
     if !crate::executor::markers::contains_word_marker_bytes(expanded) {
         return expanded.to_string();
     }
-    crate::executor::markers::decode_word_position_carriers(
+    let decoded = crate::executor::markers::decode_word_position_carriers(
         &expanded.replace(crate::executor::markers::CTLESC, ""),
-    )
+    );
+    // The operand is now a FILENAME: GNU redir.c:298
+    // redirection_expand returns the string do_redirection_internal
+    // opens verbatim, so a stored value's E400 literal-char escape
+    // pairs — transport for the raw chars — fold here through the
+    // same boundary decoder the argv/env crossings use (rubash#2881,
+    // rubash#3040); left in, the pair lands in the on-disk name.
+    fold_filename_literal_char_escapes(&decoded)
+}
+
+/// Fold E400 literal-char escape pairs in text that has been
+/// finalized as a filename (or as a diagnostic naming the operand)
+/// back to the raw chars, through the #2881 boundary decoder; text
+/// without the escape introducer passes through unchanged
+/// (rubash#3040).
+fn fold_filename_literal_char_escapes(text: &str) -> String {
+    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
 }
 
 impl Executor {
@@ -411,6 +431,10 @@ impl Executor {
             // site (redirect gate / compound binding), mirroring the
             // argument-word failglob port (command_prepare.rs).
             glob::PathnameExpansion::Fail(pattern) => {
+                // The diagnostic names the operand being finalized as
+                // a filename, so its E400 pairs fold like the literal
+                // outcomes above (rubash#3040).
+                let pattern = fold_filename_literal_char_escapes(&pattern);
                 // GNU performs ONE do_redirections per command, so the
                 // word expands (and reports) exactly once. Rubash's
                 // multi-phase redirect pipeline can expand the same operand
@@ -803,21 +827,27 @@ impl Executor {
         } else {
             raw_value
         };
-        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
-        }
-        if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
+        // Compound-claim gate (rubash#3034): the two functions below
+        // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
+        // which only ever runs on a genuine compound assignment — a decision
+        // the parser makes positionally (parse.y:5648-5657: only an unquoted
+        // `(` immediately after `=` starts parse_compound_assignment,
+        // parse.y:7104) and records as COMPOUND_ASSIGNMENT_MARKER. A
+        // parenthesized word WITHOUT the marker is a quoted scalar whose
+        // parens are literal data (subst.c:4357 expand_string_assignment);
+        // claiming it as an element list let the
+        // ARRAY_FIELD_SPLIT_MARKER-tagged field transport (`\x10"..."`)
+        // leak into scalar storage (`y="($x)"` stored `(\x10"v1.0")`).
+        if compound_assignment {
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
+            {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
         }
         // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes the
         // raw parenthesized text first; the preserve variant keeps element
