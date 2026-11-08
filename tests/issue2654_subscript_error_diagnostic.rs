@@ -48,7 +48,8 @@ const NEEDLE: &str =
 fn expect_subscript_error(script: &str, expected_stdout: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
-        out.stdout, expected_stdout,
+        out.stdout,
+        expected_stdout,
         "{ctx}: stdout mismatch; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
