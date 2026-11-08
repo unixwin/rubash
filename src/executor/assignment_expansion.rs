@@ -1475,11 +1475,32 @@ impl Executor {
             // indistinguishable from rubash#735 user data — the tail strip
             // would preserve it and the guard byte would reach the cell
             // (`v2=$'p\nq'$(echo r)s` stored 6 characters instead of 5).
+            // rubash#3058: the same boundary must also drop bare IFS_GLUE.
+            // A fragment expansion whose site was quoted carries the
+            // QUOTED_EXPANSION_SITE verdict, and the walker IFS-protects
+            // that expansion's result span — every IFS char of the result
+            // preceded by IFS_GLUE — because in word position the portion
+            // "will be split, but this portion should not be" (subst.c:
+            // 11552; protection added via quote_string, subst.c:4773 /
+            // add_quoted_string, subst.c:11862). An assignment RHS is one
+            // W_ASSIGNRHS word that is dequoted into storage without ever
+            // splitting (expand_string_assignment, subst.c:4357), so the
+            // glue is dead transport here: the quoted and unquoted tails of
+            // expand_assignment_value_inner both strip it at this same
+            // boundary, and only this mixed path missed it — the glue rode
+            // the payload splice into the cell verbatim
+            // (`v="$(echo x)/z${v:+":${v}"}"` stored `x/z:/c/aa\x1c bb`,
+            // one glue before every space of the nested result). A bare
+            // IFS_GLUE in walker output is always this protocol byte: a
+            // genuine 0x1C data byte travels as a U+E000 raw-byte pair and
+            // the comsub fragments appended below are payload that never
+            // passes through this strip, so neither can be eaten here.
             let prefix = crate::executor::markers::strip_ansi_c_ifs_guard(
                 &crate::executor::markers::dequote_ctlesc_pairs(
                     &self.expand_embedded_parameters_mut(value.get(cursor..span.start)?),
                 ),
-            );
+            )
+            .replace(crate::executor::markers::IFS_GLUE, "");
             // Walker output is storage-domain text, not source text: its
             // raw-byte marker pairs are transport for payload bytes. GNU's
             // quoted-context splice re-escapes expansion output uniformly
@@ -1508,12 +1529,14 @@ impl Executor {
         }
         // Same guard drop as the prefix fragment above (rubash#796): the
         // suffix's bare guard must not ride the payload splice into an
-        // E400-escaped pair.
+        // E400-escaped pair. Same IFS_GLUE drop as the prefix fragment
+        // above (rubash#3058).
         let suffix = crate::executor::markers::strip_ansi_c_ifs_guard(
             &crate::executor::markers::dequote_ctlesc_pairs(
                 &self.expand_embedded_parameters_mut(value.get(cursor..)?),
             ),
-        );
+        )
+        .replace(crate::executor::markers::IFS_GLUE, "");
         // Same payload provenance as the prefix fragment above (rubash#296).
         word.append_expanded_shell_text(&suffix, true);
         self.last_command_substitution_status.set(word.status);
