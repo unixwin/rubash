@@ -182,6 +182,12 @@ where
     }
 
     if let Some(pathname) = pathname {
+        // The pathname operand names a real file: fold a stored E400
+        // pair to the raw char for the probes, the stored value, and
+        // every diagnostic below (rubash#3076).
+        let folded_pathname =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(pathname);
+        let pathname = folded_pathname.as_str();
         // GNU builtins/hash.def:156-176: in a restricted shell `hash -p`
         // refuses an absolute pathname (sh_restricted -> "hash: <path>:
         // restricted") and requires a relative one to resolve through $PATH
@@ -218,6 +224,10 @@ where
         // directory, not just "/" (rubash#1360).
         let mut status = EXECUTION_SUCCESS;
         for name in &names {
+            // Table keys are folded names (rubash#3076).
+            let folded_name =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+            let name = folded_name.as_str();
             if name.contains('/') {
                 continue;
             }
@@ -240,6 +250,10 @@ where
     if delete {
         let mut status = EXECUTION_SUCCESS;
         for name in names {
+            // Table keys are folded names (rubash#3076).
+            let folded_name =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+            let name = folded_name.as_str();
             // GNU builtins/hash.def hash_builtin name loop: the
             // absolute_program(w) → continue check is the loop's first
             // statement, ahead of the delete branch — a slash name is
@@ -323,6 +337,10 @@ where
     if !names.is_empty() {
         let mut status = EXECUTION_SUCCESS;
         for name in names {
+            // Table keys are folded names (rubash#3076).
+            let folded_name =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+            let name = folded_name.as_str();
             // GNU builtins/hash.def:192-193: absolute_program(w) → continue.
             // A name containing '/' is never hashed and never reported
             // (rubash#1362); general.c:864 defines it as containing a slash.
@@ -369,6 +387,10 @@ where
 }
 
 pub(crate) fn set_hashed_path(env_vars: &mut VarTable, name: &str, path: &str) {
+    // Keys and stored pathnames are folded (raw-char) forms: the
+    // table is a name-consumption boundary (rubash#3076).
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let path = crate::executor::substitution_metadata::fold_literal_char_escapes(path);
     let mut table = hash_table(env_vars);
     table.insert(
         name.to_string(),
@@ -377,21 +399,25 @@ pub(crate) fn set_hashed_path(env_vars: &mut VarTable, name: &str, path: &str) {
     store_hash_table(env_vars, &table);
     // BASH_CMDS[name]=value mirrors `hash -p value name`; keep the internal
     // lookup cache in sync so find_user_command(name) returns value.
-    let cached_path = crate::executor::path::shell_path_to_windows(path, env_vars);
-    crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
+    let cached_path = crate::executor::path::shell_path_to_windows(&path, env_vars);
+    crate::executor::path::set_command_lookup_cache(&name, Some(cached_path), env_vars);
 }
 
 pub(crate) fn remove_hashed_path(env_vars: &mut VarTable, name: &str) {
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    table.remove(name);
+    table.remove(name.as_str());
     store_hash_table(env_vars, &table);
     // unset 'BASH_CMDS[name]' mirrors `hash -d name`; drop the internal cache
     // entry so the next lookup re-scans PATH.
-    crate::executor::path::remove_command_lookup_cache(name, env_vars);
+    crate::executor::path::remove_command_lookup_cache(&name, env_vars);
 }
 
 pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
-    hash_table(env_vars).remove(name).map(|(path, _, _)| path)
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    hash_table(env_vars)
+        .remove(name.as_str())
+        .map(|(path, _, _)| path)
 }
 
 pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
@@ -538,8 +564,9 @@ pub(crate) fn flush_command_hash_table(env_vars: &mut VarTable) {
 /// GNU hashlib.c:254: a hash_search hit increments times_found — every
 /// phash_search (`type`, `command -v`, exec resolution, `hash -t`) counts.
 pub(crate) fn bump_hashed_path_hit(env_vars: &mut VarTable, name: &str) {
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    if let Some((_, hits, _)) = table.get_mut(name) {
+    if let Some((_, hits, _)) = table.get_mut(name.as_str()) {
         *hits += 1;
         store_hash_table(env_vars, &table);
     }
@@ -558,6 +585,7 @@ pub(crate) fn record_standard_path_resolution(
     name: &str,
     shell_path: &str,
 ) {
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
     table.insert(
         name.to_string(),
@@ -565,7 +593,7 @@ pub(crate) fn record_standard_path_resolution(
     );
     store_hash_table(env_vars, &table);
     let cached_path = crate::executor::path::shell_path_to_windows(shell_path, env_vars);
-    crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
+    crate::executor::path::set_command_lookup_cache(&name, Some(cached_path), env_vars);
 }
 
 /// GNU findcmd.c:365-426: a command resolution that hits hashed_filenames
@@ -574,8 +602,9 @@ pub(crate) fn record_standard_path_resolution(
 /// Called from the external-command dispatch once `find_user_command`
 /// resolved `name` to `shell_path`.
 pub(crate) fn record_command_resolution(env_vars: &mut VarTable, name: &str, shell_path: &str) {
+    let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    if let Some((_, hits, _)) = table.get_mut(name) {
+    if let Some((_, hits, _)) = table.get_mut(name.as_str()) {
         *hits += 1;
     } else {
         table.insert(

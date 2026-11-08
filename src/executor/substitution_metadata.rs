@@ -503,6 +503,25 @@ pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     output
 }
 
+/// Fold E400 literal-char escape pairs in text that has been
+/// finalized as a NAME — a filename, a lookup key, or a diagnostic
+/// naming one — back to the raw chars, through the boundary decoder
+/// above; text without the escape introducer passes through
+/// unchanged (rubash#3040). Every name-consumption boundary routes
+/// through this one gate + decoder (rubash#3076 census): PATH and
+/// hash lookup keys, slash-name classification probes, cd/pushd
+/// operands, exec diagnostics, source resolution, test operands,
+/// glob patterns, history/bind/enable file operands, and the
+/// comsub cd fast path — so a stored pair can never reach a
+/// filesystem probe, a cache key, or a diagnostic verbatim.
+pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
+    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        decode_raw_byte_markers_to_byte_chars(text)
+    } else {
+        text.to_string()
+    }
+}
+
 /// Decode marker characters embedded in an otherwise byte-oriented output.
 ///
 /// Echo can receive shell text from a read record, but it also emits raw
@@ -561,6 +580,83 @@ pub(crate) fn decode_raw_byte_markers(bytes: &[u8]) -> Vec<u8> {
         }
     }
     output
+}
+
+/// [`decode_raw_byte_markers`] with provenance for the one payload byte
+/// that stays ambiguous after a plain decode: 0x1C. In transport text a
+/// data 0x1C rides the raw-byte marker pair (bytes_to_shell_text tags
+/// every carrier byte at storage entry), while a BARE '\u{1c}' char is
+/// the IFS_GLUE protocol marker itself (markers.rs). Decoding first and
+/// distinguishing later conflates the two — the byte-domain field
+/// splitter dropped pair-payload 0x1C bytes as glue, so git-completion
+/// candidates lost the byte (rubash#3004). The returned mask is true
+/// exactly at output positions produced by a bare IFS_GLUE char, so a
+/// byte-domain consumer applies glue semantics to protocol bytes only
+/// and treats pair payloads as the data they are.
+pub(crate) fn decode_raw_byte_markers_with_glue(bytes: &[u8]) -> (Vec<u8>, Vec<bool>) {
+    let mut output = Vec::with_capacity(bytes.len());
+    let mut glue = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let Some((ch, char_len)) = next_char(bytes, index) else {
+            output.push(bytes[index]);
+            glue.push(false);
+            index += 1;
+            continue;
+        };
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            // E400 + c is the literal-char escape: emit c verbatim — it
+            // is data even when c is itself a carrier char.
+            match next_char(bytes, index + char_len) {
+                Some((_, next_len)) => {
+                    output.extend_from_slice(&bytes[index + char_len..index + char_len + next_len]);
+                    glue.resize(output.len(), false);
+                    index += char_len + next_len;
+                }
+                None => {
+                    output.extend_from_slice(&bytes[index..index + char_len]);
+                    glue.resize(output.len(), false);
+                    index += char_len;
+                }
+            }
+            continue;
+        }
+        if ch as u32 != RAW_BYTE_MARKER_ESCAPE {
+            output.extend_from_slice(&bytes[index..index + char_len]);
+            glue.resize(output.len(), ch == crate::executor::markers::IFS_GLUE);
+            index += char_len;
+            continue;
+        }
+        match next_char(bytes, index + char_len) {
+            Some((next_ch, next_len)) if next_ch as u32 == RAW_BYTE_MARKER_ESCAPE => {
+                output.extend_from_slice(&bytes[index..index + char_len]);
+                glue.resize(output.len(), false);
+                index += char_len + next_len;
+            }
+            Some((next_ch, next_len))
+                if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(next_ch as u32)) =>
+            {
+                output.push((next_ch as u32 - RAW_BYTE_MARKER_FIRST) as u8);
+                glue.push(false);
+                index += char_len + next_len;
+            }
+            // E000 + <non-payload char> is user data, not a marker: a
+            // literal U+E000 that reached the boundary unescaped
+            // (rubash#1060). Emit the E000 bytes; the next char decodes
+            // on its own.
+            Some(_) => {
+                output.extend_from_slice(&bytes[index..index + char_len]);
+                glue.resize(output.len(), false);
+                index += char_len;
+            }
+            _ => {
+                output.extend_from_slice(&bytes[index..index + char_len]);
+                glue.resize(output.len(), false);
+                index += char_len;
+            }
+        }
+    }
+    (output, glue)
 }
 
 fn next_char(bytes: &[u8], index: usize) -> Option<(char, usize)> {

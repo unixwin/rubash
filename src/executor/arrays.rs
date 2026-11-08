@@ -290,16 +290,27 @@ fn split_mixed_ifs(value: &str, ifs: &str) -> Vec<String> {
 /// respecting UTF-8 character boundaries, and re-encodes the result.
 fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
     use crate::executor::substitution_metadata::{
-        decode_raw_byte_markers, encode_raw_byte_marker, RAW_BYTE_MARKER_ESCAPE,
+        decode_raw_byte_markers, decode_raw_byte_markers_with_glue, encode_raw_byte_marker,
+        RAW_BYTE_MARKER_ESCAPE,
     };
 
     let sentinel = char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid");
 
-    // Decode both sides to raw bytes.
-    let value_bytes = if value.contains(sentinel) {
-        decode_raw_byte_markers(value.as_bytes())
+    // Decode both sides to raw bytes. The value decode keeps glue
+    // provenance (decode_raw_byte_markers_with_glue): a 0x1C byte that
+    // arrived as a marker pair's payload is user DATA, and only a bare
+    // transport '\u{1c}' char is the IFS_GLUE protocol marker — decoding
+    // first and treating every decoded 0x1C as glue dropped the data
+    // byte out of git-completion candidates (rubash#3004). With no pair
+    // in the value there is nothing to conflate: every raw 0x1C byte is
+    // a bare marker char by construction.
+    let (value_bytes, value_glue) = if value.contains(sentinel) {
+        decode_raw_byte_markers_with_glue(value.as_bytes())
     } else {
-        value.as_bytes().to_vec()
+        (
+            value.as_bytes().to_vec(),
+            value.as_bytes().iter().map(|byte| *byte == 0x1c).collect(),
+        )
     };
     let ifs_bytes = if ifs.contains(sentinel) {
         decode_raw_byte_markers(ifs.as_bytes())
@@ -318,8 +329,12 @@ fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
     let mut index = 0;
 
     while index < value_bytes.len() {
-        // \x1c protection marker: next byte is literal data, not a separator.
-        if value_bytes[index] == 0x1c {
+        // IFS_GLUE protection marker: next byte is literal data, not a
+        // separator. Only a byte the transport carried as a BARE marker
+        // char is protocol (value_glue); a pair-payload 0x1C is user
+        // data and falls through to the ordinary IFS/data handling
+        // below (rubash#3004).
+        if value_bytes[index] == 0x1c && value_glue[index] {
             index += 1;
             if index < value_bytes.len() {
                 current_bytes.push(value_bytes[index]);
