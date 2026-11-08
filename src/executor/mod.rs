@@ -229,7 +229,9 @@ use crate::shell::state::ShellState;
 use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
-pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+// assoc_value_at is also shared with the locale funnel's scalar
+// projection of a stored binding (rubash#3065).
+pub(crate) use assignment_helpers::{assoc_nbuckets, assoc_value_at, bash_assoc_order};
 // Shared with builtins::declare for `declare -p` $'...' value rendering
 // (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
 pub(crate) use arrays::{ansic_quote, ansic_shouldquote};

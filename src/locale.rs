@@ -717,21 +717,40 @@ pub fn is_locale_family_name(name: &str) -> bool {
     )
 }
 
+/// The scalar projection of a stored binding, exactly what GNU
+/// get_string_value (variables.c:2495) hands sv_locale: it reads
+/// through get_variable_value (variables.c:2473), where an indexed
+/// array projects to element 0, an assoc to its "0" key, and anything
+/// else to the stored value itself. The store map holds arrays in
+/// compound storage form (`\x1d([0]="C")`), so every value the
+/// sv_locale mirror reads must pass through here — feeding the raw
+/// storage string to setlocale and into the warning text was
+/// rubash#3065. The projection primitives are the scalar read path's
+/// own (Executor::scalar_parameter_value uses the same pair).
+fn stored_scalar_value(env_vars: &crate::shell::var_table::VarTable, name: &str) -> Option<String> {
+    let value = env_vars.get(name)?;
+    let attrs = env_vars.attr_of(name);
+    if attrs.assoc {
+        crate::executor::assoc_value_at(value, "0")
+    } else if attrs.array {
+        crate::executor::arrays::array_value_at(value, 0)
+    } else {
+        Some(value.clone())
+    }
+}
+
 /// POSIX category precedence (locale.c:343 get_locale_var): LC_ALL wins,
 /// then the category's own variable, then LANG, then "" (the
-/// environment-default locale).
-fn get_locale_var(var: &str, env_vars: &std::collections::HashMap<String, String>) -> String {
-    let nonempty = |name: &str| {
-        env_vars
-            .get(name)
-            .map(String::as_str)
-            .filter(|value| !value.is_empty())
-    };
+/// environment-default locale). Each candidate is read through the
+/// scalar projection (GNU get_locale_var reads stored bindings the
+/// same get_string_value way sv_locale does).
+fn get_locale_var(var: &str, env_vars: &crate::shell::var_table::VarTable) -> String {
+    let nonempty =
+        |name: &str| stored_scalar_value(env_vars, name).filter(|value| !value.is_empty());
     nonempty("LC_ALL")
         .or_else(|| nonempty(var))
         .or_else(|| nonempty("LANG"))
-        .unwrap_or("")
-        .to_string()
+        .unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -832,8 +851,8 @@ fn attempt_setlocale(_category: std::ffi::c_int, _name: &str) -> Result<(), Opti
 /// empty — setlocale(LC_ALL, lang) then each category from its
 /// precedence value. Never warns (the function has no diagnostic).
 #[cfg(unix)]
-fn reset_locale_vars_mirror(env_vars: &std::collections::HashMap<String, String>) {
-    let lang = env_vars.get("LANG").cloned().unwrap_or_default();
+fn reset_locale_vars_mirror(env_vars: &crate::shell::var_table::VarTable) {
+    let lang = stored_scalar_value(env_vars, "LANG").unwrap_or_default();
     // locale.c reset_locale_vars returns at once when the composite
     // apply fails; the per-category applies never run.
     if attempt_setlocale(libc::LC_ALL, &lang).is_err() {
@@ -870,10 +889,12 @@ fn reset_locale_vars_mirror(env_vars: &std::collections::HashMap<String, String>
 ///   so the process locale follows, like GNU.
 ///
 /// `env_vars` must already hold the just-committed values (sv_locale
-/// reads the stored binding via get_string_value).
+/// reads the stored binding via get_string_value — the scalar
+/// projection of stored_scalar_value, never the raw compound storage
+/// string of an array binding; rubash#3065).
 pub fn locale_assignment_warning(
     var: &str,
-    env_vars: &std::collections::HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     if !is_locale_family_name(var) {
         return None;
@@ -886,7 +907,7 @@ pub fn locale_assignment_warning(
     }
     #[cfg(unix)]
     {
-        let lc_all = env_vars.get("LC_ALL").cloned().unwrap_or_default();
+        let lc_all = stored_scalar_value(env_vars, "LC_ALL").unwrap_or_default();
         if var == "LC_ALL" {
             if lc_all.is_empty() {
                 reset_locale_vars_mirror(env_vars);
@@ -970,10 +991,14 @@ pub fn init_locale() {
     #[cfg(unix)]
     {
         let _ = attempt_setlocale(libc::LC_ALL, "");
-        let env: std::collections::HashMap<String, String> =
+        // Process-environment values are never compound storage, so a
+        // plain from_values table (no array marks) reads them raw —
+        // the same values the previous HashMap form produced.
+        let env = crate::shell::var_table::VarTable::from_values(
             crate::executor::env_helpers::process_env_pairs()
                 .into_iter()
-                .collect();
+                .collect(),
+        );
         if let Some(warning) = locale_assignment_warning("LC_ALL", &env) {
             let shell_name = std::env::args()
                 .next()

@@ -786,6 +786,8 @@ impl ConditionalArithParser<'_> {
                     .get("LC_ALL")
                     .map(String::as_str)
                     .unwrap_or(""),
+                self.env_vars.attr_of("LC_ALL").array,
+                self.env_vars.attr_of("LC_ALL").assoc,
             );
         }
     }
