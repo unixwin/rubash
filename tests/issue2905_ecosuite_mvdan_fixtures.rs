@@ -85,7 +85,11 @@ fn mvdan_pinned_fixtures_keep_gnu_verdicts() {
     let mut checked = 0;
     for (name, parse_rc, exec_rc) in CASES {
         let fixture = dir.join(name);
-        assert!(fixture.is_file(), "pinned fixture missing: {}", fixture.display());
+        assert!(
+            fixture.is_file(),
+            "pinned fixture missing: {}",
+            fixture.display()
+        );
 
         let (_, got_parse_rc) = run_rubash(&["-n"], &fixture);
         assert_eq!(
