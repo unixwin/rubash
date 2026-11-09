@@ -2517,10 +2517,9 @@ impl Executor {
                         // child; this redirect stays in its source.
                         continue;
                     } else {
-                        match open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        ))) {
+                        match open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(&target)),
+                        ) {
                             Ok(file) => BackgroundStdio::File(file),
                             Err(_) => continue,
                         }
@@ -2528,8 +2527,7 @@ impl Executor {
                 }
                 RedirectKind::ReadWrite => {
                     let target = self.expand_redirect_target(redirect);
-                    let path = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
                     // rubash#1862: keep the parent's hands off FIFO
                     // opens uniformly, even though `<>` itself would
                     // not block — the open belongs to the child.
@@ -6211,8 +6209,8 @@ impl Executor {
                     }
                 }
                 crate::parser::RedirectKind::Append => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let fd = redirect.fd.unwrap_or(1);
                     match fd {
@@ -6254,14 +6252,14 @@ impl Executor {
                     );
                     err_spec = CoprocFdSpec::File(shared);
                     err_touched = true;
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     out_path = Some(session_target.clone());
                     err_path = Some(session_target);
                 }
                 crate::parser::RedirectKind::CombinedAppend => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let shared = file.try_clone()?;
                     replace_coproc_out_spec(

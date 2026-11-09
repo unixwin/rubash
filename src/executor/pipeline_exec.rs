@@ -6222,8 +6222,18 @@ impl Executor {
         // expands a command's words before its do_redirections run),
         // and every exit from the bracket restores the parent space.
         let stage_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(command);
+        // rubash#2629: the bracket below (applier + reject gate) is a
+        // verdict-only pass on the PARENT executor — the element's
+        // own applier run on its stage executor is the list's real
+        // evaluation (GNU evaluates a pipeline element's redirects
+        // in the forked child, execute_cmd.c:2620). The deferred
+        // writes this pass's expansions queue must therefore not
+        // survive it (the #2558 pre-scan discipline): mark the
+        // queue here and roll it back at every bracket exit.
+        let writes_mark = Self::scan_pending_writes_mark();
         if stage_has_varfd {
-            match self.apply_dynamic_fd_var_redirects(command, true) {
+            let fd_var_walk_undoable = self.redirect_walk_is_undoable(command);
+            match self.apply_dynamic_fd_var_redirects(command, true, fd_var_walk_undoable) {
                 Ok(false) => {}
                 Ok(true) => {
                     // The applier failed the list and already placed
@@ -6233,6 +6243,7 @@ impl Executor {
                     // (and like a plain command, whose funnel returns
                     // on the same verdict before dispatch).
                     self.undo_child_fd_var_redirects();
+                    Self::scan_pending_writes_rollback(writes_mark);
                     self.pipeline_stage_fds_pre_wired.set(true);
                     let captured = crate::executor::shell_options::take_stdout_capture();
                     crate::executor::shell_options::restore_stdout_capture(saved_capture);
@@ -6243,6 +6254,7 @@ impl Executor {
                     )));
                 }
                 Err(error) => {
+                    Self::scan_pending_writes_rollback(writes_mark);
                     crate::executor::shell_options::restore_stdout_capture(saved_capture);
                     return Err(error);
                 }
@@ -6255,6 +6267,7 @@ impl Executor {
                     if stage_has_varfd {
                         self.undo_child_fd_var_redirects();
                     }
+                    Self::scan_pending_writes_rollback(writes_mark);
                     crate::executor::shell_options::restore_stdout_capture(saved_capture);
                     return Err(error);
                 }
@@ -6262,6 +6275,7 @@ impl Executor {
         if stage_has_varfd {
             self.undo_child_fd_var_redirects();
         }
+        Self::scan_pending_writes_rollback(writes_mark);
         if stage_redirect_rejected.is_some() {
             // The rejected stage already placed its diagnostic on the
             // element's fd 1 (the pipe) via the capture above — GNU's

@@ -94,23 +94,25 @@ impl Executor {
         self.set_exit_code(exit_code);
     }
 
-    pub fn expand_prompt_string(&self, value: &str) -> String {
-        // rubash#431: the ignore markers that `\[`/`\]` decode to are
-        // width-accounting delimiters, never terminal payload (see
-        // strip_prompt_ignore_markers) — every render channel gets the
-        // stripped form, not just the piped `-i` driver.
-        let decoded = self.decode_prompt_string(value);
-        // parse.y:6683-6698: the expansion pass is promptvars/posix-gated.
-        let decoded = if self.prompt_expansion_enabled() {
-            self.expand_embedded_parameters_double_quoted(&decoded)
-        } else {
-            decoded
-        };
-        // Strip the width markers first: a raw-byte pair decoding to
-        // 0x01/0x02 is command-output DATA and must survive (GNU emits it);
-        // only the template's own \[ \] markers are stripped.
-        let decoded = super::prompt_expansion::strip_prompt_ignore_markers(&decoded);
-        super::prompt_expansion::decode_prompt_transport(&decoded)
+    pub fn expand_prompt_string(&mut self, value: &str) -> String {
+        // rubash#3092: GNU subst.c:4401 — prompt expansion is the SAME word
+        // expansion as every other channel (expand_word_internal), so a
+        // `${ cmd; }` inside a prompt reaches subst.c:6917
+        // function_substitute and runs subst.c:7101 parse_and_execute
+        // ("nofork comsub") in the CURRENT shell — no fork, no subshell
+        // level, assignments survive. The old `&self` channel ran the
+        // embedded walker, whose funsub arm executes in a CLONED executor
+        // (command_substitution_executor, subshell_depth + 1): BASH_SUBSHELL
+        // read 1 inside PS0/PS1 and the clone's assignments died with it,
+        // while the command-word channel and the Session host channel
+        // (expand_prompt_string_mut) already ran funsub in the current
+        // shell (execute_current_shell_body). Prompt rendering is therefore
+        // a mutating operation by GNU contract — route through the mut
+        // channel, which additionally snapshots and restores the reader's
+        // status words (parse.y:6684-6697, rubash#604). Call sites need no
+        // change: they already hold `&mut Executor` (run_interactive_stdin)
+        // or `let mut` bindings.
+        self.expand_prompt_string_mut(value)
     }
 
     pub fn expand_prompt_string_mut(&mut self, value: &str) -> String {
@@ -3513,6 +3515,24 @@ impl Executor {
             }
             _ => format!("{}: ", self.error_report_name()),
         }
+    }
+
+    /// GNU error.c error_prolog with the line suppressed — the
+    /// sys_error family. sys_error (error.c) is the one reporter
+    /// built on error_prolog(0): its prolog is the error name alone,
+    /// never a line segment, in script or interactive context alike.
+    /// The shell_execve bad-interpreter refusal reports through it
+    /// (execute_cmd.c:6184), while its sibling classifications use
+    /// internal_error / file_error (error_prolog(1)) and keep the
+    /// line (rubash#2755).
+    pub fn sys_error_prefix(&self) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        format!("{}: ", self.error_report_name())
     }
 
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)
