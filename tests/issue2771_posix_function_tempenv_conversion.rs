@@ -105,8 +105,14 @@ fn issue2771_posix_in_function_random_converts_to_draws() {
         .split(',')
         .collect();
     assert_eq!(draws.len(), 2, "two draws: {out}");
-    assert_ne!(draws[0], "7", "first read must draw, not read the plain cell: {out}");
-    assert_ne!(draws[1], "7", "second read must draw, not read the plain cell: {out}");
+    assert_ne!(
+        draws[0], "7",
+        "first read must draw, not read the plain cell: {out}"
+    );
+    assert_ne!(
+        draws[1], "7",
+        "second read must draw, not read the plain cell: {out}"
+    );
     assert_ne!(
         draws[0], draws[1],
         "consecutive reads of a seeded generator must differ: {out}"

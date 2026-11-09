@@ -122,7 +122,10 @@ fn issue2770_in_function_declare_forms() {
     assert_eq!(code, Some(0), "declare -p FUNCNAME rc");
     let (out, _) = run_script(&dir, "g() { declare -a; }\nf() { g; }\nf\n");
     assert!(
-        has_exact_line(&out, "declare -a FUNCNAME=([0]=\"g\" [1]=\"f\" [2]=\"main\")"),
+        has_exact_line(
+            &out,
+            "declare -a FUNCNAME=([0]=\"g\" [1]=\"f\" [2]=\"main\")"
+        ),
         "declare -a in a nested frame must show the whole stack: {out}"
     );
 }
@@ -137,8 +140,7 @@ fn issue2770_listing_tracks_frame_lifecycle() {
         "f() { declare -p FUNCNAME; }\nf\ndeclare -p FUNCNAME\n",
     );
     assert_eq!(
-        out,
-        "declare -a FUNCNAME=([0]=\"f\" [1]=\"main\")\ndeclare -a FUNCNAME\n",
+        out, "declare -a FUNCNAME=([0]=\"f\" [1]=\"main\")\ndeclare -a FUNCNAME\n",
         "FUNCNAME listing inside vs after the call"
     );
     assert_eq!(code, Some(0), "script rc");
