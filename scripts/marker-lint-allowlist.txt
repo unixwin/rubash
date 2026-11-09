@@ -170,7 +170,7 @@ src/executor/expand_braced_replacement.rs | L3 | contains:PATSUB_QUOTED_VALUE_ST
 src/executor/expand_braced_replacement.rs | L3 | replace:DATA_BACKSLASH | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/expand_braced_replacement.rs | L3 | replace:DATA_DQUOTE | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/expand_braced_replacement.rs | L3 | replace:QUOTED_WORD_PREFIX | strips a sentinel/prefix this subsystem itself inserted into the text; the stripped text is not raw user input
-src/executor/expand_word.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
+src/executor/substitution_metadata.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing
 src/executor/expand_word.rs | L3 | replace:CTLESC | owner restore chain: input is engine-encoded word/storage text where a bare carrier is always protocol (user data arrives E400-paired or raw-byte-paired), so the bare strip cannot fold data
 src/executor/markers_decoder_tests.rs | L2 | \\u\{0*0\} | test data: expected value of the E000+E001 decoder pair (byte 0x00), not a carrier literal used as code
 src/executor/parameter_decode.rs | L3 | contains:LITERAL_CHAR_ESCAPE | presence gate only: a hit routes into the pair-aware decoder/helper; the check itself transforms nothing

@@ -323,6 +323,13 @@ where
                         diag.free(format_args!("null directory"));
                         return Ok(EXECUTION_FAILURE);
                     }
+                    // The operand is a pathname from here on (the cd
+                    // machinery it delegates to owns it): fold a stored
+                    // E400 pair to the raw char so the probe, the
+                    // diagnostic, and the -n stack store all carry the
+                    // real name (rubash#3076).
+                    let dir =
+                        crate::executor::substitution_metadata::fold_literal_char_escapes(&dir);
                     // GNU pushd.def:223-225: a lone `-` breaks the option walk
                     // as a verbatim Dir operand, and pushd.def:298 routes it
                     // through cd_builtin — whose `cd -` arm (cd.def:339-349)
@@ -340,6 +347,13 @@ where
                             diag.free(format_args!("OLDPWD not set"));
                             return Ok(EXECUTION_FAILURE);
                         };
+                        // The substituted value is the pathname and
+                        // the echoed name (cd.def:371-374, :427): fold
+                        // a stored E400 pair in it (rubash#3076).
+                        let oldpwd =
+                            crate::executor::substitution_metadata::fold_literal_char_escapes(
+                                &oldpwd,
+                            );
                         let resolved = if oldpwd.is_empty() {
                             stack
                                 .first()

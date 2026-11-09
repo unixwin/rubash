@@ -276,6 +276,43 @@ impl Executor {
             VariableValue::Unset
         } else {
             match (typed, &mirror) {
+                // An array/assoc-marked name whose typed cell is a
+                // plain Scalar holds no typed truth: the only Scalar
+                // cells such names ever carry are the environment
+                // import's verbatim copies of the mirror storage
+                // string (init.rs seeds BASH_VERSINFO / DIRSTACK /
+                // BASH_ALIASES / BASH_CMDS into the table as storage
+                // forms, then VariableStore::from_environment binds
+                // the whole seeded table as exported scalars —
+                // rubash#3083). GNU's import binds only the process
+                // environment's plain scalars (variables.c:368
+                // initialize_shell_variables); its own array cells
+                // are born as ARRAY objects (variables.c:1018
+                // make_vers_array; variables.c:1882
+                // init_dynamic_array_var for DIRSTACK). And the
+                // seeded mirror is itself only a birth snapshot for
+                // the materialized pair: DIRSTACK / BASH_ALIASES /
+                // BASH_CMDS are rebuilt on each named access by
+                // their storage arms (variables.c:1619 get_dirstack
+                // is the GNU shape), which is why the mirror-absent
+                // arm of the capture above already consults
+                // parameter_array_storage for exactly these names.
+                // So a named capture of this class reads through
+                // that same materializing storage arm, falling back
+                // to the mirror it would otherwise have parsed. A
+                // structured typed cell (the write paths' synced
+                // form) still wins, so user arrays are captured
+                // exactly as before.
+                (Some(variable), Some(text))
+                    if (attrs.array || attrs.assoc)
+                        && matches!(variable.value, crate::shell::ShellValue::Scalar(_)) =>
+                {
+                    let storage = self
+                        .parameter_array_storage(name)
+                        .filter(|storage| !storage.is_empty())
+                        .unwrap_or_else(|| text.clone());
+                    value_from_mirror(env_vars, name, &storage, &attrs)
+                }
                 (Some(variable), _) => value_from_typed(&variable.value),
                 (None, Some(text)) => value_from_mirror(env_vars, name, text, &attrs),
                 (None, None) => VariableValue::Unset,

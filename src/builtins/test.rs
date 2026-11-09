@@ -880,6 +880,11 @@ fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std
     if operand.is_empty() {
         return std::path::PathBuf::new();
     }
+    // The operand is the pathname the syscalls see: fold a stored
+    // E400 pair to the raw char (rubash#3076). This funnel serves
+    // every file unary and binary in both `[ ]` and `[[ ]]`.
+    let folded_operand = crate::executor::substitution_metadata::fold_literal_char_escapes(operand);
+    let operand = folded_operand.as_str();
     let path = crate::executor::path::shell_path_to_windows_for_lookup(operand, env_vars);
     if path.is_absolute() {
         return path;

@@ -1650,6 +1650,10 @@ impl Executor {
             conditional_command: cmd.conditional_command.clone(),
             brace_group: cmd.brace_group.clone(),
             line: cmd.line,
+            // rubash#3028: the first-element end line is part of the
+            // node's line identity (Simple->line) — carry it like `line`
+            // or the rebuilt command loses the continuation-aware stamp.
+            first_word_end_line: cmd.first_word_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
@@ -3814,8 +3818,11 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let (temporary_assignments, assignments_failed) =
-            self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        let (temporary_assignments, assignments_failed) = self.apply_temporary_assignments(
+            &materialized_cmd.assignments,
+            assignment_raws,
+            &materialized_cmd.words,
+        );
         if let Some(rejection) = redirect_rejection {
             // Only the FatalNounset class routes through the expansion-error
             // classifier (rubash#535): an unbound variable in a function
