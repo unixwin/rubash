@@ -534,6 +534,27 @@ impl Executor {
         }
     }
 
+    /// rubash#2783: the offending-line echo for a command-substitution
+    /// body error — the physical line of the ENCLOSING input at the
+    /// error's line (GNU print_offending_line, parse.y:6814, over
+    /// shell_input_line), read out of the reader unit text the driver
+    /// parked on the shell state for the executing unit's extent.
+    /// Falls back to the body fragment stored on the error node when
+    /// no unit text is parked (eval strings run through their own
+    /// parse_and_execute route, not the reader-unit driver) or when
+    /// the line sits outside the parked unit.
+    pub(in crate::executor) fn comsub_body_echo_source(&self, line: usize, stored: &str) -> String {
+        let unit = self.shell_state.reader_unit_source.borrow();
+        if let Some((text, offset)) = unit.as_ref() {
+            if line > *offset {
+                if let Some(found) = text.lines().nth(line - offset - 1) {
+                    return found.to_string();
+                }
+            }
+        }
+        stored.to_string()
+    }
+
     /// rubash#2751: report a `$(`-body parse error in GNU's read-time
     /// shape. GNU parses the body inside the enclosing reader with
     /// shell_eof_token = `)' (parse.y:4519-4521), so the report is the
@@ -554,9 +575,10 @@ impl Executor {
     ///   conditional that does not end the body keeps its body-level
     ///   near. `body_text` is the extracted body, whose end is where
     ///   the enclosing paren sat.
-    /// The stored `__RUBASH_PARSE_SOURCE__` echo is the body fragment;
-    /// GNU echoes the enclosing line, which no driver→executor channel
-    /// carries today — the fragment is what the node has.
+    /// The echo line is the physical line of the enclosing input at
+    /// the error's line, read from the reader unit text the driver
+    /// parks on the shell state (see [`Self::comsub_body_echo_source`]);
+    /// routes with no parked unit text keep the stored body fragment.
     pub(in crate::executor) fn report_comsub_body_parse_error(
         &self,
         cmd: &crate::parser::CommandNode,
@@ -633,11 +655,12 @@ impl Executor {
                     }
                     if self.offending_line_echo_enabled() {
                         if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                            let source = self.comsub_body_echo_source(aux_b, source);
                             self.write_diagnostic_fd2(
                                 format!(
                                     "{}`{}'\n",
                                     self.parser_error_prefix_for_line(aux_b),
-                                    super::command_execute::parse_error_source_display(source)
+                                    super::command_execute::parse_error_source_display(&source)
                                 )
                                 .as_bytes(),
                             );
@@ -672,6 +695,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(line, source);
                     self.write_diagnostic_fd2(
                         format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                             .as_bytes(),
@@ -705,6 +729,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -735,6 +760,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -771,6 +797,7 @@ impl Executor {
                 }
                 if self.offending_line_echo_enabled() {
                     if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        let source = self.comsub_body_echo_source(line, source);
                         self.write_diagnostic_fd2(
                             format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                                 .as_bytes(),
@@ -804,6 +831,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",

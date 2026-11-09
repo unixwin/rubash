@@ -446,6 +446,20 @@ pub struct ShellState {
     /// clone_for_child_save, so the wholesale boundary restore
     /// reverts it to the parent's value like every other field here.
     pub(crate) subshell_source_text: Option<String>,
+    /// The reader unit currently executing: its verbatim source text
+    /// and the line offset the driver parsed it under (absolute line =
+    /// offset + string-relative line). GNU's parser holds the current
+    /// input in shell_input_line while it reads, so a syntax error
+    /// inside a command-substitution body — parsed by GNU inside the
+    /// enclosing reader — echoes the ENCLOSING line verbatim
+    /// (parse.y:6814 print_offending_line); rubash parses the body at
+    /// expansion time, when only the body fragment survives on the
+    /// error node, so the driver parks the unit text here for the
+    /// unit's extent (run_source_impl_inner's guard) and the comsub
+    /// body reporter reads the physical line back out of it
+    /// (rubash#2783). Fork copies inherit it through Clone exactly as
+    /// a forked child inherits the parent's input stream position.
+    pub(crate) reader_unit_source: std::cell::RefCell<Option<(std::rc::Rc<str>, usize)>>,
     /// execute_cmd.c subshell_environment & SUBSHELL_COMSUB — set while a
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
@@ -949,6 +963,7 @@ impl Clone for ShellState {
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             job_control: Cell::new(self.job_control.get()),
             subshell_source_text: self.subshell_source_text.clone(),
+            reader_unit_source: std::cell::RefCell::new(self.reader_unit_source.borrow().clone()),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
