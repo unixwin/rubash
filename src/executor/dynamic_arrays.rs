@@ -1870,6 +1870,161 @@ impl Executor {
         true
     }
 
+    /// The whole-variable assignment door for the two dynamic
+    /// associative variables, BASH_ALIASES and BASH_CMDS (rubash#3211).
+    /// GNU registers both with element assign hooks — assign_aliasvar
+    /// (variables.c:1785: valid_alias_name check, then add_alias) and
+    /// assign_hashcmd (variables.c:1715: phash_insert(key, value, 0,
+    /// 0)) — and every whole-variable bind reaches those hooks element
+    /// by element: compound lists through assign_compound_array_list
+    /// (arrayfunc.c:700) via bind_assoc_var_internal, scalar binds
+    /// through bind_variable_internal's assign_func arm with key "0"
+    /// (variables.c:3140). The owner table is never flushed by a bind:
+    /// entries the list does not name keep their owner state (phash
+    /// hit counts included — phash_insert runs only for listed keys),
+    /// and an invalid alias name reports and skips while the remaining
+    /// elements still land with the statement's status unchanged.
+    ///
+    /// Without this door the generic machinery wrote the value into
+    /// the mirror + typed cell only; the command-boundary
+    /// reconciliation (sync_dynamic_assoc_cells) then rebuilt both
+    /// from the untouched owner table and the assignment vanished —
+    /// the split brain #3107's residual recorded. Mirrors the DIRSTACK
+    /// door above: the caller stands the door down for unset dynamic
+    /// names and plain-cell (local/tempenv shadow) binds.
+    pub(in crate::executor) fn apply_dynamic_assoc_assignment(
+        &mut self,
+        name: &str,
+        value: &str,
+        append: bool,
+    ) -> bool {
+        let owner_storage = if name == "BASH_ALIASES" {
+            self.bash_aliases_storage()
+        } else {
+            self.bash_cmds_storage()
+        };
+        if let Some(compound) = value.strip_prefix(COMPOUND_ASSIGNMENT_MARKER) {
+            if !(compound.starts_with('(') && compound.ends_with(')')) {
+                return true;
+            }
+            // Same subscript rewrite + compound scan as the generic
+            // path, so list semantics (subscript arithmetic, kvpair
+            // form, intra-list [k]+= appends, integer attribute
+            // conversion) match a plain associative variable exactly.
+            let rewritten =
+                match self.rewrite_compound_element_subscripts(name, compound, true, true) {
+                    Ok(rewritten) => rewritten,
+                    Err(partial) => {
+                        // Mirror the generic path: the successfully
+                        // rewritten prefix still binds, the statement
+                        // fails.
+                        let entries =
+                            self.scan_dynamic_assoc_entries(name, &partial, &owner_storage, append);
+                        self.route_dynamic_assoc_entries(name, entries);
+                        self.exit_code = 1;
+                        return false;
+                    }
+                };
+            let entries = self.scan_dynamic_assoc_entries(name, &rewritten, &owner_storage, append);
+            self.route_dynamic_assoc_entries(name, entries);
+            return true;
+        }
+        // Scalar bind = element bind under key "0"
+        // (bind_variable_internal, variables.c:3140); the append form
+        // concatenates onto the owner's current element 0 first
+        // (make_variable_value ASS_APPEND, variables.c:3328).
+        let scalar = if append {
+            let current = assoc_entries(&owner_storage)
+                .into_iter()
+                .find(|(key, _)| key == "0")
+                .map(|(_, existing)| existing)
+                .unwrap_or_default();
+            format!("{current}{value}")
+        } else {
+            value.to_string()
+        };
+        self.route_dynamic_assoc_entries(name, vec![("0".to_string(), scalar)]);
+        true
+    }
+
+    /// Scan one rewritten compound list for the dynamic-assoc door and
+    /// return the (key, value) pairs the bind must route into the
+    /// owner table. A replacement bind scans against an empty table,
+    /// so intra-list `[k]+=v` appends compose within the list (GNU
+    /// builds the new cell projection from nothing and fires the hook
+    /// per element in order). An append bind scans against the
+    /// owner's live table for the final values but routes only the
+    /// keys the list names — unlisted owner entries keep their exact
+    /// owner state (hash hit counts included).
+    fn scan_dynamic_assoc_entries(
+        &mut self,
+        name: &str,
+        compound: &str,
+        owner_storage: &str,
+        append: bool,
+    ) -> Vec<(String, String)> {
+        let integer = is_marked_var(&self.shell_state.env_vars, INTEGER_VARS, name);
+        if !append {
+            let merged =
+                append_assoc_value("()", compound, integer, &self.shell_state.env_vars, name);
+            return assoc_entries(&merged);
+        }
+        let merged = append_assoc_value(
+            owner_storage,
+            compound,
+            integer,
+            &self.shell_state.env_vars,
+            name,
+        );
+        let merged_entries = assoc_entries(&merged);
+        let listed = append_assoc_value("()", compound, integer, &self.shell_state.env_vars, name);
+        assoc_entries(&listed)
+            .into_iter()
+            .map(|(key, _)| {
+                let value = merged_entries
+                    .iter()
+                    .find(|(merged_key, _)| *merged_key == key)
+                    .map(|(_, merged_value)| merged_value.clone())
+                    .unwrap_or_default();
+                (key, value)
+            })
+            .collect()
+    }
+
+    /// Route scanned entries into the variable's owner structure,
+    /// mirroring the GNU assign hooks, then republish the mirror +
+    /// typed cell from the owner (sync_dynamic_assoc_vars).
+    fn route_dynamic_assoc_entries(&mut self, name: &str, entries: Vec<(String, String)>) {
+        if name == "BASH_ALIASES" {
+            for (key, entry_value) in entries {
+                // assign_aliasvar (variables.c:1785): an invalid name
+                // reports and skips — the element is dropped, the
+                // remaining elements still land, and the statement
+                // keeps its status.
+                if !valid_alias_assignment_name(&key) {
+                    let line = format!("{}`{key}': invalid alias name\n", self.diagnostic_prefix());
+                    self.emit_assignment_diag(line);
+                    continue;
+                }
+                self.shell_state
+                    .aliases
+                    .insert(key, crate::builtins::alias::Alias::new(entry_value));
+            }
+        } else {
+            for (key, entry_value) in entries {
+                // assign_hashcmd (variables.c:1715): phash_insert with
+                // found = 0 — a routed entry's hit count resets,
+                // unrouted entries are untouched.
+                crate::builtins::hash::set_hashed_path(
+                    &mut self.shell_state.env_vars,
+                    &key,
+                    &entry_value,
+                );
+            }
+        }
+        self.sync_dynamic_assoc_vars();
+    }
+
     pub(in crate::executor) fn bashpid_value(&self) -> u32 {
         let pid = std::process::id();
         let depth = self.shell_state.subshell_depth.get();
