@@ -760,6 +760,12 @@ impl Executor {
         // full parsing/execution. This handles the alias4.sub form
         // `$(eval echo b)` so alias-expanded command substitutions participate
         // in word expansion.
+        // rubash#2785: the untrimmed body text is threaded to the
+        // body-error report separately — its trailing blank is the
+        // only evidence that a `)` closing the substitution was NOT
+        // glued to the body's last token, and the conditional
+        // near-token walk in the report reads exactly that.
+        let raw_source = source;
         let source = source.trim();
         if source.is_empty() {
             self.last_command_substitution_status.set(Some(0));
@@ -852,7 +858,8 @@ impl Executor {
             && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
                 .is_some()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -879,7 +886,9 @@ impl Executor {
         // edge.
         if let Some(name) = comsub_first_word(source) {
             if self.shell_state.functions.contains_key(name) {
-                if let Some(output) = self.command_list_substitution_output(source, context) {
+                if let Some(output) =
+                    self.command_list_substitution_output(source, context, raw_source)
+                {
                     return output;
                 }
                 return String::new();
@@ -957,7 +966,8 @@ impl Executor {
             || self.xtrace_enabled()
             || self.err_trap_inherited_into_comsub()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -1311,7 +1321,7 @@ impl Executor {
         // Fallback: run the source through the real parser/executor in a
         // subshell and capture stdout (function calls, pipelines, compound
         // commands that the special-case dispatch above does not cover).
-        if let Some(output) = self.command_list_substitution_output(source, context) {
+        if let Some(output) = self.command_list_substitution_output(source, context, raw_source) {
             return output;
         }
 
@@ -1540,6 +1550,7 @@ impl Executor {
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         // The body was extracted from the current word; keep GNU's in-place
         // line counter so body diagnostics report the original script line
@@ -1645,7 +1656,7 @@ impl Executor {
         // though the enclosing command is what dies — emit the stored
         // diagnostic instead of silently swallowing it (case-pattern
         // `$(esac;x)` in comsub-posix6.sub).
-        if self.report_comsub_body_error_if_any(&ast.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&ast.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
 
@@ -1860,12 +1871,15 @@ impl Executor {
     }
 
     /// Legacy String boundary for callers that still build AST words as text.
+    /// `body_text` is the untrimmed extracted body, carried only for
+    /// the body-error report (rubash#2785).
     fn command_list_substitution_output(
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<String> {
-        self.command_list_substitution_output_typed(source, context)
+        self.command_list_substitution_output_typed(source, context, body_text)
             .map(|output| output.text_lossy())
     }
 

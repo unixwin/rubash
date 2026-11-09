@@ -2163,6 +2163,11 @@ impl Executor {
         // `cat` command, not the line of the outer `$(`).
         let has_heredoc = source.contains("<<");
         let leading_newlines = source.chars().take_while(|ch| *ch == '\n').count();
+        // rubash#2785: the untrimmed body text rides along to the
+        // body-error report — trimming here destroyed the evidence
+        // that a closing `)` was separated from the body's last
+        // token by a blank (the conditional near-token walk).
+        let raw_source = source;
         let source = if has_heredoc {
             source.trim()
         } else {
@@ -2262,7 +2267,9 @@ impl Executor {
             // source so run_ast's own splice performs the single expansion
             // (re-expanding joined words would expand the alias a second
             // time — parse.y never re-reads pushed text twice).
-            if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+            if let Some(output) =
+                self.run_ast_command_substitution_with_context(source, context, raw_source)
+            {
                 return output;
             }
         }
@@ -2291,7 +2298,9 @@ impl Executor {
             .any(|word| word.contains(';') || matches!(word.as_str(), "&&" | "||"))
             || source.contains('\n')
         {
-            if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+            if let Some(output) =
+                self.run_ast_command_substitution_with_context(source, context, raw_source)
+            {
                 return output;
             }
         }
@@ -2309,7 +2318,9 @@ impl Executor {
                 context,
             );
         }
-        if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+        if let Some(output) =
+            self.run_ast_command_substitution_with_context(source, context, raw_source)
+        {
             return output;
         }
         let output = self.expand_command_substitution_with_context(source, context);
@@ -2335,6 +2346,9 @@ impl Executor {
         &mut self,
         source: &str,
         context: SubstitutionQuoteContext,
+        // The untrimmed extracted body, carried only for the
+        // body-error report (rubash#2785).
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         if command_substitution_contains_heredoc(source) {
             return None;
@@ -2386,7 +2400,7 @@ impl Executor {
         // early commands and re-report through the execute arms
         // under the enclosing script's prefix, with the enclosing
         // command's escalation printing a second line.
-        if self.report_comsub_body_error_if_any(&commands.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&commands.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
         if !command_substitution_needs_ast_execution(&commands.commands) {
