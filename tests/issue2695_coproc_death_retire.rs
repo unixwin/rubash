@@ -7,26 +7,31 @@
 //! sweep retires it: coproc_reap (execute_cmd.c:2225) disposes it
 //! (coproc_unsetvars + coproc_close), called from the sweep at
 //! jobs.c:1342 and from the wait_for_job path at jobs.c:3494. The
-//! retirement happens at ordinary command boundaries, builtin-only
-//! sequences included. So once the shell has run anything after
-//! the death, ${COPROC[0]} expands empty and a
-//! `read -u ${COPROC[0]}` fails with read.def:373's "invalid file
-//! descriptor specification" instead of reading EOF from the
-//! stale fd.
+//! retirement lands at wait/sweep points — the deterministic
+//! anchors being an external-command boundary or enough elapsed
+//! command time after the death. At such an anchor ${COPROC[0]}
+//! expands empty and a `read -u ${COPROC[0]}` fails with
+//! read.def:373's "invalid file descriptor specification"
+//! instead of reading EOF from the stale fd.
 //!
-//! rubash base (f17644d7, probed): the verbatim two-read shape is
-//! stale in 3/3 runs (b silently set to "", COPROC still set) —
-//! the retirement exists ONLY on paths that finish an external
-//! command (external_finish.rs sweeps there, the explicit `wait`
-//! path included); a builtin-only sequence never retires it.
+//! rubash base (f17644d7, probed): in the verbatim two-read
+//! window the state is stale in 3/3 runs — but GNU itself is
+//! stale in 2/3 runs of the same window (SIGCHLD processing is
+//! asynchronous in both shells; retirement lands at the next
+//! wait/sweep opportunity). At every DETERMINISTIC measurement
+//! point the two shells agree on base: an external command
+//! boundary, an EOF read followed by real elapsed builtin time,
+//! and explicit `wait` all retire the coproc in both. So this
+//! file is a set of regression locks over the agreed contract,
+//! not a defect pin: the residual divergence is confined to
+//! the race window, where GNU's signal-driven reap usually
+//! (not always) beats rubash's sweep. See the lane REPORT.
 //!
-//! Determinism: the bare two-read shape is timing-sensitive even
-//! in GNU (the audit saw it flip; 1 of 3 oracle runs retired in
-//! time). The defect cell below first reads to EOF — after which
-//! the coproc's death is a certainty, not a race — then burns a
-//! short builtin-only loop (no external command, so rubash's
-//! external-finish sweep cannot fire), which makes the GNU side
-//! deterministic (3/3 oracle runs) while staying red on base.
+//! Determinism: the bare two-read shape is timing-sensitive in
+//! both shells (the audit saw it flip). The cells below anchor
+//! on points where BOTH shells are deterministic: an external
+//! command boundary, an EOF read plus real elapsed builtin
+//! time, and explicit `wait`.
 
 #![cfg(unix)]
 
@@ -55,14 +60,14 @@ fn run_script(body: &str) -> (String, String, Option<i32>) {
     )
 }
 
-/// Defect cell: the coproc's output is consumed, an EOF read
-/// proves it dead, and a builtin-only loop gives the notify
-/// sweep its boundary — no external command runs, so only a
-/// genuine command-boundary retirement (GNU's) can clear the
-/// state. The third read must then fail on the empty expansion,
-/// `b` stays unset, and both COPROC and COPROC_PID are gone.
-/// Baseline rubash leaves the stale fd readable-as-EOF and the
-/// variables set.
+/// Regression lock: the coproc's output is consumed, an EOF
+/// read proves it dead, and a builtin-only loop passes real
+/// elapsed time — after which the state must be retired (the
+/// third read fails on the empty expansion, `b` stays unset,
+/// COPROC/COPROC_PID gone). Measured green on BOTH the oracle
+/// and baseline rubash (3/3 each): rubash's eval-loop sweep
+/// covers this point already; the lock guards it against
+/// regression while the race-window residual is adjudicated.
 #[test]
 fn dead_coproc_retired_at_builtin_only_boundary() {
     let (stdout, stderr, code) = run_script(
@@ -85,9 +90,8 @@ fn dead_coproc_retired_at_builtin_only_boundary() {
 }
 
 /// Regression lock: with a real external command boundary the
-/// retirement already happens on base too (the external-finish
-/// sweep); the fix must keep this working while extending the
-/// retirement to builtin-only boundaries.
+/// retirement happens in both shells (GNU's wait sweep;
+/// rubash's external-finish sweep).
 #[test]
 fn dead_coproc_retired_before_second_read() {
     let (stdout, stderr, code) = run_script(

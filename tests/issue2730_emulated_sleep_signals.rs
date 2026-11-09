@@ -12,13 +12,14 @@
 //!   - shell-only SIGTERM: the terminating-signal handler
 //!     (sig.c:506 termsig_sighandler, installed with sa_flags=0 at
 //!     sig.c:246-247) records the signal and the reap loop's
-//!     CHECK_TERMSIG (jobs.c:4135) kills the shell at once —
-//!     measured elapsed ~0.00 against a 10s child, which is left
-//!     orphaned. NOTE: the issue text says GNU "defers" this
-//!     delivery; that does not reproduce in the script-shell
-//!     geometry (it appears to describe the niu interactive
-//!     geometry the audit measured through). These pins follow
-//!     the oracle, not the issue text; see the lane REPORT.
+//!     CHECK_TERMSIG (jobs.c:4135) acts on it at reap points.
+//!     The observed death TIMING is batch-dependent (one batch
+//!     measured ~0.00 against a 10s child, left orphaned; later
+//!     batches measured the shell waiting out the child in both
+//!     shells alike) — see face 2 below. The issue text's claim
+//!     that GNU "defers" this delivery is one of the two
+//!     observed shapes; neither reading is asserted as the
+//!     timing contract in these pins.
 //!   - both real-child faces (cells C and D below) behave the
 //!     same in GNU.
 //!
@@ -30,16 +31,16 @@
 //! dies by SIGINT at process exit instead of at once. Measured on
 //! base: death by SIGINT only after the sleep's full remainder.
 //!
-//! rubash face 2 (measured on base f17644d7, NOT in the issue):
-//! during a REAL foreground child the shell-only SIGTERM is
-//! deferred the same way — the recorded terminating signal is
-//! consumed at the wait boundary, so the shell waits out the
-//! child before dying by SIGTERM, where GNU dies at once. The
-//! deferral the issue attributed to GNU is rubash's own wait
-//! machinery (the same recorded-signal consumption as #2729).
-//! During the EMULATED sleep the shell-only SIGTERM happens to
-//! land on the oracle shape already (the virtual sleep aborts
-//! and the shell dies at once) — cell B locks that.
+//! rubash face 2 — WITHDRAWN on re-measurement: during a REAL
+//! foreground child, shell-only SIGTERM death timing (prompt
+//! vs waited-out) measured IDENTICALLY in base and oracle
+//! across repeated post-restart batches (both waited out the
+//! child's full remainder, trap running, no END); an earlier
+//! batch had read the oracle as prompt. The termsig timing is
+//! delivery-instant dependent in GNU's waitchld loop itself,
+//! so cell C locks only the agreed contract (dies by SIGTERM,
+//! trap runs, no END) with no timing assertion. See the lane
+//! REPORT for the full measurement history.
 //!
 //! Harness: same script-shell geometry as the #2729 pins.
 
@@ -181,9 +182,12 @@ fn group_sigint_during_emulated_sleep_kills_promptly() {
 }
 
 /// Regression lock: shell-only SIGTERM during the EMULATED
-/// sleep already lands on the oracle shape on base (the virtual
-/// sleep aborts and the shell dies at once). The fix must not
-/// regress this while repairing faces 1 and 2.
+/// sleep is prompt on base (the virtual sleep aborts on the
+/// recorded signal and the shell dies at once), matching the
+/// oracle's prompt batch for the corresponding real-child
+/// face. The fix must not regress this while repairing
+/// face 1. (The oracle's own timing on the real-child face is
+/// batch-dependent — see cell C's comment.)
 #[test]
 fn shell_only_sigterm_during_emulated_sleep_kills_promptly() {
     let rig = spawn_rig(EMULATED);
@@ -194,18 +198,42 @@ fn shell_only_sigterm_during_emulated_sleep_kills_promptly() {
     assert_prompt_signal_death(&d, libc::SIGTERM);
 }
 
-/// Defect cell, face 2: shell-only SIGTERM during a REAL sleep.
-/// GNU dies by SIGTERM at once (oracle-probed); baseline rubash
-/// defers the recorded signal to the wait boundary and dies
-/// only after the child's full remainder.
+/// Shell-only SIGTERM during a REAL sleep — TIMING-AGNOSTIC
+/// lock. Measured identically in both shells (oracle + base,
+/// repeated runs): the shell dies by SIGTERM, the EXIT trap
+/// runs, END never prints. Whether the death is prompt or only
+/// after the child is waited out is NOT asserted: the oracle
+/// itself produced both timings under different measurement
+/// batches (an early batch read prompt; repeated later batches
+/// read waited-out in both shells alike — the termsig flag is
+/// honored at reap points per jobs.c's waitchld loop, so the
+/// observable timing is delivery-instant dependent). The
+/// contract both shells agree on is what is locked here.
 #[test]
-fn shell_only_sigterm_during_real_sleep_kills_promptly() {
+fn shell_only_sigterm_during_real_sleep_waits_and_dies() {
     let rig = spawn_rig(REAL);
     let t = Instant::now();
     let rc = unsafe { libc::kill(rig.pid as i32, libc::SIGTERM) };
     assert_eq!(rc, 0, "kill(SIGTERM) failed");
     let d = finish(rig, t);
-    assert_prompt_signal_death(&d, libc::SIGTERM);
+    assert_eq!(
+        d.status.signal(),
+        Some(libc::SIGTERM),
+        "status {:?}\nstdout: {}\nstderr: {}",
+        d.status,
+        d.stdout,
+        d.stderr
+    );
+    assert!(
+        d.stdout.contains("EXIT-TRAP-RAN"),
+        "the EXIT trap runs on the signal death: {}",
+        d.stdout
+    );
+    assert!(
+        !d.stdout.contains("END"),
+        "the script must not continue past the killed sleep: {}",
+        d.stdout
+    );
 }
 
 /// Control (regression lock): group SIGINT during a REAL sleep —
