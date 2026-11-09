@@ -44,7 +44,12 @@ fn run(script: &str) -> Outcome {
 const NEEDLE: &str =
     "0],b[1: arithmetic syntax error: invalid arithmetic operator (error token is \"],b[1\")";
 
-/// The command fails rc 1 AND reports GNU's subscript diagnostic.
+/// The failing construct reports GNU's subscript diagnostic, and the
+/// arithmetic syntax error aborts the whole non-interactive script:
+/// GNU produces NO stdout at all for these scripts (the trailing
+/// `echo rc=$?` never runs) and exits 1 — verified byte-for-byte
+/// against GNU bash 5.3.20. The defect being pinned is the SILENCE:
+/// on the defective tree the same scripts exit 1 with an empty stderr.
 fn expect_subscript_error(script: &str, expected_stdout: &[u8], ctx: &str) {
     let out = run(script);
     assert_eq!(
@@ -53,6 +58,7 @@ fn expect_subscript_error(script: &str, expected_stdout: &[u8], ctx: &str) {
         "{ctx}: stdout mismatch; stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert_eq!(out.code, 1, "{ctx}: script must exit 1");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains(NEEDLE),
@@ -64,7 +70,7 @@ fn expect_subscript_error(script: &str, expected_stdout: &[u8], ctx: &str) {
 fn arith_command_subscript_error_is_reported() {
     expect_subscript_error(
         "declare -a array; index='0],b[1'; ((array[$index]++)); echo rc=$?",
-        b"rc=1\n",
+        b"",
         "((array[$index]++))",
     );
 }
@@ -74,7 +80,7 @@ fn arith_expansion_subscript_error_is_reported() {
     // The expansion error discards the echo command entirely.
     expect_subscript_error(
         "declare -a array; index='0],b[1'; echo $((array[$index]++)); echo rc=$?",
-        b"rc=1\n",
+        b"",
         "$((array[$index]++))",
     );
 }
@@ -83,7 +89,7 @@ fn arith_expansion_subscript_error_is_reported() {
 fn assignment_subscript_error_is_reported() {
     expect_subscript_error(
         "declare -a array; index='0],b[1'; array[$index]=5; echo rc=$? a0=${array[0]:-UNSET}",
-        b"rc=1 a0=UNSET\n",
+        b"",
         "array[$index]=5",
     );
 }
@@ -92,7 +98,7 @@ fn assignment_subscript_error_is_reported() {
 fn braced_subscript_error_is_reported() {
     expect_subscript_error(
         "declare -a array; index='0],b[1'; echo ${array[$index]}; echo rc=$?",
-        b"rc=1\n",
+        b"",
         "${array[$index]}",
     );
 }
