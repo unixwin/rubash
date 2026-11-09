@@ -41,10 +41,10 @@ fn run_script(tag: &str, body: &str, extra_flags: &[&str]) -> Run {
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let script = dir.join("probe.sh");
     std::fs::write(&script, body).expect("write script");
-    let mut args: Vec<&str> = extra_flags.to_vec();
     let script_arg = script.to_string_lossy().into_owned();
+    let mut args: Vec<&str> = extra_flags.to_vec();
     args.push(&script_arg);
-    let run = run_args(&args.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let run = run_args(&args);
     let _ = std::fs::remove_dir_all(&dir);
     run
 }
