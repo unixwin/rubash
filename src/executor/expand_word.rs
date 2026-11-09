@@ -327,6 +327,22 @@ impl Executor {
             .contains(&Self::redirect_target_memo_key(redirect))
     }
 
+    /// Record that a redirect target's literal expansion carried
+    /// raw-byte transport (see `redirect_target_had_transport`): the
+    /// folded target string alone cannot tell a byte char (e.g. U+009C
+    /// for byte 0x9C) from a genuine char of the same code point, so
+    /// the output open funnels consult this set to decide whether the
+    /// target's byte chars emit raw bytes. Keyed by the folded literal
+    /// string; recorded only when the pre-literal expansion carried
+    /// decodable transport. (rubash#3104 p23)
+    fn note_redirect_target_transport(&self, literal: &str, expanded: &str) {
+        if crate::executor::markers::contains_decodable_transport(expanded) {
+            self.redirect_target_had_transport
+                .borrow_mut()
+                .insert(literal.to_string());
+        }
+    }
+
     /// GNU redir.c:298 redirection_expand → subst.c:12590
     /// expand_words_no_vars: a file-redirect operand goes through the same
     /// word-list pipeline as command arguments — brace expansion first (on
@@ -416,7 +432,9 @@ impl Executor {
             // GNU subst.c:12683-12688 (expand_words_no_vars else-branch): a
             // word that does not glob is still DEQUOTED before it becomes
             // the literal filename.
-            return (redirect_operand_literal(&expanded), false);
+            let literal = redirect_operand_literal(&expanded);
+            self.note_redirect_target_transport(&literal, &expanded);
+            return (literal, false);
         }
         match glob::pathname_expand_word(
             &expanded,
@@ -451,7 +469,11 @@ impl Executor {
             // boundary — a `>"@(zz)q"` target opens `@(zz)q`, not a name
             // led by the CTLESC byte \x11 (rubash#424: Windows open()
             // failed ERROR_INVALID_NAME on the carrier byte).
-            glob::PathnameExpansion::NoMatch => (redirect_operand_literal(&expanded), false),
+            glob::PathnameExpansion::NoMatch => {
+                let literal = redirect_operand_literal(&expanded);
+                self.note_redirect_target_transport(&literal, &expanded);
+                (literal, false)
+            }
             // GNU subst.c:12663-12668 (fail_glob_expansion): report_error
             // `no match: WORD' (the dequoted word) and exp_jump_to_
             // top_level(DISCARD) — the redirection NEVER opens and the

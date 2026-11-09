@@ -560,6 +560,12 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
     // walks $PATH with the word's raw bytes, so a stored E400
     // literal-char escape pair folds to the raw char before ANY cache
     // consult, hash-mirror key, or filesystem probe below (rubash#3076).
+    // Whether the word carried transport is recorded before the fold:
+    // the folded string cannot tell a byte char (e.g. U+009C for byte
+    // 0x9C) from a genuine char of the same code point, so the walk
+    // needs the pre-fold fact to decide byte-vs-UTF-8 probing
+    // (rubash#3104 p23).
+    let name_had_transport = crate::executor::markers::contains_decodable_transport(name);
     let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let name = folded_name.as_str();
 
@@ -605,7 +611,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
                 cache.results.remove(name);
             }
         }
-        let result = find_user_command_uncached(name, env_vars, &fingerprint);
+        let result = find_user_command_uncached(name, env_vars, &fingerprint, name_had_transport);
         if result.is_none() && !has_path_separator(name) {
             let mut stores = command_lookup_stores();
             let cache = session_lookup_slice(&mut stores, &scope);
@@ -666,7 +672,7 @@ pub fn find_user_command(name: &str, env_vars: &HashMap<String, String>) -> Opti
         }
     }
 
-    let result = find_user_command_uncached(name, env_vars, &fingerprint);
+    let result = find_user_command_uncached(name, env_vars, &fingerprint, name_had_transport);
 
     let mut stores = command_lookup_stores();
     let cache = session_lookup_slice(&mut stores, &scope);
@@ -700,8 +706,9 @@ pub(crate) fn find_user_command_without_hash(
     env_vars: &HashMap<String, String>,
 ) -> Option<PathBuf> {
     let fingerprint = command_lookup_fingerprint(env_vars);
+    let name_had_transport = crate::executor::markers::contains_decodable_transport(name);
     let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
-    find_user_command_uncached(&folded_name, env_vars, &fingerprint)
+    find_user_command_uncached(&folded_name, env_vars, &fingerprint, name_had_transport)
 }
 
 /// GNU findcmd.c:373 `file_status(hashed_file)` checks FS_EXISTS|FS_EXECABLE.
@@ -876,7 +883,15 @@ fn path_scan_scaffold(
     if cache.path_dirs.is_none() {
         let dirs = split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default())
             .into_iter()
-            .map(|dir| anchor_at_session_cwd(shell_path_to_windows(&dir, env_vars), env_vars))
+            .map(|dir| {
+                // rubash#3104: fold a raw-byte pair in the element
+                // before the listing scan, like the unix walk; on
+                // Windows the folded string is already the WTF-8
+                // path spelling, so no byte conversion applies.
+                let folded =
+                    crate::executor::substitution_metadata::fold_literal_char_escapes(&dir);
+                anchor_at_session_cwd(shell_path_to_windows(&folded, env_vars), env_vars)
+            })
             .collect::<Vec<_>>();
         cache.path_dirs = Some(Arc::new(dirs));
     }
@@ -1122,6 +1137,7 @@ fn find_user_command_uncached(
     name: &str,
     env_vars: &HashMap<String, String>,
     fingerprint: &str,
+    name_had_transport: bool,
 ) -> Option<PathBuf> {
     if has_path_separator(name) {
         // `/bin/bash` / `/usr/bin/bash` normally resolve to the literal
@@ -1183,7 +1199,7 @@ fn find_user_command_uncached(
     // 126), not not-found (127). Windows has no execute bit, so the
     // preference tier collapses to the first-existing-file behavior.
     #[cfg(unix)]
-    if let Some((found, _as_written)) = find_in_path_walk_unix(name, env_vars) {
+    if let Some((found, _as_written)) = find_in_path_walk_unix(name, env_vars, name_had_transport) {
         return Some(found);
     }
     // rubash#159: the Windows branch replaces GNU's per-element
@@ -1234,19 +1250,57 @@ fn find_user_command_uncached(
 fn find_in_path_walk_unix(
     name: &str,
     env_vars: &HashMap<String, String>,
+    name_had_transport: bool,
 ) -> Option<(PathBuf, String)> {
     let mut file_to_lose_on: Option<(PathBuf, String)> = None;
     for dir in split_shell_path(env_vars.get("PATH").map(String::as_str).unwrap_or_default()) {
-        let joined = shell_path_to_windows(&dir, env_vars).join(name);
-        let candidate = anchor_at_session_cwd(joined.clone(), env_vars);
+        // rubash#3104: a PATH element carrying a raw-byte pair must be
+        // folded before the probe — GNU findcmd.c:623 walks with the
+        // element bytes verbatim, and the unfolded pair spelling never
+        // matches the on-disk byte name. Each side converts to
+        // filesystem bytes only when it carried transport, so a folded
+        // byte char (e.g. 0x9C) probes as its raw byte while a genuine
+        // UTF-8 char in the other component keeps its UTF-8 bytes.
+        let dir_had_transport = crate::executor::markers::contains_decodable_transport(&dir);
+        let folded_dir = crate::executor::substitution_metadata::fold_literal_char_escapes(&dir);
+        let dir_normalized = shell_path_to_windows(&folded_dir, env_vars);
+        let dir_display = dir_normalized.to_string_lossy().into_owned();
+        let dir_fs = if dir_had_transport {
+            path_buf_from_folded_name(&dir_display)
+        } else {
+            dir_normalized
+        };
+        let name_fs = if name_had_transport {
+            path_buf_from_folded_name(name)
+        } else {
+            PathBuf::from(name)
+        };
+        let joined = dir_fs.join(name_fs);
+        // The as-written join stays the folded string spelling (what
+        // `type` prints and $0 records); only the probe path is bytes.
+        let as_written = if dir_had_transport || name_had_transport {
+            if dir_display.is_empty() {
+                name.to_string()
+            } else {
+                format!(
+                    "{}/{name}",
+                    dir_display
+                        .strip_suffix('/')
+                        .unwrap_or(dir_display.as_str())
+                )
+            }
+        } else {
+            joined.to_string_lossy().into_owned()
+        };
+        let candidate = anchor_at_session_cwd(joined, env_vars);
         if !candidate.is_file() {
             continue;
         }
         if file_is_executable(&candidate) {
-            return Some((candidate, joined.to_string_lossy().into_owned()));
+            return Some((candidate, as_written));
         }
         if file_to_lose_on.is_none() {
-            file_to_lose_on = Some((candidate, joined.to_string_lossy().into_owned()));
+            file_to_lose_on = Some((candidate, as_written));
         }
     }
     file_to_lose_on
@@ -1268,6 +1322,7 @@ pub fn find_user_command_as_written(
 ) -> Option<String> {
     // Folded like find_user_command (rubash#3076): the recorded join
     // names the raw file, never the stored pair.
+    let name_had_transport = crate::executor::markers::contains_decodable_transport(name);
     let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let name = folded_name.as_str();
     if name.is_empty() || has_path_separator(name) {
@@ -1275,7 +1330,7 @@ pub fn find_user_command_as_written(
     }
     #[cfg(unix)]
     {
-        find_in_path_walk_unix(name, env_vars).map(|(_, as_written)| as_written)
+        find_in_path_walk_unix(name, env_vars, name_had_transport).map(|(_, as_written)| as_written)
     }
     #[cfg(not(unix))]
     {
@@ -1304,6 +1359,39 @@ pub(crate) fn exec_name_for_program(
     }
     let anchored = anchor_at_session_cwd(PathBuf::from(&as_written), env_vars);
     (anchored == program).then_some(as_written)
+}
+
+/// rubash#2696: the spelling a PATH resolution of `name` to `program`
+/// RECORDS in the hash table. GNU's walk builds ONE string — the
+/// as-written `<elem>/<name>` join (findcmd.c sh_makepath) — and that
+/// single string is what phash_insert records, what `hash` and `type`
+/// print, and what shell_execve later executes verbatim. When the
+/// as-written join anchors (at the session cwd) onto exactly
+/// `program`, the search itself produced this file, so the join is
+/// the recorded spelling; the anchored absolute display would lose a
+/// relative element (`./rel1` recorded as `/cwd/./rel1/foo`) and with
+/// it the post-cd verbatim-exec behavior. Any resolution the walk did
+/// not itself produce (a hash-table re-record, an emulated stand-in
+/// whose program came from elsewhere) keeps the anchored display
+/// form. Non-unix keeps the existing rendering (the #2302/#2317
+/// status quo for Windows display forms).
+pub(crate) fn recorded_resolution_spelling(
+    name: &str,
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    #[cfg(unix)]
+    {
+        if let Some(as_written) = find_user_command_as_written(name, env_vars) {
+            if as_written.contains('/') {
+                let anchored = anchor_at_session_cwd(PathBuf::from(&as_written), env_vars);
+                if anchored == program {
+                    return as_written;
+                }
+            }
+        }
+    }
+    super::execution_misc::shell_display_path(&program.to_string_lossy().replace('\\', "/"))
 }
 
 /// rubash#2442: the one filename-resolution funnel every external
@@ -3662,6 +3750,34 @@ pub(crate) fn literal_executable_file(spelling: &str, env_vars: &HashMap<String,
     executable_candidate(&candidate, env_vars).is_some()
 }
 
+/// rubash#2717: GNU findcmd.c file_status qualification for a
+/// slash-bearing name at the DESCRIBE faces (builtins/type.def
+/// describe_command): an absolute_program name is reported only
+/// when file_status grants FS_EXECABLE — an existing, executable,
+/// non-directory file. file_status never sets FS_EXECABLE for a
+/// directory, and a missing or non-executable file earns no report
+/// at all — unlike the slash-free PATH walk, whose file_to_lose_on
+/// hit IS reported (findcmd.c:591/695); execution keeps that
+/// lose-on semantics, only the describe faces qualify here. The
+/// probe folds the stored E400 pair (rubash#3076) and anchors at
+/// the session cwd, exactly like find_user_command's slash branch.
+pub(crate) fn slash_name_is_describable(
+    spelling: &str,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(spelling);
+    let candidate = anchor_at_session_cwd(shell_path_to_windows(&folded, env_vars), env_vars);
+    #[cfg(unix)]
+    {
+        std::fs::metadata(&candidate)
+            .is_ok_and(|meta| meta.is_file() && file_is_executable(&candidate))
+    }
+    #[cfg(not(unix))]
+    {
+        executable_candidate(&candidate, env_vars).is_some()
+    }
+}
+
 fn executable_candidate(path: &Path, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Extensionless names probe every PATHEXT candidate before the bare file
     // (native wrappers like `code.cmd` win over an extensionless `code`).
@@ -3781,7 +3897,7 @@ fn find_standard_unix_shell() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn has_path_separator(name: &str) -> bool {
+pub(crate) fn has_path_separator(name: &str) -> bool {
     // GNU general.c:843 absolute_program(): only `/` makes a name absolute,
     // except under __MSYS__ where `\\` counts too — exactly the Windows /
     // unix split below. On unix `foo\bar` is an ordinary filename looked up
@@ -3825,6 +3941,29 @@ pub(crate) fn shell_path_to_windows(path: &str, env_vars: &HashMap<String, Strin
         map_ntfs_colon_final_component(mapped)
     } else {
         mapped
+    }
+}
+
+/// Build a filesystem path from a name finalized by
+/// [`crate::executor::substitution_metadata::fold_literal_char_escapes`].
+/// On unix the bytes come from `folded_name_to_path_bytes`, so byte
+/// chars emit their raw byte (GNU redir.c:298 / findcmd.c:623 pass the
+/// name bytes verbatim); on Windows the folded string is already the
+/// WTF-8 path spelling, so the string form is used unchanged.
+/// Callers must gate on transport presence (see
+/// `folded_name_to_path_bytes`): only a name that went through folding
+/// may take this route. (rubash#3104 p23)
+pub(crate) fn path_buf_from_folded_name(text: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(
+            &crate::executor::substitution_metadata::folded_name_to_path_bytes(text),
+        ))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(text)
     }
 }
 
@@ -4630,7 +4769,7 @@ mod tests {
         // first existing non-executable regular file is the command; the
         // exec then fails with EACCES (126), not 127.
         assert_eq!(
-            find_user_command_uncached("rubash-execwalk", &env, ""),
+            find_user_command_uncached("rubash-execwalk", &env, "", false),
             Some(non_exec)
         );
         // FS_EXEC_PREFERRED (findcmd.c:580): an executable in a LATER PATH
@@ -4641,7 +4780,7 @@ mod tests {
         perms.set_mode(0o755);
         std::fs::set_permissions(&exec, perms).unwrap();
         assert_eq!(
-            find_user_command_uncached("rubash-execwalk", &env, ""),
+            find_user_command_uncached("rubash-execwalk", &env, "", false),
             Some(exec)
         );
         let _ = std::fs::remove_dir_all(&base);

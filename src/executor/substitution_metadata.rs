@@ -503,23 +503,60 @@ pub(crate) fn decode_raw_byte_markers_to_byte_chars(text: &str) -> String {
     output
 }
 
-/// Fold E400 literal-char escape pairs in text that has been
-/// finalized as a NAME — a filename, a lookup key, or a diagnostic
-/// naming one — back to the raw chars, through the boundary decoder
-/// above; text without the escape introducer passes through
-/// unchanged (rubash#3040). Every name-consumption boundary routes
-/// through this one gate + decoder (rubash#3076 census): PATH and
-/// hash lookup keys, slash-name classification probes, cd/pushd
-/// operands, exec diagnostics, source resolution, test operands,
-/// glob patterns, history/bind/enable file operands, and the
-/// comsub cd fast path — so a stored pair can never reach a
-/// filesystem probe, a cache key, or a diagnostic verbatim.
+/// Fold carrier pairs in text that has been finalized as a NAME —
+/// a filename, a lookup key, or a diagnostic naming one — back to
+/// the raw chars / byte chars, through the boundary decoder above;
+/// text with neither transport family passes through unchanged.
+/// The gate is the shared double-family gate (rubash#3038): the
+/// decoder folds BOTH the E400 literal-char escape pairs
+/// (rubash#3040) and the U+E000 raw-byte marker pairs — gating on
+/// the E400 introducer alone left every boundary below unfolded
+/// whenever a name carried only a raw-byte pair, so a stored byte
+/// (e.g. 0x1C from `$(printf 'a\034b')`) reached filesystem probes,
+/// cache keys, and diagnostics as its pair spelling (rubash#3104,
+/// the E000-domain counterpart of the rubash#3076 census). Every
+/// name-consumption boundary routes through this one gate +
+/// decoder: PATH and hash lookup keys, slash-name classification
+/// probes, cd/pushd operands, exec diagnostics, source resolution,
+/// test operands, glob patterns, history/bind/enable file
+/// operands, the comsub cd fast path, redirect operand
+/// finalization, and the `$(< file)` reader — so a stored pair of
+/// either family can never reach a filesystem probe, a cache key,
+/// or a diagnostic verbatim.
 pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
-    if text.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+    if crate::executor::markers::contains_decodable_transport(text) {
         decode_raw_byte_markers_to_byte_chars(text)
     } else {
         text.to_string()
     }
+}
+
+/// Convert a name finalized by [`fold_literal_char_escapes`] to the
+/// filesystem byte spelling: byte chars (U+0000..=U+00FF) emit their
+/// single byte; every other char emits its UTF-8 encoding. GNU passes
+/// the name bytes verbatim to open(2) (redir.c:298 redirection_expand
+/// returns the string do_redirection_internal opens; findcmd.c:623
+/// walks PATH with the name bytes), so a folded U+009C must reach the
+/// disk as 0x9C, not re-encoded as UTF-8 C2 9C (rubash#3104 p23).
+///
+/// Callers must only route names that went through folding here: a
+/// genuine Latin-1 char (e.g. U+00E9 `é`) in a folded name is
+/// indistinguishable from the byte char for 0xE9 and would emit the
+/// single byte. Names that never carried transport skip the fold
+/// entirely, so a pure-UTF-8 name never reaches this conversion
+/// (guarded by the transport flag at each call site).
+pub(crate) fn folded_name_to_path_bytes(text: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        if cp <= 0xFF {
+            output.push(cp as u8);
+        } else {
+            let mut buf = [0; 4];
+            output.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    output
 }
 
 /// Decode marker characters embedded in an otherwise byte-oriented output.
