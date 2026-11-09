@@ -36,9 +36,7 @@ fn run_script(tag: &str, body: &str) -> (String, String, Option<i32>) {
         .output()
         .expect("run rubash");
     let normalize = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .replace(path.to_str().expect("utf8 path"), "S")
-            .into_owned()
+        String::from_utf8_lossy(bytes).replace(path.to_str().expect("utf8 path"), "S")
     };
     (
         normalize(&output.stdout),
@@ -56,9 +54,13 @@ fn issue2659_canonical_for_loop_redirect_fires_err_then_errexit() {
         "( set -e\n  trap 'echo got error ERR' ERR\n  for f in 1 2; do x=4; done < /no/such/dir/f\n  echo \"after: $?\" )\necho outer_rc=$?\n",
     );
     assert_eq!(stdout, "got error ERR\nouter_rc=1\n");
-    assert_eq!(
-        stderr,
-        "S: line 3: /no/such/dir/f: No such file or directory\n"
+    // The redirect diagnostic itself is asserted loosely: GNU
+    // attributes it to line 4 of this script, rubash to line 3 (the
+    // for command's own line) — a line-attribution observation
+    // recorded in the lane REPORT, not part of this issue's claim.
+    assert!(
+        stderr.contains("/no/such/dir/f: No such file or directory"),
+        "stderr: {stderr}"
     );
     assert_eq!(code, Some(0));
 }

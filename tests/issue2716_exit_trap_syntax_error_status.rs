@@ -40,9 +40,7 @@ fn run_script(tag: &str, body: &str) -> (String, String, Option<i32>) {
         .output()
         .expect("run rubash");
     let normalize = |bytes: &[u8]| {
-        String::from_utf8_lossy(bytes)
-            .replace(path.to_str().expect("utf8 path"), "S")
-            .into_owned()
+        String::from_utf8_lossy(bytes).replace(path.to_str().expect("utf8 path"), "S")
     };
     (
         normalize(&output.stdout),
