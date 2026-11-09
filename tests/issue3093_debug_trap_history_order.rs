@@ -221,5 +221,5 @@ fn script_form_history_precedes_the_trap() {
         vec!["echo one".to_string(), "echo two".to_string()],
         "stderr:\n{stderr}"
     );
-    assert_eq!(out.stdout, "one\ntwo\n");
+    assert_eq!(out.stdout, b"one\ntwo\n".as_slice());
 }
