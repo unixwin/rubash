@@ -16,11 +16,14 @@
 //! offset hook), `RANDOM=7 :` leaves the generator seeded (reads
 //! draw, they do not read back "7"). The converted bind lands on
 //! the global dynamic cell: it is still in force after the
-//! function returns. Rubash wires this conversion for the
-//! attribute-absorption and top-level arms
-//! (Executor::convert_kept_tempenv_dynamic_binds) but the POSIX
-//! in-function merge arm in src/executor/command_dispatch.rs never
-//! calls it. Expectations are the literal oracle outputs.
+//! function returns. In rubash the POSIX in-function merge arm in
+//! src/executor/command_dispatch.rs never calls the converter
+//! (Executor::convert_kept_tempenv_dynamic_binds) that the other
+//! keep arms call — and the fail-first run for this pin measured
+//! the top-level `:` keep unconverted as well (100 -> 100), so the
+//! observable surface is the special-builtin keep generally, with
+//! the in-function arm its code-located core. Expectations are
+//! the literal oracle outputs.
 #![cfg(unix)]
 
 use std::fs;
@@ -119,12 +122,16 @@ fn issue2771_posix_in_function_random_converts_to_draws() {
     );
 }
 
-/// Control (expected to pass before and after the fix): the same
-/// kept conversion at TOP level in POSIX mode is already wired —
-/// this is the arm the in-function path must be brought in line
-/// with, not a second defect.
+/// The same kept conversion at TOP level in POSIX mode. This cell
+/// was designed as a control (the top-level arm does call the
+/// converter), but the fail-first run measured it RED on the base:
+/// the value is kept yet never converted (`top: 100 -> 100`). It
+/// is retained as a GNU-parity cell and as scope evidence — the
+/// fix must establish whether the top-level special-builtin keep
+/// shares the in-function arm's missing call or is a sibling gap
+/// in the keep routing.
 #[test]
-fn issue2771_posix_top_level_conversion_already_wired() {
+fn issue2771_posix_top_level_kept_seconds_ticks() {
     check(
         "top-level-control",
         "set -o posix\nSECONDS=100 :\ns=$SECONDS; sleep 1; echo \"top: $s -> $SECONDS\"\n",

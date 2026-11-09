@@ -17,12 +17,13 @@
 //!     composition: bare `declare`/`set` print
 //!     `FUNCNAME=([0]="f" [1]="main")`, the declare forms print
 //!     `declare -a FUNCNAME=([0]="f" [1]="main")`.
-//! Rubash composes FUNCNAME for expansion and the test -v overlay
-//! but never supplies it to the listing machinery
-//! (dynamic_declaration_class / dynamic_set_views in
-//! src/executor/dynamic_arrays.rs omit the name), so the listings
-//! diverge in both directions. Expectations are the literal oracle
-//! outputs.
+//! Rubash composes FUNCNAME for expansion, the test -v overlay
+//! and the named `declare -p FUNCNAME` form, but the ENUMERATION
+//! supply (dynamic_declaration_class / dynamic_set_views in
+//! src/executor/dynamic_arrays.rs omit the name) renders it as a
+//! static valueless entry in the declare forms and omits it from
+//! the assignment forms — regardless of the live frame stack.
+//! Expectations are the literal oracle outputs.
 #![cfg(unix)]
 
 use std::fs;
