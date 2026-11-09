@@ -587,7 +587,12 @@ impl Executor {
             // the substring path — the operator parse owns it. Require a
             // valid parameter name before `:` (covers shell names, special
             // parameters, positional digits, `!name`, array subscripts).
-            || !crate::executor::parameter_ops::is_parameter_error_name(var_name)
+            // A bare `!` is admitted alongside the `!name` indirect form:
+            // it is the `$!` special parameter itself (indirection needs
+            // a following name character), and GNU slices it like every
+            // other special parameter (rubash#3063).
+            || !(crate::executor::parameter_ops::is_parameter_error_name(var_name)
+                || var_name == "!")
         {
             return None;
         }
@@ -817,7 +822,12 @@ impl Executor {
             // the substring path — the operator parse owns it. Require a
             // valid parameter name before `:` (covers shell names, special
             // parameters, positional digits, `!name`, array subscripts).
-            || !crate::executor::parameter_ops::is_parameter_error_name(var_name)
+            // A bare `!` is admitted alongside the `!name` indirect form:
+            // it is the `$!` special parameter itself (indirection needs
+            // a following name character), and GNU slices it like every
+            // other special parameter (rubash#3063).
+            || !(crate::executor::parameter_ops::is_parameter_error_name(var_name)
+                || var_name == "!")
         {
             return None;
         }
@@ -1174,7 +1184,20 @@ pub(in crate::executor) fn split_top_level_colon(input: &str) -> (&str, &str, bo
             }
             if paren_depth == 0 {
                 if ch == b'?' {
-                    skipcol += 1;
+                    // A `?` in the very first position, immediately
+                    // followed by the separator colon, is the parameter
+                    // NAME itself (`$?`), not a ternary marker. GNU
+                    // extracts the name in param_expand before
+                    // skip_to_delim's ternary rule (subst.c:2262) ever
+                    // scans text: that rule runs via skiparith on the
+                    // post-colon substring text only (subst.c:8407, in
+                    // verify_substring_values). Counting the name's own
+                    // `?` here would eat the name's colon and split
+                    // `?:0:1` as name `?:0`, killing the substring parse
+                    // at the name gate (rubash#3063).
+                    if !(index == 0 && bytes.get(index + 1) == Some(&b':')) {
+                        skipcol += 1;
+                    }
                     index += 1;
                     continue;
                 }

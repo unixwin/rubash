@@ -1,0 +1,40 @@
+== definitions ==
+broken-9.9.9
+fake-1.0.0
+fake-2.0.0
+defs-rc=0
+== resolve ==
+resolved=fake-2.0.0
+== install fake-1.0.0 ==
+==> Downloading fake-1.0.0.tar.gz...
+-> curl -q -fL --silent -o fake-1.0.0.tar.gz "file://$HOME/pkgs/fake-1.0.0.tar.gz"
+HOOK before fake-1.0.0
+==> Installing fake-1.0.0...
+HOOK after fake-1.0.0
+==> Installed fake-1.0.0 to SCRATCH/installed1
+install1-rc=0
+install1-stderr=empty
+fake payload 1.0.0
+fake-tool 1.0.0 works
+tool1-rc=0
+buildpath=wiped
+== install resolved ==
+==> Downloading fake-2.0.0.tar.gz...
+-> curl -q -fL --silent -o fake-2.0.0.tar.gz "file://$HOME/pkgs/fake-2.0.0.tar.gz"
+HOOK before fake-2.0.0
+==> Installing fake-2.0.0...
+HOOK after fake-2.0.0
+==> Installed fake-2.0.0 to SCRATCH/installed2
+install2-rc=0
+install2-stderr=empty
+fake-tool 2.0.0 works
+== broken checksum ==
+broken-rc=1
+==> Downloading broken-9.9.9.tar.gz...
+-> curl -q -fL --silent -o broken-9.9.9.tar.gz "file://$HOME/pkgs/broken-9.9.9.tar.gz"
+mismatch-lines=1
+buildfailed-lines=1
+badprefix=absent
+== final definitions count ==
+final-defs=3
+done
