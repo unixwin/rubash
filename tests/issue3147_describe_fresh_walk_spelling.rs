@@ -96,10 +96,7 @@ fn type_all_prints_each_element_join() {
 #[test]
 fn plain_relative_element_join_verbatim() {
     let root = fixture("plainrel");
-    let out = run(
-        &root,
-        "PATH=rel1:/usr/bin:/bin\ncommand -v foo\ntype foo\n",
-    );
+    let out = run(&root, "PATH=rel1:/usr/bin:/bin\ncommand -v foo\ntype foo\n");
     assert_eq!(out.stdout, "rel1/foo\nfoo is rel1/foo\n");
     assert_eq!(out.stderr, "");
     assert_eq!(out.rc, 0);
@@ -123,9 +120,7 @@ fn dot_and_empty_elements_join_as_dot_slash() {
 #[test]
 fn absolute_element_join_coincides() {
     let root = fixture("abs");
-    let body = format!(
-        "PATH=\"$FIX/rel1:/usr/bin:/bin\"\ncommand -v foo\ntype foo\n"
-    );
+    let body = format!("PATH=\"$FIX/rel1:/usr/bin:/bin\"\ncommand -v foo\ntype foo\n");
     let out = run(&root, &body);
     let abs = format!("{}/rel1/foo", root.display());
     assert_eq!(out.stdout, format!("{abs}\nfoo is {abs}\n"));
