@@ -1,6 +1,49 @@
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
+thread_local! {
+    /// Whether the fragment currently being dispatched sits inside a
+    /// quoted word context (double quotes or a here-document body) for
+    /// the extquote `$'name'` decode gate in the embedded walker.
+    ///
+    /// GNU translates a `$'...'` parameter name while READING the word
+    /// (parse.y parse_matched_pair), so the verdict is a property of
+    /// the enclosing word's quoting, and it reaches fragments nested
+    /// inside that word's pattern / replacement sub-words (the
+    /// DOLBRACE_QUOTE / DOLBRACE_QUOTE2 regions). The pattern pipeline
+    /// expands those sub-words through the context-free embedded
+    /// walker, which would otherwise re-judge the nested fragment as
+    /// unquoted and reject a name the enclosing word's quoting admits
+    /// (rubash#2650: `"${x#${$'x1'%$'t'}}"` was a bad substitution while
+    /// the same fragment in a default word expanded). The whole-word
+    /// dispatchers and the walker's own `${` arm record the context
+    /// here for the duration of one fragment dispatch; the scope is
+    /// always restored, so an unquoted fragment nested inside a quoted
+    /// one (a command-substitution body runs its own dispatches, which
+    /// record their own context) is judged on its own quoting.
+    static EXTQUOTE_NAME_QUOTED_CONTEXT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the extquote-name quoted-context record set to
+/// `quoted` (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]); the previous value
+/// is restored on return.
+pub(in crate::executor) fn with_extquote_name_quoted_context<T>(
+    quoted: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.replace(quoted));
+    let result = f();
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.set(previous));
+    result
+}
+
+/// The recorded extquote-name quoted context for the fragment being
+/// dispatched (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]).
+pub(in crate::executor) fn extquote_name_quoted_context() -> bool {
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.get())
+}
+
 /// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
 /// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
 /// the expansion). Only $'...' is accepted; single-quoted, double-quoted, and

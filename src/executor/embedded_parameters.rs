@@ -197,7 +197,12 @@ impl Executor {
         // prior command's status. Snapshot and restore the overlay too so
         // the prompt pass is transparent to both read paths.
         let word_comsub_exit_before = self.word_expansion_comsub_exit.replace(None);
-        let result = self.expand_embedded_parameters_inner(word, false, false, false, true, false);
+        // The prompt pass is a double-quoted context (Q_DOUBLE_QUOTES):
+        // record it so pattern sub-words of fragments walked here judge
+        // a nested `$'name'` by that quoting (rubash#2650).
+        let result = crate::executor::expand_word::with_extquote_name_quoted_context(true, || {
+            self.expand_embedded_parameters_inner(word, false, false, false, true, false)
+        });
         self.last_command_substitution_status
             .set(comsub_status_before);
         self.word_expansion_comsub_exit.set(word_comsub_exit_before);
@@ -715,9 +720,18 @@ impl Executor {
                             for _ in 0..=close {
                                 chars.next();
                             }
+                            // This arm only fires for a fragment in a
+                            // quoted region (see the condition above):
+                            // record that context for the fragment's
+                            // pattern sub-words (rubash#2650).
                             let value = crate::executor::expand_word::with_pending_diagnostic_word(
                                 word,
-                                || self.expand_word(&format!("${{{body}}}")),
+                                || {
+                                    crate::executor::expand_word::with_extquote_name_quoted_context(
+                                        true,
+                                        || self.expand_word(&format!("${{{body}}}")),
+                                    )
+                                },
                             );
                             if preserve_quotes {
                                 push_preserved_expansion_output(&mut output, &value, in_double);
@@ -846,6 +860,7 @@ impl Executor {
                     if !double_quoted
                         && !in_double
                         && !heredoc
+                        && !crate::executor::expand_word::extquote_name_quoted_context()
                         && !self
                             .shell_state
                             .env_vars
@@ -867,9 +882,15 @@ impl Executor {
                     // A bad-substitution diagnostic inside this fragment must
                     // name the whole enclosing word (GNU subst.c:10278),
                     // not just the `${...}` span (rubash#758).
+                    // The fragment's pattern sub-words inherit this
+                    // walker's quote context for the extquote-name gate
+                    // (rubash#2650): record it for the dispatch.
                     let value =
                         crate::executor::expand_word::with_pending_diagnostic_word(word, || {
-                            self.expand_word(&format!("${{{name}}}"))
+                            crate::executor::expand_word::with_extquote_name_quoted_context(
+                                in_double || double_quoted || heredoc,
+                                || self.expand_word(&format!("${{{name}}}")),
+                            )
                         });
                     if preserve_quotes {
                         push_preserved_expansion_output(&mut output, &value, in_double);
