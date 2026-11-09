@@ -493,6 +493,13 @@ impl VariableStore {
     /// This is the initial migration boundary: executor writes still update the
     /// legacy environment mirror, while typed array and attribute state can be
     /// introduced without changing child-process setup in one step.
+    ///
+    /// The blanket `exported` here is correct only for a RAW process
+    /// environment map (every entry arrived exported, variables.c:511-518).
+    /// Executor birth tables are seeded with the shell's own variables
+    /// before the store is built; those go through
+    /// [`VariableStore::from_var_table`] so seeded names keep their
+    /// unexported provenance (rubash#3108).
     pub fn from_environment(environment: &HashMap<String, String>) -> Self {
         let mut store = Self::default();
         for (name, value) in environment {
@@ -509,6 +516,39 @@ impl VariableStore {
             }
             let mut variable = Variable::scalar(value.clone());
             variable.exported = true;
+            store.variables.insert(name.clone(), variable);
+        }
+        store
+    }
+
+    /// Bind the typed store from a shell variable table whose entries
+    /// carry per-name attribute provenance.
+    ///
+    /// The executor's birth table is NOT a raw process environment:
+    /// `initialize_fresh_shell_env_vars` has already seeded it with
+    /// the shell's own managed variables (BASH_VERSINFO, DIRSTACK,
+    /// BASH_ALIASES, BASH_CMDS, ...) alongside the imported entries.
+    /// GNU's provenance is per-entry — only the entries that arrive
+    /// via the environment are bound att_exported|att_imported
+    /// (variables.c:511-518, initialize_shell_variables); the shell's
+    /// own cells are born without it (variables.c:1010
+    /// make_vers_array; variables.c:1882 init_dynamic_array_var
+    /// registers DIRSTACK with attrs 0). So each entry's `exported`
+    /// comes from the table's own attribute record, the same record
+    /// the env side reads — one source of truth, decided at the
+    /// binding source (rubash#3108; binding the whole seeded table
+    /// exported made every seed name snapshot as exported).
+    pub fn from_var_table(table: &crate::shell::var_table::VarTable) -> Self {
+        let mut store = Self::default();
+        for (name, value) in table.iter() {
+            // Same identifier gate as from_environment
+            // (variables.c:511-526): invalid names never become shell
+            // variables in the typed store either.
+            if !is_valid_identifier(name) {
+                continue;
+            }
+            let mut variable = Variable::scalar(value.clone());
+            variable.exported = table.attr_of(name).exported;
             store.variables.insert(name.clone(), variable);
         }
         store
@@ -619,6 +659,47 @@ mod tests {
         assert!(store.get("BASH_FUNC_rm%%").is_none());
         assert!(store.get("WITH SPACE").is_none());
         assert!(store.get("1STARTS_DIGIT").is_none());
+    }
+
+    // rubash#3108: the table-aware binding takes each entry's
+    // exported provenance from the table's attribute record — a
+    // seeded name the table never marked exported binds unexported
+    // and an imported (marked) name binds exported. The serialized
+    // marker key itself stays in the table's values (it is the
+    // transport encoding, VarTable::from keeps the strings) and
+    // binds unexported like any other unmarked entry.
+    #[test]
+    fn from_var_table_binds_exported_from_table_attrs() {
+        let mut values = HashMap::new();
+        values.insert("IMPORTED_NAME".to_string(), "kept".to_string());
+        values.insert("SEEDED_NAME".to_string(), "seed".to_string());
+        values.insert(
+            crate::executor::types::EXPORTED_VARS.to_string(),
+            "IMPORTED_NAME".to_string(),
+        );
+        let table = crate::shell::var_table::VarTable::from_values(values);
+        let store = VariableStore::from_var_table(&table);
+        assert_eq!(
+            store.get("IMPORTED_NAME").map(|v| v.exported),
+            Some(true),
+            "table-marked name binds exported"
+        );
+        assert_eq!(
+            store.get("SEEDED_NAME").map(|v| v.exported),
+            Some(false),
+            "unmarked seed name binds unexported"
+        );
+        // The serialized marker key itself is a valid identifier and
+        // binds like the old from_environment bound it (the transport
+        // string stays in the table's values) — but nothing marks it
+        // exported, so it now binds unexported too.
+        assert_eq!(
+            store
+                .get(crate::executor::types::EXPORTED_VARS)
+                .map(|v| v.exported),
+            Some(false),
+            "marker key binds unexported"
+        );
     }
 
     #[test]
