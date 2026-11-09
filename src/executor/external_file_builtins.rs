@@ -215,8 +215,13 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: record the as-written join when the walk
+            // itself produced this program (see
+            // recorded_resolution_spelling in executor::path).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                name,
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
@@ -378,8 +383,12 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command("tput", &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: same recorded-spelling rule as the plain
+            // record sites (see recorded_resolution_spelling).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                "tput",
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
