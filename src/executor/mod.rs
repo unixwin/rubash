@@ -1857,6 +1857,18 @@ pub struct Executor {
     /// branches, failglob pattern) leaves the gate's existing behavior
     /// untouched, so an unquoted `$var` that word-splits stays ambiguous.
     redirect_target_single_glob_match: RefCell<HashSet<String>>,
+    /// The transport fact the folded target string cannot carry: keys
+    /// are folded redirect-target strings whose literal expansion
+    /// carried raw-byte transport (a stored E000 pair or E400 escape).
+    /// A folded byte char (e.g. U+009C for byte 0x9C) is
+    /// indistinguishable from a genuine char of the same code point,
+    /// so the output open funnels consult this set — cleared at each
+    /// execute_command entry like redirect_target_memo — to decide
+    /// whether the target's byte chars emit raw bytes or the name
+    /// takes the plain UTF-8 funnel. Only the literal arms of
+    /// expand_redirect_operand_fields set it; glob matches, procsub
+    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
+    redirect_target_had_transport: RefCell<HashSet<String>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.
@@ -1933,6 +1945,18 @@ pub struct Executor {
     /// command the gate is validating, not to an enclosing command
     /// whose applier ran earlier.
     fd_var_close_generation: u64,
+    /// rubash#2629: the binds the most recent successful
+    /// apply_dynamic_fd_var_redirects run produced on this executor,
+    /// recorded so a later helper walk over the SAME redirect list
+    /// (the pipeline stream-routing bracket) can rebind them from
+    /// the record instead of running the applier again — a second
+    /// applier run re-expands every `{var}` target word, and a
+    /// target with a side effect (`$((i+=1))` in the filename,
+    /// `$(mktemp)`) then evaluates twice where GNU's single
+    /// do_redirections pass (redir.c:237) evaluates it once. The
+    /// record is replaced by every successful apply and cleared by
+    /// every failed one; see FdVarApplySnapshot.
+    fd_var_apply_snapshot: Option<trap_exec::FdVarApplySnapshot>,
     /// rubash#2281: the fd_var_close_generation value whose applier
     /// run recorded the current fd_var_pending_closes contents.
     fd_var_pending_close_generation: u64,
