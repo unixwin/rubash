@@ -1375,11 +1375,10 @@ impl Executor {
                                     // flag drives expand_command_words'
                                     // ExpansionFailure(1) so the list is
                                     // abandoned and the script continues.
-                                } else if (actual_fatal
+                                } else if actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,
-                                    ))
-                                    && !embedded_command_substitution_expression(&expression)
+                                    )
                                 {
                                     self.shell_state.arithmetic_fatal_error.set(true);
                                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1406,19 +1405,36 @@ impl Executor {
                                         }
                                     }
                                 } else {
-                                    let value = protect_command_substitution_output(
-                                        &self.expand_command_substitution_mut_with_context(
-                                            &expression,
-                                            context,
-                                        ),
-                                    );
-                                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                        output.push_str(&mark_expansion_whitespace(
-                                            &value,
-                                            preserve_quotes,
-                                        ));
-                                    } else {
-                                        output.push_str(&value);
+                                    // rubash#2715: the classification
+                                    // above is final (subst.c:10842-10862
+                                    // decides arithmetic vs comsub BEFORE
+                                    // expansion, on paren balance alone).
+                                    // An evalexp failure on the spliced
+                                    // text is expand_wdesc_error — the
+                                    // expansion is discarded with the
+                                    // arithmetic diagnostic, and the
+                                    // spliced text is NEVER executed as
+                                    // commands (the old retry here ran
+                                    // `;`-spliced text and produced
+                                    // `3: command not found`).
+                                    self.shell_state.arithmetic_nonfatal_error.set(true);
+                                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                                        let eval_input =
+                                            self.arithmetic_last_eval_input.borrow().clone();
+                                        let display = if eval_input.is_empty() {
+                                            expression.as_str()
+                                        } else {
+                                            eval_input.as_str()
+                                        };
+                                        if let Some(message) =
+                                            crate::executor::arithmetic::arithmetic_error_message(
+                                                display,
+                                                true,
+                                                &self.shell_state.env_vars,
+                                            )
+                                        {
+                                            eprintln!("{}{}", self.error_prefix(), message);
+                                        }
                                     }
                                 }
                             }
@@ -2848,10 +2864,6 @@ fn command_substitution_needs_ast_execution(commands: &[CommandNode]) -> bool {
 // GNU subst.c treats a syntactically command-like $((...)) body as a
 // command substitution fallback, even though arithmetic parsing rejects it.
 // Keep ordinary arithmetic diagnostics (notably 1/0 and invalid octal 08).
-fn embedded_command_substitution_expression(expression: &str) -> bool {
-    expression.contains(';') && expression.contains('(')
-}
-
 fn collect_dollar_paren_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {

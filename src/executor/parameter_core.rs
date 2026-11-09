@@ -313,12 +313,13 @@ impl Executor {
             if let Some(value) = self.eval_arithmetic_expansion_value(expression) {
                 return value.to_string();
             }
-            // A command-list separator is GNU's recognition-failure path for
-            // POSIX command substitution, not an arithmetic runtime error.
-            if expression.contains(';') {
-                let command_source = format!("({expression})");
-                return self.expand_command_substitution_mut_with_context(&command_source, context);
-            }
+            // rubash#2715: a `;` in the extracted expression is NOT a
+            // recognition failure — the classification verdict already
+            // ran in whole_word_arithmetic_substitution_body (via
+            // dollar_double_paren_is_arithmetic), mirroring subst.c's
+            // chk_arithsub decision before expansion. A `;` here is
+            // spliced text (a comsub body's own separator or its
+            // output) and the evalexp failure below is the verdict.
             let actual_fatal = self
                 .shell_state
                 .arithmetic_last_error_category
@@ -372,11 +373,37 @@ impl Executor {
             if self.shell_state.arithmetic_nonfatal_error.get() {
                 return String::new();
             }
-            // GNU subst.c retries unrecognized arithmetic syntax as command substitution.
-            // Keep the parenthesized command source so nested subshell delimiters
-            // are balanced during the fallback parse.
-            let command_source = format!("({expression})");
-            self.expand_command_substitution_mut_with_context(&command_source, context);
+            // rubash#2715: GNU never retries an arithmetic-classified
+            // `$((` as command substitution after evalexp fails
+            // (subst.c:10858-10895 — the comsub goto is the
+            // classification branch, taken before expand_arith_string
+            // runs). The failure is expand_wdesc_error: print the
+            // arithmetic diagnostic against the spliced text, discard
+            // the expansion, and let the nonfatal marker abandon the
+            // command while the script continues.
+            self.shell_state.arithmetic_nonfatal_error.set(true);
+            if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                let eval_input = self.arithmetic_last_eval_input.borrow().clone();
+                let display = if eval_input.is_empty() {
+                    expression
+                } else {
+                    eval_input.as_str()
+                };
+                let message = crate::executor::arithmetic::arithmetic_error_message(
+                    display,
+                    true,
+                    &self.shell_state.env_vars,
+                )
+                .unwrap_or_else(|| {
+                    format!(
+                        "{display}: arithmetic syntax error in expression (error token is \"{display}\")"
+                    )
+                });
+                self.write_diagnostic_fd2(
+                    format!("{}{}\n", self.error_prefix(), message).as_bytes(),
+                );
+            }
+            return String::new();
         }
 
         // Current-shell forms are special `${...}` expansions, not ordinary
