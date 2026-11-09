@@ -83,7 +83,11 @@ fn issue2779_mapfile_n1_then_read_chain_gets_l2_and_l3() {
         &dir,
     );
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(run.stdout, "next=[l2]\nnext2=[l3]\n", "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout, "next=[l2]\nnext2=[l3]\n",
+        "stderr: {}",
+        run.stderr
+    );
 }
 
 #[test]
@@ -146,5 +150,9 @@ fn issue2779_chain_mapfile_read_cat_three_readers_in_sequence() {
         &dir,
     );
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
-    assert_eq!(run.stdout, "a=[l1] next=[l2]\nl3\n", "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout, "a=[l1] next=[l2]\nl3\n",
+        "stderr: {}",
+        run.stderr
+    );
 }

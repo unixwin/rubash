@@ -261,8 +261,6 @@ fn issue2688_pipeline_stage_child_sees_exactly_fd3() {
     );
 }
 
-
-
 #[test]
 fn issue2688_chain_write_then_reopen_moves_the_single_alias_free_fd() {
     // Chain: a child writes through fd 3 (state lands in f3.txt), the
@@ -287,5 +285,9 @@ fn issue2688_chain_write_then_reopen_moves_the_single_alias_free_fd() {
         Vec::<u32>::new(),
         "stale binding leaked after reopen; listing={listing:?}"
     );
-    assert_eq!(numbers_for(&listing, "f3b.txt"), vec![3], "listing={listing:?}");
+    assert_eq!(
+        numbers_for(&listing, "f3b.txt"),
+        vec![3],
+        "listing={listing:?}"
+    );
 }
