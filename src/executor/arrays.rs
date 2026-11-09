@@ -290,16 +290,26 @@ fn split_mixed_ifs(value: &str, ifs: &str) -> Vec<String> {
 /// respecting UTF-8 character boundaries, and re-encodes the result.
 fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
     use crate::executor::substitution_metadata::{
-        decode_raw_byte_markers, encode_raw_byte_marker, RAW_BYTE_MARKER_ESCAPE,
+        decode_raw_byte_markers, decode_raw_byte_markers_with_glue, RAW_BYTE_MARKER_ESCAPE,
     };
 
     let sentinel = char::from_u32(RAW_BYTE_MARKER_ESCAPE).expect("sentinel is valid");
 
-    // Decode both sides to raw bytes.
-    let value_bytes = if value.contains(sentinel) {
-        decode_raw_byte_markers(value.as_bytes())
+    // Decode both sides to raw bytes. The value decode keeps glue
+    // provenance (decode_raw_byte_markers_with_glue): a 0x1C byte that
+    // arrived as a marker pair's payload is user DATA, and only a bare
+    // transport '\u{1c}' char is the IFS_GLUE protocol marker — decoding
+    // first and treating every decoded 0x1C as glue dropped the data
+    // byte out of git-completion candidates (rubash#3004). With no pair
+    // in the value there is nothing to conflate: every raw 0x1C byte is
+    // a bare marker char by construction.
+    let (value_bytes, value_glue) = if value.contains(sentinel) {
+        decode_raw_byte_markers_with_glue(value.as_bytes())
     } else {
-        value.as_bytes().to_vec()
+        (
+            value.as_bytes().to_vec(),
+            value.as_bytes().iter().map(|byte| *byte == 0x1c).collect(),
+        )
     };
     let ifs_bytes = if ifs.contains(sentinel) {
         decode_raw_byte_markers(ifs.as_bytes())
@@ -318,8 +328,12 @@ fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
     let mut index = 0;
 
     while index < value_bytes.len() {
-        // \x1c protection marker: next byte is literal data, not a separator.
-        if value_bytes[index] == 0x1c {
+        // IFS_GLUE protection marker: next byte is literal data, not a
+        // separator. Only a byte the transport carried as a BARE marker
+        // char is protocol (value_glue); a pair-payload 0x1C is user
+        // data and falls through to the ordinary IFS/data handling
+        // below (rubash#3004).
+        if value_bytes[index] == 0x1c && value_glue[index] {
             index += 1;
             if index < value_bytes.len() {
                 current_bytes.push(value_bytes[index]);
@@ -375,10 +389,23 @@ fn field_split_with_raw_byte_markers(value: &str, ifs: &str) -> Vec<String> {
         fields.pop();
     }
 
-    // Re-encode byte fields back to Rust Strings with raw-byte markers.
+    // Re-encode byte fields back to transport text with the canonical
+    // storage encoder (substitution_metadata::bytes_to_shell_text): every
+    // carrier byte (0x0c/0x11/0x13 and the 0x14..=0x1f block) is pair-tagged
+    // again and marker-zone chars are E400-escaped, exactly as at storage
+    // entry. The provenance the decode above preserved is the field's
+    // only claim that a 0x1C byte is data rather than the IFS_GLUE
+    // protocol char (and a 0x1F byte data rather than DATA_DOLLAR): a
+    // re-encode that emits those bytes as bare chars hands every
+    // char-domain consumer downstream — word materialization, the
+    // for/set binding finalizers — a field whose data bytes read as
+    // protocol, so the byte was eaten as glue or folded to '$' in
+    // command-word position (rubash#3103; the array-assignment consumers
+    // #3004 verified never re-enter those char-domain passes, so the
+    // loss stayed invisible there).
     fields
         .into_iter()
-        .map(|bytes| bytes_to_shell_text(&bytes, &sentinel, &encode_raw_byte_marker))
+        .map(|bytes| crate::executor::substitution_metadata::bytes_to_shell_text(&bytes))
         .collect()
 }
 
@@ -413,35 +440,6 @@ fn utf8_char_len(bytes: &[u8]) -> usize {
     } else {
         1
     }
-}
-
-/// Re-encode raw bytes as a Rust String, using raw-byte markers for bytes
-/// >= 0x80 so the result is valid UTF-8 and round-trips through the executor.
-fn bytes_to_shell_text(
-    bytes: &[u8],
-    sentinel: &char,
-    encode_raw_byte_marker: &dyn Fn(u8) -> String,
-) -> String {
-    let mut output = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        let len = utf8_char_len(&bytes[index..]);
-        let slice = &bytes[index..index + len];
-        if let Ok(text) = std::str::from_utf8(slice) {
-            output.push_str(text);
-        } else {
-            for &byte in slice {
-                if byte < 0x80 {
-                    output.push(char::from(byte));
-                } else {
-                    output.push_str(&encode_raw_byte_marker(byte));
-                }
-            }
-        }
-        index += len;
-    }
-    let _ = sentinel; // suppress unused warning
-    output
 }
 
 pub(super) fn field_split_values_with_ifs(value: &str, ifs: Option<&str>) -> Vec<String> {
