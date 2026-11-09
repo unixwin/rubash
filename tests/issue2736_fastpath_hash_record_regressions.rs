@@ -169,7 +169,7 @@ fn command_face_dirname_recorded() {
 #[test]
 fn hashall_off_records_nothing() {
     let dir = scratch("nohashall");
-    let out = run(&dir, &ambient_path(), "set +H; sleep 0; hash");
+    let out = run(&dir, &ambient_path(), "set +h; sleep 0; hash");
     assert_eq!(hash_hits(&out.stdout, "sleep"), None, "{}", out.stdout);
 }
 
