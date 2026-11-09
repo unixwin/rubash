@@ -105,12 +105,18 @@ fn compopt_outside_any_completion_still_errors() {
     // Guard (subprocess): GNU bash 5.3.20 errors for a bare compopt
     // at top level and for compopt inside a top-level compgen -F
     // function — the binding is a generation-window state, not a
-    // permanent one.
+    // permanent one. The in-function rc is observed through a global
+    // variable, NOT an echo: compgen captures the function's stdout
+    // as its generation channel, so an `echo "in_rc=$?"` inside the
+    // function never reaches the script's stdout — verified against
+    // GNU bash 5.3.20 itself, whose stdout for the echo form is also
+    // just "bare_rc=1" (the rc reads 1 identically on both shells
+    // through the variable channel and through stderr).
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(
-            "_f2611() { compopt -o nospace 2>/dev/null; echo \"in_rc=$?\"; COMPREPLY=(x); }; \
-             compgen -F _f2611 -- x >/dev/null; \
+            "_f2611() { compopt -o nospace 2>/dev/null; IN_RC2611=$?; COMPREPLY=(x); }; \
+             compgen -F _f2611 -- x >/dev/null; echo \"in_rc=$IN_RC2611\"; \
              compopt 2>/dev/null; echo \"bare_rc=$?\"",
         )
         .output()
