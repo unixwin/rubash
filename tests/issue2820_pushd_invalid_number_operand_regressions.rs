@@ -41,6 +41,7 @@ fn shell_bin() -> PathBuf {
 
 struct Output {
     stdout: String,
+    #[allow(dead_code)]
     stderr: String,
 }
 

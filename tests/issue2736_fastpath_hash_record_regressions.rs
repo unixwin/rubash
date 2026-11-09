@@ -38,6 +38,7 @@ fn shell_bin() -> PathBuf {
 struct Output {
     stdout: String,
     stderr: String,
+    #[allow(dead_code)]
     code: Option<i32>,
 }
 
@@ -71,12 +72,20 @@ fn ambient_path() -> String {
 }
 
 /// The hits count `hash` reports for `name`, or None when the name
-/// has no hash-table entry. Hash lines are `<hits>\t<full path>`.
+/// has no hash-table entry. Hash output opens with a header line
+/// (`hits\tcommand`); entry lines are `<hits>\t<full path>`.
+/// Non-entry lines are skipped, never treated as a verdict.
 fn hash_hits(stdout: &str, name: &str) -> Option<u32> {
     for line in stdout.lines() {
         let mut parts = line.splitn(2, '\t');
-        let hits: u32 = parts.next()?.trim().parse().ok()?;
-        let path = parts.next()?;
+        let hits: u32 = match parts.next().and_then(|field| field.trim().parse().ok()) {
+            Some(hits) => hits,
+            None => continue,
+        };
+        let path = match parts.next() {
+            Some(path) => path,
+            None => continue,
+        };
         if path.rsplit('/').next() == Some(name) {
             return Some(hits);
         }
