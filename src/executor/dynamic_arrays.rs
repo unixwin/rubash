@@ -2008,7 +2008,7 @@ impl Executor {
                 }
                 self.shell_state
                     .aliases
-                    .insert(key, crate::builtins::alias::Alias::new(entry_value));
+                    .insert(key, crate::builtins::alias::Alias::new(&entry_value));
             }
         } else {
             for (key, entry_value) in entries {
