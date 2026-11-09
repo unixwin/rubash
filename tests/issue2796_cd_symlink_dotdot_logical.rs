@@ -139,6 +139,32 @@ fn issue2796_chain_cd_link_dotdot_then_link_again() {
 }
 
 #[test]
+fn issue2796_cd_dot_from_deleted_cwd_keeps_logical_dot_form() {
+    // R88-D shape (captain-adjudicated into this issue from the r88
+    // diff hunt): `cd .` with the cwd deleted. GNU change_to_directory
+    // falls back to chdir(".") — which the kernel still resolves via
+    // the unlinked cwd inode — so the cd SUCCEEDS; resetting the
+    // logical value then fails getcwd (the diagnostic), and $PWD is
+    // bound to the uncanonicalized make_absolute(".", tcwd) form.
+    let tree = make_tree("dotdeleted");
+    std::fs::create_dir_all(tree.base.join("gone")).expect("create gone");
+    let script = format!(
+        "cd \"{r}/gone\"; (cd ..; rmdir gone); cd .; echo \"rc=$?\"; echo \"PWD=$PWD\"; pwd -L; echo \"rc2=$?\"\n",
+        r = tree.real
+    );
+    let (stdout, stderr, code) = run_script_in(&tree.base, &script);
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        stderr,
+        "cd: error retrieving current directory: getcwd: cannot access parent directories: No such file or directory\n"
+    );
+    assert_eq!(
+        stdout,
+        format!("rc=0\nPWD={r}/gone/.\n{r}/gone/.\nrc2=0\n", r = tree.real)
+    );
+}
+
+#[test]
 fn issue2796_control_cd_dash_p_dotdot_uses_physical_parent() {
     let tree = make_tree("ctrlp");
     let script = format!(
