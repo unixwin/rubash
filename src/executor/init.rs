@@ -1146,6 +1146,7 @@ impl Executor {
                 procsub_streams: std::cell::RefCell::new(HashMap::new()),
                 procsub_adhoc_carriers: std::cell::RefCell::new(Vec::new()),
                 fork_saved_process_umask: None,
+                fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
             exit_code: 0,

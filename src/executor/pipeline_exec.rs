@@ -5623,6 +5623,12 @@ impl Executor {
         // half; the pipeline-stage path was the one boundary missing
         // it, so `umask 077 | cat` leaked 0077 into the parent.
         let saved_process_umask = crate::builtins::umask::snapshot_process_umask();
+        // rubash#2636: the same fork argument for the PROCESS rlimit
+        // set — a `ulimit` executed inside the element re-limits the
+        // parent shell itself (builtins/ulimit.rs drives the real
+        // setrlimit on unix); GNU's element child takes its limit
+        // changes to its grave. Bracket the set like the mask above.
+        let saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
         // rubash#1349: GNU forks every pipeline element, and
         // execute_cmd.c's execute_subshell_builtin_or_function calls
         // without_job_control() (jobs.c: delete_all_jobs) in the child —
@@ -5923,6 +5929,11 @@ impl Executor {
         // rubash#2694: the element's process-umask changes die with it.
         if let Some(mask) = saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        // rubash#2636: the element's process-rlimit changes die with
+        // it too.
+        if let Some(rlimits) = &saved_process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
         // rubash#2126: the stage's dispatches stay inside the element.
         self.shell_state.last_dispatch_was_eval_or_source = saved_dispatch_tracker;

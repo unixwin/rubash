@@ -2312,14 +2312,34 @@ impl Executor {
         // command's own fd-1 redirects below still override this, and
         // `2>&1`-style dups copy it, matching the sequential dup2 ordering a
         // forked GNU child would apply on top of the inherited pipe.
+        // rubash#2660: the base stdio above starts from the PROCESS
+        // descriptors, but an enclosing compound command's
+        // redirections live in this executor's fd table — the flat
+        // body never touches the process's real descriptors. GNU's
+        // async child is a fork of the shell AS REDIRECTED
+        // (execute_cmd.c:2837 execute_connection '&' forks after the
+        // compound applied do_redirections to its own descriptors),
+        // so it is born holding the compound's bindings. Seed slots
+        // 1/2 from the live fd table — the same source a foreground
+        // spawn inherits from — before the capture override below:
+        // an explicit binding (e.g. `>/dev/null`) beats the capture
+        // pipe, exactly like GNU's ordering (the subshell's redirect
+        // rebinds the capture child's fd 1 before the body forks).
+        for slot in 1..=2u32 {
+            if let Some(seeded) = self.background_stdio_from_fd_table(slot) {
+                stdio[slot as usize] = seeded;
+            }
+        }
         let mut captured_pipe_writer = false;
-        if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
-            stdio[1] = BackgroundStdio::File(write);
-            // Registration is conservative: a later fd-1 redirect may drop
-            // the pipe for THIS child, but reaping it then only drains an
-            // empty pipe — never another child's bytes (the drain fires when
-            // the whole writer set is reaped).
-            captured_pipe_writer = true;
+        if matches!(stdio[1], BackgroundStdio::Inherit) {
+            if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
+                stdio[1] = BackgroundStdio::File(write);
+                // Registration is conservative: a later fd-1 redirect may drop
+                // the pipe for THIS child, but reaping it then only drains an
+                // empty pipe — never another child's bytes (the drain fires when
+                // the whole writer set is reaped).
+                captured_pipe_writer = true;
+            }
         }
         // rubash#1862 bookkeeping for the FIFO deferral further down:
         // the stdio the child spawns with before any of the command's
@@ -2600,6 +2620,44 @@ impl Executor {
         }
 
         (stdio, consumed, captured_pipe_writer)
+    }
+
+    /// rubash#2660: the async spawn's base for one stdio slot, read
+    /// from the executor's LIVE fd table — the bindings an enclosing
+    /// compound command's redirections installed (`( ... ) >/dev/null`,
+    /// `{ ...; } >file`, `exec >file`, a function's redirects). GNU's
+    /// async child forks from the shell holding exactly these
+    /// descriptors (execute_cmd.c:2837), so a file-backed binding
+    /// hands the child a duplicate of the same open file description
+    /// (shared offset, like dup2). Returns None to keep the caller's
+    /// default (process inherit) when the slot carries no spawnable
+    /// binding: unbound slots, the process-stdio markers naming the
+    /// slot itself, and the in-process channel endpoints
+    /// (process-substitution / pipe-channel writers), which a spawned
+    /// child cannot hold — the same shapes the foreground faces serve
+    /// in-process instead. A CLOSED slot maps to Null, matching this
+    /// resolver's own treatment of the command's `>&-` redirects.
+    fn background_stdio_from_fd_table(&self, fd: u32) -> Option<BackgroundStdio> {
+        use super::fd_table::FdWriteEndpoint;
+        if self.fd_table.is_closed(fd) {
+            return Some(BackgroundStdio::Null);
+        }
+        let dup_file = |handle: crate::fd::HANDLE| -> Option<BackgroundStdio> {
+            crate::fd::duplicate_handle(handle)
+                .ok()
+                .map(|dup| BackgroundStdio::File(crate::fd::handle_to_file(dup)))
+        };
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => dup_file(file_fd.handle),
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => dup_file(file_fd.handle),
+            // The slot was dup'd from the sibling stdio slot (e.g.
+            // `2>&1` at compound level): the marker names the process
+            // descriptor as bound at entry, so hand the child a
+            // duplicate of that live process descriptor.
+            Some(FdWriteEndpoint::Stdout) if fd != 1 => dup_file(1),
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => dup_file(2),
+            _ => None,
+        }
     }
 
     /// True when a background redirect target resolves to an existing
