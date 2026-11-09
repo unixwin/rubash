@@ -4456,17 +4456,28 @@ impl Executor {
         }
         let mut mode: Option<&str> = None;
         let mut files: Vec<String> = Vec::new();
+        // getopt_long semantics (coreutils chmod): the FIRST `--`
+        // ends option scanning wherever it appears — before the mode,
+        // between operands, or after the mode (rubash#3106). Every
+        // later word is an operand: the first is the mode, the rest
+        // are files, and a second `--` is an ordinary file name.
+        let mut options_done = false;
         for arg in &cmd.words[1..] {
+            if !options_done && arg == "--" {
+                options_done = true;
+                continue;
+            }
             if mode.is_none() {
-                if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c" | "--") || arg.starts_with("--")
-                {
-                    continue;
-                }
-                if arg.starts_with('-')
-                    && arg.len() > 1
-                    && arg[1..].chars().all(|ch| "fRvc".contains(ch))
-                {
-                    continue;
+                if !options_done {
+                    if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c") || arg.starts_with("--") {
+                        continue;
+                    }
+                    if arg.starts_with('-')
+                        && arg.len() > 1
+                        && arg[1..].chars().all(|ch| "fRvc".contains(ch))
+                    {
+                        continue;
+                    }
                 }
                 mode = Some(arg);
                 continue;
@@ -4662,6 +4673,15 @@ fn chmod_declines(words: &[String]) -> bool {
     for word in words {
         let arg = word.as_str();
         if mode.is_some() {
+            // The first `--` is the option terminator even after the
+            // mode (getopt_long, rubash#3106): it is not a file, so
+            // `chmod 600 --` keeps files == 0 and declines to the real
+            // binary's missing-operand diagnostic. A second `--` is
+            // an ordinary file operand.
+            if arg == "--" && !after_terminator {
+                after_terminator = true;
+                continue;
+            }
             files += 1;
             continue;
         }
