@@ -105,7 +105,7 @@ fn issue2793_builtin_read_devtcp_fd_control() {
          echo \"first:[$first]\"\n"
     ));
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(stdout, "first:[HTTP/1.0 200 OK]\n", "stderr:\n{stderr}");
+    assert_eq!(stdout, "first:[HTTP/1.0 200 OK\r]\n", "stderr:\n{stderr}");
 }
 
 /// Control (isolation table, second row): the same external `cat <&3`
