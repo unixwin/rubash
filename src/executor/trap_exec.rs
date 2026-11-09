@@ -4521,6 +4521,22 @@ impl Executor {
                         used_capture_write_end = true;
                     }
                 }
+                // rubash#3149: the stage pipe's write end forwards
+                // like a file write handle; NOT a BackgroundCapture
+                // writer, so used_capture_write_end stays clear.
+                super::external_setup::ProcsubSpawnFd::StreamWrite(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        env_entries
+                            .push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                        env_entries.push((
+                            format!("__RUBASH_FD_WPATH_{fd}"),
+                            file.path.to_string_lossy().into_owned(),
+                        ));
+                        ambient_fd_dups.push(dup);
+                        #[cfg(unix)]
+                        ambient_pins.push((dup, *fd));
+                    }
+                }
                 _ => {}
             }
         }
