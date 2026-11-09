@@ -256,6 +256,12 @@ impl Executor {
         }
 
         if let Some(file) = &flags.file {
+            // The -f operand names a real file: fold a stored E400
+            // pair to the raw char for the read and the diagnostics
+            // (rubash#3076).
+            let folded_file =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(file);
+            let file = &folded_file;
             // bind.def:268-282: read the file; failure is
             // `bind: FILE: cannot read: ERRNO` with rc 1.
             match std::fs::read_to_string(file) {

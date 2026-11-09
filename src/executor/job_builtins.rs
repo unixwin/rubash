@@ -4173,6 +4173,11 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(null_filename_status);
                 }
+                // The resolved filename names a real file: fold a
+                // stored E400 pair to the raw char before every
+                // provider call and diagnostic below (rubash#3076;
+                // twin of the history_exec.rs resolution point).
+                let file = crate::executor::substitution_metadata::fold_literal_char_escapes(&file);
                 // niubash#646: sv_histtimefmt (variables.c:6168-6177) arms
                 // the file faces whenever HISTTIMEFORMAT exists as a
                 // variable (`history_write_timestamps = (v != 0)`), and

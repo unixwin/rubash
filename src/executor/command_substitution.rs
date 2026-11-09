@@ -1422,6 +1422,12 @@ impl Executor {
                 }
             }
         };
+        // The target (operand expansion or the $HOME value) is a
+        // pathname from here on: fold a stored E400 pair to the raw
+        // char so the existence probe and the failure diagnostics
+        // name the real directory, exactly like the cd builtin's
+        // resolve_target (rubash#3076).
+        let target = crate::executor::substitution_metadata::fold_literal_char_escapes(&target);
         let target_display = target.clone();
         let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
         // rubash#2211: a relative target anchors at the SESSION cwd —
@@ -1967,6 +1973,7 @@ impl Executor {
             no_closing_brace_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_bound_frames: Vec::new(),
             applying_temporary_assignments: false,
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),

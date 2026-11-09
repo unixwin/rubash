@@ -1313,6 +1313,20 @@ impl Executor {
                 // the rubash#1620 root-cause-2 shape on this channel.
                 continue;
             }
+            if assignments_applied && !append {
+                // rubash#3071: the dispatch seam already applied this
+                // assignment on this executor; reuse the value it bound
+                // (the apply expanded the RHS exactly once, against the
+                // pre-bind table — GNU variables.c:3598 assign_in_env).
+                // Expanding the raw RHS again below would read the
+                // post-bind table and double a self-referencing RHS.
+                if let Some((_, bound)) = self.applied_tempenv_value(cmd, var_name, var_value) {
+                    if is_valid_process_env(&env_name, &bound) {
+                        env_vars.insert(env_name, bound);
+                    }
+                    continue;
+                }
+            }
             let raw = raws_aligned
                 .then(|| cmd.assignment_raws.get(index))
                 .flatten()
@@ -1534,6 +1548,40 @@ impl Executor {
                 // compose_child_environment. Re-applying the raw RHS here would
                 // overwrite the appended value (a+=5 printenv a must see 145,
                 // not 5).
+                continue;
+            }
+            // rubash#3071: when this command's prefix assignments were
+            // already applied on this executor (the dispatch paths run
+            // apply_temporary_assignments first), the value the apply
+            // bound IS the env value — GNU assign_in_env expands the
+            // RHS exactly once (variables.c:3598 via subst.c:3881
+            // expand_assignment_string_to_string) and the child
+            // environment carries that result verbatim. Expanding the
+            // raw RHS below would read the post-bind table, doubling a
+            // self-referencing RHS (`v="p${v}q"` -> `ppa bqq`). Spawns
+            // whose assignments were never applied here (the concurrent
+            // pipeline / procsub-consumer spawners) find no frame for
+            // their command and fall through to the expansion below,
+            // which is their one and only expansion.
+            if let Some((record_env_name, bound)) =
+                self.applied_tempenv_value(cmd, var_name, var_value)
+            {
+                if is_valid_process_env(&record_env_name, &bound) {
+                    if cfg!(windows) && record_env_name == "TMPDIR" {
+                        let value = self.child_env_value(&record_env_name, &bound);
+                        crate::executor::readonly_functions::env_pair_supercede(
+                            &mut pairs,
+                            record_env_name,
+                            value,
+                        );
+                    } else {
+                        crate::executor::readonly_functions::env_pair_supercede(
+                            &mut pairs,
+                            record_env_name,
+                            bound,
+                        );
+                    }
+                }
                 continue;
             }
             let raw = raws_aligned
@@ -5093,6 +5141,12 @@ pub(crate) fn slash_command_execve_error_message(
     // `a\b` is an ordinary name that goes through the PATH search and
     // earns "command not found", not the execve classification
     // (rubash#1482).
+    // The classification probes the real file: fold the stored E400
+    // pair to the raw char first, or an existing non-executable file
+    // stats as missing and earns 127 instead of GNU's 126
+    // (rubash#3076).
+    let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+    let name = folded_name.as_str();
     let has_separator = if cfg!(windows) {
         name.contains('/') || name.contains('\\')
     } else {

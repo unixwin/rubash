@@ -32,6 +32,18 @@ pub struct Token {
     pub value: String,
     pub raw: String,
     pub position: usize,
+    /// rubash#3028: the PHYSICAL line on which this token's LAST byte was
+    /// read. GNU's reader increments line_number for every physical line
+    /// crossed while reading a token — including elided
+    /// backslash-newline pairs (parse.y:2846 shell_getc, parse.y:2270
+    /// yy_getc) — and read_token_word captures simplecmd_lineno from it
+    /// at the END of a command-position word (parse.y:5849-5851), so a
+    /// word split by a continuation stamps its finishing line, not its
+    /// starting line. The feeder's position-stamping pass computes this
+    /// from the token's end column over the same newline/join prefix
+    /// counts as `position`; everywhere else it defaults to `position`
+    /// (a token that cannot span physical lines ends where it starts).
+    pub end_position: usize,
     pub column: usize,
     /// The LOGICAL line this token belongs to (the feeder's
     /// logical_start_line). GNU parse.y:2504 bumps line_number per
@@ -133,6 +145,7 @@ impl Token {
             value: value.to_string(),
             raw: value.to_string(),
             position,
+            end_position: position,
             column: position,
             logical_line: position,
             line_break: false,
@@ -181,6 +194,7 @@ impl Token {
             value: value.to_string(),
             raw: raw.to_string(),
             position,
+            end_position: position,
             column: position,
             logical_line: position,
             line_break: false,
@@ -206,6 +220,7 @@ impl Token {
             value,
             raw: raw.to_string(),
             position,
+            end_position: position,
             column: position,
             logical_line: position,
             line_break: false,
