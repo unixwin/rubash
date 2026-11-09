@@ -1555,11 +1555,59 @@ impl Executor {
             }
         }
 
+        // GNU execute_cmd.c:4617 execute_simple_command: the forked pipeline
+        // element applies ITS OWN redirections after the pipeline binds its
+        // fds (redir.c do_redirection_internal), so a stage's `< file` /
+        // `<> file` fd-0 redirect REPLACES the inherited shell stdin (an
+        // unbound stage 0) or the upstream pipe payload. This spawner only
+        // modeled inherit-or-payload: a stage-0 `< /dev/null` left the child
+        // reading the live console/pipe forever (rubash#429 — the bash-it
+        // iterate theme's per-prompt `$BASH --norc -i < /dev/null | sed`
+        // wedged the whole ConPTY session), and `echo hi | cat < /dev/null`
+        // fed the upstream payload where GNU feeds the empty file.
+        // rubash#2255: the fd-0 dup/close winners take the same
+        // shared adjudication — a `<&N` dup resolves against the
+        // ambient fd table and (via the replay apply_external_stdin_
+        // redirect performs for the plain path) the command's own
+        // list; a closed fd 0 stays closed. Before this, only the
+        // file winners were adjudicated and a dup winner silently
+        // fell through to the pipe payload below.
+        let fd0_redirect_wins =
+            match crate::executor::shell_options::fd0_stdin_redirect_winner(command) {
+                Some(crate::parser::RedirectKind::Input)
+                | Some(crate::parser::RedirectKind::ReadWrite)
+                | Some(crate::parser::RedirectKind::DuplicateInput)
+                | Some(crate::parser::RedirectKind::CloseInput) => true,
+                // A heredoc/here-string winner is the payload already fed
+                // through the piped arm below (initial_pipeline_input).
+                Some(_) => false,
+                None => command.redirect_in.is_some(),
+            };
+        // rubash#3149 (REPORT §3.1 scheme (b)): a stage-0 fd 0 the
+        // wrapper left bound is a LIVE pipe read end (the streaming
+        // sandwich's producer pipe) — re-read it from the fd table at
+        // the spawn point instead of feeding the empty staged payload
+        // through a fresh pipe (GNU execute_cmd.c:6373 do_piping:
+        // the pipe replaces fd 0). The `!input.is_empty()` guard
+        // never discards a computed payload; drivers guarantee empty
+        // input on the live path, so it is unreachable in the
+        // intended cases.
+        let live_fd0: Option<crate::fd::HANDLE> = if stdin_inherit
+            || fd0_redirect_wins
+            || !input.is_empty()
+        {
+            None
+        } else {
+            match self.fd_table.read_endpoint(0) {
+                Some(crate::executor::fd_table::FdReadEndpoint::File(file)) => Some(file.handle),
+                _ => None,
+            }
+        };
         // The stage's fd 0 is the buffered `input` payload fed through a
         // pipe below (or the live inherited stdin for an unbound stage 0)
         // and fd 1 is captured by the caller — /dev/fd operands
         // materialize against those endpoints, not the fd table.
-        let dev_stdin = if stdin_inherit {
+        let dev_stdin = if stdin_inherit || live_fd0.is_some() {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable
         } else {
             crate::executor::dev_fd_operands::DevOperandStdin::Payload(
@@ -1642,38 +1690,21 @@ impl Executor {
                 process.env(base_name, expanded_value);
             }
         }
-        // GNU execute_cmd.c:4617 execute_simple_command: the forked pipeline
-        // element applies ITS OWN redirections after the pipeline binds its
-        // fds (redir.c do_redirection_internal), so a stage's `< file` /
-        // `<> file` fd-0 redirect REPLACES the inherited shell stdin (an
-        // unbound stage 0) or the upstream pipe payload. This spawner only
-        // modeled inherit-or-payload: a stage-0 `< /dev/null` left the child
-        // reading the live console/pipe forever (rubash#429 — the bash-it
-        // iterate theme's per-prompt `$BASH --norc -i < /dev/null | sed`
-        // wedged the whole ConPTY session), and `echo hi | cat < /dev/null`
-        // fed the upstream payload where GNU feeds the empty file.
-        // rubash#2255: the fd-0 dup/close winners take the same
-        // shared adjudication — a `<&N` dup resolves against the
-        // ambient fd table and (via the replay apply_external_stdin_
-        // redirect performs for the plain path) the command's own
-        // list; a closed fd 0 stays closed. Before this, only the
-        // file winners were adjudicated and a dup winner silently
-        // fell through to the pipe payload below.
-        let fd0_redirect_wins =
-            match crate::executor::shell_options::fd0_stdin_redirect_winner(command) {
-                Some(crate::parser::RedirectKind::Input)
-                | Some(crate::parser::RedirectKind::ReadWrite)
-                | Some(crate::parser::RedirectKind::DuplicateInput)
-                | Some(crate::parser::RedirectKind::CloseInput) => true,
-                // A heredoc/here-string winner is the payload already fed
-                // through the piped arm below (initial_pipeline_input).
-                Some(_) => false,
-                None => command.redirect_in.is_some(),
-            };
         if fd0_redirect_wins {
             self.apply_external_stdin_redirect(command, &mut process)?;
         } else if stdin_inherit {
             process.stdin(Stdio::inherit());
+        } else if let Some(handle) = live_fd0 {
+            // rubash#3149: the fd table's fd 0 is the live upstream
+            // pipe read end — hand the child a duplicate of it (the
+            // same shape as the stdout stream arm below, and GNU
+            // execute_cmd.c:6373 do_piping dup2'ing the pipe onto
+            // fd 0). The child then holds the producer pipe itself,
+            // so no empty-payload writer thread is started and
+            // child.stdin stays None.
+            let duplicated =
+                crate::fd::duplicate_handle_inheritable(handle).map_err(ExecuteError::IoError)?;
+            process.stdin(stdio_from_fd_handle(duplicated));
         } else {
             process.stdin(Stdio::piped());
         }

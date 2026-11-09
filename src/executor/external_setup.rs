@@ -189,6 +189,14 @@ pub(in crate::executor) enum ProcsubSpawnFd {
     /// FileFd's handle is that write end; its path label mirrors
     /// the ambient standard backing's (rubash#2484).
     CaptureWrite(Rc<FileFd>),
+    /// rubash#3149: the consumer's descriptor is a duplicate of the
+    /// live capture stream's write end (the stage pipe) — NOT a
+    /// BackgroundCapture writer. The consumer holds the stage pipe
+    /// open until it exits; its bytes stream live to the downstream
+    /// member (GNU subst.c:6362 process_substitute: the fork
+    /// inherits the descriptor; execute_cmd.c:6373 do_piping: the
+    /// pipe replaces fd 1). Never registered, never drained.
+    StreamWrite(Rc<FileFd>),
     /// A prefix redirect closed this fd.
     Closed,
 }
@@ -2363,15 +2371,43 @@ impl Executor {
     /// with no record was bound directly rather than dup2'd, so it
     /// names the executor's current stdout object: the live capture
     /// when one is active.
-    fn capture_bound_stdout_write_end(&self, fd: u32) -> Option<Rc<FileFd>> {
+    /// The shared preamble of the two capture-bound routes: a
+    /// capture frame is active and fd's recorded stdout-alias
+    /// generation (rubash#223) is the active one. Extracted so
+    /// both routes adjudicate identically.
+    fn capture_stdout_generation_matches(&self, fd: u32) -> bool {
         if !crate::executor::shell_options::stdout_capture_active() {
-            return None;
+            return false;
         }
         match self.fd_table.stdout_alias_generation.get(&fd) {
             Some(Some(generation))
                 if *generation == crate::executor::shell_options::stdout_capture_generation() => {}
-            Some(_) => return None,
+            Some(_) => return false,
             None => {}
+        }
+        true
+    }
+
+    /// rubash#3149: when the live capture frame streams to a
+    /// pipeline pipe, the consumer's fd gets a duplicate of the
+    /// stream's write end itself (the stage pipe), not the
+    /// BG_CAPTURE ordering pipe. Returns None unless the stream
+    /// is armed (no stream under plain $(...) capture).
+    fn capture_bound_stream_write_end(&self, fd: u32) -> Option<Rc<FileFd>> {
+        if !self.capture_stdout_generation_matches(fd) {
+            return None;
+        }
+        let stream = crate::executor::shell_options::active_capture_stream()?;
+        let handle = crate::fd::duplicate_handle_inheritable(stream).ok()?;
+        Some(Rc::new(crate::executor::fd_table::FileFd {
+            handle,
+            path: PathBuf::from("ambient:stdout"),
+        }))
+    }
+
+    fn capture_bound_stdout_write_end(&self, fd: u32) -> Option<Rc<FileFd>> {
+        if !self.capture_stdout_generation_matches(fd) {
+            return None;
         }
         let file = crate::executor::shell_options::background_capture_write_end()?;
         Some(Rc::new(crate::executor::fd_table::FileFd {
@@ -2415,6 +2451,15 @@ impl Executor {
             // ambient backing below, which stays the answer for
             // records naming the process stdout or a parked scope.
             Some(FdWriteEndpoint::Stdout) => {
+                // rubash#3149: when the live capture frame streams to
+                // a pipeline pipe, the consumer's descriptor is a
+                // duplicate of the stream's write end itself (the
+                // stage pipe) — GNU subst.c:6362 / execute_cmd.c:6373.
+                // Only then fall back to the BG_CAPTURE ordering pipe
+                // (rubash#2484).
+                if let Some(file) = self.capture_bound_stream_write_end(fd) {
+                    return ProcsubSpawnFd::StreamWrite(file);
+                }
                 if let Some(file) = self.capture_bound_stdout_write_end(fd) {
                     return ProcsubSpawnFd::CaptureWrite(file);
                 }
@@ -2504,6 +2549,14 @@ impl Executor {
             // live capture scope rides the scope's pipe write end
             // directly as its stdio.
             Some(ProcsubSpawnFd::CaptureWrite(file)) => {
+                match crate::fd::duplicate_handle_inheritable(file.handle).ok() {
+                    Some(handle) => Stdio::from(crate::fd::handle_to_file(handle)),
+                    None => Stdio::inherit(),
+                }
+            }
+            // rubash#3149: same delivery as CaptureWrite — the
+            // disposition already names the stage pipe's write end.
+            Some(ProcsubSpawnFd::StreamWrite(file)) => {
                 match crate::fd::duplicate_handle_inheritable(file.handle).ok() {
                     Some(handle) => Stdio::from(crate::fd::handle_to_file(handle)),
                     None => Stdio::inherit(),
@@ -3600,6 +3653,20 @@ impl Executor {
                         );
                         parent_side_dups.push(dup);
                         used_capture_write_end = true;
+                    }
+                }
+                // rubash#3149: the stage pipe's write end crosses
+                // through the same env channel; NOT a Background-
+                // Capture writer (the pipe itself orders its bytes),
+                // so used_capture_write_end stays clear.
+                ProcsubSpawnFd::StreamWrite(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        env_map.insert(format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}"));
+                        env_map.insert(
+                            format!("__RUBASH_FD_WPATH_{fd}"),
+                            file.path.to_string_lossy().into_owned(),
+                        );
+                        parent_side_dups.push(dup);
                     }
                 }
                 ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
