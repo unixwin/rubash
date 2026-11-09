@@ -501,11 +501,21 @@ pub struct ShellState {
     /// gen_progcomp_completions saves/restores around nesting) so the bare
     /// `compopt` form can operate on it (complete.def:862-886
     /// compopt_builtin). `None` outside a completion function run.
-    pub(crate) pcomp_curcs: Option<crate::builtins::complete::Compspec>,
+    ///
+    /// The handle is SHARED across state clones, like `bind_registry`
+    /// below: in GNU these are process globals, and rubash runs `compgen`
+    /// in-process, so a completion function that reaches `compgen` through
+    /// a command substitution executes on a fork-copy executor whose
+    /// `compopt` mutation must still land on the attempt's live copy and
+    /// fold back into candidate generation (rubash#2611; the copy is
+    /// installed and restored value-wise by the attempt owner, so sharing
+    /// the cell does not leak it across attempts).
+    pub(crate) pcomp_curcs: Rc<RefCell<Option<crate::builtins::complete::Compspec>>>,
     /// pcomplete.c:181 `pcomp_curcmd` port: the command name whose compspec
     /// `pcomp_curcs` governs (printed by the bare `compopt` report form,
-    /// complete.def:872 print_compopts (pcomp_curcmd, ...)).
-    pub(crate) pcomp_curcmd: Option<String>,
+    /// complete.def:872 print_compopts (pcomp_curcmd, ...)). Shares the
+    /// `pcomp_curcs` handle.
+    pub(crate) pcomp_curcmd: Rc<RefCell<Option<String>>>,
     /// Readline's RL_STATE_COMPLETING port: the depth of the host
     /// completion attempts currently in flight
     /// (`Executor::complete_line`, including nested `compgen`
