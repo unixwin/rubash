@@ -248,7 +248,11 @@ use command_text::*;
 pub(crate) use embedded_mutations::COMPOUND_EXPANSION_WS_TAG;
 use env_helpers::*;
 pub(crate) use execution_misc::RandomGen;
+// Shared with builtins::exec: the `exec` builtin face reports a failed
+// spawn through the same shell_execve classification as the executor's
+// own spawn faces (rubash#3148).
 use execution_misc::*;
+pub(crate) use external_inner::spawn_error_diagnostic;
 use external_setup::{
     command_needs_process_substitution_materialization, ProcessSubstitutionFiles,
 };

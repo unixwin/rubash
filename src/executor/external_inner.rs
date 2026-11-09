@@ -4707,16 +4707,26 @@ impl Drop for ForegroundBuiltinSigintGuard {
     }
 }
 
-/// GNU shell_execve (execute_cmd.c:6126-6159) classification of a failed
-/// execve/spawn against the resolved program path. Returns the diagnostic
-/// body (the caller prepends the report prolog and the resolved pathname)
-/// and the exit status. Non-ENOENT failures are EX_NOEXEC with the plain
-/// errno text, exactly the historical behavior of this call site.
+/// GNU shell_execve (execute_cmd.c:6126) classification of a failed
+/// execve/spawn against the resolved program path, in the C arm order:
+/// the status switch (execute_cmd.c:6143 — ENOENT is EX_NOTFOUND, every
+/// other errno EX_NOEXEC), the non-executable file_error arm (:6150),
+/// the E2BIG/ENOMEM file_error arm (:6156), then the sample check —
+/// an executable file with a `#!` line is the bad-interpreter refusal
+/// (:6184, EX_NOEXEC) for ANY errno, because the kernel hands the
+/// interpreter's own failure back as the execve errno (a missing
+/// interpreter is ENOENT, a non-executable one EACCES); an executable
+/// non-`#!` file the kernel cannot load at all is the ENOENT-only
+/// "cannot execute: required file not found" internal_error (:6193);
+/// anything else keeps the plain errno text via file_error (:6198).
+/// Returns the diagnostic body (the caller prepends the report prolog
+/// and the reported pathname) and the exit status. Shared by the
+/// executor's spawn faces and the `exec` builtin face (rubash#3148).
 /// The bool is the prolog family: GNU shell_execve reports the
 /// bad-interpreter refusal through sys_error (error_prolog(0) — no
 /// line segment, rubash#2755) and every sibling classification
 /// through internal_error / file_error (error_prolog(1)).
-fn spawn_error_diagnostic(
+pub(crate) fn spawn_error_diagnostic(
     program: &PathBuf,
     cwd: &std::path::Path,
     error: &io::Error,
@@ -4726,18 +4736,19 @@ fn spawn_error_diagnostic(
     // ENOENT on unix and ERROR_FILE_NOT_FOUND on Windows share the value 2;
     // no libc dependency is needed for this classification.
     const OS_ERROR_FILE_NOT_FOUND: i32 = 2;
-    if error.raw_os_error() != Some(OS_ERROR_FILE_NOT_FOUND) {
-        return (
-            crate::posix_errors::message(error).to_string(),
-            EX_NOEXEC,
-            false,
-        );
-    }
-    // errno == ENOENT: the status is EX_NOTFOUND unless the file itself
-    // proves the #! bad-interpreter refusal (EX_NOEXEC). The probes
-    // below must stat the file the CHILD tried to exec: children are
-    // born in the session cwd (G-02), so a relative program (a
-    // hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
+    // E2BIG / ENOMEM (execute_cmd.c:6156): the only errnos the C code
+    // routes to file_error before the sample check. The values are the
+    // unix ones and MSVC's CRT agrees on both.
+    const OS_ERROR_ARG_LIST_TOO_LONG: i32 = 7;
+    const OS_ERROR_NOT_ENOUGH_MEMORY: i32 = 12;
+    let enoent = error.raw_os_error() == Some(OS_ERROR_FILE_NOT_FOUND);
+    let sample_preempted = matches!(
+        error.raw_os_error(),
+        Some(OS_ERROR_ARG_LIST_TOO_LONG) | Some(OS_ERROR_NOT_ENOUGH_MEMORY)
+    );
+    // The probes below must stat the file the CHILD tried to exec:
+    // children are born in the session cwd (G-02), so a relative program
+    // (a hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
     // anchors there — probing it against the process cwd stats a
     // different file and misclassifies a missing recorded target as
     // a bad interpreter.
@@ -4751,45 +4762,60 @@ fn spawn_error_diagnostic(
         .as_ref()
         .is_some_and(|meta| meta.is_file() && file_has_exec_bit(meta));
     if executable {
-        if let Ok(sample) = std::fs::read(&probe) {
-            if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
-                let line_end = sample
-                    .iter()
-                    .position(|&byte| byte == b'\n')
-                    .unwrap_or(sample.len());
-                let line = String::from_utf8_lossy(&sample[2..line_end]);
-                // GNU getinterp (execute_cmd.c) terminates the interpreter
-                // name at a blank or tab only — a CR stays part of the
-                // name (and is displayed as ^M below), so do not split on
-                // the full whitespace class here.
-                let interp = line.split([' ', '\t']).next().unwrap_or_default();
-                if !interp.is_empty() {
-                    // GNU getinterp + sys_error (execute_cmd.c:6170-6184):
-                    // a trailing CR in the interpreter name is displayed
-                    // as ^M (`#!/bin/sh\r` -> "/bin/sh^M").
-                    let interp = match interp.strip_suffix('\r') {
-                        Some(stem) => format!("{stem}^M"),
-                        None => interp.to_string(),
-                    };
-                    return (
-                        format!("{interp}: bad interpreter: No such file or directory"),
-                        EX_NOEXEC,
-                        true,
-                    );
+        if !sample_preempted {
+            if let Ok(sample) = std::fs::read(&probe) {
+                if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
+                    let line_end = sample
+                        .iter()
+                        .position(|&byte| byte == b'\n')
+                        .unwrap_or(sample.len());
+                    let line = String::from_utf8_lossy(&sample[2..line_end]);
+                    // GNU getinterp (execute_cmd.c) terminates the interpreter
+                    // name at a blank or tab only — a CR stays part of the
+                    // name (and is displayed as ^M below), so do not split on
+                    // the full whitespace class here.
+                    let interp = line.split([' ', '\t']).next().unwrap_or_default();
+                    if !interp.is_empty() {
+                        // GNU getinterp + sys_error (execute_cmd.c:6170-6184):
+                        // a trailing CR in the interpreter name is displayed
+                        // as ^M (`#!/bin/sh\r` -> "/bin/sh^M"). sys_error
+                        // appends the ACTUAL errno text, so an EACCES
+                        // interpreter reads "bad interpreter: Permission
+                        // denied", not the ENOENT wording.
+                        let interp = match interp.strip_suffix('\r') {
+                            Some(stem) => format!("{stem}^M"),
+                            None => interp.to_string(),
+                        };
+                        return (
+                            format!(
+                                "{interp}: bad interpreter: {}",
+                                crate::posix_errors::message(error)
+                            ),
+                            EX_NOEXEC,
+                            true,
+                        );
+                    }
                 }
             }
         }
-        // An executable file the kernel cannot load at all (missing
-        // PT_INTERP loader): execute_cmd.c:6188-6192 internal_error.
+        if enoent {
+            // An executable file the kernel cannot load at all (missing
+            // PT_INTERP loader): execute_cmd.c:6193 internal_error.
+            return (
+                "cannot execute: required file not found".to_string(),
+                EX_NOTFOUND,
+                false,
+            );
+        }
         return (
-            "cannot execute: required file not found".to_string(),
-            EX_NOTFOUND,
+            crate::posix_errors::message(error).to_string(),
+            EX_NOEXEC,
             false,
         );
     }
     (
         crate::posix_errors::message(error).to_string(),
-        EX_NOTFOUND,
+        if enoent { EX_NOTFOUND } else { EX_NOEXEC },
         false,
     )
 }

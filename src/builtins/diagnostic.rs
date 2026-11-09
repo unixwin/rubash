@@ -42,6 +42,19 @@ pub(crate) fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     "rubash: ".to_string()
 }
 
+/// GNU error.c:275-281 sys_error: error_prolog (0) — get_name_for_error
+/// alone, never a line segment. The one shell_execve classification
+/// reported through sys_error is the bad-interpreter refusal
+/// (execute_cmd.c:6184); the `exec` builtin face reaches it through
+/// the shared spawn classifier (rubash#3148), mirroring the executor's
+/// own `sys_error_prefix`.
+pub(crate) fn sys_error_prefix(env_vars: &HashMap<String, String>) -> String {
+    if let Some(file) = error_file_name(env_vars) {
+        return format!("{file}: ");
+    }
+    "rubash: ".to_string()
+}
+
 /// GNU error.c:453 err_readonly (report_error family): the bare
 /// `VAR: readonly variable` bind diagnostic honors gnu_errfmt
 /// (rubash#1038), unlike the builtin_error lines.

@@ -3,7 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
-use super::diagnostic::diagnostic_prefix;
+use super::diagnostic::{diagnostic_prefix, sys_error_prefix};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
@@ -217,19 +217,16 @@ pub(crate) fn replace_process_image(
     if error.raw_os_error() == Some(libc::ENOEXEC) {
         return None;
     }
-    let status = if error.raw_os_error() == Some(libc::ENOENT) {
-        EX_NOTFOUND
-    } else {
-        EX_NOEXEC
-    };
     let mut stderr = io::stderr().lock();
-    let _ = writeln!(
-        stderr,
-        "{}exec: {}: {}",
-        diagnostic_prefix(env_vars),
-        program.display(),
-        error
-    );
+    // The failed execve is reported exactly as the simulation reports
+    // it (rubash#3148): the shared shell_execve classification, not
+    // the bare `(errno == ENOENT) ? 127 : 126` switch with the raw
+    // error text — the doc contract above (the caller's
+    // finish_exec_replacement applies the returned status unchanged)
+    // already promises GNU's failed_exec statuses. A failed stderr
+    // write cannot change the status (GNU ignores the fprintf result).
+    let status = report_exec_spawn_failure(&program, command, env_vars, cwd, &error, &mut stderr)
+        .unwrap_or(EX_NOEXEC);
     Some(Ok(status))
 }
 
@@ -590,6 +587,83 @@ where
     Ok(Some(index))
 }
 
+/// The reported name for a failed spawn on the exec face: GNU
+/// builtins/exec.def:172 hands shell_execve `full_pathname (command)`
+/// (general.c:931-943) — the typed word for a slash-bearing name
+/// (findcmd.c:385-387 savestring), the PATH walk's as-written join
+/// otherwise — made absolute against the cwd with dot components
+/// removed (sh_makepath, MP_DOCWD|MP_RMDOT). The resolved `program`
+/// cannot be re-rendered into this form: the session-cwd anchor that
+/// produced it keeps the join's `/./` residue (rubash#3148).
+fn exec_report_name(
+    command_name: &str,
+    program: &std::path::Path,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+) -> String {
+    // Folded like every other probe and diagnostic in this file
+    // (rubash#3076): the recorded join names the raw file.
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(command_name);
+    let construction = if crate::executor::path::has_path_separator(&folded) {
+        folded
+    } else {
+        crate::executor::path::find_user_command_as_written(&folded, env_vars)
+            .unwrap_or_else(|| program.display().to_string())
+    };
+    let construction = construction.replace('\\', "/");
+    // full_pathname: an absolute construction is returned verbatim
+    // (general.c:937-938).
+    if construction.starts_with('/') || construction.as_bytes().get(1) == Some(&b':') {
+        return construction;
+    }
+    let cwd = cwd.to_string_lossy().replace('\\', "/");
+    let joined = format!("{cwd}/{construction}");
+    // sh_makepath MP_RMDOT canonicalizes the joined form textually:
+    // "." components drop, ".." consumes the preceding component,
+    // empty components collapse.
+    let root_prefix = if joined.starts_with('/') { "/" } else { "" };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    format!("{root_prefix}{}", parts.join("/"))
+}
+
+/// GNU shell_execve (execute_cmd.c:6126-6198) reporting for a failed
+/// spawn on the exec builtin face, shared by every spawn site in this
+/// file (the process-replacement attempt and both simulation arms):
+/// the classification is the executor's `spawn_error_diagnostic`
+/// (rubash#2755) — the bad-interpreter refusal takes the sys_error
+/// prolog (error.c:275: no line segment, and no `exec:` infix; this
+/// is not a builtin_error report), the sibling classifications keep
+/// the line segment, and the reported name is the exec.def:172
+/// full_pathname form. Returns the exit status.
+fn report_exec_spawn_failure<E: Write>(
+    program: &std::path::Path,
+    command_name: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    error: &io::Error,
+    stderr: &mut E,
+) -> io::Result<i32> {
+    let (message, status, sys_error) =
+        crate::executor::spawn_error_diagnostic(&program.to_path_buf(), cwd, error);
+    let prefix = if sys_error {
+        sys_error_prefix(env_vars)
+    } else {
+        diagnostic_prefix(env_vars)
+    };
+    let name = exec_report_name(command_name, program, env_vars, cwd);
+    writeln!(stderr, "{prefix}{name}: {message}")?;
+    Ok(status)
+}
+
 fn run_external_exec<W, E>(
     program: &std::path::Path,
     command_name: &str,
@@ -641,14 +715,7 @@ where
             ))
         }
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
         }
     }
 }
@@ -698,14 +765,7 @@ where
             Ok(crate::executor::wait_status::process_exit_status(&status))
         }
         Err(error) => {
-            writeln!(
-                stderr,
-                "{}exec: {}: {}",
-                diagnostic_prefix(env_vars),
-                program.display(),
-                error
-            )?;
-            Ok(126)
+            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
         }
     }
 }
