@@ -2274,6 +2274,31 @@ pub(super) fn arithmetic_unbound_variable(
     let mut chars = expression.chars().peekable();
     let mut previous = None;
     while let Some(ch) = chars.next() {
+        if ch == ARITH_ASSOC_KEY_MARKER {
+            // A pre-expanded subscript (expand_arithmetic_assoc_subscripts /
+            // expand_arith_indexed_subscripts) reaches this scan hex-encoded
+            // behind the carrier marker, so its identifiers are invisible to
+            // the char walk below. GNU evaluates an indexed subscript in its
+            // own evalexp frame (arrayfunc.c:1368-1378 array_expand_index),
+            // where expr_streval (expr.c:1190-1216) traps an unset read the
+            // same as at the top level — decode the payload and scan it with
+            // the same rules. Associative keys never reach this arm: the
+            // scan skips an associative subscript whole at its `name[`
+            // branch above, so key text stays data here as it is in GNU.
+            let mut hex = String::new();
+            while chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) {
+                hex.push(chars.next().expect("peeked hex digit"));
+            }
+            if let Some(decoded) =
+                decode_arithmetic_assoc_key(&format!("{ARITH_ASSOC_KEY_MARKER}{hex}"))
+            {
+                if let Some(name) = arithmetic_unbound_variable(&decoded, env_vars) {
+                    return Some(name);
+                }
+            }
+            previous = Some(ch);
+            continue;
+        }
         if !(ch == '_' || ch.is_ascii_alphabetic()) {
             previous = Some(ch);
             continue;
