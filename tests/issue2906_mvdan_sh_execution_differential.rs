@@ -18,7 +18,10 @@
 //!   (advisory axis; wording divergences are filed separately).
 //! - Outputs are path-normalized before comparison (shell binary path,
 //!   snippet path, scratch/HOME path) — the eco chain's "path artifact"
-//!   exclusion — so the ledgers are checkout-location independent.
+//!   exclusion — so the ledgers are checkout-location independent. The
+//!   shell's own PPID in `typeset`/`declare` dumps is likewise masked to
+//!   `<PPID>`: it names the process tree the test happens to run under,
+//!   not shell behaviour, so those ledger rows are parent independent.
 //! - A snippet listed in `known-divergences.tsv` must reproduce its
 //!   recorded divergent output exactly (and stay divergent from GNU).
 //!   When a fix for the tracked issue lands, that cell turns red here:
@@ -237,7 +240,53 @@ fn normalize(data: &[u8], bin: &str, script: &Path, work: &Path) -> Vec<u8> {
         }
         out = res;
     }
-    out
+    mask_ppid(&out)
+}
+
+/// `typeset` / `declare` dumps print the shell's own PPID, which is fixed
+/// by the process tree the test runs under, not by shell behaviour. Mask
+/// the digit run in both dump shapes — bare `PPID=82765` and quoted
+/// `declare -ir PPID="82765"` — replacing it with `<PPID>` so the ledger
+/// rows for those snippets reproduce under any parent process.
+fn mask_ppid(data: &[u8]) -> Vec<u8> {
+    const KEY: &[u8] = b"PPID=";
+    let mut res: Vec<u8> = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        // The key must start a variable name: do not mask a longer name
+        // that merely ends in `PPID` (e.g. a user variable `XPPID=`).
+        let boundary = match res.last() {
+            None => true,
+            Some(&b) => !(b.is_ascii_alphanumeric() || b == b'_'),
+        };
+        if boundary && data[i..].starts_with(KEY) {
+            let mut j = i + KEY.len();
+            let quoted = data.get(j) == Some(&b'"');
+            if quoted {
+                j += 1;
+            }
+            let digits_start = j;
+            while j < data.len() && data[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > digits_start && (!quoted || data.get(j) == Some(&b'"')) {
+                res.extend_from_slice(KEY);
+                if quoted {
+                    res.push(b'"');
+                }
+                res.extend_from_slice(b"<PPID>");
+                if quoted {
+                    res.push(b'"');
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+        }
+        res.push(data[i]);
+        i += 1;
+    }
+    res
 }
 
 /// Check one snippet against its expectation; Err describes the mismatch.
