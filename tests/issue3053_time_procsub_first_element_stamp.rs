@@ -322,15 +322,17 @@ fn procsub_target_after_word_keeps_word_line() {
     );
 }
 
-/// Guard: the procsub BODY's own split command reports its own
-/// word-end line (the body is parsed from the target text with its
-/// line provenance; this is the adjacent face, already correct).
+/// Guard: a failing SECOND redirection reports the FIRST
+/// element's stamp (here the unsplit procsub target, ending on
+/// line 1) — not the failing redirection's own target line. The
+/// stamp belongs to the command's first element, whichever
+/// element's diagnostic surfaces it.
 #[test]
-fn procsub_body_split_name_reports_its_end_line() {
+fn second_redirect_error_reports_first_element_stamp() {
     check(
-        "< <(foo\\\nbar) echo done\n",
-        "done\n",
-        "case.sh: line 2: foobar: command not found\n",
-        0,
+        "< <(echo hi) < /no\\\nsuch\n",
+        "",
+        "case.sh: line 1: /nosuch: No such file or directory\n",
+        1,
     );
 }
