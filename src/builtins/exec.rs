@@ -245,7 +245,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin)
+    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
@@ -270,6 +270,43 @@ where
         stderr,
         Some((child_stdout, child_stderr)),
         child_stdin,
+        &[],
+    )
+}
+
+/// execute_with_child_stdio plus genuinely closed child std fds
+/// (rubash#2803): a `>&-` binding is a CLOSED descriptor in GNU —
+/// the child's writes fail EBADF and the child reports them itself
+/// (redir.c r_close_this). Stdio::null() would let the writes
+/// silently succeed, so the spawner inherits the descriptor and
+/// closes it in the child before execve, the same realization the
+/// external-command spawn uses for closed slots
+/// (external_redirects.rs register_pre_exec_close).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_child_stdio_closing<W, E>(
+    args: &[String],
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    stdout: &mut W,
+    stderr: &mut E,
+    child_stdout: Stdio,
+    child_stderr: Stdio,
+    child_stdin: Stdio,
+    close_fds: &[u32],
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_impl(
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        Some((child_stdout, child_stderr)),
+        child_stdin,
+        close_fds,
     )
 }
 
@@ -281,6 +318,7 @@ fn execute_impl<W, E>(
     stderr: &mut E,
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     W: Write,
@@ -430,6 +468,7 @@ where
                 child_stderr,
                 child_stdin,
                 stderr,
+                close_fds,
             ),
             None => run_external_exec(
                 &program,
@@ -639,6 +678,7 @@ fn run_external_exec_with_stdio<E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     stderr: &mut E,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     E: Write,
@@ -653,6 +693,24 @@ where
         cwd,
     );
     process.stdout(child_stdout).stderr(child_stderr);
+    // rubash#2803: genuinely closed std fds (see
+    // execute_with_child_stdio_closing): std arranges the inherited
+    // descriptors first, then the pre_exec closures run, so the
+    // close lands on the arranged slot before execve.
+    #[cfg(unix)]
+    if !close_fds.is_empty() {
+        let close_fds = close_fds.to_vec();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(move || {
+                for fd in &close_fds {
+                    libc::close(*fd as std::os::unix::io::RawFd);
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = close_fds;
     // Explicit for symmetry with run_external_exec: `.status()` would
     // inherit by default, but every spawn site of the exec builtin must
     // state its child-stdin source (fd-table endpoint 0 resolution),
