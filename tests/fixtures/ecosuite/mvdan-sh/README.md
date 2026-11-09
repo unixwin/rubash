@@ -41,7 +41,12 @@ Outputs are path-normalized before comparison — shell binary path →
 `<SHELL>`, snippet path → `<SCRIPT>`, scratch/HOME path → `<HOME>` —
 so the ledgers do not depend on the checkout location (the eco chain's
 "path artifact" exclusion; it is what keeps the `typeset` listing
-snippet t0447 comparable across trees).
+snippet t0447 comparable across trees). Variable dumps additionally
+have the shell's own PPID masked to `<PPID>` (both the bare `PPID=…`
+form in t0447 and the `declare -ir PPID="…"` form in t0449): a PPID
+names the parent process of whoever ran the recording, not shell
+behaviour, so without the mask those two rows could only ever pass
+under the recorder's own parent process.
 
 ## State at pinning (master `88047f50`, 2026-11-08)
 
