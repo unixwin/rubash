@@ -85,3 +85,26 @@ decision recorded in rubash#3033, which this pin does not pre-empt.
 
 Raw run artifacts: `target/issue-suites/results/ecosuite/` (modernish/,
 mvdan-n/, nvm/, bats-core/).
+
+## Manual-run list (rubash#2910)
+
+Some ecosuite faces cannot be chained in automation — live TUI interaction,
+live-session rendering, network-heavy installs. Per the 2026-11-06 ruling
+(manual local runs are acceptable coverage when recorded), those faces sit on
+one recorded list with a named procedure per face and a run log: the list
+lives in the ecosuite warehouse as `MANUAL-RUNS.md` (warehouse-local git,
+`ecosuite` commit `483c2bb`), and covers:
+
+- fzf: the real junegunn/fzf `shell/key-bindings.bash` /
+  `shell/completion.bash` (never vendored or sourced by any harness) + live
+  fzf TUI interaction (Ctrl-R / Ctrl-T / Alt-C / `**` completion).
+- ble.sh (pin v0.4.0-devel3): multiline editing + completion rendering in a
+  live session (`ble-attach` is unreliable in automation).
+- oh-my-niu bundle: end-to-end exercise from an installed location + the
+  theme-gallery visual pass.
+- nvm (pin v0.40.8): `test/slow` + `test/installation_iojs` (real-network
+  runs; never run on any shell so far).
+
+A manual pass counts as coverage only when it is logged in that document
+(date, operator, binary/version, result). As of the list's creation
+(2026-11-08), no manual runs are recorded yet for any of the four faces.

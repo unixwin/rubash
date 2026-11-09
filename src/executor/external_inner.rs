@@ -1090,10 +1090,20 @@ impl Executor {
                     &display,
                 );
             } else {
+                // rubash#2696: the plain walk records the as-written
+                // join (see recorded_resolution_spelling), not the
+                // anchored display — the standard-path branch above
+                // keeps `display` because its walk never consulted
+                // the environment PATH this spelling describes.
+                let recorded = crate::executor::path::recorded_resolution_spelling(
+                    &cmd.words[0],
+                    &program,
+                    &self.shell_state.env_vars,
+                );
                 crate::builtins::hash::record_command_resolution(
                     &mut self.shell_state.env_vars,
                     &cmd.words[0],
-                    &display,
+                    &recorded,
                 );
             }
         }
@@ -3640,23 +3650,37 @@ impl Executor {
         // write(2) — the prolog is what `report_external_spawn_error`
         // would print for the same command).
         let fail_prefix = format!("{}{}: ", self.error_prefix(), exec_path.display());
-        let (enoent_message, enoent_status) = spawn_error_diagnostic(
+        let (enoent_message, enoent_status, enoent_sys_error) = spawn_error_diagnostic(
             &exec_path.to_path_buf(),
+            cwd,
             &std::io::Error::from_raw_os_error(libc::ENOENT),
         );
+        // rubash#2755: the pre-built ENOENT line takes the sys_error
+        // prolog (no line segment) when the classification is the
+        // bad-interpreter refusal, exactly as
+        // report_external_spawn_error prints it.
+        let fail_enoent_text = if enoent_sys_error {
+            format!(
+                "{}{}: {}\n",
+                self.sys_error_prefix(),
+                exec_path.display(),
+                enoent_message
+            )
+        } else {
+            format!("{fail_prefix}{enoent_message}\n")
+        };
         let fail_prefix_c = CString::new(fail_prefix.clone()).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "diagnostic prefix contains an interior NUL",
             )
         })?;
-        let fail_enoent_c =
-            CString::new(format!("{fail_prefix}{enoent_message}\n")).map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "diagnostic text contains an interior NUL",
-                )
-            })?;
+        let fail_enoent_c = CString::new(fail_enoent_text).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "diagnostic text contains an interior NUL",
+            )
+        })?;
 
         // ---- fork: the parent returns the pid at once, no sync. ----
         let pid = unsafe { libc::fork() };
@@ -4349,12 +4373,18 @@ impl Executor {
         // GNU report_prolog (errors.c:75-120): a script-context exec failure
         // prints `$0: line N: word: message` — the same prolog every other
         // diagnostic uses (rubash#231: the bare `rubash:` prefix dropped the
-        // script/line attribution GNU prints). shell_execve reports via
-        // internal_error, so the prefix honors gnu_errfmt (rubash#1038).
+        // script/line attribution GNU prints). shell_execve's sibling
+        // classifications report via internal_error / file_error, so
+        // their prefix honors gnu_errfmt (rubash#1038); the
+        // bad-interpreter refusal alone reports via sys_error
+        // (error_prolog(0), no line segment — rubash#2755).
         // GNU shell_execve (execute_cmd.c:6126-6159) reports the execve
-        // failure against the RESOLVED pathname (findcmd.c file_to_lose_on
-        // fallback included), not the typed word — `noexec.sh` found via
-        // PATH prints the full candidate path (rubash#231).
+        // failure against the filename it handed to execve: the
+        // RESOLVED pathname for PATH shapes (findcmd.c file_to_lose_on
+        // fallback included) — `noexec.sh` found via PATH prints the
+        // full candidate path (rubash#231) — and the typed word itself
+        // for a slash-bearing name, which is never searched
+        // (findcmd.c:385-387 savestring(pathname)).
         //
         // The status is NOT uniformly EX_NOEXEC: shell_execve sets
         // last_command_exit_value = (errno == ENOENT) ? EX_NOTFOUND (127)
@@ -4368,14 +4398,20 @@ impl Executor {
         // EX_NOEXEC); an existing executable non-#! file is "cannot
         // execute: required file not found" (EX_NOTFOUND); anything else
         // keeps the plain errno text via file_error.
-        let (message, status) = spawn_error_diagnostic(program, &error);
-        writeln!(
-            &mut stderr,
-            "{}{}: {}",
-            self.error_prefix(),
-            program.display(),
-            message
-        )?;
+        let (message, status, sys_error) =
+            spawn_error_diagnostic(program, &self.shell_state.cwd, &error);
+        let prefix = if sys_error {
+            self.sys_error_prefix()
+        } else {
+            self.error_prefix()
+        };
+        let word = cmd.words.first().map(String::as_str).unwrap_or_default();
+        let report_name = if crate::executor::path::has_path_separator(word) {
+            crate::executor::substitution_metadata::fold_literal_char_escapes(word)
+        } else {
+            program.display().to_string()
+        };
+        writeln!(&mut stderr, "{}{}: {}", prefix, report_name, message)?;
         self.finish_external_error(cmd, &stderr, status)
     }
 }
@@ -4676,23 +4712,46 @@ impl Drop for ForegroundBuiltinSigintGuard {
 /// body (the caller prepends the report prolog and the resolved pathname)
 /// and the exit status. Non-ENOENT failures are EX_NOEXEC with the plain
 /// errno text, exactly the historical behavior of this call site.
-fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32) {
+/// The bool is the prolog family: GNU shell_execve reports the
+/// bad-interpreter refusal through sys_error (error_prolog(0) — no
+/// line segment, rubash#2755) and every sibling classification
+/// through internal_error / file_error (error_prolog(1)).
+fn spawn_error_diagnostic(
+    program: &PathBuf,
+    cwd: &std::path::Path,
+    error: &io::Error,
+) -> (String, i32, bool) {
     const EX_NOTFOUND: i32 = 127;
     const EX_NOEXEC: i32 = 126;
     // ENOENT on unix and ERROR_FILE_NOT_FOUND on Windows share the value 2;
     // no libc dependency is needed for this classification.
     const OS_ERROR_FILE_NOT_FOUND: i32 = 2;
     if error.raw_os_error() != Some(OS_ERROR_FILE_NOT_FOUND) {
-        return (crate::posix_errors::message(error).to_string(), EX_NOEXEC);
+        return (
+            crate::posix_errors::message(error).to_string(),
+            EX_NOEXEC,
+            false,
+        );
     }
     // errno == ENOENT: the status is EX_NOTFOUND unless the file itself
-    // proves the #! bad-interpreter refusal (EX_NOEXEC).
-    let metadata = std::fs::metadata(program).ok();
+    // proves the #! bad-interpreter refusal (EX_NOEXEC). The probes
+    // below must stat the file the CHILD tried to exec: children are
+    // born in the session cwd (G-02), so a relative program (a
+    // hash-recorded spelling, rubash#2696, or a `hash -p` pathname)
+    // anchors there — probing it against the process cwd stats a
+    // different file and misclassifies a missing recorded target as
+    // a bad interpreter.
+    let probe = if program.is_absolute() {
+        program.clone()
+    } else {
+        cwd.join(program)
+    };
+    let metadata = std::fs::metadata(&probe).ok();
     let executable = metadata
         .as_ref()
         .is_some_and(|meta| meta.is_file() && file_has_exec_bit(meta));
     if executable {
-        if let Ok(sample) = std::fs::read(program) {
+        if let Ok(sample) = std::fs::read(&probe) {
             if sample.len() >= 2 && sample[0] == b'#' && sample[1] == b'!' {
                 let line_end = sample
                     .iter()
@@ -4715,6 +4774,7 @@ fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32)
                     return (
                         format!("{interp}: bad interpreter: No such file or directory"),
                         EX_NOEXEC,
+                        true,
                     );
                 }
             }
@@ -4724,9 +4784,14 @@ fn spawn_error_diagnostic(program: &PathBuf, error: &io::Error) -> (String, i32)
         return (
             "cannot execute: required file not found".to_string(),
             EX_NOTFOUND,
+            false,
         );
     }
-    (crate::posix_errors::message(error).to_string(), EX_NOTFOUND)
+    (
+        crate::posix_errors::message(error).to_string(),
+        EX_NOTFOUND,
+        false,
+    )
 }
 
 /// Write byte slices to fd 2, ignoring errors (GNU ignores the failed

@@ -1995,10 +1995,12 @@ impl Executor {
             let mut limit_reached = false;
             // The mirror stores RAW stream bytes, so a carrier delimiter
             // (e.g. `-d $'\x1b'`) appears as its literal char here, while
-            // the normalized needle is the marker pair — match both and
-            // advance by the form that matched.
+            // the normalized needle is the marker pair, and a byte-locale
+            // high-byte delimiter arrives as the single-byte marker pair
+            // of the raw byte itself (rubash#2662) — match every form
+            // and advance by the form that matched.
             let delimiter_needle = read_delimiter_needle(delimiter);
-            let delimiter_literal_len = delimiter.len_utf8();
+            let delimiter_single = read_delimiter_single_form(delimiter);
             // Count *decoded* units, not transport chars: a raw-byte marker
             // pair (E000 + E001..=E100) is ONE input byte and consumes ONE
             // unit of the -n/-N budget, and the pair is emitted whole so a
@@ -2022,14 +2024,13 @@ impl Executor {
             while cursor < chars.len() {
                 let (index, ch) = chars[cursor];
                 if !exact_char_limit && !escaped && !(escape_aware && ch == '\\') {
-                    if slice[index..].starts_with(&delimiter_needle) {
-                        consumed = index + delimiter_needle.len();
-                        took_any = true;
-                        delimiter_found = true;
-                        break;
-                    }
-                    if slice[index..].starts_with(delimiter) {
-                        consumed = index + delimiter_literal_len;
+                    if let Some(form_len) = read_delimiter_match_len(
+                        &slice[index..],
+                        &delimiter_needle,
+                        delimiter_single.as_deref(),
+                        delimiter,
+                    ) {
+                        consumed = index + form_len;
                         took_any = true;
                         delimiter_found = true;
                         break;

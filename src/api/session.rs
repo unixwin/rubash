@@ -1394,9 +1394,17 @@ impl Session {
         self.executor.positional_params()
     }
 
-    /// Replace the positional parameters (the `set --` path).
+    /// Replace the positional parameters. Hosts pass RAW data:
+    /// the engine entry-encodes each value into the storage domain
+    /// at this boundary (rubash#3105), so callers must not
+    /// pre-encode. (The shell's own `set --` path hands the shared
+    /// setter cooked words and does not pass through here.)
     pub fn set_positional(&mut self, args: Vec<String>) {
-        self.executor.set_positional_params(args);
+        self.executor.set_positional_params(
+            args.iter()
+                .map(|value| crate::executor::substitution_metadata::entry_encode_value_text(value))
+                .collect(),
+        );
     }
 
     /// Alias snapshot: (name, value) pairs, sorted by name.
