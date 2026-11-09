@@ -352,6 +352,32 @@ where
             let folded_command =
                 crate::executor::substitution_metadata::fold_literal_char_escapes(command);
             let command = folded_command.as_str();
+            // GNU builtins/exec.def:163-166: whatever the spelling, an
+            // operand that IS a directory as written is classified before
+            // the generic not-found report — file_isdir(args[0]) probes
+            // the operand itself, so `exec .` and `exec somedir` (no
+            // slash; the PATH walk discarded the directory per findcmd.c
+            // FS_NODIRS) report "cannot execute: Is a directory"
+            // (EX_NOEXEC), not "not found" (rubash#2661). The probe
+            // anchors at the session cwd (G-02), like the slash branch
+            // below.
+            let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
+            let as_written = if as_written.is_absolute() {
+                as_written
+            } else {
+                cwd.join(&as_written)
+            };
+            if std::fs::metadata(&as_written)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                writeln!(
+                    stderr,
+                    "{}exec: {command}: cannot execute: Is a directory",
+                    diagnostic_prefix(env_vars)
+                )?;
+                return Ok(EX_NOEXEC);
+            }
             // GNU builtins/exec.def:151: a slash-containing operand bypasses
             // search_for_command and is handed to shell_execve directly, so
             // the diagnostic is the execve errno text (exec.def:231 ->

@@ -322,7 +322,7 @@ impl Executor {
         // allocates and assigns the dynamic fd like any other command.
         // This path bypasses the simple-command dispatch, so apply the
         // fd_var redirects here.
-        if self.apply_dynamic_fd_var_redirects(cmd, true)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, true, true)? {
             self.exit_code = 1;
             return Ok(());
         }
@@ -848,7 +848,7 @@ impl Executor {
         // allocation and variable bind happen in the child, so the parent
         // keeps the file side effects but never sees the variable value.
         // Apply the redirects for their side effects, then undo the binds.
-        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, false, false)? {
             status = 1;
         }
         self.undo_child_fd_var_redirects();

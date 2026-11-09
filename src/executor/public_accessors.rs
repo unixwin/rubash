@@ -3508,6 +3508,24 @@ impl Executor {
         }
     }
 
+    /// GNU error.c error_prolog with the line suppressed — the
+    /// sys_error family. sys_error (error.c) is the one reporter
+    /// built on error_prolog(0): its prolog is the error name alone,
+    /// never a line segment, in script or interactive context alike.
+    /// The shell_execve bad-interpreter refusal reports through it
+    /// (execute_cmd.c:6184), while its sibling classifications use
+    /// internal_error / file_error (error_prolog(1)) and keep the
+    /// line (rubash#2755).
+    pub fn sys_error_prefix(&self) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        format!("{}: ", self.error_report_name())
+    }
+
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)
     /// appends yy_input_name() — the input stream name — when it differs from
     /// get_name_for_error(). For `bash -c` the stream name is "-c", producing
