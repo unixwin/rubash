@@ -922,6 +922,29 @@ impl Executor {
         context: SubstitutionQuoteContext,
         spans_nonposix: bool,
     ) -> String {
+        // The fragment's pattern / replacement sub-words are expanded
+        // by the context-free embedded walker; record this fragment's
+        // quote context so a nested `$'name'` there is judged by the
+        // enclosing word's quoting, as GNU's read-time translation
+        // judges it (rubash#2650). Recorded HERE, at the routed entry,
+        // because fragment entries (the mutable walker's per-`${}`
+        // dispatch, heredoc bodies included) reach the routed body
+        // directly without passing the whole-word entry above.
+        crate::executor::expand_word::with_extquote_name_quoted_context(
+            matches!(
+                context,
+                SubstitutionQuoteContext::DoubleQuoted | SubstitutionQuoteContext::HereDocument
+            ),
+            || self.expand_quoted_parameter_word_mut_routed_body(word, context, spans_nonposix),
+        )
+    }
+
+    fn expand_quoted_parameter_word_mut_routed_body(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+        spans_nonposix: bool,
+    ) -> String {
         // GNU param_expand resolves one `${}` expansion once: memoize
         // array-element fetches for the duration of this word so repeated
         // helper-layer reads (operator set-checks, error probes) do not
