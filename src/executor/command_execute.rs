@@ -18,6 +18,13 @@ impl Executor {
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
+        // rubash#3107: the dynamic associative variables' owner tables
+        // (aliases, hashed_filenames) mutate without a mirror write, so
+        // a materialized typed cell goes stale at this boundary;
+        // reconcile it from the owner before the verifier below (and
+        // before any later read trusts the cell). See
+        // Executor::sync_dynamic_assoc_cells.
+        self.sync_dynamic_assoc_cells();
         // Debug-only systemic regression net for the typed-cell ↔ mirror
         // invariant: after every command boundary every fresh (undirty)
         // structured array cell must still equal its mirror projection.
