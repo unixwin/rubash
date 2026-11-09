@@ -151,6 +151,21 @@ fn run(root: &Path, body: &str) -> Outcome {
     }
 }
 
+/// The genuine U+E000 control file the fixture ships (user data,
+/// E400-transported — see `fixture`): pair-head scans must skip it,
+/// or every name scan false-reds on the control file itself.
+const GENUINE_UE000: &[u8] = "u\u{E000}v".as_bytes();
+
+/// True when any name OTHER than the genuine-U+E000 control file
+/// carries the raw-byte pair head (U+E000 UTF-8). The fixture ships
+/// `u\u{E000}v` as a genuine-char control, so a bare "any name has a
+/// pair head" scan kills the fixture itself (rubash#3104 rework).
+fn pair_headed(names: &[Vec<u8>]) -> bool {
+    names
+        .iter()
+        .any(|n| n != GENUINE_UE000 && n.windows(3).any(|w| w == PAIR_HEAD))
+}
+
 fn no_pair(out: &Outcome) {
     assert!(
         !out.stdout.windows(3).any(|w| w == PAIR_HEAD)
@@ -176,10 +191,7 @@ fn redirect_var_target_lands_raw_byte_name() {
         names.iter().any(|n| n == b"r\x1c1"),
         "raw byte name missing: {names:?}"
     );
-    assert!(
-        !names.iter().any(|n| n.windows(3).any(|w| w == PAIR_HEAD)),
-        "pair-spelled name landed: {names:?}"
-    );
+    assert!(!pair_headed(&names), "pair-spelled name landed: {names:?}");
     assert_eq!(
         std::fs::read(byte_named(&root, "r", "1")).expect("landed content"),
         b"X"
@@ -200,10 +212,7 @@ fn redirect_comsub_target_lands_raw_byte_name() {
         names.iter().any(|n| n == b"r\x1c2"),
         "raw byte name missing: {names:?}"
     );
-    assert!(
-        !names.iter().any(|n| n.windows(3).any(|w| w == PAIR_HEAD)),
-        "pair-spelled name landed: {names:?}"
-    );
+    assert!(!pair_headed(&names), "pair-spelled name landed: {names:?}");
     no_pair(&out);
 }
 
@@ -217,9 +226,48 @@ fn redirect_ansic_target_lands_raw_byte_name() {
         names.iter().any(|n| n == b"r\x1c3"),
         "raw byte name missing: {names:?}"
     );
+    assert!(!pair_headed(&names), "pair-spelled name landed: {names:?}");
+    no_pair(&out);
+}
+
+// ---- high-byte redirect target (rubash#3104 rework, probe p23) ----
+
+#[test]
+fn redirect_var_target_lands_high_byte_name() {
+    // GNU opens the name bytes verbatim (redir.c:298): a stored byte
+    // 0x9C must land as the single byte, not re-encoded as UTF-8
+    // (C2 9C). 0x1C passes only because it is < 0x80.
+    let root = fixture("redirhigh");
+    let out = run(
+        &root,
+        "n=$(printf 'a\\234b'); printf X > \"$n\"; echo \"rc=$?\"\n",
+    );
+    assert_eq!(out.stdout, b"rc=0\n");
+    let names = entry_names(&root);
     assert!(
-        !names.iter().any(|n| n.windows(3).any(|w| w == PAIR_HEAD)),
-        "pair-spelled name landed: {names:?}"
+        names.iter().any(|n| n == b"a\x9cb"),
+        "high-byte name missing: {names:?}"
+    );
+    assert!(!pair_headed(&names), "pair-spelled name landed: {names:?}");
+    assert_eq!(
+        std::fs::read(root.join(OsStr::from_bytes(b"a\x9cb"))).expect("landed content"),
+        b"X"
+    );
+    no_pair(&out);
+}
+
+#[test]
+fn redirect_target_keeps_utf8_name_bytes() {
+    // Control for the p23 fix: a genuine non-ASCII name carries no
+    // transport, so its UTF-8 bytes must reach the disk unchanged —
+    // the byte-char emission must not Latin-1 widen real text.
+    let root = fixture("redirutf8");
+    let out = run(&root, "printf X > 'aéb'; echo \"rc=$?\"\n");
+    assert_eq!(out.stdout, b"rc=0\n");
+    let names = entry_names(&root);
+    assert!(
+        names.iter().any(|n| n == "aéb".as_bytes()),
+        "utf-8 name missing: {names:?}"
     );
     no_pair(&out);
 }
@@ -404,10 +452,7 @@ fn history_write_lands_raw_byte_name() {
         names.iter().any(|n| n == b"h\x1cf"),
         "raw byte history file missing: {names:?}"
     );
-    assert!(
-        !names.iter().any(|n| n.windows(3).any(|w| w == PAIR_HEAD)),
-        "pair-spelled name landed: {names:?}"
-    );
+    assert!(!pair_headed(&names), "pair-spelled name landed: {names:?}");
     no_pair(&out);
 }
 
