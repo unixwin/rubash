@@ -103,6 +103,81 @@ fn braced_subscript_error_is_reported() {
     );
 }
 
+/// A subscript read of an unset variable under `set -u` traps at the
+/// subscript's own evalexp frame: GNU expr.c:1190-1216 expr_streval
+/// raises err_unboundvar for a reference evaluated through
+/// array_expand_index (arrayfunc.c:1368-1378), exactly as for a
+/// top-level reference. The unit-expansion pass hex-encodes the
+/// subscript behind the carrier marker before evaluation, so the
+/// nounset name scan must decode the payload and scan it with the
+/// same rules, or the trap is lost and the command silently runs on.
+fn expect_unbound(script: &str, name: &str, ctx: &str) {
+    let out = run(script);
+    assert_eq!(
+        out.stdout,
+        b"",
+        "{ctx}: stdout must be empty (the trap aborts the script); stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.code, 127, "{ctx}: -c top-level nounset trap exits 127");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(&format!("{name}: unbound variable")),
+        "{ctx}: stderr must report `{name}: unbound variable`; got {stderr}"
+    );
+}
+
+#[test]
+fn nounset_command_subscript_traps() {
+    expect_unbound(
+        "set -u; declare -a b=(x y); (( b[undef]++ )); echo after",
+        "undef",
+        "(( b[undef]++ ))",
+    );
+}
+
+#[test]
+fn nounset_command_comma_subscript_traps() {
+    expect_unbound(
+        "set -u; declare -a b=(x y); (( b[undef,0]++ )); echo after",
+        "undef",
+        "(( b[undef,0]++ ))",
+    );
+}
+
+#[test]
+fn nounset_command_read_subscript_traps() {
+    expect_unbound(
+        "set -u; declare -a b=(x y); (( x = b[undef,0] )); echo after",
+        "undef",
+        "(( x = b[undef,0] ))",
+    );
+}
+
+#[test]
+fn nounset_let_subscript_traps() {
+    expect_unbound(
+        "set -u; declare -a b=(x y); let 'b[undef]++'; echo after",
+        "undef",
+        "let 'b[undef]++'",
+    );
+}
+
+#[test]
+fn nounset_assoc_key_stays_data() {
+    // Control: an associative subscript is a string key, never an
+    // arithmetic read — a missing key on a non-empty assoc array
+    // reads as empty and the script runs on.
+    let out = run("set -u; declare -A A=([k]=1); (( A[undef] )); echo after");
+    assert_eq!(out.stdout, b"after\n", "assoc key control");
+    assert_eq!(out.code, 0, "assoc key control rc");
+    assert!(
+        out.stderr.is_empty(),
+        "assoc key control: stderr must be empty; got {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn literal_comma_expression_still_evaluates() {
     // Control: the same final text written literally is a valid comma
