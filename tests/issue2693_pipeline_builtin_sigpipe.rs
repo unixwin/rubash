@@ -46,8 +46,12 @@ fn printf_stage_dies_by_sigpipe() {
     assert_eq!(stdout, "y\nps0=141 ps1=0\n", "stderr: {stderr}");
 }
 
-/// A builtin loop stage: the stage's `echo` writes must meet the
-/// same fate once `head` closes the pipe.
+/// A builtin loop stage: the same fate must meet the stage's
+/// `echo` writes once `head` closes the pipe. NOTE (base probe,
+/// f17644d7): this cell already passes on base — compound/loop
+/// stages take the forked-child path, whose spawn resets SIGPIPE
+/// like an external child. It is kept as a regression lock; the
+/// defect cell of this issue is the simple-builtin stage above.
 #[test]
 fn echo_loop_stage_dies_by_sigpipe() {
     let (stdout, stderr, code) = run_rubash(

@@ -19,14 +19,27 @@
 //!     geometry (it appears to describe the niu interactive
 //!     geometry the audit measured through). These pins follow
 //!     the oracle, not the issue text; see the lane REPORT.
-//!   - both control faces (real /usr/bin/sleep) behave the same.
+//!   - both real-child faces (cells C and D below) behave the
+//!     same in GNU.
 //!
 //! rubash face 1 (per the issue): the emulated sleep
 //! (src/executor/command_dispatch_primary.rs PrimarySlot::Sleep,
 //! trap_exec.rs sleep_interruptibly) cannot be group-killed — a
 //! group SIGINT is recorded and consumed only when the virtual
 //! sleep ends, so the script CONTINUES (END prints) and the shell
-//! dies by SIGINT at process exit instead of at once.
+//! dies by SIGINT at process exit instead of at once. Measured on
+//! base: death by SIGINT only after the sleep's full remainder.
+//!
+//! rubash face 2 (measured on base f17644d7, NOT in the issue):
+//! during a REAL foreground child the shell-only SIGTERM is
+//! deferred the same way — the recorded terminating signal is
+//! consumed at the wait boundary, so the shell waits out the
+//! child before dying by SIGTERM, where GNU dies at once. The
+//! deferral the issue attributed to GNU is rubash's own wait
+//! machinery (the same recorded-signal consumption as #2729).
+//! During the EMULATED sleep the shell-only SIGTERM happens to
+//! land on the oracle shape already (the virtual sleep aborts
+//! and the shell dies at once) — cell B locks that.
 //!
 //! Harness: same script-shell geometry as the #2729 pins.
 
@@ -118,13 +131,13 @@ fn finish(mut rig: Rig, delivered_at: Instant) -> Driven {
 const EMULATED: &str = "trap 'echo EXIT-TRAP-RAN' EXIT\n\
     : > \"$J2_LATCH\"\n\
     echo STARTED\n\
-    sleep 2\n\
+    sleep 3\n\
     echo END\n";
 
 const REAL: &str = "trap 'echo EXIT-TRAP-RAN' EXIT\n\
     : > \"$J2_LATCH\"\n\
     echo STARTED\n\
-    /usr/bin/sleep 2\n\
+    /usr/bin/sleep 3\n\
     echo END\n";
 
 fn assert_prompt_signal_death(d: &Driven, sig: i32) {
@@ -167,11 +180,10 @@ fn group_sigint_during_emulated_sleep_kills_promptly() {
     assert_prompt_signal_death(&d, libc::SIGINT);
 }
 
-/// Face 2 cell: shell-only SIGTERM during the EMULATED sleep.
-/// GNU (real child, oracle-probed) dies by SIGTERM at once, EXIT
-/// trap runs, END never prints. Whether baseline rubash diverges
-/// here is what this cell measures; the fix must land on the
-/// oracle shape either way.
+/// Regression lock: shell-only SIGTERM during the EMULATED
+/// sleep already lands on the oracle shape on base (the virtual
+/// sleep aborts and the shell dies at once). The fix must not
+/// regress this while repairing faces 1 and 2.
 #[test]
 fn shell_only_sigterm_during_emulated_sleep_kills_promptly() {
     let rig = spawn_rig(EMULATED);
@@ -182,10 +194,12 @@ fn shell_only_sigterm_during_emulated_sleep_kills_promptly() {
     assert_prompt_signal_death(&d, libc::SIGTERM);
 }
 
-/// Control (regression lock): shell-only SIGTERM during a REAL
-/// sleep — the shell dies by SIGTERM at once in both shells.
+/// Defect cell, face 2: shell-only SIGTERM during a REAL sleep.
+/// GNU dies by SIGTERM at once (oracle-probed); baseline rubash
+/// defers the recorded signal to the wait boundary and dies
+/// only after the child's full remainder.
 #[test]
-fn shell_only_sigterm_during_real_sleep_control() {
+fn shell_only_sigterm_during_real_sleep_kills_promptly() {
     let rig = spawn_rig(REAL);
     let t = Instant::now();
     let rc = unsafe { libc::kill(rig.pid as i32, libc::SIGTERM) };

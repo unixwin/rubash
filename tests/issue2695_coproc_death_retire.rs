@@ -6,21 +6,27 @@
 //! (execute_cmd.c:2318ff) sets COPROC_DEAD — and the job-status
 //! sweep retires it: coproc_reap (execute_cmd.c:2225) disposes it
 //! (coproc_unsetvars + coproc_close), called from the sweep at
-//! jobs.c:1342 and from the wait_for_job path at jobs.c:3494. So
-//! once the shell has had any command boundary after the death,
-//! ${COPROC[0]} expands empty and a `read -u ${COPROC[0]}` fails
-//! with read.def:373's "invalid file descriptor specification"
-//! instead of reading EOF from the stale fd.
+//! jobs.c:1342 and from the wait_for_job path at jobs.c:3494. The
+//! retirement happens at ordinary command boundaries, builtin-only
+//! sequences included. So once the shell has run anything after
+//! the death, ${COPROC[0]} expands empty and a
+//! `read -u ${COPROC[0]}` fails with read.def:373's "invalid file
+//! descriptor specification" instead of reading EOF from the
+//! stale fd.
 //!
-//! rubash retires the coproc only on the explicit `wait` path
-//! (external_finish.rs); its notify sweep leaves COPROC/COPROC_PID
-//! set and the stale fd readable-as-EOF.
+//! rubash base (f17644d7, probed): the verbatim two-read shape is
+//! stale in 3/3 runs (b silently set to "", COPROC still set) —
+//! the retirement exists ONLY on paths that finish an external
+//! command (external_finish.rs sweeps there, the explicit `wait`
+//! path included); a builtin-only sequence never retires it.
 //!
 //! Determinism: the bare two-read shape is timing-sensitive even
-//! in GNU (the audit saw it flip); these cells put a real external
-//! command boundary (a foreground wait, which sweeps dead children
-//! in both shells' designs) between the death and the check, which
-//! makes the GNU side deterministic.
+//! in GNU (the audit saw it flip; 1 of 3 oracle runs retired in
+//! time). The defect cell below first reads to EOF — after which
+//! the coproc's death is a certainty, not a race — then burns a
+//! short builtin-only loop (no external command, so rubash's
+//! external-finish sweep cannot fire), which makes the GNU side
+//! deterministic (3/3 oracle runs) while staying red on base.
 
 #![cfg(unix)]
 
@@ -49,10 +55,39 @@ fn run_script(body: &str) -> (String, String, Option<i32>) {
     )
 }
 
-/// After the coproc's output is consumed (it has exited) and one
-/// foreground external command has run, the coproc is retired:
-/// the second read fails on the empty expansion, `b` stays unset,
-/// and both COPROC and COPROC_PID are gone.
+/// Defect cell: the coproc's output is consumed, an EOF read
+/// proves it dead, and a builtin-only loop gives the notify
+/// sweep its boundary — no external command runs, so only a
+/// genuine command-boundary retirement (GNU's) can clear the
+/// state. The third read must then fail on the empty expansion,
+/// `b` stays unset, and both COPROC and COPROC_PID are gone.
+/// Baseline rubash leaves the stale fd readable-as-EOF and the
+/// variables set.
+#[test]
+fn dead_coproc_retired_at_builtin_only_boundary() {
+    let (stdout, stderr, code) = run_script(
+        "coproc { echo only; }\n\
+         read -u ${COPROC[0]} a\n\
+         read -u ${COPROC[0]} x\n\
+         i=0; while (( i < 10000 )); do (( i++ )); done\n\
+         read -u ${COPROC[0]} b\n\
+         echo \"rc=$? a=[$a] b=[${b-unset}] c0=[${COPROC[0]-empty}] cpid=[${COPROC_PID-empty}]\"\n",
+    );
+    assert_eq!(code, Some(0), "stdout: {stdout}\nstderr: {stderr}");
+    assert_eq!(
+        stdout, "rc=1 a=[only] b=[unset] c0=[empty] cpid=[empty]\n",
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("invalid file descriptor specification"),
+        "the retired coproc's read must fail as a bad fd: {stderr}"
+    );
+}
+
+/// Regression lock: with a real external command boundary the
+/// retirement already happens on base too (the external-finish
+/// sweep); the fix must keep this working while extending the
+/// retirement to builtin-only boundaries.
 #[test]
 fn dead_coproc_retired_before_second_read() {
     let (stdout, stderr, code) = run_script(
@@ -73,9 +108,8 @@ fn dead_coproc_retired_before_second_read() {
     );
 }
 
-/// State-only face of the same mechanism: an EOF read proves the
-/// coproc is dead; after one more command boundary the COPROC
-/// variables must already be retired (no `wait` involved).
+/// Regression lock: an EOF read plus an external boundary also
+/// retires on base; state face of the same mechanism.
 #[test]
 fn dead_coproc_state_retired_after_eof_and_boundary() {
     let (stdout, stderr, code) = run_script(
