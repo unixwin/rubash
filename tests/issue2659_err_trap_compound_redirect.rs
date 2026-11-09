@@ -122,6 +122,26 @@ fn issue2659_loop_body_never_runs_and_trap_state_chains() {
 }
 
 #[test]
+fn issue2659_subshell_redirect_fires_err_and_continues() {
+    let (stdout, _stderr, code) = run_script(
+        "subshell",
+        "trap 'echo gotERR' ERR\n( echo inner ) < /no/such/dir/f\necho \"after: $?\"\n",
+    );
+    assert_eq!(stdout, "gotERR\nafter: 1\n");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn issue2659_case_redirect_fires_err_and_continues() {
+    let (stdout, _stderr, code) = run_script(
+        "case",
+        "trap 'echo gotERR' ERR\ncase x in x) echo cbody;; esac < /no/such/dir/f\necho \"after: $?\"\n",
+    );
+    assert_eq!(stdout, "gotERR\nafter: 1\n");
+    assert_eq!(code, Some(0));
+}
+
+#[test]
 fn issue2659_simple_command_redirect_still_fires_err() {
     // Regression lock: the simple-command redirect channel already
     // adjudicated the ERR trap before this fix (execute_cmd.c:993
