@@ -4975,7 +4975,7 @@ impl Executor {
             // rest of this attempt. Outside it always errors.
             if parsed.operands.is_empty() && pseudo.is_none() {
                 if self.shell_state.line_completion_depth == 0
-                    || self.shell_state.pcomp_curcs.is_none()
+                    || self.shell_state.pcomp_curcs.borrow().is_none()
                 {
                     writeln!(
                         stderr,
@@ -4984,11 +4984,16 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(1); // EXECUTION_FAILURE
                 }
-                let curcmd = self.shell_state.pcomp_curcmd.clone().unwrap_or_default();
+                let curcmd = self
+                    .shell_state
+                    .pcomp_curcmd
+                    .borrow()
+                    .clone()
+                    .unwrap_or_default();
                 if parsed.on_options == 0 && parsed.off_options == 0 {
                     // complete.def:870-874 print_compopts (pcomp_curcmd,
                     // cs, 1) → stdout.
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_ref() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow().as_ref() {
                         crate::builtins::complete::print_compopts_line(&curcmd, cs, &mut stdout)?;
                     }
                 } else {
@@ -5000,7 +5005,7 @@ impl Executor {
                     // after generation, pcomplete.c gen_progcomp_
                     // completions), so the fallback decisions and the
                     // insert policy see the mutated bits (rubash#2572).
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow_mut().as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
                     }
@@ -5518,10 +5523,10 @@ impl Executor {
         // restored afterwards (nesting-safe). A `compopt` executed by the
         // completion function reads and mutates this copy
         // (complete.def:866-886).
-        let saved_curcs = self.shell_state.pcomp_curcs.take();
-        let saved_curcmd = self.shell_state.pcomp_curcmd.take();
-        self.shell_state.pcomp_curcs = Some(spec.clone());
-        self.shell_state.pcomp_curcmd = Some(cmd_name.clone());
+        let saved_curcs = self.shell_state.pcomp_curcs.borrow_mut().take();
+        let saved_curcmd = self.shell_state.pcomp_curcmd.borrow_mut().take();
+        *self.shell_state.pcomp_curcs.borrow_mut() = Some(spec.clone());
+        *self.shell_state.pcomp_curcmd.borrow_mut() = Some(cmd_name.clone());
         // rubash#1799: same PIPESTATUS cell rule as the compgen arm.
         dynamic.pipestatus = self.pipestatus_listing();
         if let Some(funcname) = spec.funcname.as_deref() {
@@ -5572,12 +5577,12 @@ impl Executor {
         // restore discards it — GNU's `*foundp |= cs->options` fold.
         // The registry spec itself is never mutated by a live
         // completion (the mutation lives on the per-attempt copy).
-        if let Some(current) = &self.shell_state.pcomp_curcs {
+        if let Some(current) = self.shell_state.pcomp_curcs.borrow().as_ref() {
             dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
-        self.shell_state.pcomp_curcs = saved_curcs;
-        self.shell_state.pcomp_curcmd = saved_curcmd;
+        *self.shell_state.pcomp_curcs.borrow_mut() = saved_curcs;
+        *self.shell_state.pcomp_curcmd.borrow_mut() = saved_curcmd;
         Some(dynamic)
     }
 
