@@ -119,10 +119,7 @@ fn command_v_merged_stream_interleaves_per_operand() {
 /// the streams either).
 #[test]
 fn type_merged_file_interleaves_per_operand() {
-    let dir = std::env::temp_dir().join(format!(
-        "rubash-issue2699-{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("rubash-issue2699-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create fixture dir");
     let file = dir.join("merged.out");

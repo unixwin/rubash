@@ -12,10 +12,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<bool, ExecuteError> {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if self.execute_command_describe_with_io(&cmd.words[1..], &mut stdout, &mut stderr)? {
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        if self.execute_command_describe_with_io(
+            &cmd.words[1..],
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
+        )? {
+            self.write_buffered_builtin_output_chunks(cmd, &log)?;
             return Ok(true);
         }
 
@@ -149,10 +152,13 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let status = self.execute_type_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
-        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        let status = self.execute_type_with_io(
+            &cmd.words[1..],
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
+        )?;
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         Ok(status)
     }
 
@@ -273,6 +279,14 @@ impl Executor {
                     diag.free(format_args!("{name}: not found"));
                 }
             }
+            // rubash#2699: flush the diagnostic for THIS operand now,
+            // so the stderr chunk lands in the log immediately after
+            // this operand's stdout describe chunk (GNU type.def
+            // writes through the descriptors as it goes;
+            // builtin_error is unbuffered). A no-op when nothing is
+            // pending — TypeOnly/PathOnly record nothing, so the
+            // comsub fast path is unaffected.
+            diag.flush_with(|| self.diagnostic_prolog());
         }
         diag.flush_with(|| self.diagnostic_prolog());
         Ok(status)
