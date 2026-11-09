@@ -1546,6 +1546,14 @@ pub struct Executor {
     /// came from that upfront lex (not from a later eval-time lex) and is
     /// eligible for the read-time re-derivation.
     unit_lex_locale: std::cell::RefCell<Option<String>>,
+    /// rubash#2772: extquote state in effect when each SOURCE LINE was
+    /// first reached at reader level — the state GNU's parser applies to
+    /// that line's `$'...'` translation verdicts (parse.y:4053 translates
+    /// a span inside a `${}` body only when `extended_quote` held at the
+    /// moment the line was read, for word-region spans in double quotes).
+    /// Same recording discipline as `line_lex_locales`; consumed by the
+    /// word re-derivation in command_prepare.
+    line_lex_extquotes: std::cell::RefCell<HashMap<usize, bool>>,
     /// GNU `line_number` ambient: at top level it advances to each
     /// command's parse-end line; inside a pre-parsed body it freezes at
     /// the enclosing command's established line (execute_cmd.c — only
