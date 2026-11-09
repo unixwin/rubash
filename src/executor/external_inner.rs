@@ -2750,10 +2750,9 @@ impl Executor {
             } else {
                 let opened = if write {
                     if redirect.append {
-                        open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        )))
+                        open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(&target)),
+                        )
                     } else {
                         self.create_redirect_output(&target, redirect.clobber)
                             .map_err(|error| crate::posix_errors::path_error(&target, error))

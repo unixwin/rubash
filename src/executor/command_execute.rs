@@ -46,6 +46,7 @@ impl Executor {
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
         self.redirect_target_single_glob_match.borrow_mut().clear();
+        self.redirect_target_had_transport.borrow_mut().clear();
         self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand

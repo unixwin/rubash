@@ -531,6 +531,34 @@ pub(crate) fn fold_literal_char_escapes(text: &str) -> String {
     }
 }
 
+/// Convert a name finalized by [`fold_literal_char_escapes`] to the
+/// filesystem byte spelling: byte chars (U+0000..=U+00FF) emit their
+/// single byte; every other char emits its UTF-8 encoding. GNU passes
+/// the name bytes verbatim to open(2) (redir.c:298 redirection_expand
+/// returns the string do_redirection_internal opens; findcmd.c:623
+/// walks PATH with the name bytes), so a folded U+009C must reach the
+/// disk as 0x9C, not re-encoded as UTF-8 C2 9C (rubash#3104 p23).
+///
+/// Callers must only route names that went through folding here: a
+/// genuine Latin-1 char (e.g. U+00E9 `é`) in a folded name is
+/// indistinguishable from the byte char for 0xE9 and would emit the
+/// single byte. Names that never carried transport skip the fold
+/// entirely, so a pure-UTF-8 name never reaches this conversion
+/// (guarded by the transport flag at each call site).
+pub(crate) fn folded_name_to_path_bytes(text: &str) -> Vec<u8> {
+    let mut output = Vec::with_capacity(text.len());
+    for ch in text.chars() {
+        let cp = ch as u32;
+        if cp <= 0xFF {
+            output.push(cp as u8);
+        } else {
+            let mut buf = [0; 4];
+            output.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    output
+}
+
 /// Decode marker characters embedded in an otherwise byte-oriented output.
 ///
 /// Echo can receive shell text from a read record, but it also emits raw

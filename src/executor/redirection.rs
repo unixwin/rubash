@@ -3017,8 +3017,7 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
                     match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
                         Some(error) => Err(crate::posix_errors::path_error(&target, error)),
