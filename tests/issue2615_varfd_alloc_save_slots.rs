@@ -206,6 +206,38 @@ fn issue2615_save_lives_for_the_commands_duration() {
 }
 
 #[test]
+fn issue2615_fork_child_walks_count_no_saves() {
+    // The saves counted by the cells above exist only in an
+    // UNDOABLE walk (redir.c:243 gates the whole undo machinery on
+    // RX_UNDOABLE). A forked child's walks run RX_ACTIVE only — an
+    // external command's list (execute_cmd.c:5522) and a subshell's
+    // own list (execute_cmd.c:1761) — so there the SAME list shapes
+    // allocate without the save: the external child's dup lands on
+    // fd 10 (its reader reads fd 10), and a `{var}` allocation in a
+    // subshell body whose list rebound an open fd allocates 10,
+    // not 11. GNU-verified with this script (THIS_SH pointing at
+    // the shell under test on both sides).
+    let dir = tempdir("fork");
+    std::fs::write(dir.join("seed.txt"), "SEED\n").expect("write seed");
+    std::fs::write(dir.join("f9.txt"), "F9\n").expect("write f9");
+    std::fs::write(
+        dir.join("reader.sh"),
+        "IFS= read -r -u 10 line || line=\"READ10-FAIL\"\necho \"CHILD10=[$line]\"\n",
+    )
+    .expect("write reader");
+    let (stdout, stderr, code) = run_script(
+        &dir,
+        "exec 9<seed.txt\n\"${THIS_SH}\" reader.sh 9<f9.txt {w}<&9\necho \"rc=$? w=[${w-UNSET}]\"\n( {v}>isub.txt echo hi; echo \"SUBV=$v\" ) 9>osub.txt\n",
+    );
+    assert_eq!(
+        stdout, "CHILD10=[F9]\nrc=0 w=[UNSET]\nhi\nSUBV=10\n",
+        "stderr: {stderr}"
+    );
+    assert_eq!(code, Some(0));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn issue2615_ambient_occupancy_control() {
     // S08 control: persistent occupancy already agreed — ambient 10
     // and 11 open, a bare {var} bind allocates 12 in both shells.
