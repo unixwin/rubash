@@ -151,6 +151,18 @@ golden_fixture!(golden_issue296_carrier_adjacent_comsub => "issue296-carrier-adj
 fn golden_issue1338_bash_argv0() {
     run_golden_fixture("issue1338-bash-argv0", 60, &[]);
 }
+// Windows-lane gated (not a golden_fixture! invocation): the rubash#2908
+// chain EXECUTES the vendored ruby-build corpus copy offline, driving
+// real POSIX externals resolved from the lane PATH (curl fetching a
+// file:// URL, tar, a sha256 tool) and a POSIX corpus program; under
+// the Windows lane's resolver shapes (System32 curl.exe, drive-letter
+// paths in file:// URLs) the transcript is not engine bytes. Coverage
+// continues on non-Windows runs.
+#[cfg(not(windows))]
+#[test]
+fn golden_issue2908_ruby_build_exec() {
+    run_golden_fixture("issue2908-ruby-build-exec", 60, &["ruby-build/ruby-build"]);
+}
 golden_fixture!(golden_issue1339_numeric_padding => "issue1339-numeric-padding", timeout 60, corpus []);
 golden_fixture!(golden_issue1340_xtrace_setattr => "issue1340-xtrace-setattr", timeout 60, corpus []);
 golden_fixture!(golden_issue1341_xtrace_indirection => "issue1341-xtrace-indirection", timeout 60, corpus []);
