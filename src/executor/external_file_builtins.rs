@@ -2150,7 +2150,7 @@ impl Executor {
                     return Ok(true);
                 }
                 let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                    &self.session_path(self.redirect_target_filesystem_path(&target)),
                 )?;
                 file.write_all(&output)?;
                 self.exit_code = 0;

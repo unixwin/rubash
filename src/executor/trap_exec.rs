@@ -612,7 +612,7 @@ impl Executor {
             return Ok(());
         }
         // G-02 session-cwd anchor (rubash#1887): see set_fd_readwrite_file.
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         let file = FileFd::open_write(path, append, false)
             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
         self.fd_table
@@ -3874,7 +3874,7 @@ impl Executor {
         if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);
             let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(&target)),
             )?;
             let child_stdout = Stdio::from(file.try_clone()?);
             // rubash#1175: `exec cmd >>file` — same replacement attempt
@@ -4038,7 +4038,7 @@ impl Executor {
         if let Some(redirect) = &cmd.redirect_err_append {
             let target = self.expand_redirect_target(redirect);
             let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(&target)),
             )?;
             let child_stderr = Stdio::from(file.try_clone()?);
             // rubash#1175: `exec cmd 2>>file` — same replacement attempt
@@ -7856,8 +7856,7 @@ impl Executor {
 
                 // G-02 session-cwd anchor (rubash#1887): see
                 // set_fd_readwrite_file.
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 let (read_file, write_file) =
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         FileFd::open_readwrite_pair(path)

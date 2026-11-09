@@ -2160,6 +2160,7 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
@@ -2505,12 +2506,35 @@ impl Executor {
         let [file_word] = words.as_slice() else {
             return ambiguity(strip_matching_quotes(target));
         };
+        // The finalized word is a FILENAME from here on: GNU
+        // open_redir_file (builtins/evalstring.c:759) opens the
+        // expanded word verbatim, so fold any carrier pair it
+        // carries through the shared name-boundary gate + decoder
+        // (rubash#3104). This face finalizes its own word and never
+        // passes redirect_operand_literal, so a stored raw-byte
+        // pair otherwise reached the open — and its diagnostic —
+        // verbatim.
+        // Whether the word carried transport is recorded before the
+        // fold (rubash#3104 p23): the folded string cannot tell a
+        // byte char from a genuine char of the same code point, so a
+        // high-byte name must probe as raw bytes here.
+        let file_word_had_transport =
+            crate::executor::markers::contains_decodable_transport(file_word);
+        let folded_file_word =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(file_word);
+        let file_word: &str = &folded_file_word;
         // Model the Linux open(dir, O_RDONLY)+read dance: open succeeds and
         // the first zread fails EISDIR, so read_comsub (subst.c:6700-6712)
         // returns NULL with EXECUTION_SUCCESS — a directory operand is
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
-        let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        let read_path = if file_word_had_transport {
+            crate::executor::path::path_buf_from_folded_name(
+                &shell_path_to_windows(file_word, &self.shell_state.env_vars).to_string_lossy(),
+            )
+        } else {
+            shell_path_to_windows(file_word, &self.shell_state.env_vars)
+        };
         // A materialized input process substitution resolves to /dev/fd/N
         // (subst.c process_substitute + move_to_high_fd): the bytes live in
         // the fd table's ProcessSubstitution endpoint, not on disk. Reading
