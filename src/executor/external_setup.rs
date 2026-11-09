@@ -599,8 +599,7 @@ impl Executor {
                     {
                         return InListBinding::Other;
                     }
-                    let path = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
                     return InListBinding::File(path);
                 }
             }
@@ -735,8 +734,7 @@ impl Executor {
                         return self
                             .endpoint_as_own_input_binding(fd, ambient_fd, endpoint, &target);
                     }
-                    let path = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
                     let opened = if entry.kind == crate::parser::RedirectKind::ReadWrite {
                         std::fs::OpenOptions::new()
                             .read(true)
@@ -1062,8 +1060,7 @@ impl Executor {
                 // walk).
                 self.open_net_redirect(&target)?
             } else if redirect.append {
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 // niubash#519: CON has no read+write handle; a child's fd 0
                 // only needs the console input half (FileFd::
                 // open_readwrite_pair splits the fd-table binds).

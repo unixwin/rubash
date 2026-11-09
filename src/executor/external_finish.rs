@@ -1165,9 +1165,16 @@ impl Executor {
             // this same process, and a `umask` inside it must die at
             // this process boundary like GNU's exec'd child.
             let fork_saved_process_umask = saved_shell_state.fork_saved_process_umask;
+            // rubash#2636: the same bypass applies to the rlimit
+            // half — a `ulimit` inside the child script re-limited
+            // this process and must die at this boundary too.
+            let fork_saved_process_rlimits = saved_shell_state.fork_saved_process_rlimits.clone();
             self.shell_state = saved_shell_state;
             if let Some(mask) = fork_saved_process_umask {
                 crate::builtins::umask::apply_process_umask(mask);
+            }
+            if let Some(rlimits) = &fork_saved_process_rlimits {
+                crate::builtins::ulimit::apply_process_rlimits(rlimits);
             }
         }
         self.shell_state.coproc_names = saved_coproc_names;

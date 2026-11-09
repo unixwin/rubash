@@ -718,7 +718,7 @@ impl Executor {
         // POSIX target word is kept for diagnostics. A path that exists
         // (or misses under both spellings) keeps the plain mapped form.
         let win_path = self.session_path(crate::executor::path::windows_operand_file_path(
-            shell_path_to_windows(target, &self.shell_state.env_vars),
+            self.redirect_target_filesystem_path(target),
             &self.shell_state.env_vars,
         ));
         // A spawned child reading a `<(cmd)` carrier must get the stream's
@@ -2162,6 +2162,26 @@ impl Executor {
         }
     }
 
+    /// The filesystem path for an expanded redirect target. When the
+    /// target's expansion carried raw-byte transport (recorded by
+    /// expand_redirect_operand_fields in `redirect_target_had_transport`),
+    /// its byte chars emit raw bytes — GNU redir.c:298 opens the name
+    /// bytes verbatim, so a folded U+009C must reach the disk as 0x9C,
+    /// not re-encoded as UTF-8 C2 9C. Any other target takes the
+    /// existing shell-name funnel unchanged, so a genuine non-ASCII
+    /// name keeps its UTF-8 bytes. (rubash#3104 p23)
+    pub(in crate::executor) fn redirect_target_filesystem_path(
+        &self,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
+        if self.redirect_target_had_transport.borrow().contains(target) {
+            crate::executor::path::path_buf_from_folded_name(&normalized.to_string_lossy())
+        } else {
+            normalized
+        }
+    }
+
     pub(in crate::executor) fn create_redirect_output(
         &self,
         target: &str,
@@ -2252,7 +2272,7 @@ impl Executor {
             };
         }
         let target = self.redirect_output_path_target(target);
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
             && !Self::noclobber_target_is_device_like(&path)
@@ -2529,9 +2549,9 @@ impl Executor {
                 match self.open_output_fd_append(target) {
                     Ok(file) => Ok(file),
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
+                        crate::executor::execution_misc::open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(target)),
+                        )
                     }
                     Err(error) => Err(error),
                 }
@@ -2543,11 +2563,9 @@ impl Executor {
                         "Permission denied",
                     )),
                     Some(true) => Self::synthetic_proc_write_sink(true),
-                    None => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
-                    }
+                    None => crate::executor::execution_misc::open_redirect_append(
+                        &self.session_path(self.redirect_target_filesystem_path(target)),
+                    ),
                 }
             }
             SpecialPathClass::SyntheticLink => {
@@ -2569,7 +2587,7 @@ impl Executor {
                 }
             }
             SpecialPathClass::Filesystem => crate::executor::execution_misc::open_redirect_append(
-                &self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(target)),
             ),
         }
     }

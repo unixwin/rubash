@@ -796,7 +796,7 @@ impl Executor {
         // what the walk consumes either way.)
         let stage_call_has_varfd = super::redirection::command_has_dynamic_fd_var_redirects(&call);
         if stage_call_has_varfd {
-            let _ = subshell.apply_dynamic_fd_var_redirects(&call, true);
+            let _ = subshell.apply_dynamic_fd_var_redirects(&call, true, true);
         }
         // rubash#1605: short of that fatal skip, a final stage whose fd 1
         // IS the shell's own stdout runs the body uncaptured (no
@@ -1270,7 +1270,7 @@ impl Executor {
         // element with status 1 — the applier has already rendered
         // the diagnostic — exactly like a numbered redirect failure
         // in the element; the pipeline itself continues.
-        let fd_var_failed = self.apply_dynamic_fd_var_redirects(&command, true)?;
+        let fd_var_failed = self.apply_dynamic_fd_var_redirects(&command, true, false)?;
         let result = if fd_var_failed {
             Ok(Some((String::new(), String::new(), 1)))
         } else {
