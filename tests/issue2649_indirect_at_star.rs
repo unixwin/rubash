@@ -11,8 +11,9 @@
 //!   `*` joins the positionals with IFS[0], `@` joins with a space.
 //! - The joined text becomes the indirect NAME: when it is not a valid
 //!   brace-expansion word, subst.c:7947 reports
-//!   `<joined>: invalid variable name` and the command is abandoned
-//!   with status 1 (the script continues). A single positional that is
+//!   `<joined>: invalid variable name`; the expansion error is fatal
+//!   to a non-interactive shell (subst.c:4296 exp_jump_to_top_level),
+//!   so the script stops with status 1. A single positional that is
 //!   a valid name expands that variable; no positionals expand empty.
 //!
 //! Oracle: GNU bash 5.3.20 probe scripts (2026-11-08), byte-compared.
@@ -77,9 +78,22 @@ fn at_two_positionals_reports_joined_name() {
 
 #[test]
 fn star_error_abandons_only_the_command() {
+    // Corrected 2026-11-09 against the GNU bash 5.3.20 oracle: on the
+    // indirection path the invalid-name report (subst.c:7947) is an
+    // expansion error, which unwinds a non-interactive shell via
+    // subst.c:4296 exp_jump_to_top_level — the failure is script-fatal,
+    // not command-local. Oracle, byte-for-byte: stdout empty (`echo
+    // DONE` never runs), stderr names `a b: invalid variable name`,
+    // status 1. The original expectation (script continues, status 0)
+    // contradicted the oracle; the product already matches it.
     let out = run("a=hello b=world; set -- a b; echo ${!*}; echo DONE");
-    assert_eq!(out.stdout, b"DONE\n", "stderr: {:?}", stderr_text(&out));
-    assert_eq!(out.code, 0, "stderr: {:?}", stderr_text(&out));
+    assert_eq!(out.stdout, b"", "stderr: {:?}", stderr_text(&out));
+    let err = stderr_text(&out);
+    assert!(
+        err.contains("a b: invalid variable name"),
+        "stderr must name the joined name; got {err:?}"
+    );
+    assert_eq!(out.code, 1, "stderr: {:?}", stderr_text(&out));
 }
 
 #[test]
