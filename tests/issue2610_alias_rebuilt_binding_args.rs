@@ -82,9 +82,19 @@ fn alias_hop_binds_rebuilt_first_word_to_command() {
         "shopt -s progcomp_alias; alias g=git; \
          complete -C 'printf \"CMD:%s\\n\"' git",
     );
+    // The -C command is printf with the format "CMD:%s\n": it cycles
+    // the format over ALL the arguments gen_command_matches appends
+    // after it ($1 $2 $3 = rebuilt-cmdname, cur, prev = git, zz, git),
+    // so GNU's verbatim candidate set is {CMD:git, CMD:zz} — verified
+    // against GNU bash 5.3.20 interactively (TAB on `g zz` inserts
+    // only the common prefix "CMD:", and the surviving not-found
+    // error names 'CMD:', never the full 'CMD:git'). The cell's
+    // assertion is the $1-derived line: CMD:git (rebuilt first word),
+    // not CMD:g (the typed alias) — on the unfixed base this cell
+    // yields ["CMD:g", "CMD:zz"].
     assert_eq!(
         complete(&mut executor, "g zz"),
-        vec!["CMD:git".to_string()],
+        vec!["CMD:git".to_string(), "CMD:zz".to_string()],
         "the -C command's $1 argument is the rebuilt first word"
     );
 }
