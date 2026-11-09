@@ -189,6 +189,57 @@ pub(in crate::executor) enum FdWalkBinding {
 /// they resolve against the ambient fd table, as before.
 pub(in crate::executor) type FdWalkSpace = std::collections::HashMap<u32, FdWalkBinding>;
 
+/// rubash#2629: one recorded apply_dynamic_fd_var_redirects result
+/// (see the fd_var_apply_snapshot field): the fingerprint of the
+/// redirect list it belongs to — per entry, the same tuple the
+/// redirect-target memo keys on, plus the entry's `{var}` name and
+/// the heredoc entries' names — and the binds it produced, in apply
+/// order: (variable, descriptor, fd-table entry the apply left
+/// standing). A helper walk over the same list replays these binds
+/// verbatim (replay_dynamic_fd_var_snapshot) instead of running the
+/// applier again, so the list's target words evaluate exactly once
+/// per command — GNU's single do_redirections pass (redir.c:237).
+#[derive(Debug, Clone)]
+pub(in crate::executor) struct FdVarApplySnapshot {
+    fingerprint: Vec<String>,
+    binds: Vec<(String, u32, super::fd_table::FdEntry)>,
+}
+
+impl FdVarApplySnapshot {
+    /// The list identity a snapshot (or a replay request) is keyed
+    /// on: every entry of the plain list and of the heredoc split,
+    /// in order. Two executions of the same list in different shell
+    /// states share a fingerprint, which is safe because every real
+    /// apply replaces the record — a replay is only ever offered
+    /// the binds of the most recent apply of that exact list on
+    /// this executor, and any intervening apply of any other list
+    /// (a loop body's own commands included) replaces it first.
+    fn fingerprint_of(cmd: &CommandNode) -> Vec<String> {
+        let mut fingerprint: Vec<String> = cmd
+            .redirects
+            .iter()
+            .map(|redirect| {
+                format!(
+                    "{:?}\x1f{}\x1f{:?}\x1f{}\x1f{}",
+                    redirect.kind,
+                    redirect.operator,
+                    redirect.fd,
+                    redirect.target,
+                    redirect.fd_var.as_deref().unwrap_or_default()
+                )
+            })
+            .collect();
+        for redirect in &cmd.heredoc_redirects {
+            fingerprint.push(format!(
+                "heredoc\x1f{}\x1f{}",
+                redirect.fd_var.as_deref().unwrap_or_default(),
+                redirect.delimiter
+            ));
+        }
+        fingerprint
+    }
+}
+
 /// rubash#2612: a `{var}` dup entry's source resolution against
 /// the walk space (see Executor::fd_walk_dup_action).
 #[derive(Debug, Clone)]
@@ -3546,7 +3597,7 @@ impl Executor {
         // before running the operand. The stdio-only paths above already
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
-        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, false, true)? {
             // rubash#2125: a `{var}` apply failure is a do_redirections
             // failure (redir_varassign), reached BEFORE exec_builtin's
             // search/execve — so in POSIX mode it takes the
@@ -4773,6 +4824,21 @@ impl Executor {
                 }
                 continue;
             }
+            // rubash#2615: GNU registers this fixed entry's undo save
+            // before performing it even for `exec` — exec_builtin's
+            // list carries a redirection_undo_list (execute_cmd.c:5619)
+            // whose saves are live for the walk's duration and only
+            // disposed once the whole list stands, so a later `{var}`
+            // allocation in THIS list counts them (see
+            // fd_walk_undo_save_slots). This walk's table IS the
+            // evolved descriptor space, so the walk overlay is empty;
+            // occupied_slots is walk-local, so the saves leave no
+            // trace for later commands, matching the dispose.
+            for (slot, _source) in
+                self.fd_walk_undo_save_slots(&FdWalkSpace::new(), redirect, &occupied_slots)
+            {
+                occupied_slots.insert(slot);
+            }
             match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::Append
@@ -5376,7 +5442,12 @@ impl Executor {
             // rubash#2282: heredoc entries apply after the plain list
             // here too, so every numbered slot counts as occupied.
             occupied_slots.extend(command_own_numbered_slots(cmd));
-            match self.execute_dynamic_fd_var_heredoc(redirect, false, &occupied_slots) {
+            match self.execute_dynamic_fd_var_heredoc(
+                redirect,
+                false,
+                &occupied_slots,
+                &FdWalkSpace::new(),
+            ) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -6344,6 +6415,154 @@ impl Executor {
         }
     }
 
+    /// rubash#2615: the descriptor space the owning walk has evolved
+    /// at its current position, as an occupied-slot set for F_DUPFD
+    /// searches: the ambient table's occupied slots plus the slots
+    /// the walk itself has bound or saved so far (`occupied_slots`),
+    /// minus the slots the walk has CLOSED at this position — a
+    /// close frees its descriptor for the walk's later allocations
+    /// in GNU's single space (`exec 10>f` then `cmd 10>&- {v}>g`
+    /// allocates v=10), even though the ambient table — which the
+    /// funnel path never applies the fixed entries to — still holds
+    /// it open.
+    pub(in crate::executor) fn fd_walk_occupied_set(
+        &self,
+        occupied_slots: &std::collections::HashSet<u32>,
+        walk: &FdWalkSpace,
+    ) -> std::collections::HashSet<u32> {
+        let mut occupied: std::collections::HashSet<u32> = self
+            .fd_table
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.closed && (entry.read.is_some() || entry.write.is_some()))
+            .map(|(fd, _)| *fd)
+            .collect();
+        occupied.extend(occupied_slots.iter().copied());
+        for (fd, binding) in walk.iter() {
+            if matches!(binding, FdWalkBinding::Closed) {
+                occupied.remove(fd);
+            }
+        }
+        occupied
+    }
+
+    /// The lowest descriptor >= `base` outside `occupied`, under the
+    /// same soft-limit ceiling the fd table's own allocator applies
+    /// (see FdTable::allocate_dynamic_with_limit).
+    pub(in crate::executor) fn fd_walk_lowest_free(
+        &self,
+        base: u32,
+        occupied: &std::collections::HashSet<u32>,
+    ) -> Option<u32> {
+        let limit = self.open_files_limit();
+        let mut candidate = base;
+        loop {
+            if let Some(limit) = limit {
+                if candidate >= limit {
+                    return None;
+                }
+            }
+            if !occupied.contains(&candidate) {
+                return Some(candidate);
+            }
+            candidate += 1;
+        }
+    }
+
+    /// rubash#2615: allocate a dynamic fd against the descriptor
+    /// space the owning walk has evolved (see fd_walk_occupied_set):
+    /// like allocate_dynamic_fd_avoiding, except a descriptor the
+    /// walk has closed at this position is free even when the
+    /// ambient table still holds it open.
+    pub(in crate::executor) fn allocate_dynamic_fd_in_walk(
+        &mut self,
+        occupied_slots: &std::collections::HashSet<u32>,
+        walk: &FdWalkSpace,
+    ) -> Option<u32> {
+        let occupied = self.fd_walk_occupied_set(occupied_slots, walk);
+        self.fd_walk_lowest_free(10, &occupied)
+    }
+
+    /// rubash#2615: the undo-save slots GNU's do_redirections walk
+    /// registers for ONE fixed (non-`{var}`) entry at its walk
+    /// position, in registration order, each paired with the
+    /// descriptor whose binding the save copies. When a command's
+    /// redirections rebind a descriptor that is open at the entry's
+    /// position, bash first dups it out of the way — add_undo_redirect
+    /// (redir.c:1296) with F_DUPFD to the lowest free slot >=
+    /// SHELL_FD_BASE (redir.c:86); for the dup arms the search starts
+    /// above the dup source when the source is itself >= SHELL_FD_BASE
+    /// (fdbase = redir_fd, passed at redir.c:1163, applied at
+    /// redir.c:1303) — and the save stays open for the rest of the
+    /// walk and for the command's whole duration, so every later
+    /// REDIR_VARASSIGN allocation must count it. The gates, per arm:
+    /// file/heredoc opens save an open redirector from SHELL_FD_BASE
+    /// (redir.c:972/1091); a dup entry saves its open redirector from
+    /// the fdbase above, unless source == redirector (a self-dup
+    /// registers nothing, redir.c:1153's `redir_fd != redirector`);
+    /// a move entry whose redirector is open earns a SECOND save, of
+    /// its source, from SHELL_FD_BASE (redir.c:1175); a close entry
+    /// saves its open redirector from SHELL_FD_BASE (redir.c:1253).
+    /// An entry whose redirector is closed at its position registers
+    /// only a close-undo (add_undo_close_redirect) and occupies
+    /// nothing. `{var}` entries never reach here — a varassign's own
+    /// undo is the varredir_close close record, never a save.
+    pub(in crate::executor) fn fd_walk_undo_save_slots(
+        &self,
+        walk: &FdWalkSpace,
+        redirect: &Redirect,
+        occupied_slots: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        let effective_fd = redirect
+            .fd
+            .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+        if !matches!(
+            self.fd_walk_resolve(walk, effective_fd),
+            FdWalkBinding::TableSlot(_) | FdWalkBinding::File(_)
+        ) {
+            return Vec::new();
+        }
+        let mut occupied = self.fd_walk_occupied_set(occupied_slots, walk);
+        let mut saves: Vec<(u32, u32)> = Vec::new();
+        let mut claim = |base: u32, source: u32, occupied: &mut std::collections::HashSet<u32>| {
+            if let Some(slot) = self.fd_walk_lowest_free(base, occupied) {
+                occupied.insert(slot);
+                saves.push((slot, source));
+            }
+        };
+        match redirect.kind {
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                claim(10, effective_fd, &mut occupied);
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                let target = self.expand_redirect_target(redirect);
+                if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                    if source_fd != effective_fd {
+                        let base = if source_fd >= 10 { source_fd + 1 } else { 10 };
+                        claim(base, effective_fd, &mut occupied);
+                    }
+                    if move_source {
+                        claim(10, source_fd, &mut occupied);
+                    }
+                }
+            }
+            crate::parser::RedirectKind::Input
+            | crate::parser::RedirectKind::Output
+            | crate::parser::RedirectKind::Append
+            | crate::parser::RedirectKind::ClobberOutput
+            | crate::parser::RedirectKind::ReadWrite
+            | crate::parser::RedirectKind::HereDoc
+            | crate::parser::RedirectKind::HereString
+            | crate::parser::RedirectKind::CombinedOutput
+            | crate::parser::RedirectKind::CombinedAppend => {
+                claim(10, effective_fd, &mut occupied);
+            }
+            crate::parser::RedirectKind::Unknown => {}
+        }
+        saves
+    }
+
     /// GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
     /// every `{var}` redirection allocates a fresh descriptor and assigns
     /// the number to the variable — for builtins, functions and external
@@ -6356,6 +6575,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         auto_close: bool,
+        undoable_walk: bool,
     ) -> Result<bool, ExecuteError> {
         // RESTRICTED_SHELL (#804 F1/N2): the refusal must precede
         // redir_varassign — GNU checks restricted before the varassign arm
@@ -6366,6 +6586,9 @@ impl Executor {
         // every applier path (simple-command preflight and the
         // exec-with-operand site alike).
         if self.reject_restricted_write_redirect_entry(cmd)? {
+            // rubash#2629: a refused apply produced no binds; a stale
+            // snapshot must not outlive it.
+            self.fd_var_apply_snapshot = None;
             return Ok(true);
         }
         let mut redirect_failed = false;
@@ -6378,6 +6601,11 @@ impl Executor {
         self.fd_var_external_undo.clear();
         self.fd_var_pending_closes.clear();
         self.fd_var_close_restore.clear();
+        // rubash#2629: this run replaces the recorded apply result;
+        // it is re-recorded at the end only if the whole list
+        // applied (a failed apply's partial binds are not a replay
+        // candidate — the command they belonged to never ran).
+        self.fd_var_apply_snapshot = None;
         // rubash#2282: GNU's do_redirections is one ordered walk over
         // one descriptor space (redir.c:237): when a REDIR_VARASSIGN
         // allocation (redir.c:940 F_DUPFD) runs, the numbered entries
@@ -6420,6 +6648,25 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             let Some(name) = redirect.fd_var.as_deref() else {
+                // rubash#2615: GNU registers this entry's undo save
+                // before performing the entry (see
+                // fd_walk_undo_save_slots); the save occupies its
+                // slot for the rest of the walk, so fold it into the
+                // running occupied set before recording the entry.
+                // The saves exist only in an UNDOABLE walk: redir.c's
+                // undo machinery is gated on RX_UNDOABLE (redir.c:243),
+                // and the fork-child walks (execute_disk_command,
+                // execute_cmd.c:5522; the subshell list,
+                // execute_cmd.c:1761) run RX_ACTIVE only, so a `{var}`
+                // allocation there counts no saves — the caller
+                // passes the walk's mode in `undoable_walk`.
+                if undoable_walk {
+                    for (slot, _source) in
+                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                    {
+                        occupied_slots.insert(slot);
+                    }
+                }
                 // rubash#2612: a fixed entry moves the walk space
                 // like any other entry of GNU's single pass — its
                 // binding is what later entries resolve against.
@@ -6568,8 +6815,12 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            let outcome =
-                self.execute_dynamic_fd_var_heredoc(redirect, auto_close, &occupied_slots);
+            let outcome = self.execute_dynamic_fd_var_heredoc(
+                redirect,
+                auto_close,
+                &occupied_slots,
+                &walk_space,
+            );
             // rubash#2281: the applier-bound descriptor, as at the
             // plain-list site above (a heredoc entry always binds).
             let bound_fd = match &outcome {
@@ -6595,7 +6846,104 @@ impl Executor {
                 Err(error) => return Err(error),
             }
         }
+        // rubash#2629: record this run's binds for a later helper
+        // walk over the same list (see FdVarApplySnapshot). The
+        // binds are read back from the undo records the run just
+        // produced — exactly the descriptors it bound, in order —
+        // with the fd-table entries still standing for them.
+        if !redirect_failed {
+            let binds: Vec<(String, u32, super::fd_table::FdEntry)> = self
+                .fd_var_external_undo
+                .iter()
+                .filter_map(|(name, _prior, _prior_typed, bound_fd)| {
+                    let fd = (*bound_fd)?;
+                    let entry = self.fd_table.entries.get(&fd)?.clone();
+                    Some((name.clone(), fd, entry))
+                })
+                .collect();
+            self.fd_var_apply_snapshot = Some(FdVarApplySnapshot {
+                fingerprint: FdVarApplySnapshot::fingerprint_of(cmd),
+                binds,
+            });
+        }
         Ok(redirect_failed)
+    }
+
+    /// rubash#2629: rebind the recorded result of the most recent
+    /// successful apply_dynamic_fd_var_redirects run for THIS
+    /// redirect list, without re-running the applier — no target
+    /// word is expanded, no file is opened, no side effect of the
+    /// list's words evaluates a second time. The replay performs
+    /// the same bookkeeping a real apply leaves behind for its
+    /// consumers: fresh undo records (priors read at replay time,
+    /// so the caller's undo restores the state the replay found),
+    /// the close-generation stamp, and the varredir_close deferred
+    /// closes under the same gate the applier uses. Returns false
+    /// when no usable record exists (no apply yet, a failed apply,
+    /// or an intervening apply of a different list replaced it) —
+    /// the caller then runs the real applier, exactly as before.
+    pub(in crate::executor) fn replay_dynamic_fd_var_snapshot(
+        &mut self,
+        cmd: &CommandNode,
+        auto_close: bool,
+    ) -> bool {
+        let Some(snapshot) = self.fd_var_apply_snapshot.clone() else {
+            return false;
+        };
+        if snapshot.fingerprint != FdVarApplySnapshot::fingerprint_of(cmd) {
+            return false;
+        }
+        self.fd_var_close_generation += 1;
+        self.fd_var_pending_close_generation = self.fd_var_close_generation;
+        self.fd_var_external_undo.clear();
+        self.fd_var_pending_closes.clear();
+        self.fd_var_close_restore.clear();
+        let close_after_command = auto_close
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
+        // One undo record per `{var}` entry of the list, in list
+        // order, mirroring the applier's records: entries the
+        // recorded apply bound carry their descriptor, the rest
+        // (close forms, failed dups) carry None. A variable bound
+        // by several entries (`{v}>a {v}>b`) consumes the recorded
+        // binds in order, one per entry.
+        let mut bound_queues: std::collections::HashMap<&str, std::collections::VecDeque<u32>> =
+            std::collections::HashMap::new();
+        for (name, fd, _entry) in &snapshot.binds {
+            bound_queues
+                .entry(name.as_str())
+                .or_default()
+                .push_back(*fd);
+        }
+        let entry_names: Vec<String> = cmd
+            .redirects
+            .iter()
+            .filter_map(|redirect| redirect.fd_var.clone())
+            .chain(
+                cmd.heredoc_redirects
+                    .iter()
+                    .filter_map(|redirect| redirect.fd_var.clone()),
+            )
+            .collect();
+        for name in &entry_names {
+            let resolved = self
+                .resolved_variable_name(name)
+                .unwrap_or_else(|| name.clone());
+            let prior = self.shell_state.env_vars.get(&resolved).cloned();
+            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            let bound_fd = bound_queues
+                .get_mut(resolved.as_str())
+                .and_then(|queue| queue.pop_front());
+            self.fd_var_external_undo
+                .push((resolved, prior, prior_typed, bound_fd));
+        }
+        for (name, fd, entry) in &snapshot.binds {
+            self.fd_table.entries.insert(*fd, entry.clone());
+            let _ = self.set_dynamic_fd_variable(name, *fd);
+            if close_after_command {
+                self.deferred_varredir_closes.push(*fd);
+            }
+        }
+        true
     }
 
     /// `{var}<<[-]EOF` / `{var}<<<word` — allocate a dynamic fd holding the
@@ -6609,6 +6957,10 @@ impl Executor {
         // already bound, counted as occupied by the allocation (see
         // apply_dynamic_fd_var_redirects).
         occupied_slots: &std::collections::HashSet<u32>,
+        // rubash#2615: the owning walk's evolved descriptor space
+        // (see execute_dynamic_fd_var_redirect's `walk` parameter);
+        // faces whose table IS the evolved space pass an empty one.
+        walk: &FdWalkSpace,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -6629,7 +6981,7 @@ impl Executor {
         // here_document_to_fd produces — storage prefix decoded and
         // the here-string newline present (rubash#1867).
         let body = self.expand_heredoc_redirect_text(redirect);
-        let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+        let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
             // GNU exhausts {var} heredocs through the same REDIR_VARASSIGN
             // fcntl F_DUPFD path (probe: ulimit -Sn 6 then exec {v}<<E
             // prints "redirection error: cannot duplicate fd: ..." too), so
@@ -7296,7 +7648,7 @@ impl Executor {
                     {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                    let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -7354,7 +7706,7 @@ impl Executor {
                     {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                    let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -7401,14 +7753,15 @@ impl Executor {
                     // plumbed into this entry, so the child's diagnostic
                     // frame starts from the body's own text.)
                     let mut bound_fd = None;
-                    if let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) {
+                    if let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) {
                         if self.bind_input_process_substitution_child(fd, source, None) {
                             bound_fd = Some(fd);
                         }
                     }
                     if bound_fd.is_none() {
                         if let Some(input) = self.process_substitution_output(source) {
-                            let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                            let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
+                            else {
                                 return Err(ExecuteError::IoError(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     self.fd_dup_error_payload(&target),
@@ -7478,7 +7831,7 @@ impl Executor {
                             FdWalkDupAction::CopyFrom(slot) => {
                                 if self.fd_table.is_open_for_read(slot) {
                                     let Some(fd) =
-                                        self.allocate_dynamic_fd_avoiding(occupied_slots)
+                                        self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                                     else {
                                         return Err(ExecuteError::IoError(std::io::Error::new(
                                             std::io::ErrorKind::Other,
@@ -7514,7 +7867,7 @@ impl Executor {
                         (file.clone(), file)
                     };
                 let file = read_file;
-                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
@@ -7542,7 +7895,7 @@ impl Executor {
             crate::parser::RedirectKind::Output
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
-                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),

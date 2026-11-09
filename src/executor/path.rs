@@ -1361,6 +1361,39 @@ pub(crate) fn exec_name_for_program(
     (anchored == program).then_some(as_written)
 }
 
+/// rubash#2696: the spelling a PATH resolution of `name` to `program`
+/// RECORDS in the hash table. GNU's walk builds ONE string — the
+/// as-written `<elem>/<name>` join (findcmd.c sh_makepath) — and that
+/// single string is what phash_insert records, what `hash` and `type`
+/// print, and what shell_execve later executes verbatim. When the
+/// as-written join anchors (at the session cwd) onto exactly
+/// `program`, the search itself produced this file, so the join is
+/// the recorded spelling; the anchored absolute display would lose a
+/// relative element (`./rel1` recorded as `/cwd/./rel1/foo`) and with
+/// it the post-cd verbatim-exec behavior. Any resolution the walk did
+/// not itself produce (a hash-table re-record, an emulated stand-in
+/// whose program came from elsewhere) keeps the anchored display
+/// form. Non-unix keeps the existing rendering (the #2302/#2317
+/// status quo for Windows display forms).
+pub(crate) fn recorded_resolution_spelling(
+    name: &str,
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    #[cfg(unix)]
+    {
+        if let Some(as_written) = find_user_command_as_written(name, env_vars) {
+            if as_written.contains('/') {
+                let anchored = anchor_at_session_cwd(PathBuf::from(&as_written), env_vars);
+                if anchored == program {
+                    return as_written;
+                }
+            }
+        }
+    }
+    super::execution_misc::shell_display_path(&program.to_string_lossy().replace('\\', "/"))
+}
+
 /// rubash#2442: the one filename-resolution funnel every external
 /// spawn route passes through. GNU has exactly one resolution point
 /// per disk command — execute_disk_command's `search_for_command`
@@ -3717,6 +3750,34 @@ pub(crate) fn literal_executable_file(spelling: &str, env_vars: &HashMap<String,
     executable_candidate(&candidate, env_vars).is_some()
 }
 
+/// rubash#2717: GNU findcmd.c file_status qualification for a
+/// slash-bearing name at the DESCRIBE faces (builtins/type.def
+/// describe_command): an absolute_program name is reported only
+/// when file_status grants FS_EXECABLE — an existing, executable,
+/// non-directory file. file_status never sets FS_EXECABLE for a
+/// directory, and a missing or non-executable file earns no report
+/// at all — unlike the slash-free PATH walk, whose file_to_lose_on
+/// hit IS reported (findcmd.c:591/695); execution keeps that
+/// lose-on semantics, only the describe faces qualify here. The
+/// probe folds the stored E400 pair (rubash#3076) and anchors at
+/// the session cwd, exactly like find_user_command's slash branch.
+pub(crate) fn slash_name_is_describable(
+    spelling: &str,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(spelling);
+    let candidate = anchor_at_session_cwd(shell_path_to_windows(&folded, env_vars), env_vars);
+    #[cfg(unix)]
+    {
+        std::fs::metadata(&candidate)
+            .is_ok_and(|meta| meta.is_file() && file_is_executable(&candidate))
+    }
+    #[cfg(not(unix))]
+    {
+        executable_candidate(&candidate, env_vars).is_some()
+    }
+}
+
 fn executable_candidate(path: &Path, env_vars: &HashMap<String, String>) -> Option<PathBuf> {
     // Extensionless names probe every PATHEXT candidate before the bare file
     // (native wrappers like `code.cmd` win over an extensionless `code`).
@@ -3836,7 +3897,7 @@ fn find_standard_unix_shell() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-fn has_path_separator(name: &str) -> bool {
+pub(crate) fn has_path_separator(name: &str) -> bool {
     // GNU general.c:843 absolute_program(): only `/` makes a name absolute,
     // except under __MSYS__ where `\\` counts too — exactly the Windows /
     // unix split below. On unix `foo\bar` is an ordinary filename looked up
