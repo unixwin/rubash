@@ -6221,7 +6221,8 @@ impl Executor {
         // queue here and roll it back at every bracket exit.
         let writes_mark = Self::scan_pending_writes_mark();
         if stage_has_varfd {
-            match self.apply_dynamic_fd_var_redirects(command, true) {
+            let fd_var_walk_undoable = self.redirect_walk_is_undoable(command);
+            match self.apply_dynamic_fd_var_redirects(command, true, fd_var_walk_undoable) {
                 Ok(false) => {}
                 Ok(true) => {
                     // The applier failed the list and already placed

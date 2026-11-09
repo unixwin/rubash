@@ -1688,7 +1688,8 @@ impl Executor {
         // queue must not survive it (the #2558 pre-scan discipline):
         // mark the queue and roll it back on every exit.
         let writes_mark = Self::scan_pending_writes_mark();
-        let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true) {
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
                 let result = self.command_output_redirect_fails_impl(cmd, true);
                 self.undo_child_fd_var_redirects();
@@ -3209,8 +3210,12 @@ impl Executor {
         // where GNU's single do_redirections pass evaluates it
         // once. The replay falls back to the real applier when no
         // matching record exists.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
         let applied = self.replay_dynamic_fd_var_snapshot(cmd, true)
-            || matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
+            || matches!(
+                self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable),
+                Ok(false)
+            );
         let result = self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         if applied {
             self.undo_child_fd_var_redirects();

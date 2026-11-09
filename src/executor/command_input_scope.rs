@@ -324,6 +324,14 @@ impl Executor {
         // is (save slot, entry to hold there), removed at scope end
         // if the body left it untouched.
         let mut materialized_saves: Vec<(u32, FdEntry)> = Vec::new();
+        // rubash#2615: the saves above exist only when this list's
+        // walk is undoable. A subshell's own list is applied by the
+        // forked child with RX_ACTIVE (execute_cmd.c:1761
+        // execute_in_subshell), so it earns no saves and the body's
+        // allocations count none; in-process compounds (groups,
+        // loops, function bodies) walk undoable
+        // (execute_cmd.c:854/5606), so theirs count.
+        let undoable_walk = cmd.subshell_command.is_none();
         let mut apply_error: Option<ExecuteError> = None;
         // rubash#2612: the walk space of this list (see FdWalkBinding
         // in trap_exec.rs). This loop used to service the `{var}`
@@ -429,17 +437,21 @@ impl Executor {
                 // rubash#2615: fold this fixed entry's undo saves
                 // into the walk's occupied set (as the applier loop
                 // does) and remember the ones the table can
-                // materialize for the body's duration.
-                for (slot, source) in
-                    self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
-                {
-                    occupied_slots.insert(slot);
-                    if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
-                        self.fd_walk_resolve(&walk_space, source)
+                // materialize for the body's duration — in an
+                // undoable walk only (see `undoable_walk` above).
+                if undoable_walk {
+                    for (slot, source) in
+                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
                     {
-                        if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
-                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
-                                materialized_saves.push((slot, entry));
+                        occupied_slots.insert(slot);
+                        if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
+                            self.fd_walk_resolve(&walk_space, source)
+                        {
+                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
+                                {
+                                    materialized_saves.push((slot, entry));
+                                }
                             }
                         }
                     }
@@ -1537,6 +1549,9 @@ impl Executor {
         // holds, mirroring the command-input scope pass; the slots'
         // pre-scope state is captured into `saved` first, so the
         // scope restore returns each slot to exactly what it held.
+        // A subshell-headed list earns no saves at all: its walk is
+        // the forked child's RX_ACTIVE pass (execute_cmd.c:1761).
+        let undoable_walk = cmd.subshell_command.is_none();
         let mut walk_space = super::trap_exec::FdWalkSpace::new();
         let mut occupied_slots: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut materialized_saves: Vec<(u32, FdEntry)> = Vec::new();
@@ -1545,16 +1560,19 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             if redirect.fd_var.is_none() {
-                for (slot, source) in
-                    self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
-                {
-                    occupied_slots.insert(slot);
-                    if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
-                        self.fd_walk_resolve(&walk_space, source)
+                if undoable_walk {
+                    for (slot, source) in
+                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
                     {
-                        if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
-                            if !entry.closed && (entry.read.is_some() || entry.write.is_some()) {
-                                materialized_saves.push((slot, entry));
+                        occupied_slots.insert(slot);
+                        if let super::trap_exec::FdWalkBinding::TableSlot(table_slot) =
+                            self.fd_walk_resolve(&walk_space, source)
+                        {
+                            if let Some(entry) = self.fd_table.entries.get(&table_slot).cloned() {
+                                if !entry.closed && (entry.read.is_some() || entry.write.is_some())
+                                {
+                                    materialized_saves.push((slot, entry));
+                                }
                             }
                         }
                     }

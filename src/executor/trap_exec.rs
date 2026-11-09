@@ -3597,7 +3597,7 @@ impl Executor {
         // before running the operand. The stdio-only paths above already
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
-        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, false, true)? {
             // rubash#2125: a `{var}` apply failure is a do_redirections
             // failure (redir_varassign), reached BEFORE exec_builtin's
             // search/execve — so in POSIX mode it takes the
@@ -6575,6 +6575,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         auto_close: bool,
+        undoable_walk: bool,
     ) -> Result<bool, ExecuteError> {
         // RESTRICTED_SHELL (#804 F1/N2): the refusal must precede
         // redir_varassign — GNU checks restricted before the varassign arm
@@ -6652,10 +6653,19 @@ impl Executor {
                 // fd_walk_undo_save_slots); the save occupies its
                 // slot for the rest of the walk, so fold it into the
                 // running occupied set before recording the entry.
-                for (slot, _source) in
-                    self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
-                {
-                    occupied_slots.insert(slot);
+                // The saves exist only in an UNDOABLE walk: redir.c's
+                // undo machinery is gated on RX_UNDOABLE (redir.c:243),
+                // and the fork-child walks (execute_disk_command,
+                // execute_cmd.c:5522; the subshell list,
+                // execute_cmd.c:1761) run RX_ACTIVE only, so a `{var}`
+                // allocation there counts no saves — the caller
+                // passes the walk's mode in `undoable_walk`.
+                if undoable_walk {
+                    for (slot, _source) in
+                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                    {
+                        occupied_slots.insert(slot);
+                    }
                 }
                 // rubash#2612: a fixed entry moves the walk space
                 // like any other entry of GNU's single pass — its
