@@ -376,7 +376,10 @@ pub(crate) fn set_command_lookup_cache(
 /// candidates resolved against the process cwd, which the session owned;
 /// with per-session cwd fields they must anchor explicitly. Absolute
 /// candidates pass through unchanged.
-fn anchor_at_session_cwd(candidate: PathBuf, env_vars: &HashMap<String, String>) -> PathBuf {
+pub(crate) fn anchor_at_session_cwd(
+    candidate: PathBuf,
+    env_vars: &HashMap<String, String>,
+) -> PathBuf {
     if candidate.is_absolute() {
         return candidate;
     }
