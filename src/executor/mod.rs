@@ -1933,6 +1933,18 @@ pub struct Executor {
     /// command the gate is validating, not to an enclosing command
     /// whose applier ran earlier.
     fd_var_close_generation: u64,
+    /// rubash#2629: the binds the most recent successful
+    /// apply_dynamic_fd_var_redirects run produced on this executor,
+    /// recorded so a later helper walk over the SAME redirect list
+    /// (the pipeline stream-routing bracket) can rebind them from
+    /// the record instead of running the applier again — a second
+    /// applier run re-expands every `{var}` target word, and a
+    /// target with a side effect (`$((i+=1))` in the filename,
+    /// `$(mktemp)`) then evaluates twice where GNU's single
+    /// do_redirections pass (redir.c:237) evaluates it once. The
+    /// record is replaced by every successful apply and cleared by
+    /// every failed one; see FdVarApplySnapshot.
+    fd_var_apply_snapshot: Option<trap_exec::FdVarApplySnapshot>,
     /// rubash#2281: the fd_var_close_generation value whose applier
     /// run recorded the current fd_var_pending_closes contents.
     fd_var_pending_close_generation: u64,
