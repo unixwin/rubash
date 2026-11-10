@@ -287,6 +287,7 @@ impl Executor {
                 {
                     self.shell_state.arithmetic_expansion_error.set(false);
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -303,6 +304,7 @@ impl Executor {
         if self.shell_state.arithmetic_nounset_error.replace(false) {
             self.shell_state.arithmetic_expansion_error.set(false);
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -1626,6 +1628,7 @@ impl Executor {
         // (DISCARD) — the command is abandoned with status 1 and the
         // session keeps reading, whatever the target dispatches to.
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
@@ -1812,6 +1815,7 @@ impl Executor {
                 // abandoned with status 1 and the session keeps reading;
                 // the FORCE_EOF branch below is noninteractive only.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);

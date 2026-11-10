@@ -3693,7 +3693,7 @@ impl Executor {
             .stdin(Stdio::piped())
             .stdout(self.procsub_plan_stdio(spawn_plan.get(1)))
             .stderr(self.procsub_plan_stdio(spawn_plan.get(2)));
-        process.current_dir(&self.shell_state.cwd);
+        self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
         let spawn_result = process.spawn();
         for dup in parent_side_dups {

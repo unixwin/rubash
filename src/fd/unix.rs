@@ -807,7 +807,18 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
     let mut cmd = Command::new(&spec.program);
     cmd.args(&spec.args);
     if let Some(cwd) = &spec.cwd {
-        cmd.current_dir(cwd);
+        // rubash#3198: a session cwd whose directory has been unlinked
+        // must not refuse the respawn — `current_dir` re-resolves the
+        // path in the child and fails ENOENT for a deleted directory.
+        // The respawned child re-derives its session cwd from the
+        // transported state, not from the process cwd it is born in,
+        // so leaving it unstamped (inherit) preserves its semantics;
+        // the executor's own spawn faces use the inode anchor
+        // (stamp_spawn_cwd) for foreign children, whose cwd IS the
+        // process cwd they are born in.
+        if cwd.is_dir() {
+            cmd.current_dir(cwd);
+        }
     }
     // The spec's env IS the child environment (the caller composes it from
     // the ingested process environment plus the shell's exported state,
