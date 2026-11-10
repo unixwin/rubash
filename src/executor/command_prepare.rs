@@ -280,6 +280,7 @@ impl Executor {
             // `-c` top level; a `( ... )` subshell child contains the jump
             // at execute_cmd.c:1811 and exits 1 — niubash#163).
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -547,6 +548,7 @@ impl Executor {
                 // interactive session died on `echo ${X?}` — the theme-
                 // source session-killer (wt90).
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
@@ -698,6 +700,7 @@ impl Executor {
                     // exits 1 (eval.c:104-109) and a `( ... )` subshell
                     // contains it to 1 (execute_cmd.c:1811 — niubash#163).
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -776,7 +779,7 @@ impl Executor {
             }
             self.pending_scalar_assignment =
                 expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
-            if !self.apply_shell_assignment(name, expanded_value) {
+            if !self.apply_shell_assignment(name, expanded_value, None) {
                 // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
                 // a failed standalone assignment (readonly violation, invalid
                 // nameref value, ...) prints its diagnostic and then
@@ -1030,6 +1033,7 @@ impl Executor {
                 // execute_empty_words_command above: interactive_shell
                 // selects the DISCARD-class error so the session survives.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
@@ -1704,6 +1708,10 @@ impl Executor {
             // node's line identity (Simple->line) — carry it like `line`
             // or the rebuilt command loses the continuation-aware stamp.
             first_word_end_line: cmd.first_word_end_line,
+            // rubash#3209/#3053: the first-element facts ride with
+            // the stamp they belong to.
+            first_element_redirect: cmd.first_element_redirect,
+            time_prefix_first_element_end_line: cmd.time_prefix_first_element_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
@@ -4098,10 +4106,6 @@ impl Executor {
             if self.exit_code != 0 {
                 self.raise_evalerror_abort();
             }
-            return true;
-        }
-        if cmd.words.first().is_some_and(|word| word.starts_with('#')) {
-            self.exit_code = 0;
             return true;
         }
         false

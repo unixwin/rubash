@@ -113,7 +113,7 @@ impl Executor {
             if status.is_some() {
                 command_substitution_status = status;
             }
-            if !self.apply_shell_assignment(&name, expanded_value) {
+            if !self.apply_shell_assignment(&name, expanded_value, None) {
                 apply_failed = true;
             }
         }
@@ -153,7 +153,7 @@ impl Executor {
         let mut value = value.clone();
         value.push_str(suffix);
         let expanded_value = self.expand_assignment_value(name, &value);
-        self.exit_code = if self.apply_shell_assignment(name, expanded_value) {
+        self.exit_code = if self.apply_shell_assignment(name, expanded_value, None) {
             0
         } else {
             1

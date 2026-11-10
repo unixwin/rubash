@@ -592,41 +592,29 @@ impl Executor {
         if read_fd.is_none() {
             if cmd.heredoc_body.is_some() {
                 let input = self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body);
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
             if let Some(heredoc) = &cmd.heredoc {
                 let input = self.expand_heredoc_body_mut(heredoc);
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
 
@@ -817,9 +805,10 @@ impl Executor {
                 // record reader observes real arrival). The timed
                 // collection below is the spawn-failure fallback.
                 if let Some(fd) = self.allocate_dynamic_fd() {
-                    if let Some(file_fd) =
-                        self.spawn_input_process_substitution_child(source, cmd.line)
-                    {
+                    if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                        source,
+                        super::command_text::procsub_body_seed_line(cmd),
+                    ) {
                         self.fd_table
                             .open_input(fd, FdReadEndpoint::File(file_fd), true);
                         let line = self.fd_table.read_text(
@@ -896,22 +885,16 @@ impl Executor {
                     // `!record_contains_delimiter(..)` misreports EOF when
                     // a -n/-N limit stopped the trim before the end of the
                     // slurped text; replay the per-unit walk instead.
-                    self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                        &output,
-                        delimiter,
-                        char_limit,
-                        exact_char_limit,
-                        escape_aware,
-                        raw,
-                    );
-                    return Some(trim_read_input(
+                    let (record, eof_no_delimiter) = slurped_record(
                         output,
                         delimiter,
                         char_limit,
                         exact_char_limit,
                         escape_aware,
                         raw,
-                    ));
+                    );
+                    self.read_eof_no_delimiter |= eof_no_delimiter;
+                    return Some(record);
                 }
             }
 
@@ -1078,22 +1061,16 @@ impl Executor {
                 if input.is_empty() {
                     return None;
                 }
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
             // rubash#2091: a /dev/tcp|udp target is judged by the
             // registry on its shell spelling too — it has no filesystem
@@ -1182,6 +1159,37 @@ impl Executor {
                     &self.shell_state.env_vars,
                 )),
             };
+            // rubash#3268: from a deleted cwd the joined spelling's
+            // metadata and opens below die at the dead component —
+            // when the cwd anchor applies for the relative operand,
+            // the anchor's fstatat supplies the is-file classification
+            // and its openat the handle, so the transient-bind and
+            // slurp arms run exactly as on a live cwd. (The rejection
+            // gates own the missing-target diagnostic; a failed
+            // anchored open keeps this funnel's plain decline.)
+            #[cfg(unix)]
+            let anchored_operand = if expanded_target.is_empty() {
+                None
+            } else {
+                let fs_operand = self.redirect_target_filesystem_path(&expanded_target);
+                if fs_operand.is_relative() && self.fstatat_via_cwd_anchor(&fs_operand).is_some() {
+                    Some(fs_operand)
+                } else {
+                    None
+                }
+            };
+            #[cfg(not(unix))]
+            let anchored_operand: Option<std::path::PathBuf> = None;
+            #[cfg(unix)]
+            let anchored_is_file = anchored_operand.as_ref().is_some_and(|operand| {
+                matches!(
+                    self.fstatat_via_cwd_anchor(operand),
+                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFREG)
+                )
+            });
+            #[cfg(not(unix))]
+            let anchored_is_file = false;
             if redirect.append {
                 let _ = OpenOptions::new()
                     .create(true)
@@ -1232,9 +1240,29 @@ impl Executor {
             // reader handles the stream.
             if !std::fs::metadata(&path)
                 .map(|m| m.is_file())
-                .unwrap_or(false)
+                .unwrap_or(anchored_is_file)
             {
-                let Ok(file) = FileFd::open_read(path) else {
+                let Ok(file) = FileFd::open_read(path.clone()).or_else(|error| {
+                    // rubash#3268: the plain open died with the joined
+                    // spelling — when the anchor applies, its openat
+                    // is the bind's one open.
+                    #[cfg(unix)]
+                    {
+                        match &anchored_operand {
+                            Some(operand) => self
+                                .open_via_cwd_anchor(operand, libc::O_RDONLY, 0)
+                                .and_then(|result| result.ok())
+                                .map(|file| FileFd::from_file(file, path.clone()))
+                                .ok_or(error),
+                            None => Err(error),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = &anchored_operand;
+                        Err(error)
+                    }
+                }) else {
                     return None;
                 };
                 let saved = self.fd_table.entries.get(&0).cloned();
@@ -1333,30 +1361,47 @@ impl Executor {
                 // stream — serve the shared remainder (subst.c:7143).
                 crate::executor::substitution_metadata::bytes_to_shell_text(&bytes)
             } else {
-                match crate::executor::substitution_metadata::read_shell_input_file(path) {
+                match crate::executor::substitution_metadata::read_shell_input_file(&path) {
                     Ok(text) => text,
-                    Err(_) => return None,
+                    Err(_) => {
+                        // rubash#3268: the plain read died with the
+                        // joined spelling — the anchored read face
+                        // (read_session_anchored, the emulated-cat
+                        // ladder) serves the bytes when the anchor
+                        // applies; any other failure keeps the plain
+                        // decline.
+                        #[cfg(unix)]
+                        if let Some(text) = anchored_operand.as_ref().and_then(|operand| {
+                            self.read_session_anchored(operand, &path)
+                                .ok()
+                                .map(|bytes| {
+                                    crate::executor::substitution_metadata::bytes_to_shell_text(
+                                        &bytes,
+                                    )
+                                })
+                        }) {
+                            text
+                        } else {
+                            return None;
+                        }
+                        #[cfg(not(unix))]
+                        return None;
+                    }
                 }
             };
             if input.is_empty() {
                 return None;
             }
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
 
         // Here-strings are command-local input. Persistent virtual fds must
@@ -1378,22 +1423,16 @@ impl Executor {
                 .any(|redirect| redirect.fd == Some(0));
         if has_fd0_body {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &line,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     line,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
 
@@ -1983,6 +2022,57 @@ impl Executor {
         }
         if char_limit == Some(0) {
             return Some(String::new());
+        }
+
+        // rubash#3212: when the delimiter byte is joined into a literal
+        // character of the mirror text it exists in no form the
+        // character scan below can match — serve the record from the
+        // decoded byte domain and write the unconsumed remainder back
+        // re-encoded (the split can leave the next record starting
+        // inside a character, which only the byte form can spell; the
+        // OFFSET stays at the tail's start in the rewritten mirror).
+        // The timed judge below keys on the mirror's original length,
+        // so it does not judge a byte-served record; the record itself
+        // is complete by construction.
+        if let Some(slice) = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN)
+            .map(|input| input[offset..].to_string())
+        {
+            if joined_delimiter_scan_applies(&slice, delimiter) {
+                let scan = scan_text_record_bytes(
+                    &slice,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                self.read_eof_no_delimiter = !scan.delimiter_found && !scan.limit_reached;
+                let mut mirror = self
+                    .shell_state
+                    .env_vars
+                    .get(FUNCTION_STDIN)
+                    .cloned()
+                    .unwrap_or_default();
+                mirror.truncate(offset);
+                mirror.push_str(&scan.tail);
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN.to_string(), mirror);
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
+                return Some(trim_read_input(
+                    scan.record,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                ));
+            }
         }
 
         // One record scan over a window of the stream; re-run on the

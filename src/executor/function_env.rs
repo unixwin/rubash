@@ -316,32 +316,35 @@ fn redirect_suffix_text(def_redirects: &[crate::parser::Redirect]) -> String {
     )
 }
 
-pub(in crate::executor) fn export_args_request_functions(args: &[String]) -> bool {
-    for arg in args {
-        if arg == "--" {
-            return false;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            return false;
-        }
-        if arg[1..].contains('f') {
-            return true;
+/// Whether an export/readonly invocation diverts to its `-f`
+/// function face: a MINUS-signed `f` in the option region, scanned
+/// with the row's own machine (Stage-2 ④ Phase 4 — the old
+/// `contains('f')` walk also fired on an `f` after an invalid
+/// letter, e.g. `-Zf`, which the machine stops at). Diagnostics go
+/// to a discard sink: the face reports them itself.
+fn setattr_args_request_functions(row_name: &str, args: &[String]) -> bool {
+    let row = crate::executor::builtin_table::builtin_table_row(row_name).expect("setattr row");
+    let mut sink = Vec::new();
+    let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut sink);
+    let mut opt = crate::executor::builtin_opt::BuiltinOpt::new(row, args, &mut diag, false);
+    loop {
+        match opt.next() {
+            crate::executor::builtin_opt::OptEvent::Opt(c) => {
+                if c == b'f' && opt.opttype() == b'-' {
+                    return true;
+                }
+            }
+            crate::executor::builtin_opt::OptEvent::OptArg(_, _) => {}
+            crate::executor::builtin_opt::OptEvent::Help
+            | crate::executor::builtin_opt::OptEvent::End => return false,
         }
     }
-    false
+}
+
+pub(in crate::executor) fn export_args_request_functions(args: &[String]) -> bool {
+    setattr_args_request_functions("export", args)
 }
 
 pub(in crate::executor) fn readonly_args_request_functions(args: &[String]) -> bool {
-    for arg in args {
-        if arg == "--" {
-            return false;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            return false;
-        }
-        if arg[1..].contains('f') {
-            return true;
-        }
-    }
-    false
+    setattr_args_request_functions("readonly", args)
 }

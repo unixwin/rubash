@@ -397,6 +397,16 @@ pub struct GroupedRunClassification {
     /// DISCARD arm); it does not by itself decide the session —
     /// the errexit verdict on the interrupted status does.
     pub signal_discard: bool,
+    /// rubash#2794: the terminal group ended in an
+    /// expansion-error discard — a FATAL-class word-expansion
+    /// error (`${var:?}`, nounset unbound, bad @-transform) the
+    /// executor adjudicated an interactive DISCARD at its raise
+    /// point (subst.c:10416-10418's error branch) instead of
+    /// the fatal FORCE_EOF branch. Recorded per group like
+    /// `signal_discard`; like it, the discard abandons the
+    /// rest of the line without deciding the session — the
+    /// errexit verdict on status 1 does.
+    pub expansion_error_discard: bool,
 }
 
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
@@ -565,6 +575,9 @@ fn run_script_grouped_at_line_offset(
     // the run (a terminal discard group stops nothing, but the
     // classification must still report it).
     let mut terminal_discard = false;
+    // rubash#2794: the same carry for the expansion-error
+    // discard fact.
+    let mut terminal_expansion_discard = false;
     while index < raw_lines.len() {
         // One gather implementation for every grouped reader (the `source`
         // builtin shares it via read_next_source_group). The gather loop
@@ -597,6 +610,7 @@ fn run_script_grouped_at_line_offset(
                 // as the terminal one (Q6 arm B approximation
                 // (iii), resolved).
                 terminal_discard = false;
+                terminal_expansion_discard = false;
                 continue;
             }
             failglob_discard_until = None;
@@ -674,6 +688,10 @@ fn run_script_grouped_at_line_offset(
         // below is exactly what separates the two.
         let discarded = executor.take_unit_signal_discard();
         terminal_discard = discarded;
+        // rubash#2794: the same per-group take for the
+        // expansion-error discard record the raise points noted.
+        let expansion_discarded = executor.take_unit_expansion_error_discard();
+        terminal_expansion_discard = expansion_discarded;
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
@@ -700,6 +718,7 @@ fn run_script_grouped_at_line_offset(
                     None
                 },
                 signal_discard: discarded,
+                expansion_error_discard: expansion_discarded,
             };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
@@ -790,6 +809,7 @@ fn run_script_grouped_at_line_offset(
         GroupedRunClassification {
             last_inverted: executor.last_command_inverted(),
             signal_discard: terminal_discard,
+            expansion_error_discard: terminal_expansion_discard,
             ..GroupedRunClassification::default()
         },
     )
@@ -3995,6 +4015,20 @@ fn run_source_impl(
         suppress_unclosed_diagnostic,
         !source_run_prior,
     );
+    // rubash#2680: a unit that ended in a parse error has that error's
+    // status as its own $? — GNU's reader abandons the unit with the
+    // parse failure's status (parse_and_execute's yyparse failure,
+    // evalstring.c:584-600). The parser's own error path already
+    // records it, but the unclosed-diagnostics route only RETURNS its
+    // status (2, or 1 for the array-list family) without recording
+    // it, so a grouped reader's parse-abort adjudication — which
+    // reads last_exit_code — inherited the PREVIOUS unit's status
+    // and a script whose last group died in the route exited with a
+    // stale code (0 after a successful `shopt`). Record the unit's
+    // status whenever the parse-error latch is still standing.
+    if executor.parse_error_pending() {
+        executor.set_last_exit_code(status);
+    }
     executor.source_run_active.set(source_run_prior);
     status
 }

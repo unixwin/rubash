@@ -970,7 +970,36 @@ impl Executor {
         // substitution pipe read ends at their numbers in the child.
         #[cfg(unix)]
         crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
-        process.current_dir(&self.shell_state.cwd);
+        // rubash#3201: deliver the shell's ambient descriptors >= 3 to
+        // this child, exactly as the full-execution spawn does through
+        // apply_external_fd_delivery. This shortcut spawner previously
+        // registered no ambient pins at all, so a trivial comsub body
+        // (`x=$(external …)`) deterministically saw none of the shell's
+        // open fds while a non-trivial body (routed to the full
+        // executor) saw them all — GNU subst.c:7143 command_substitute
+        // forks one way for every body, and the fork inherits the
+        // descriptor set at its numbers. The pin sources are the fd
+        // table's own handles (not inheritable duplicates), so a
+        // CLOEXEC source dies at exec and no alias of the #2688 kind
+        // is introduced on this face. Text endpoints have no handle
+        // to pin and keep the full path's materialization behaviour
+        // only there; this face's File/standard-backed set is the
+        // measured #3201 shape (`exec 3<file 5<file2`).
+        #[cfg(unix)]
+        {
+            let pins = self.ambient_fd_pins_unbound();
+            if !pins.is_empty() {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: same contract as attach_ambient_fd_pins —
+                // the closure runs only in the forked child before
+                // exec and only dup2/closes raw descriptors.
+                unsafe {
+                    process
+                        .pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+                }
+            }
+        }
+        self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
         let mut spawned = match process.spawn() {
             Ok(child) => child,

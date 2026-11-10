@@ -1383,11 +1383,20 @@ fn backtick_end(buf: &[char], pos: usize) -> Option<usize> {
 /// later candidate would pay the caller's speculative path). With a
 /// span-proportional interval the total re-scan work stays within a
 /// small multiple of the span, and a unit that closes is retried
-/// within a few KB of fed text. Parking longer is always safe —
-/// this only trades re-scan cost against release latency.
+/// within a few chars of fed text. There is deliberately no absolute
+/// floor on the interval: a floor of N chars strands every unit whose
+/// span is under ~16*N for the whole of any shorter input (rubash#2653
+/// — a 22-char span under a 2048-char floor was never retried across a
+/// ~110-byte script). The span/16 growth alone keeps the re-scan count
+/// geometric, so the total re-scan work stays linear in the span fed.
+/// Parking longer is safe for the commit contract (nothing is
+/// released meanwhile), but a park the throttle re-arms without a
+/// re-scan is STALE — it testifies nothing about the text fed since —
+/// and the phases report that through `park_stale` so no caller
+/// mistakes it for a current "unterminated" verdict.
 fn retry_deadline(buffer_len: usize, park_pos: usize) -> usize {
     let span = buffer_len.saturating_sub(park_pos);
-    buffer_len + (span / 16).max(2048)
+    buffer_len + (span / 16).max(1)
 }
 
 /// Streaming form of expand_comsub_alias_bodies: same scan, fed in
@@ -1410,8 +1419,10 @@ struct ComsubAliasScanner<'a> {
     /// re-scan), and the input length at which it may be retried
     /// (see retry_deadline). Without this, a unit spanning N lines
     /// is re-scanned from its start on every line — the O(span^2)
-    /// shape rubash#1961 exists to remove. Retrying late is safe:
-    /// the scanner simply stays parked meanwhile.
+    /// shape rubash#1961 exists to remove. Retrying late is safe for
+    /// the commit contract (the scanner simply stays parked and
+    /// releases nothing), but the re-armed park is stale — see
+    /// park_stale.
     park_pos: Option<usize>,
     park_rescan: bool,
     retry_at: usize,
@@ -1421,6 +1432,16 @@ struct ComsubAliasScanner<'a> {
     /// value inside the truncated body contributing its closer), so
     /// the caller owes it the batch check (see AliasStreamScanner).
     park_comsub: bool,
+    /// The current park was re-armed WITHOUT re-scanning the
+    /// accumulated text (the retry throttle fired, or the poison
+    /// latch re-armed): it describes the input as of the last real
+    /// scan and cannot testify that the text is still unterminated —
+    /// the span it parked on may have closed in text fed since. Set
+    /// by a throttled drive, cleared by any drive that actually
+    /// scans. AliasStreamScanner::park_needs_batch surfaces it, so
+    /// the grouped driver's gather never reads a stale park as "the
+    /// group stays open by construction" (rubash#2653).
+    park_stale: bool,
     /// Shell_getc token-boundary state for `#' comment recognition
     /// (parse.y:3631): true after the input start, a blank, a newline, or
     /// an operator; false inside a word. Kept in lockstep with the batch
@@ -1444,6 +1465,7 @@ impl<'a> ComsubAliasScanner<'a> {
             park_rescan: false,
             retry_at: 0,
             park_comsub: false,
+            park_stale: false,
             at_word_start: true,
         }
     }
@@ -1463,6 +1485,7 @@ impl<'a> ComsubAliasScanner<'a> {
         self.parked = false;
         if self.poisoned {
             self.parked = true;
+            self.park_stale = true;
             return;
         }
         if !final_pass
@@ -1471,8 +1494,10 @@ impl<'a> ComsubAliasScanner<'a> {
             && self.chars.len() < self.retry_at
         {
             self.parked = true;
+            self.park_stale = true;
             return;
         }
+        self.park_stale = false;
         let mut rescan_park = false;
         let mut comsub_park = false;
         while self.pos < self.chars.len() {
@@ -1689,6 +1714,9 @@ struct MainAliasScanner<'a> {
     park_pos: Option<usize>,
     park_rescan: bool,
     retry_at: usize,
+    /// The current park was re-armed without a re-scan and is stale
+    /// (see ComsubAliasScanner::park_stale).
+    park_stale: bool,
 }
 
 impl<'a> MainAliasScanner<'a> {
@@ -1726,6 +1754,7 @@ impl<'a> MainAliasScanner<'a> {
             park_pos: None,
             park_rescan: false,
             retry_at: 0,
+            park_stale: false,
         }
     }
 
@@ -1813,6 +1842,7 @@ impl<'a> MainAliasScanner<'a> {
         self.parked = false;
         if self.poisoned {
             self.parked = true;
+            self.park_stale = true;
             return;
         }
         if !final_pass
@@ -1821,8 +1851,10 @@ impl<'a> MainAliasScanner<'a> {
             && self.buf.len() < self.retry_at
         {
             self.parked = true;
+            self.park_stale = true;
             return;
         }
+        self.park_stale = false;
         let mut rescan_park = false;
         while self.pos < self.buf.len() {
             // shell_getc boundary pops (parse.y:2081 pop_string).
@@ -2398,14 +2430,26 @@ impl<'a> AliasStreamScanner<'a> {
     ///     expands the truncated body as-is, and an alias value inside
     ///     it can contribute the unit's closer (the documented
     ///     `short='echo ok 8 )'` shape), completing the text early.
-    /// Every other park leaves an unterminated unit IN the batch
-    /// expansion itself (an open quote, backtick, word, compound
-    /// assignment, or `((` in the produced text, an operator or `$` at
-    /// the very end of input), where the batch needs-more scan is
-    /// positive by construction — the caller answers those candidates
-    /// "needs more" outright instead of paying for the scan.
+    ///   - either phase's park is STALE (park_stale): the park was
+    ///     re-armed by the retry throttle without a re-scan, so it
+    ///     describes the text as of an earlier feed — the span it
+    ///     parked on may have closed in text fed since, and only the
+    ///     batch verdict over the accumulated text can tell. Reading
+    ///     a stale park as "unterminated by construction" is the
+    ///     rubash#2653 defect: the gather swallowed the rest of the
+    ///     script into one read unit behind a multi-line alias
+    ///     definition whose closing line it never re-scanned.
+    /// Every other park is current and leaves an unterminated unit IN
+    /// the batch expansion itself (an open quote, backtick, word,
+    /// compound assignment, or `((` in the produced text, an operator
+    /// or `$` at the very end of input), where the batch needs-more
+    /// scan is positive by construction — the caller answers those
+    /// candidates "needs more" outright instead of paying for the scan.
     pub(crate) fn park_needs_batch(&self) -> bool {
-        self.poisoned || (self.pre.parked && self.pre.park_comsub)
+        self.poisoned
+            || (self.pre.parked && self.pre.park_comsub)
+            || (self.pre.parked && self.pre.park_stale)
+            || (self.main.parked && self.main.park_stale)
     }
 
     /// Flush with end-of-input semantics and return the expansion
@@ -2511,6 +2555,41 @@ mod stream_tests {
         assert_stream_matches_batch("foo bar'\nfoo baz\n", lookup, false);
         // Value-introduced redirection operator takes the next word as target.
         assert_stream_matches_batch("ec a2 c file\n", lookup, false);
+    }
+
+    /// rubash#2653: a multi-line alias DEFINITION read while the
+    /// table is live parks the pre-pass on its open quote. The park
+    /// must retire once the closing line is fed — a throttle deadline
+    /// with a 2048-char floor stranded it for the rest of any shorter
+    /// input, and park_needs_batch did not cover the stale park, so
+    /// the grouped driver's gather read it as "unterminated by
+    /// construction" and swallowed the rest of the script into one
+    /// read unit. After the closing line the scanner must either be
+    /// unparked or owe the caller a batch verdict, and the released
+    /// text must total exactly the batch expansion.
+    #[test]
+    fn multiline_alias_definition_park_retires_on_closing_line() {
+        let mut raw: HashMap<&'static str, (&'static str, bool)> = HashMap::new();
+        raw.insert("foo1", ("echo one; echo two", false));
+        raw.insert("foo2", ("echo three\necho four", false));
+        let table = lookup_for(raw);
+        let lookup = &table as &AliasLookup<'_>;
+        let mut scanner = AliasStreamScanner::new(lookup, false);
+        scanner.push_line("alias foo1='echo one; echo two'\n");
+        scanner.push_line("alias foo2='echo three\n");
+        assert!(
+            scanner.parked(),
+            "the open quote of the multi-line definition parks the scanner"
+        );
+        scanner.push_line("echo four'\n");
+        assert!(
+            !scanner.parked() || scanner.park_needs_batch(),
+            "the closing line retires the park or marks it batch-owed"
+        );
+        let fed = "alias foo1='echo one; echo two'\nalias foo2='echo three\necho four'\n";
+        let mut total = scanner.take_committed();
+        total.push_str(&scanner.finish());
+        assert_eq!(total, expand_aliases_in_source(fed, lookup, false));
     }
 
     #[test]
