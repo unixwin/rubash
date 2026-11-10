@@ -759,7 +759,7 @@ pub(crate) fn canonical_keyseq(written: &str) -> String {
                 // is itself a backslash or a quote takes the
                 // dumper's backslash prefix like any other byte
                 // (byte 0x1c therefore renders "\C-\\").
-                let letter = ((byte ^ 0x40) as char).to_ascii_lowercase();
+                let letter = char::from(byte ^ 0x40).to_ascii_lowercase();
                 if letter == '\\' || letter == '"' {
                     out.push('\\');
                 }
@@ -782,7 +782,7 @@ pub(crate) fn canonical_keyseq(written: &str) -> String {
             }
             b'\\' => out.push_str("\\\\"),
             b'"' => out.push_str("\\\""),
-            byte => out.push(byte as char),
+            byte => out.push(char::from(byte)),
         }
     }
     out
@@ -1287,8 +1287,8 @@ mod tests {
         registry.register(xentry("\\C-g", "g"));
         registry.register(xentry("\\C-x\\C-f", "xf"));
         registry.register(xentry("\\C-x", "x"));
-        let seqs: Vec<&str> = registry
-            .snapshot()
+        let snapshot = registry.snapshot();
+        let seqs: Vec<&str> = snapshot
             .iter()
             .filter(|entry| matches!(entry.kind, BindKind::Execute { .. }))
             .map(|entry| entry.keyseq.as_str())
