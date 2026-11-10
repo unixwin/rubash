@@ -760,6 +760,12 @@ impl Executor {
         // full parsing/execution. This handles the alias4.sub form
         // `$(eval echo b)` so alias-expanded command substitutions participate
         // in word expansion.
+        // rubash#2785: the untrimmed body text is threaded to the
+        // body-error report separately — its trailing blank is the
+        // only evidence that a `)` closing the substitution was NOT
+        // glued to the body's last token, and the conditional
+        // near-token walk in the report reads exactly that.
+        let raw_source = source;
         let source = source.trim();
         if source.is_empty() {
             self.last_command_substitution_status.set(Some(0));
@@ -852,7 +858,8 @@ impl Executor {
             && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
                 .is_some()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -879,7 +886,9 @@ impl Executor {
         // edge.
         if let Some(name) = comsub_first_word(source) {
             if self.shell_state.functions.contains_key(name) {
-                if let Some(output) = self.command_list_substitution_output(source, context) {
+                if let Some(output) =
+                    self.command_list_substitution_output(source, context, raw_source)
+                {
                     return output;
                 }
                 return String::new();
@@ -957,7 +966,8 @@ impl Executor {
             || self.xtrace_enabled()
             || self.err_trap_inherited_into_comsub()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -1311,7 +1321,7 @@ impl Executor {
         // Fallback: run the source through the real parser/executor in a
         // subshell and capture stdout (function calls, pipelines, compound
         // commands that the special-case dispatch above does not cover).
-        if let Some(output) = self.command_list_substitution_output(source, context) {
+        if let Some(output) = self.command_list_substitution_output(source, context, raw_source) {
             return output;
         }
 
@@ -1540,6 +1550,7 @@ impl Executor {
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         // The body was extracted from the current word; keep GNU's in-place
         // line counter so body diagnostics report the original script line
@@ -1645,7 +1656,7 @@ impl Executor {
         // though the enclosing command is what dies — emit the stored
         // diagnostic instead of silently swallowing it (case-pattern
         // `$(esac;x)` in comsub-posix6.sub).
-        if self.report_comsub_body_error_if_any(&ast.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&ast.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
 
@@ -1860,12 +1871,15 @@ impl Executor {
     }
 
     /// Legacy String boundary for callers that still build AST words as text.
+    /// `body_text` is the untrimmed extracted body, carried only for
+    /// the body-error report (rubash#2785).
     fn command_list_substitution_output(
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<String> {
-        self.command_list_substitution_output_typed(source, context)
+        self.command_list_substitution_output_typed(source, context, body_text)
             .map(|output| output.text_lossy())
     }
 
@@ -2014,6 +2028,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
@@ -2160,12 +2175,14 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: self.fd_var_apply_snapshot.clone(),
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -2504,12 +2521,35 @@ impl Executor {
         let [file_word] = words.as_slice() else {
             return ambiguity(strip_matching_quotes(target));
         };
+        // The finalized word is a FILENAME from here on: GNU
+        // open_redir_file (builtins/evalstring.c:759) opens the
+        // expanded word verbatim, so fold any carrier pair it
+        // carries through the shared name-boundary gate + decoder
+        // (rubash#3104). This face finalizes its own word and never
+        // passes redirect_operand_literal, so a stored raw-byte
+        // pair otherwise reached the open — and its diagnostic —
+        // verbatim.
+        // Whether the word carried transport is recorded before the
+        // fold (rubash#3104 p23): the folded string cannot tell a
+        // byte char from a genuine char of the same code point, so a
+        // high-byte name must probe as raw bytes here.
+        let file_word_had_transport =
+            crate::executor::markers::contains_decodable_transport(file_word);
+        let folded_file_word =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(file_word);
+        let file_word: &str = &folded_file_word;
         // Model the Linux open(dir, O_RDONLY)+read dance: open succeeds and
         // the first zread fails EISDIR, so read_comsub (subst.c:6700-6712)
         // returns NULL with EXECUTION_SUCCESS — a directory operand is
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
-        let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        let read_path = if file_word_had_transport {
+            crate::executor::path::path_buf_from_folded_name(
+                &shell_path_to_windows(file_word, &self.shell_state.env_vars).to_string_lossy(),
+            )
+        } else {
+            shell_path_to_windows(file_word, &self.shell_state.env_vars)
+        };
         // A materialized input process substitution resolves to /dev/fd/N
         // (subst.c process_substitute + move_to_high_fd): the bytes live in
         // the fd table's ProcessSubstitution endpoint, not on disk. Reading

@@ -2287,9 +2287,18 @@ impl Executor {
         // snapshot whose region never touched the mask) re-apply the
         // same value.
         let fork_saved_process_umask = saved_state.fork_saved_process_umask;
+        // rubash#2636: the region also ran its `ulimit` sets against
+        // this same PROCESS (builtins/ulimit.rs drives the real
+        // setrlimit on unix); GNU's fork discards them with the
+        // child. Re-apply the save point's rlimit snapshot alongside
+        // the umask, at the same LAST position.
+        let fork_saved_process_rlimits = saved_state.fork_saved_process_rlimits.clone();
         self.shell_state = saved_state;
         if let Some(mask) = fork_saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        if let Some(rlimits) = &fork_saved_process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
         // Re-seat the stopped jobs into the restored table. The id
         // allocator takes highest-occupied-id + 1, so a re-inserted id
@@ -3506,6 +3515,24 @@ impl Executor {
             }
             _ => format!("{}: ", self.error_report_name()),
         }
+    }
+
+    /// GNU error.c error_prolog with the line suppressed — the
+    /// sys_error family. sys_error (error.c) is the one reporter
+    /// built on error_prolog(0): its prolog is the error name alone,
+    /// never a line segment, in script or interactive context alike.
+    /// The shell_execve bad-interpreter refusal reports through it
+    /// (execute_cmd.c:6184), while its sibling classifications use
+    /// internal_error / file_error (error_prolog(1)) and keep the
+    /// line (rubash#2755).
+    pub fn sys_error_prefix(&self) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        format!("{}: ", self.error_report_name())
     }
 
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)
