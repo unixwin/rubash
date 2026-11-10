@@ -17,6 +17,11 @@ impl Executor {
     where
         W: Write,
     {
+        // The described name is looked up and reported as a name:
+        // fold a stored E400 pair to the raw char once, here, so the
+        // table consults and every report line agree (rubash#3076).
+        let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+        let name = folded_name.as_str();
         if !force_path {
             if self.alias_expansion_enabled() {
                 if let Some(alias) = self.shell_state.aliases.get(name) {
@@ -135,6 +140,9 @@ impl Executor {
     where
         W: Write,
     {
+        // Folded like describe_name_with_io (rubash#3076).
+        let folded_name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
+        let name = folded_name.as_str();
         let mut found = false;
 
         // GNU type.def describe_command: with CDESC_ALL the alias/keyword/

@@ -22,7 +22,7 @@ mod word;
 mod tests;
 
 use brace_scan::{opens_function_body_after_previous_signature, tokens_open_unclosed_brace_group};
-pub(crate) use classification::is_assignment;
+pub(crate) use classification::{is_assignment, is_keyword};
 use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
 pub(crate) use continuation::{
     comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
@@ -61,11 +61,12 @@ pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
+pub(crate) use quotes::with_lex_extquote_pin;
 pub(crate) use quotes::{
     escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
-pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};
+pub(crate) use word::{raw_has_ansi_u_escape, raw_has_dolbrace_ansi_c, word_value_from_raw};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 
@@ -1907,6 +1908,24 @@ impl GroupScanFeeder {
                 token.position = logical_start_line
                     + newline_offsets.partition_point(|&offset| offset < column)
                     + joins.iter().filter(|&&join| join <= column).count();
+                // rubash#3028: the token's END line — the same prefix
+                // count taken at the token's end column. A join AT the
+                // end column counts as crossed: a token whose last byte
+                // abuts the join had the backslash-newline inside its
+                // own scan (the reader crossed the line before the scan
+                // terminated — `foo\<newline>` at EOF finishes the word
+                // on line 2), while a token terminated before the join
+                // has a delimiter byte in between and ends strictly
+                // before it (`foo \<newline>` keeps line 1). This also
+                // makes abutting tokens agree: one token's end line is
+                // the next token's start line. GNU captures
+                // simplecmd_lineno at exactly this point: after the
+                // word's scan terminated (parse.y:5849-5851).
+                let end_column = column + token.raw.len();
+                token.end_position = (logical_start_line
+                    + newline_offsets.partition_point(|&offset| offset < end_column)
+                    + joins.iter().filter(|&&join| join <= end_column).count())
+                .max(token.position);
                 // DISCARD-family skips (GNU eval.c:111 — the rest of the
                 // current command LIST is abandoned) span the whole logical
                 // line; executor skip loops compare this, not `position`,
@@ -1916,6 +1935,7 @@ impl GroupScanFeeder {
         } else {
             for token in &mut line_tokens {
                 token.position = self.logical_start_line;
+                token.end_position = self.logical_start_line;
                 token.logical_line = self.logical_start_line;
             }
         }
@@ -2171,6 +2191,23 @@ impl GroupScanFeeder {
                             .count()
                 } else {
                     self.logical_start_line
+                };
+                // rubash#3028: same end-line stamp as the accept path
+                // (see there) — the leftover run's tokens feed the same
+                // first-word capture in the parser.
+                token.end_position = if leftover_spans_lines {
+                    let column = token.column.min(self.logical_line.len());
+                    let end_column = column + token.raw.len();
+                    (self.logical_start_line
+                        + newline_offsets.partition_point(|&offset| offset < end_column)
+                        + self
+                            .continuation_join_columns
+                            .iter()
+                            .filter(|&&join| join <= end_column)
+                            .count())
+                    .max(token.position)
+                } else {
+                    token.position
                 };
                 token.logical_line = self.logical_start_line;
             }

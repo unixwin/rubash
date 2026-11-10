@@ -47,6 +47,37 @@ impl Executor {
         {
             return Ok(false);
         }
+        // rubash#3004: the emulations stand in for the PATH binary, and
+        // the spawn funnel hands that binary pair-DECODED argv (path.rs
+        // decode_bytes; GNU execute_cmd.c:6139 shell_execve passes the
+        // raw word bytes). Cooked words are transport text — a user
+        // carrier byte rides the raw-byte marker pair (markers.rs
+        // storage contract) — so decode the words once here; otherwise
+        // a filename operand reaches the filesystem with the pair's
+        // UTF-8 bytes as its name (a \x1c name landed on disk under its
+        // U+E000-pair spelling, which is also how t9902's fixture
+        // creation under the shell under test went wrong). Words with
+        // no transport pair pass through uncloned.
+        let decoded_cmd;
+        let cmd = if cmd
+            .words
+            .iter()
+            .any(|word| crate::executor::markers::contains_decodable_transport(word))
+        {
+            decoded_cmd = {
+                let mut decoded = cmd.clone();
+                for word in &mut decoded.words {
+                    *word =
+                        crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(
+                            word,
+                        );
+                }
+                decoded
+            };
+            &decoded_cmd
+        } else {
+            cmd
+        };
         let emulated = matches!(
             name,
             "/bin/pwd"
@@ -184,8 +215,13 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: record the as-written join when the walk
+            // itself produced this program (see
+            // recorded_resolution_spelling in executor::path).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                name,
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
@@ -347,8 +383,12 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command("tput", &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: same recorded-spelling rule as the plain
+            // record sites (see recorded_resolution_spelling).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                "tput",
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
@@ -2110,7 +2150,7 @@ impl Executor {
                     return Ok(true);
                 }
                 let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                    &self.session_path(self.redirect_target_filesystem_path(&target)),
                 )?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
@@ -4416,17 +4456,28 @@ impl Executor {
         }
         let mut mode: Option<&str> = None;
         let mut files: Vec<String> = Vec::new();
+        // getopt_long semantics (coreutils chmod): the FIRST `--`
+        // ends option scanning wherever it appears — before the mode,
+        // between operands, or after the mode (rubash#3106). Every
+        // later word is an operand: the first is the mode, the rest
+        // are files, and a second `--` is an ordinary file name.
+        let mut options_done = false;
         for arg in &cmd.words[1..] {
+            if !options_done && arg == "--" {
+                options_done = true;
+                continue;
+            }
             if mode.is_none() {
-                if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c" | "--") || arg.starts_with("--")
-                {
-                    continue;
-                }
-                if arg.starts_with('-')
-                    && arg.len() > 1
-                    && arg[1..].chars().all(|ch| "fRvc".contains(ch))
-                {
-                    continue;
+                if !options_done {
+                    if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c") || arg.starts_with("--") {
+                        continue;
+                    }
+                    if arg.starts_with('-')
+                        && arg.len() > 1
+                        && arg[1..].chars().all(|ch| "fRvc".contains(ch))
+                    {
+                        continue;
+                    }
                 }
                 mode = Some(arg);
                 continue;
@@ -4622,6 +4673,15 @@ fn chmod_declines(words: &[String]) -> bool {
     for word in words {
         let arg = word.as_str();
         if mode.is_some() {
+            // The first `--` is the option terminator even after the
+            // mode (getopt_long, rubash#3106): it is not a file, so
+            // `chmod 600 --` keeps files == 0 and declines to the real
+            // binary's missing-operand diagnostic. A second `--` is
+            // an ordinary file operand.
+            if arg == "--" && !after_terminator {
+                after_terminator = true;
+                continue;
+            }
             files += 1;
             continue;
         }

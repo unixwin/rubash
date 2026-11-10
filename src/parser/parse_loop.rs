@@ -345,15 +345,29 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
             // reserved_word_acceptable's set) is grammatical without a `;'
             // terminator: compound_list's `newline_list list1' production
             // (parse.y:1262) accepts a single pipeline_command with no
-            // terminator, and reserved_word_acceptable (parse.y:5899,
-            // COND_END in the set) recognizes `then'/`do` there —
-            // `if [[ $x == y ]] then' inside a function body (cond.tests:230,
+            // terminator, and reserved_word_acceptable (parse.y:5899-5940,
+            // ARITH_CMD and COND_END in the predecessor set) recognizes the
+            // reserved word there — `if [[ $x == y ]] then' inside a
+            // function body (cond.tests:230,
             // shell_function_n_shortcuts/.shortcut). After a plain WORD the
             // word is still an argument (`if true then' stays rejected), and
             // after `]]' any non-reserved word keeps the old error.
+            //
+            // rubash#2646: the exemption is not `then'/`do'-only. GNU's
+            // CHECK_FOR_RESERVED_WORD (parse.y:3168) treats EVERY reserved
+            // word alike at a command boundary — the grammar level that
+            // owns the current section then decides whether that word is
+            // legal there (an if-body's `fi'/`elif'/`else' closes or
+            // continues the clause; a stray one errors at that level).
+            // The #460 value set only covered the CONDITION position, so
+            // a body-level compound (`if ((1)) then ((2)) fi',
+            // arith.tests:351; `if true; then (echo s) fi') still died
+            // here before the section stop could accept its closer.
+            // `command_boundary_keyword_allowed' is the predecessor half
+            // of reserved_word_acceptable; this guard is the word half.
             let reserved_follows_compound = tokens.get(next_i).is_some_and(|next| {
                 next.kind == TokenKind::Keyword
-                    && matches!(next.value.as_str(), "then" | "do")
+                    && crate::lexer::is_keyword(&next.value)
                     && super::command_boundary_keyword_allowed(tokens, next_i)
             });
             if !separated
@@ -920,6 +934,13 @@ fn fold_and_or_list_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
                     .into_iter()
                     .last()
                     .expect("and-or list has a command");
+                // rubash#3028: same end-line anchor as the dangling
+                // pipeline fold — the carrier's line must be the last
+                // command's parse-end line (its connector token's
+                // line), not its start line.
+                if let Some(end_line) = command.end_line {
+                    command.line = Some(end_line);
+                }
                 command
                     .insert_assignment("__RUBASH_PARSE_ERROR_EOF__".to_string(), "1".to_string());
                 folded.push(command);
@@ -999,7 +1020,16 @@ fn fold_pipeline_commands(commands: Vec<CommandNode>) -> Vec<CommandNode> {
                 // anchoring on the first stage under-reported every
                 // multi-line pipeline by its span (rubash#2754:
                 // `echo a |'/`echo b |' reported line 2, GNU line 3).
-                let last_line = stages.last().and_then(|stage| stage.line);
+                // rubash#3028: anchor on the last stage's parse-END
+                // line when the connector stamp recorded one — a stage
+                // whose `|`/`|&` token was reached through a
+                // continuation (`foo \` + `|&`) ends on the later
+                // physical line, and the EOF renderer reports carrier
+                // line + 1 (t0065: stage starts line 1, its `|&` sits
+                // on line 2, GNU reports line 3).
+                let last_line = stages
+                    .last()
+                    .and_then(|stage| stage.end_line.or(stage.line));
                 let mut command = stages
                     .into_iter()
                     .next()
@@ -2330,6 +2360,18 @@ pub(super) fn push_unexpected_token_error_named(
     let token_text = name_override.unwrap_or_else(|| {
         if tokens[i].value.starts_with('{') {
             "{"
+        } else if tokens[i].kind == TokenKind::Keyword
+            && tokens[i].value.starts_with("((")
+            && tokens[i].value.ends_with("))")
+        {
+            // GNU's ARITH_CMD token string IS the arithmetic body:
+            // parse_arith_cmd (parse.y:4963) stores the matched-pair
+            // content as the token's word, so the error names the body —
+            // `((1)) (( 2 + 3 ))' names ` 2 + 3 ', `((1)) ((x=1))' names
+            // `x=1' — never the scanner's whole folded `((…))' text
+            // (rubash#3204). The parse_dparen fold branch is the only
+            // producer of a Keyword token with this value shape.
+            &tokens[i].value[2..tokens[i].value.len() - 2]
         } else {
             tokens[i].value.as_str()
         }
@@ -2706,6 +2748,9 @@ pub(super) fn unclosed_brace_eof_node(
         let mut inner = crate::lexer::tokenize_locked_body(inner_text, brace.posix_gate);
         for token in inner.iter_mut() {
             token.position = token.position + brace_line - 1;
+            // rubash#3028: the end line shifts in lockstep (it defaults
+            // to the fragment-relative position, like `position`).
+            token.end_position = token.end_position + brace_line - 1;
         }
         region_owned = inner;
         &region_owned

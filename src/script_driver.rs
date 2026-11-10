@@ -5260,6 +5260,10 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if !pending.trim().is_empty() {
                     if let Some(ps0) = executor.get_env("PS0") {
                         if !ps0.is_empty() {
+                            // rubash#3092 (captain): end the `get_env`
+                            // borrow before the `&mut` prompt render —
+                            // otherwise E0502 at this call site.
+                            let ps0 = ps0.to_string();
                             let rendered = executor.expand_prompt_string(&ps0);
                             eprint!("{rendered}");
                         }
