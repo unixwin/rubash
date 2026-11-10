@@ -5761,3 +5761,117 @@ fn issue863_gap13_applied_invocation_shopt_flag_last_entry_wins() {
         Some(true)
     );
 }
+
+// ---- rubash#2794: the expansion-error discard face on the classification ----
+//
+// The fate matrix these cells ride on is locked by
+// tests/issue2794_expansion_error_discard_classification.rs; the
+// assertions here are the classification face that pin could not
+// reference before the field existed. GNU law: the FATAL
+// word-expansion class (`${var:?}` — subst.c:10416-10418;
+// nounset unbound — subst.c:11032-11034; arithmetic nounset —
+// expr.c:1208-1216) returns the error descriptor in an
+// interactive shell and the fatal descriptor otherwise, so the
+// interactive fate is a DISCARD: status 1, the line dropped,
+// the session alive — indistinguishable from an ordinary
+// status-1 completion until the classification carries the
+// fact. The face reports the executor's adjudication at its
+// raise points, never a session-layer re-derivation; the
+// lesser expansion classes (bad substitution and kin) carry
+// no interactive/fatal branch in GNU and stay off this face.
+
+#[test]
+fn issue2794_discard_face_grouped_and_line_routes() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    let class = outcome.classification;
+    assert!(class.expansion_error_discard);
+    assert!(!class.parse_error);
+    assert!(!class.signal_discard);
+    assert_eq!(class.unwind, None);
+    // The record is the run's own: the next run classifies clear.
+    let outcome = session.run("true", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+
+    // The line route reports the same fact.
+    let mut session = issue863_gap1_interactive_session();
+    let outcome = session
+        .run_line("echo ${q6_undef:?boom}")
+        .expect("run_line");
+    assert_eq!(outcome.status, 1);
+    assert!(outcome.classification.expansion_error_discard);
+    let outcome = session.run_line("true").expect("run_line");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_discard_face_coexists_with_errexit_verdict() {
+    // The discard happened; the errexit verdict on its status
+    // ends the session. Both facts stand — the verdict does
+    // not erase the discard (evalstring.c:387-393).
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -e", &options).expect("run");
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::ErrexitBreak(1));
+    let class = outcome.classification;
+    assert!(class.expansion_error_discard);
+    assert!(class.errexit_break);
+    assert_eq!(class.unwind, Some(RunUnwind::ErrexitBreak));
+}
+
+#[test]
+fn issue2794_fatal_face_stays_off_the_discard_face() {
+    // Non-interactive, the same error is the fatal descriptor:
+    // an exit jump, not a discard — the face stays clear.
+    let mut session = Session::builder().build().expect("session builds");
+    let outcome = session
+        .run("echo ${q6_undef:?boom}", &RunOptions::new())
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    let class = outcome.classification;
+    assert!(!class.expansion_error_discard);
+    assert!(class.exit_jump);
+    assert_eq!(class.unwind, Some(RunUnwind::ExitJump));
+}
+
+#[test]
+fn issue2794_nounset_member_of_the_class_reports_the_face() {
+    // subst.c:11032-11034: nounset unbound is the same
+    // interactive-error / non-interactive-fatal branch.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("echo $q6_undef", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_plain_failure_and_lesser_class_stay_clear() {
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    // An ordinary status-1 completion is not a discard — the
+    // distinction this face exists to carry.
+    let outcome = session.run("false", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert!(!outcome.classification.expansion_error_discard);
+    // A lesser expansion class (bad substitution) abandons the
+    // command in every mode; GNU gives it no interactive/fatal
+    // branch, so it is not this face.
+    let outcome = session.run("echo ${#:}", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(!outcome.classification.expansion_error_discard);
+}

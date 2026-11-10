@@ -454,6 +454,7 @@ impl Executor {
                     // child contains the jump at execute_cmd.c:1811 and
                     // exits 1 (niubash#163).
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
