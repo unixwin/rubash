@@ -2076,6 +2076,11 @@ impl Executor {
     /// - Path resolvable (the overwhelming common case): refresh the
     ///   ShellState cwd anchor if it does not already name this exact
     ///   directory inode, then stamp by path exactly as before.
+    ///   rubash#3275: "resolvable" here is the identity verdict of
+    ///   session_cwd_path_resolves — a path recreated around a
+    ///   stationary session (same spelling, different inode) counts
+    ///   as NOT resolvable and takes the anchor mode below, so the
+    ///   child is born in the session's dead inode, not the ghost.
     /// - Path NOT resolvable but the anchor names this cwd (the
     ///   directory was entered while it existed, then deleted): on
     ///   Unix, register a pre_exec fchdir onto the anchor handle —
@@ -2089,7 +2094,7 @@ impl Executor {
     ///   fallback the issue sanctions for the unanchored case.
     pub(in crate::executor) fn stamp_spawn_cwd(&self, process: &mut Command) {
         let cwd = self.shell_state.cwd.clone();
-        if self.refresh_cwd_anchor_for(&cwd) {
+        if self.session_cwd_path_resolves(&cwd) {
             process.current_dir(cwd);
             return;
         }
@@ -2132,9 +2137,17 @@ impl Executor {
     /// A directory that was deleted and RECREATED at the same path is
     /// a different inode: the (dev, ino) comparison re-opens the
     /// anchor so a later deletion anchors the new directory, not the
-    /// ghost. Called by the spawn stamp and by the cd funnels, so the
-    /// anchor is warm from the moment a directory is entered, before
-    /// any spawn observes it.
+    /// ghost.
+    ///
+    /// rubash#3275: this is the ADOPT refresh — its callers are the
+    /// cd funnels (through refresh_cwd_anchor), where the session HAS
+    /// moved and adopting the inode the path now names is the whole
+    /// point. The spawn stamp and the anchored read must NOT use it:
+    /// a session that never moved stays in its anchor's inode even
+    /// when the path is recreated around it, so those faces ask
+    /// session_cwd_path_resolves instead (the fallback there reaches
+    /// this refresh only when no anchor names the cwd and there is
+    /// nothing to compare against).
     pub(in crate::executor) fn refresh_cwd_anchor_for(&self, cwd: &std::path::Path) -> bool {
         #[cfg(unix)]
         {
@@ -2169,6 +2182,60 @@ impl Executor {
         #[cfg(not(unix))]
         {
             std::fs::metadata(cwd).is_ok_and(|meta| meta.is_dir())
+        }
+    }
+
+    /// rubash#3275: does the cwd path still resolve TO THE DIRECTORY
+    /// THE SESSION SITS IN? The spawn stamp and the anchored read ask
+    /// this; unlike refresh_cwd_anchor_for it never re-opens the
+    /// anchor onto a different inode.
+    ///
+    /// GNU anchors the session in the inode, not the spelling: the
+    /// process cwd IS the directory (cd.def's chdir), and the
+    /// namespace may change around it without moving the session.
+    /// So while an anchor is held for this exact cwd value, the path
+    /// resolves for the session only if it still names the anchor's
+    /// very (dev, ino). A directory deleted and RECREATED at the same
+    /// path is a ghost: the comparison fails, the verdict is "does
+    /// not resolve", and the caller spends the anchor (fchdir /
+    /// openat) — the session's reads and children keep landing in
+    /// the dead inode, exactly as GNU's do, until a cd funnel adopts
+    /// the new directory through refresh_cwd_anchor_for.
+    ///
+    /// With no anchor naming this cwd there is no identity to
+    /// compare against (the cwd was never observed while resolvable),
+    /// so the verdict falls back to the plain refresh — resolvability
+    /// with adoption, the pre-#3275 behaviour for that case.
+    pub(in crate::executor) fn session_cwd_path_resolves(&self, cwd: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = {
+                let anchor = self.shell_state.cwd_anchor.borrow();
+                anchor.as_ref().and_then(|anchor| {
+                    if anchor.path == cwd {
+                        anchor
+                            .dir
+                            .metadata()
+                            .ok()
+                            .map(|meta| (meta.dev(), meta.ino()))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(identity) = held {
+                return std::fs::metadata(cwd).is_ok_and(|meta| {
+                    meta.is_dir() && meta.dev() == identity.0 && meta.ino() == identity.1
+                });
+            }
+            self.refresh_cwd_anchor_for(cwd)
+        }
+        #[cfg(not(unix))]
+        {
+            // No inode anchor off Unix; resolvability is the only
+            // question the stamp can ask there.
+            self.refresh_cwd_anchor_for(cwd)
         }
     }
 
@@ -2233,8 +2300,11 @@ impl Executor {
         use std::os::unix::io::{AsRawFd, FromRawFd};
         let cwd = self.shell_state.cwd.clone();
         // Same two-mode rule as the spawn stamp: the anchor is only
-        // spent on a cwd whose path no longer resolves.
-        if self.refresh_cwd_anchor_for(&cwd) {
+        // spent on a cwd whose path no longer resolves — where
+        // "resolves" carries the #3275 identity gate, so a path
+        // recreated around the stationary session counts as dead
+        // here too and the read walks the anchor's inode.
+        if self.session_cwd_path_resolves(&cwd) {
             return None;
         }
         let anchor_fd = {
