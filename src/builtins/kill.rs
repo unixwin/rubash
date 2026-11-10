@@ -3654,10 +3654,7 @@ fn trap_key_is_entry_ignored(key: &str) -> bool {
 /// (kernel_signals::at_baseline_state): a baseline-looking table whose
 /// kernel state has not converged still takes the slow path.
 #[cfg(unix)]
-fn trap_entry_is_armed(
-    env_vars: &std::collections::HashMap<String, String>,
-    key: &str,
-) -> bool {
+fn trap_entry_is_armed(env_vars: &std::collections::HashMap<String, String>, key: &str) -> bool {
     match env_vars.get(key) {
         None => false,
         Some(action) if !action.is_empty() => true,
