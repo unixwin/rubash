@@ -1615,45 +1615,6 @@ impl Executor {
         let _ = self.shell_state.arithmetic_expansion_error.replace(true);
     }
 
-    /// Fallback readonly reporter for boundaries that do NOT drain
-    /// the event log (the ordered drain handles the event-carrying
-    /// boundaries itself, at the event's recorded position —
-    /// rubash#3078). A readonly event still sitting in the log means
-    /// its boundary has not drained yet, so this reporter stays
-    /// silent and leaves both marker and event for that drain; only
-    /// a marker with no matching event (a bind recorded outside the
-    /// log's window) prints here, exactly as before.
-    fn report_arithmetic_readonly_error(&mut self) {
-        let Some(name) = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_ARITH_READONLY_ERROR")
-            .cloned()
-        else {
-            return;
-        };
-        let event_pending = ARITH_EVAL_EVENTS.with(|slot| {
-            slot.borrow().iter().any(
-                |event| matches!(event, ArithEvalEvent::Readonly(existing) if existing == &name),
-            )
-        });
-        if event_pending {
-            return;
-        }
-        self.shell_state
-            .env_vars
-            .remove("__RUBASH_ARITH_READONLY_ERROR");
-        // rubash#1238: remember the diagnostic was printed so the
-        // (( ))/let reporters don't add a synthesized syntax error after
-        // it (GNU's bind failure produces exactly one diagnostic line).
-        self.shell_state.arithmetic_readonly_error.set(true);
-        if !self.shell_state.arithmetic_expansion_error.replace(true) {
-            eprintln!("{}{}: readonly variable", self.error_prefix(), name);
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
-        }
-    }
-
     /// A fatal arithmetic evaluation error (expr.c evalerror) raised while
     /// expanding parts of a compound command — case patterns, loop headers —
     /// abandons the whole compound command with status 1 (127 under `set -u`
