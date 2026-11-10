@@ -1712,6 +1712,19 @@ pub struct Executor {
     /// (error.c get_name_for_error with yy_input_name()=="command
     /// substitution") and a newline-terminated body reader.
     backtick_body_diagnostic: Cell<bool>,
+    /// An arithmetic-fallback command-substitution body is being
+    /// expanded RIGHT NOW — a `$((` span that failed GNU's
+    /// chk_arithsub and fell back to a command substitution
+    /// (subst.c:10841-10866 LPAREN arm -> comsub). Like a backtick
+    /// body it is parsed in the substituted child at execution time
+    /// (subst.c:7143 parse_and_execute), never read-parsed, so its
+    /// parse error is contained: `command substitution: line N:`
+    /// prefix, substitution empty, status 2, script continues
+    /// (rubash#2677). Only the containment decision points consult
+    /// this flag (see `comsub_body_parse_is_contained`); the
+    /// backtick-only reader semantics (newline termination, the
+    /// unclosed-input verdict) keep reading `backtick_body_diagnostic`.
+    arith_fallback_comsub_body: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending
