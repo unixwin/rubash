@@ -22,7 +22,7 @@ use super::bind::{BindKindView, BindView};
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
-    RcPolicy, StartupClass, StartupContext,
+    RcPolicy, SpecialCompspecKind, StartupClass, StartupContext,
 };
 use super::completion_attempt::CompletionAttempt;
 use super::completion_view::{full_env_sorted, CompletionView};
@@ -918,6 +918,19 @@ impl Session {
     /// asks the engine about the position itself.
     pub fn has_compspec(&self, command: &str) -> bool {
         self.executor.has_compspec(command)
+    }
+
+    /// Whether the special compspec of one class is registered —
+    /// the selective form of [`Session::has_compspec`]
+    /// (rubash#2738): the name form ORs the command's own
+    /// registration and all three special slots (`-D` / `-E` /
+    /// `-I`) together, so a host routing gate cannot open for
+    /// exactly the class that governs a position. This answers for
+    /// a single slot ([`SpecialCompspecKind`]), a pure registration
+    /// query like the name form; whether a spec governs a concrete
+    /// `(line, cursor)` is [`Session::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: SpecialCompspecKind) -> bool {
+        self.executor.has_special_compspec(kind)
     }
 
     /// Whether a compspec governs completion at `(line, cursor)` —

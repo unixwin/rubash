@@ -534,6 +534,24 @@ impl ConditionalArithParser<'_> {
             };
         }
 
+        // GNU expr.c:1190-1199 expr_streval: a read of a name with
+        // no binding at all traps under nounset. The entry-level
+        // text scan cannot see this read — the name arrives as a
+        // stored VALUE (an element's text, or a scalar's value
+        // re-entering through expr.c:1241's `subexpr (value)`), not
+        // as expression text — so the check lives at this one read
+        // point every value frame funnels through (rubash#3200).
+        // The dynamic legs above already resolved the names they
+        // own; a name merely SET to an empty value is bound and
+        // reads as 0 through the fallback below.
+        if super::super::arithmetic_name_is_unbound(name, self.env_vars)
+            && std::env::var(name).is_err()
+            && crate::builtins::set::shell_option_enabled(self.env_vars, "nounset")
+        {
+            self.error_category = Some(super::super::ArithmeticErrorCategory::UnboundVariable);
+            super::super::record_arith_unbound_name(name.to_string());
+            return None;
+        }
         let value = self
             .env_vars
             .get(name)

@@ -99,7 +99,8 @@ pub use bind::{BindEntryView, BindKindView, BindRemovalView, BindView};
 pub use capabilities::ElevationHandler;
 pub use capabilities::{
     Candidate, CandidateKind, CompletionOutcome, CompletionPolicy, CompletionProvider,
-    DiagnosticSink, ExternalCommandHandler, RcPolicy, StartupClass, StartupContext,
+    DiagnosticSink, ExternalCommandHandler, RcPolicy, SpecialCompspecKind, StartupClass,
+    StartupContext,
 };
 pub use completion_attempt::CompletionAttempt;
 pub use completion_view::CompletionView;
