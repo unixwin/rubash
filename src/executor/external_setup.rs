@@ -1271,7 +1271,10 @@ impl Executor {
         // rubash#1184 f4: every output substitution materialized here is
         // constructed by THIS command; its line is the body's diagnostic
         // attribution (see OutputProcessSubstitution::line).
-        let cmd_line = cmd.line;
+        // rubash#3210: the body's diagnostic seed is the enclosing
+        // command's first-element end line (execute_cmd.c:936), not
+        // its start line — see procsub_body_seed_line.
+        let cmd_line = super::command_text::procsub_body_seed_line(cmd);
         let mut redirect_target_rewrites = Vec::new();
         // GNU subst.c: an unquoted `name=<( )` word is an assignment whose
         // value is the process substitution (make_dev_fd_filename,
