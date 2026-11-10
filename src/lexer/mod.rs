@@ -209,7 +209,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 pub(crate) fn source_ends_in_cond_command(input: &str, posix: bool) -> bool {
     let mut parse_state = LexerParseState::default();
     let mut brace_cache = BraceScanCache::default();
-    let _ = tokenize_plain(input, posix, &mut parse_state, &mut brace_cache);
+    let _ = tokenize_plain(input, posix, &mut parse_state, &mut brace_cache, &[]);
     LexerParseState::cond_command_open(&parse_state)
 }
 
@@ -1659,6 +1659,7 @@ impl GroupScanFeeder {
             self.parse_posix,
             &mut line_lex_state,
             &mut self.brace_cache,
+            &self.continuation_join_columns,
         );
         // Summary fold BEFORE the join branch moves `line_tokens` into the
         // next boundary checkpoint: a tail-resumed pass extends the previous
@@ -2185,6 +2186,7 @@ impl GroupScanFeeder {
                 self.parse_posix,
                 &mut self.lexer_parse_state,
                 &mut self.brace_cache,
+                &self.continuation_join_columns,
             );
             if ws_capture_armed {
                 let mut previous_end = 0usize;
@@ -3133,8 +3135,10 @@ fn tokenize_plain(
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
+    join_columns: &[usize],
 ) -> TokenizePass {
     let mut lexer = Lexer::new_with_cache(input, posix, brace_cache);
+    lexer.set_join_columns(join_columns);
     lexer.extended_glob = parse_extended_glob();
     // parse.y keeps a single parser_state for the whole input — resume the
     // PST_CASEPAT / last_read_token state left by the previous logical line.
@@ -3168,6 +3172,7 @@ fn tokenize_resume_from(
     offset: usize,
     state: &LexerBoundaryState,
     parse_state: &mut LexerParseState,
+    join_columns: &[usize],
     // True for the BOUNDARY tail resume (the list strictly extends the
     // checkpointed prefix, so the caller folds only the token delta into
     // the keyword-stack summary); false for the OPENER resume (the list is
@@ -3177,6 +3182,7 @@ fn tokenize_resume_from(
     tail_resume: bool,
 ) -> TokenizePass {
     let mut lexer = Lexer::new_resumed_at(input, posix, brace_cache, offset, state);
+    lexer.set_join_columns(join_columns);
     lexer.extended_glob = parse_extended_glob();
     for token in &mut lexer {
         if token.kind == TokenKind::Eof {
@@ -3240,6 +3246,7 @@ fn tokenize_with_boundary(
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
+    join_columns: &[usize],
 ) -> TokenizePass {
     if resume_allowed {
         if let Some((offset, tokens, state)) = checkpoint {
@@ -3252,6 +3259,7 @@ fn tokenize_with_boundary(
                     offset,
                     &state,
                     parse_state,
+                    join_columns,
                     true,
                 );
             }
@@ -3270,6 +3278,7 @@ fn tokenize_with_boundary(
                 offset,
                 &state,
                 parse_state,
+                join_columns,
                 false,
             );
         }
@@ -3277,9 +3286,9 @@ fn tokenize_with_boundary(
     if resume_allowed {
         // resume was allowed but no checkpoint existed: full re-lex under
         // the ALLOWED stat (tail = whole input).
-        return tokenize_plain(input, posix, parse_state, brace_cache);
+        return tokenize_plain(input, posix, parse_state, brace_cache, join_columns);
     }
-    tokenize_plain(input, posix, parse_state, brace_cache)
+    tokenize_plain(input, posix, parse_state, brace_cache, join_columns)
 }
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized

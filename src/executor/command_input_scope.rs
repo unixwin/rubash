@@ -849,9 +849,10 @@ impl Executor {
                     // the compound forever. The timed collection below
                     // is the spawn-failure fallback (its recorded
                     // schedule served #1141 before a live pipe could).
-                    if let Some(file_fd) =
-                        self.spawn_input_process_substitution_child(&source, cmd.line)
-                    {
+                    if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                        &source,
+                        super::command_text::procsub_body_seed_line(cmd),
+                    ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
@@ -1375,8 +1376,10 @@ impl Executor {
                 // (subst.c:6362) binds the forked body's pipe read end
                 // on the target fd; the collected form below is the
                 // spawn-failure fallback.
-                if let Some(file_fd) = self.spawn_input_process_substitution_child(source, cmd.line)
-                {
+                if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                    source,
+                    super::command_text::procsub_body_seed_line(cmd),
+                ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         self.set_fd_readwrite_file(fd, &target, true)
