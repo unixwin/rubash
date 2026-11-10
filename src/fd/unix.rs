@@ -684,6 +684,14 @@ pub struct WhitelistedSpawn {
     /// G-02: the child's working directory (the spawning session's cwd).
     /// None keeps the process cwd (host-level spawns with no session).
     pub cwd: Option<std::path::PathBuf>,
+    /// rubash#3268 (e): raw fd of the spawning session's cwd anchor,
+    /// spent only when `cwd` no longer resolves (the directory was
+    /// deleted): the child is fchdir'd into the anchor inode between
+    /// fork and exec — the same landing stamp_spawn_cwd gives
+    /// Command-based spawns. The fd is borrowed: it must stay open in
+    /// this process for the duration of the spawn call. None (or a
+    /// resolvable `cwd`) leaves the spawn exactly as before.
+    pub cwd_anchor_fd: Option<HANDLE>,
     /// rubash#2241: job-control grouping for async respawns — the child
     /// takes its own process group between fork and exec (GNU jobs.c:2390
     /// make_child) and the parent repeats the call after spawn
@@ -810,14 +818,35 @@ pub fn spawn_whitelisted(spec: &WhitelistedSpawn) -> std::io::Result<SpawnedChil
         // rubash#3198: a session cwd whose directory has been unlinked
         // must not refuse the respawn — `current_dir` re-resolves the
         // path in the child and fails ENOENT for a deleted directory.
-        // The respawned child re-derives its session cwd from the
-        // transported state, not from the process cwd it is born in,
-        // so leaving it unstamped (inherit) preserves its semantics;
-        // the executor's own spawn faces use the inode anchor
-        // (stamp_spawn_cwd) for foreign children, whose cwd IS the
-        // process cwd they are born in.
+        //
+        // rubash#3268 (e): "unstamped" used to be the whole story —
+        // the child silently inherited THIS process's cwd, a live but
+        // foreign directory, and was born there believing it was the
+        // session's directory. When the caller supplies the session's
+        // anchor fd, land the child in the anchor inode instead
+        // (fchdir between fork and exec — the stamp_spawn_cwd
+        // mechanism the executor's own spawn faces use for foreign
+        // children): the respawned child is then born inside the
+        // deleted directory itself, its birth getcwd fails, and its
+        // own birth machinery (birth anchor on "." plus the
+        // transported-PWD adoption in Executor::new) reconstructs the
+        // session there. GNU's forked child never leaves the inode.
         if cwd.is_dir() {
             cmd.current_dir(cwd);
+        } else if let Some(anchor_fd) = spec.cwd_anchor_fd {
+            // SAFETY: pre_exec runs in the forked child before exec;
+            // fchdir is async-signal-safe, and the fd is the caller's
+            // live anchor handle (open in this process, inherited
+            // across the fork).
+            unsafe {
+                use std::os::unix::process::CommandExt as _;
+                cmd.pre_exec(move || {
+                    if libc::fchdir(anchor_fd) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
         }
     }
     // The spec's env IS the child environment (the caller composes it from
@@ -961,6 +990,7 @@ mod tests {
             std_handles: [0, 1, 2],
             extra_handles: vec![extra],
             cwd: None,
+            cwd_anchor_fd: None,
             new_process_group: false,
         })
         .unwrap();
