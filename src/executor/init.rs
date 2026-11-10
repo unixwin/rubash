@@ -1205,6 +1205,7 @@ impl Executor {
                 ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                bash_source_seed: None,
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
