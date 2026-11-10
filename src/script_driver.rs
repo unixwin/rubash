@@ -3995,12 +3995,70 @@ fn run_source_impl(
         suppress_unclosed_diagnostic,
         !source_run_prior,
     );
+    // rubash#2680: a unit that ended in a parse error has that error's
+    // status as its own $? — GNU's reader abandons the unit with the
+    // parse failure's status (parse_and_execute's yyparse failure,
+    // evalstring.c:584-600). The parser's own error path already
+    // records it, but the unclosed-diagnostics route only RETURNS its
+    // status (2, or 1 for the array-list family) without recording
+    // it, so a grouped reader's parse-abort adjudication — which
+    // reads last_exit_code — inherited the PREVIOUS unit's status
+    // and a script whose last group died in the route exited with a
+    // stale code (0 after a successful `shopt`). Record the unit's
+    // status whenever the parse-error latch is still standing.
+    if executor.parse_error_pending() {
+        executor.set_last_exit_code(status);
+    }
     executor.source_run_active.set(source_run_prior);
     status
 }
 
 #[allow(clippy::too_many_arguments)]
+/// rubash#2783: park the executing reader unit's source text (and its
+/// line offset) on the executor's shell state for the unit's extent,
+/// restoring the enclosing unit's value afterwards. GNU echoes the
+/// enclosing input line for a command-substitution body's syntax
+/// error (parse.y:6814 print_offending_line over shell_input_line);
+/// rubash parses the body at expansion time, so the body reporter
+/// reads the physical line out of this cell instead. Nested units
+/// (a sourced file inside this one) shadow the cell for their own
+/// extent and hand the enclosing text back on exit. The split into a
+/// wrapper exists because the body returns from many points: every
+/// one of them funnels back through here.
 fn run_source_impl_inner(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Option<Vec<Token>>,
+    suppress_unclosed_diagnostic: bool,
+    root_span_outermost: bool,
+) -> i32 {
+    let saved_unit_source = executor
+        .shell_state
+        .reader_unit_source
+        .replace(Some((std::rc::Rc::from(input), line_offset)));
+    let result = run_source_impl_inner_body(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        pre_lexed,
+        suppress_unclosed_diagnostic,
+        root_span_outermost,
+    );
+    executor
+        .shell_state
+        .reader_unit_source
+        .replace(saved_unit_source);
+    result
+}
+
+fn run_source_impl_inner_body(
     executor: &mut Executor,
     input: &str,
     interactive: bool,

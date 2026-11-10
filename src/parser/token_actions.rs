@@ -443,6 +443,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         &raw_assignment_value,
                         None,
+                        token.extglob_gate,
                     );
                     state.current_cmd.insert_assignment_with_raw(
                         var_name,
@@ -606,6 +607,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             raw_assignment_value,
                             Some(word_index),
+                            token.extglob_gate,
                         );
                     }
                     note_time_prefix_first_element(

@@ -645,6 +645,18 @@ pub struct ExtglobPattern {
     pub alternatives: Vec<String>,
     pub word_index: Option<usize>,
     pub assignment_name: Option<String>,
+    /// rubash#3224: whether the lexer pass that produced this pattern's
+    /// word consumed the group as pattern text — i.e. the extglob gate
+    /// was OPEN at read time (GNU parse.y:5466 `read_token_word`
+    /// consults the read-time `extended_glob`). Stamped by the parser's
+    /// word intakes from `Token::extglob_gate`; `false` when the
+    /// producing pass is unknown, which keeps the executor's gate-off
+    /// diagnostic armed for such patterns. A pattern read under the
+    /// open gate is a legally formed word: at execution its operators
+    /// simply go inert under a live-off gate (pathexp.h
+    /// `FNMATCH_EXTFLAG` is evaluated with the live global), so it
+    /// must never be vetoed by the execution-time state.
+    pub read_gate_on: bool,
 }
 
 /// Represents a parsed tilde prefix such as `~`, `~/x`, `~+`, or `~user`.

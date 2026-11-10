@@ -236,6 +236,10 @@ pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
     cmd.extglob_patterns
         .extend(extglob_patterns.iter().cloned().map(|mut p| {
             p.word_index = Some(word_index);
+            // rubash#3224: stamp the read-time gate of the pass that
+            // lexed this word (Token::extglob_gate; GNU parse.y:5466
+            // decides pattern legality at read time).
+            p.read_gate_on = token.extglob_gate;
             p
         }));
     cmd.pathname_patterns
