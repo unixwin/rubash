@@ -1551,6 +1551,24 @@ impl GroupScanFeeder {
             self.brace_join_active = false;
             return;
         }
+        // rubash#3229: an extglob pattern group is word-internal, so
+        // none of the join gates above can see it — the word reader
+        // folds the group into the word even when the pair never
+        // closes on the accumulated text (skip_extglob_group has no
+        // unclosed marker), and the logical line would be tokenized
+        // as complete with the group cut at the newline. GNU
+        // read_token_word's matched pair reads across lines
+        // (parse.y:5466-5489 -> parse_matched_pair), so while the
+        // pair is open the logical line is not finished. The scan is
+        // seeded with the parse gate in force at this logical line's
+        // start (shopt flips land when a line tokenizes, i.e. after
+        // the previous logical line completed — GNU's read-execute
+        // cadence); `shopt` lines inside the accumulated text itself
+        // are mirrored by the scan.
+        if unclosed_extglob_group_line(&self.logical_line, parse_extended_glob()).is_some() {
+            self.brace_join_active = false;
+            return;
+        }
         // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
         // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
         // closes the substitution while the still-pending body was gathered
@@ -2438,6 +2456,25 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
 /// execution stops there).
 pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
     skip::unclosed_array_subscript_eof(input)
+}
+
+/// rubash#3229: same router with the walk's `extended_glob` mirror
+/// seeded from the reader's executed gate state (a grouped run's
+/// `shopt` line is an earlier group, invisible in this group's text).
+pub fn unclosed_array_subscript_eof_seeded(
+    input: &str,
+    extglob_seed: bool,
+) -> Option<(usize, char, usize, bool)> {
+    skip::unclosed_array_subscript_eof_seeded(input, extglob_seed)
+}
+
+/// rubash#3229: the line an unclosed extglob pattern group opened on,
+/// when the read-time matched-pair EOF (parse.y:5466-5489 ->
+/// 3901-3912) owns the diagnostic; see
+/// skip::unclosed_extglob_group_line for the walk and its ownership
+/// boundaries.
+pub fn unclosed_extglob_group_line(input: &str, extglob_seed: bool) -> Option<usize> {
+    skip::unclosed_extglob_group_line(input, extglob_seed)
 }
 
 /// rubash#390 q1: `((` P_ARITH-group probe for the unclosed-command-`(`
