@@ -2181,6 +2181,98 @@ impl Executor {
         self.refresh_cwd_anchor_for(&cwd);
     }
 
+    /// rubash#3198: the in-process half of the cwd anchor. Spawned
+    /// children are served by stamp_spawn_cwd's fchdir, but a face
+    /// that opens a file IN the shell process (the emulated external
+    /// file builtins' operand reads) holds only the joined path
+    /// string: session_path anchors a relative operand at the cwd
+    /// FIELD, so once that directory is unlinked the joined spelling
+    /// (`<cwd>/../f`) dies at its dead component in the kernel walk —
+    /// even though the same operand resolves for a spawned child
+    /// sitting in the anchor inode (measured: real wc/grep/head read
+    /// `../f` fine from a deleted cwd while the emulated cat could
+    /// not). For a RELATIVE operand, when the cwd no longer resolves
+    /// and the anchor names it, open the operand relative to the
+    /// anchor handle instead (openat): the kernel walk from the
+    /// inode is exactly the walk GNU's child performs, so `..`
+    /// still names the real parent. An ABSOLUTE operand keeps the
+    /// plain path open even when its spelling textually traverses
+    /// the dead directory — GNU's child gets the same string and
+    /// the same ENOENT (measured: `cat $PWD/../f` fails under GNU
+    /// from a deleted cwd). Every other shape — a resolvable cwd,
+    /// no anchor — likewise keeps the plain path open.
+    pub(in crate::executor) fn read_session_anchored(
+        &self,
+        operand: &std::path::Path,
+        joined: &std::path::Path,
+    ) -> std::io::Result<Vec<u8>> {
+        #[cfg(unix)]
+        {
+            if operand.is_relative() {
+                if let Some(result) = self.read_via_cwd_anchor(operand) {
+                    return result;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // No fchdir anchor route off Unix; the operand is read
+            // through the joined path below exactly as before.
+            let _ = operand;
+        }
+        std::fs::read(joined)
+    }
+
+    /// The anchor route of read_session_anchored: Some(result) when
+    /// the anchor applies (the open was attempted against the anchor
+    /// handle, successfully or not — an error there is the operand's
+    /// real verdict, exactly as the child in the inode would see it),
+    /// None when the plain path open should run instead.
+    #[cfg(unix)]
+    fn read_via_cwd_anchor(&self, operand: &std::path::Path) -> Option<std::io::Result<Vec<u8>>> {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        let cwd = self.shell_state.cwd.clone();
+        // Same two-mode rule as the spawn stamp: the anchor is only
+        // spent on a cwd whose path no longer resolves.
+        if self.refresh_cwd_anchor_for(&cwd) {
+            return None;
+        }
+        let anchor_fd = {
+            let anchor = self.shell_state.cwd_anchor.borrow();
+            let anchor = anchor.as_ref()?;
+            if anchor.path != cwd {
+                return None;
+            }
+            anchor.dir.as_raw_fd()
+        };
+        let operand = if operand.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            operand
+        };
+        let c_operand =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str()))
+                .ok()?;
+        // SAFETY: anchor_fd is the anchor's open directory handle;
+        // the Arc<File> in ShellState keeps it alive for the whole
+        // call, and openat with a relative path resolves against it
+        // without modifying any shared state.
+        let fd = unsafe {
+            libc::openat(
+                anchor_fd,
+                c_operand.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Some(Err(std::io::Error::last_os_error()));
+        }
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        Some(file.read_to_end(&mut bytes).map(|_| bytes))
+    }
+
     #[cfg(unix)]
     pub(in crate::executor) fn ambient_fd_pins_for(
         &self,

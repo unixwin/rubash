@@ -32,6 +32,21 @@
 //! a future change breaks settlement membership in either direction
 //! (waiting producers that must be abandoned, or dropping consumers
 //! that must be settled).
+//!
+//! HARNESS ORDERING LAW (rework after the first revision of this pin
+//! failed its own shapes 1/4 on BOTH the base and head trees): an
+//! at-exit existence assertion must be snapshotted in the window
+//! between observing the shell's exit and draining its pipes. A
+//! detached producer inherits the shell's stderr pipe and holds its
+//! EOF off until the producer itself exits, so a harness that reads
+//! stderr to EOF before asserting is really asserting the state at
+//! PRODUCER exit — by then the producer has touched its marker and
+//! every correct shell "fails". GNU bash 5.3.20 fails this pin's
+//! shapes 1/4 under the drain-first ordering in exactly the same way
+//! (captain probe: shell exits at 0.01s, stderr EOF at 10.01s, marker
+//! present), so the snapshot below is taken the moment try_wait
+//! reports the exit, and the pipes are drained on side threads whose
+//! completion the assertions never wait for.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -52,7 +67,19 @@ fn scratch(case: &str) -> ScratchDir {
     ScratchDir(dir)
 }
 
-fn run_rubash(dir: &Path, script: &str) -> (String, String, Option<i32>) {
+struct RunOutcome {
+    stdout: String,
+    stderr: String,
+    code: Option<i32>,
+    /// Existence of each requested marker file, snapshotted the
+    /// moment the shell's exit was observed — BEFORE either pipe is
+    /// drained (see the harness ordering law in the header).
+    markers_at_exit: Vec<bool>,
+}
+
+/// Spawn rubash on `script` inside `dir`. `markers` names files in
+/// `dir` whose existence is snapshotted at shell exit.
+fn run_rubash(dir: &Path, script: &str, markers: &[&str]) -> RunOutcome {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_rubash"));
     cmd.arg("-c")
         .arg(script)
@@ -64,6 +91,28 @@ fn run_rubash(dir: &Path, script: &str) -> (String, String, Option<i32>) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().expect("spawn rubash");
+    // Drain both pipes on side threads from the start: a detached
+    // producer can hold either pipe's EOF off past the shell's exit,
+    // and the main thread must be free to snapshot the markers the
+    // moment the exit lands.
+    let (out_tx, out_rx) = std::sync::mpsc::channel::<String>();
+    if let Some(mut pipe) = child.stdout.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            let _ = out_tx.send(text);
+        });
+    }
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<String>();
+    if let Some(mut pipe) = child.stderr.take() {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut text = String::new();
+            let _ = pipe.read_to_string(&mut text);
+            let _ = err_tx.send(text);
+        });
+    }
     let deadline = Instant::now() + Duration::from_secs(40);
     let status = loop {
         match child.try_wait().expect("poll rubash") {
@@ -75,32 +124,43 @@ fn run_rubash(dir: &Path, script: &str) -> (String, String, Option<i32>) {
             None => std::thread::sleep(Duration::from_millis(10)),
         }
     };
-    use std::io::Read;
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout);
+    // THE snapshot: shell exit has been observed and neither pipe
+    // has been waited on yet, so a still-sleeping producer has not
+    // had its post-sleep act (the marker touch) counted either way.
+    let markers_at_exit: Vec<bool> = markers.iter().map(|name| dir.join(name).exists()).collect();
+    // Diagnostics only from here on: a pipe whose EOF is held by a
+    // detached producer may not deliver until that producer exits;
+    // the timeout keeps the harness bounded and the assertions above
+    // do not depend on what arrives.
+    let stdout = out_rx
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap_or_else(|_| "(stdout pipe still held by a detached producer)".to_string());
+    let stderr = err_rx
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap_or_else(|_| "(stderr pipe still held by a detached producer)".to_string());
+    RunOutcome {
+        stdout,
+        stderr,
+        code: status.code(),
+        markers_at_exit,
     }
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
-    }
-    (stdout, stderr, status.code())
 }
 
 #[test]
 fn issue2526_abandoned_producer_not_waited_completion_form() {
     let dir = scratch("abandoned");
-    let (stdout, stderr, code) = run_rubash(
+    let out = run_rubash(
         &dir.0,
         "head -c 7 <(printf 'first\\nse'; sleep 10; touch marker1); echo done1\n",
+        &["marker1"],
     );
-    assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(stdout, "first\nsdone1\n", "stderr:\n{stderr}");
-    // The producer sleeps 10s before touching the marker; the shell
-    // has already exited (this assertion runs at shell exit), so the
-    // marker can only exist if the shell waited the producer out.
+    assert_eq!(out.code, Some(0), "stderr:\n{}", out.stderr);
+    assert_eq!(out.stdout, "first\nsdone1\n", "stderr:\n{}", out.stderr);
+    // The producer sleeps 10s before touching the marker; the
+    // snapshot was taken at shell exit, so the marker can only be
+    // recorded present if the shell waited the producer out.
     assert!(
-        !dir.0.join("marker1").exists(),
+        !out.markers_at_exit[0],
         "shell waited out the abandoned producer (marker1 exists at exit)"
     );
 }
@@ -108,12 +168,13 @@ fn issue2526_abandoned_producer_not_waited_completion_form() {
 #[test]
 fn issue2526_bare_wait_settles_output_consumer_completion_form() {
     let dir = scratch("consumer");
-    let (stdout, stderr, code) = run_rubash(
+    let out = run_rubash(
         &dir.0,
         "printf 'x\\n' > >(sleep 1; cat >> result.txt); wait; echo waited\n",
+        &[],
     );
-    assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(stdout, "waited\n", "stderr:\n{stderr}");
+    assert_eq!(out.code, Some(0), "stderr:\n{}", out.stderr);
+    assert_eq!(out.stdout, "waited\n", "stderr:\n{}", out.stderr);
     let result = std::fs::read_to_string(dir.0.join("result.txt")).expect("result.txt written");
     assert_eq!(result, "x\n");
 }
@@ -121,17 +182,18 @@ fn issue2526_bare_wait_settles_output_consumer_completion_form() {
 #[test]
 fn issue2526_bare_wait_waits_lone_producer_completion_form() {
     let dir = scratch("lone");
-    let (stdout, stderr, code) = run_rubash(
+    let out = run_rubash(
         &dir.0,
         "read -n 2 x < <(printf 'ab'; sleep 2; touch marker2); echo \"x:$x\"; wait; echo done2\n",
+        &["marker2"],
     );
-    assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(stdout, "x:ab\ndone2\n", "stderr:\n{stderr}");
+    assert_eq!(out.code, Some(0), "stderr:\n{}", out.stderr);
+    assert_eq!(out.stdout, "x:ab\ndone2\n", "stderr:\n{}", out.stderr);
     // The lone producer is the last asynchronous registration, so
     // bare `wait` settles it: its final act (the touch) has happened
     // by the time the shell exits.
     assert!(
-        dir.0.join("marker2").exists(),
+        out.markers_at_exit[0],
         "bare wait skipped the lone producer (marker2 missing at exit)"
     );
 }
@@ -139,17 +201,18 @@ fn issue2526_bare_wait_waits_lone_producer_completion_form() {
 #[test]
 fn issue2526_bare_wait_skips_producer_when_job_owns_last_async_completion_form() {
     let dir = scratch("jobowns");
-    let (stdout, stderr, code) = run_rubash(
+    let out = run_rubash(
         &dir.0,
         "read -n 2 y < <(printf 'cd'; sleep 6; touch marker3); echo \"y:$y\"; sleep 1 & wait; echo done3\n",
+        &["marker3"],
     );
-    assert_eq!(code, Some(0), "stderr:\n{stderr}");
-    assert_eq!(stdout, "y:cd\ndone3\n", "stderr:\n{stderr}");
+    assert_eq!(out.code, Some(0), "stderr:\n{}", out.stderr);
+    assert_eq!(out.stdout, "y:cd\ndone3\n", "stderr:\n{}", out.stderr);
     // The real background job owns $!: wait returns with the job
     // (~1s), long before the producer's 6s sleep ends, so its marker
     // cannot exist at shell exit.
     assert!(
-        !dir.0.join("marker3").exists(),
+        !out.markers_at_exit[0],
         "bare wait settled the producer despite the job owning last-async (marker3 exists)"
     );
 }
