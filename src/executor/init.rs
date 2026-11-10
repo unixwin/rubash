@@ -1132,6 +1132,7 @@ impl Executor {
                 // process boundary (rubash#2487).
                 job_control: Cell::new(false),
                 subshell_source_text: None,
+                reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
