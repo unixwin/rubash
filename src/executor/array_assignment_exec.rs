@@ -348,6 +348,17 @@ impl Executor {
                         } else {
                             raw
                         };
+                        // rubash#3085: a `$'...'` span is decoded and
+                        // sh_single_quote'd before the arith pass (the
+                        // generic arm below documents the GNU anchors), so
+                        // evalexp receives `'x y'`, never the raw spelling.
+                        let requoted;
+                        let raw = if raw.contains("$'") {
+                            requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                            requoted.as_str()
+                        } else {
+                            raw
+                        };
                         eval_text = self.expand_arithmetic_special_parameters(raw);
                         eval_text.as_str()
                     }
@@ -798,6 +809,24 @@ impl Executor {
                     let raw = if raw.contains("$\"") {
                         decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
                         decoded_locale.as_str()
+                    } else {
+                        raw
+                    };
+                    // rubash#3085: a `$'...'` span in the raw subscript is
+                    // ANSI-C decoded and sh_single_quote'd before the arith
+                    // pass — GNU's assignment word is cooked at parse time
+                    // (read_token_word's `$'` arm: ansiexpand, then
+                    // sh_single_quote re-quote; the runtime arith form is
+                    // expand_string_dollar_quote, subst.c:4133), so evalexp
+                    // receives `'x y'` and even `'1'` fails as a quoted
+                    // literal, while expansions inside the span still run
+                    // under the arith pass below (`$'$(echo 1+2)'` tokens
+                    // `'1+2'`). Without this the raw `$'...'` spelling
+                    // reached evalexp and its `$` leaked into the token.
+                    let requoted;
+                    let raw = if raw.contains("$'") {
+                        requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                        requoted.as_str()
                     } else {
                         raw
                     };
