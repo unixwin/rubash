@@ -979,6 +979,24 @@ impl Executor {
         std::mem::take(&mut self.unit_signal_discard)
     }
 
+    /// rubash#2794: record that the current unit's terminal
+    /// word-expansion error was adjudicated an interactive
+    /// discard (see Executor::unit_expansion_error_discard).
+    /// Called at the FATAL class's discard arms, where
+    /// `expansion_error_is_interactive_discard` selects
+    /// subst.c:10416-10418's error branch over the fatal one —
+    /// the adjudication point itself, never a downstream
+    /// re-derivation from the unit's status.
+    pub fn note_unit_expansion_error_discard(&mut self) {
+        self.unit_expansion_error_discard = true;
+    }
+
+    /// rubash#2794: take-style read of the unit
+    /// expansion-error-discard record.
+    pub fn take_unit_expansion_error_discard(&mut self) -> bool {
+        std::mem::take(&mut self.unit_expansion_error_discard)
+    }
+
     /// rubash#2233: non-consuming read of the hangup-death mark — the
     /// SIGHUP view of the generalized termsig-death mark (see
     /// Executor::termsig_death_pending). The interactive reader peeks

@@ -1032,6 +1032,10 @@ impl Executor {
                 // startup getcwd reports); from here on the field, not
                 // the process, carries the session's cwd.
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                // rubash#3198: the cwd inode anchor is a lazy cache —
+                // it is opened by the first spawn stamp (or cd) that
+                // finds the path resolvable, never at construction.
+                cwd_anchor: std::cell::RefCell::new(None),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1178,6 +1182,7 @@ impl Executor {
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             bash_logout_sourced: false,

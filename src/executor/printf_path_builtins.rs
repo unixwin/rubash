@@ -445,6 +445,13 @@ impl Executor {
         // must therefore funnel through the one sync point below.
         let status = self.execute_cd_redirect_bound(cmd)?;
         self.sync_cd_variables();
+        // rubash#3198: warm the cwd inode anchor at the moment the
+        // directory is entered, so a later unlink of the directory
+        // cannot strand every spawn on a path that no longer resolves
+        // (see stamp_spawn_cwd in external_inner.rs).
+        if status == 0 {
+            self.refresh_cwd_anchor();
+        }
         Ok(status)
     }
 

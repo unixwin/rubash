@@ -1413,6 +1413,7 @@ impl Executor {
         self.write_diagnostic_fd2(line.as_bytes());
         if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 // rubash#439: expansion error, not a failed command.
                 self.command_expansion_failed.set(true);
