@@ -6092,6 +6092,7 @@ impl Executor {
                 // the error branch (DISCARD) — the pipeline is abandoned
                 // with status 1 and the session keeps reading.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     1
                 } else {
                     self.expansion_fatal_status()
@@ -6130,6 +6131,7 @@ impl Executor {
             self.write_default_stderr(line.as_bytes())?;
             let code = if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     1
                 } else {
                     self.expansion_fatal_status()
