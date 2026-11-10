@@ -120,9 +120,14 @@ impl Executor {
             );
         }
 
+        // An EMPTY prefix is not the list form: a body of exactly `*`
+        // or `@` is indirection over the special parameter itself
+        // (subst.c:122 VALID_INDIR_PARAM), handled by the target
+        // computation below (rubash#2649).
         if let Some(prefix) = indirect_name
             .strip_suffix('*')
             .or_else(|| indirect_name.strip_suffix('@'))
+            .filter(|prefix| !prefix.is_empty())
         {
             // GNU param_expand lists shell_variables only (subst.c
             // parameter_brace_expand_indir); invalid-name environment
@@ -170,7 +175,18 @@ impl Executor {
             }
         }
 
-        let target_name = if let Ok(index) = indirect_name.parse::<usize>() {
+        let target_name = if indirect_name == "*" {
+            // GNU subst.c:7847-7861 parameter_brace_find_indir with
+            // var_is_special: the source expands under PF_ASSIGNRHS +
+            // expand_no_split_dollar_star — `*` joins the positionals
+            // with IFS[0] — and the joined text becomes the indirect
+            // name (rubash#2649).
+            self.positional_params_star_joined()
+        } else if indirect_name == "@" {
+            // Same find_indir path: dollar_at in a no-split context
+            // joins the positionals with a space.
+            self.shell_state.positional_window().join(" ")
+        } else if let Ok(index) = indirect_name.parse::<usize>() {
             self.shell_state
                 .positional_window()
                 .get(index.saturating_sub(1))

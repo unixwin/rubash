@@ -469,6 +469,12 @@ impl Executor {
                 // set PATH without it, rubash#1545) they must not run.
                 if !self.emulated_external_stands_down("dirname") {
                     if let Some(status) = self.try_execute_dirname_fast_path(cmd) {
+                        // rubash#2736: an answered fast path records
+                        // the PATH resolution, as GNU's locate does.
+                        super::execution_misc::record_fastpath_command_resolution(
+                            &mut self.shell_state.env_vars,
+                            "dirname",
+                        );
                         self.exit_code = status;
                         return Ok(());
                     }
@@ -478,6 +484,12 @@ impl Executor {
             Some(LateSlot::Basename) => {
                 if !self.emulated_external_stands_down("basename") {
                     if let Some(status) = self.try_execute_basename_fast_path(cmd) {
+                        // rubash#2736: an answered fast path records
+                        // the PATH resolution, as GNU's locate does.
+                        super::execution_misc::record_fastpath_command_resolution(
+                            &mut self.shell_state.env_vars,
+                            "basename",
+                        );
                         self.exit_code = status;
                         return Ok(());
                     }
