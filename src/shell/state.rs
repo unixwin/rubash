@@ -271,6 +271,18 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#3125: the `$0` seed value installed into
+    /// `bash_source_stack` by `set_env(__RUBASH_SCRIPT_NAME)`, if
+    /// any. The seed is a local device — GNU's `bash_source_a`
+    /// (variables.c:5721 `push_source`) holds only real frames, so
+    /// the BASH_SOURCE views must pop the bottom entry ONLY when it
+    /// really is the seed. An interactive session never installs one
+    /// (`None`), so its bottom entry is a real sourced-file frame
+    /// and must survive. The seed, when present, is always the
+    /// bottom entry: seeding replaces the whole stack with one
+    /// element, real frames only ever enter at index 0
+    /// (`push_bash_source`, function entry) and leave from index 0.
+    pub(crate) bash_source_seed: Option<String>,
     /// rubash#2482: frames an ExitCode/LastpipeExit unwind deliberately
     /// left on the three call stacks above. GNU's fatal unwinds
     /// (errexit via execute_cmd.c's exit_immediately_on_error, the
@@ -1008,6 +1020,7 @@ impl Clone for ShellState {
             dynamic_cells: self.dynamic_cells.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
+            bash_source_seed: self.bash_source_seed.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
             respawn_function_line_spans: self.respawn_function_line_spans.clone(),
             respawn_root_line_spans: self.respawn_root_line_spans.clone(),
