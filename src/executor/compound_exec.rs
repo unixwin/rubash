@@ -6826,7 +6826,15 @@ impl Executor {
                     {
                         return false;
                     }
-                    if case_pattern_has_extglob(&stripped) {
+                    // rubash#3224: the extglob route is taken only while
+                    // the LIVE gate is on — GNU execute_cmd.c:3736 matches
+                    // case patterns through strmatch with FNMATCH_EXTFLAG
+                    // evaluated from the live `extended_glob` (pathexp.h),
+                    // so with the gate off (e.g. a same-unit `shopt -u`
+                    // already executed) the operators are literal text
+                    // and the plain glob matcher below is the correct
+                    // route.
+                    if case_pattern_has_extglob(&stripped) && self.extglob_enabled() {
                         // Extglob staging needs the word chars immediately
                         // (no literal fast path in extglob_matches_at); seed
                         // the lazy cell here.
