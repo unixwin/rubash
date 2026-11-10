@@ -4955,8 +4955,14 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         executor.set_shell_option("history", true);
     }
     // shell.c init_interactive: interactive shells also default histexpand
-    // (set -H) on, so !!/!str expand on each accepted line.
-    executor.set_shell_option("histexpand", true);
+    // (set -H) on, so !!/!str expand on each accepted line. This site runs
+    // AFTER the startup files, so the default must be set-if-unset: an
+    // explicit `+H` at invocation or a startup file's `set +H` has already
+    // written the carrier and is the user's word (rubash#2733 — the
+    // unconditional set re-armed H over both).
+    if executor.get_env("__RUBASH_SETOPT_histexpand").is_none() {
+        executor.set_shell_option("histexpand", true);
+    }
     // The HISTFILE default is NOT this site's business. GNU defaults
     // HISTFILE once, at shell_initialize (shell.c:580) — variables.c:654-661
     // `if (remember_on_history) { name = bash_default_histfile();

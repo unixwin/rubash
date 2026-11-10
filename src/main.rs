@@ -1836,7 +1836,15 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
     // word (niubash#660 — the unconditional set made an opted-out shell
     // record and save anyway).
     apply_interactive_history_defaults(executor);
-    executor.set_shell_option("histexpand", true);
+    // GNU shell.c:1839 init_interactive seeds histexp_flag from the
+    // invocation-time state (bashhist.c: the interactive default is
+    // HISTEXPAND_DEFAULT) — an explicit `+H` on the command line has
+    // already written the carrier by now and must survive the default
+    // (rubash#2733). Same set-if-unset shape as the history default
+    // in apply_interactive_history_defaults.
+    if executor.get_env("__RUBASH_SETOPT_histexpand").is_none() {
+        executor.set_shell_option("histexpand", true);
+    }
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
     }
