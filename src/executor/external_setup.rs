@@ -3672,6 +3672,28 @@ impl Executor {
                 ProcsubSpawnFd::Inherit | ProcsubSpawnFd::Closed => {}
             }
         }
+        // rubash#3221: this spawn carries fd>=3 through the
+        // __RUBASH_FD_* env channel as inheritable dups — each extra
+        // arrives in the child AT ITS STAMPED NUMBER. Unlike the
+        // input form's ambient_pins (trap_exec.rs), this spawn runs
+        // a plain Command::spawn with NO pre_exec pin pass, so the
+        // child's init must restore the stamped handle, not adopt
+        // whatever descriptor sits at slot `fd` (init.rs
+        // restore_handle). Without this declaration the consumer
+        // adopted the inherited outer file at slot 3: bats_tee's
+        // `>(cat >&3)` — whose fd 3 the parent had rebound with
+        // `exec 3<&1` to the live capture scope (sweep: CaptureWrite)
+        // — wrote the whole stage output to the outer TAP file
+        // instead of the capture pipe (direct-test6: tap.log 7
+        // lines, comsub empty, INNER-RC=1). GNU's
+        // process_substitute fork (subst.c:6362) inherits the
+        // expansion-time table, which is what the stamped handle
+        // carries. Declaring the delivery mode is the fix: the
+        // #2521 key already means "delivered at stamped number".
+        env_map.insert(
+            super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
+            "1".to_string(),
+        );
         // rubash#2356: same state-channel spill as the `&` respawn —
         // the composed environment can carry a single entry past
         // MAX_ARG_STRLEN (the fork-context stamp scales with the

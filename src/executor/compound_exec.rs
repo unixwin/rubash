@@ -1532,7 +1532,9 @@ impl Executor {
         // descriptors delivered AT their stamped numbers, and the
         // child's restore must adopt them there, not at the slot
         // (FD_DELIVERY_AT_STAMPED_KEY, init.rs). The pin transports
-        // (external / procsub / coproc) never set this key.
+        // (external / input-procsub / coproc) never set this key —
+        // the output procsub form does (rubash#3221: it carries no
+        // pre_exec pin pass, so its stamped dups are authoritative).
         env_map.insert(
             super::FD_DELIVERY_AT_STAMPED_KEY.to_string(),
             "1".to_string(),
