@@ -27,61 +27,53 @@ impl Executor {
             })
             .collect();
 
-        // GNU redir.c: `2>&N`/`2>&-`/`>&word` are NOT file opens — fd 2 is
-        // dup2'd (or closed) by the general redirect machinery before the
-        // builtin runs, so the diagnostic must flow through the command's
-        // BOUND fd 2 (the landed #250/#271 path below). Only a plain
-        // filename target may be opened directly here; a `&`-prefixed
-        // target would otherwise become a bogus file literally named `&1`
-        // (rubash#271: `unset rv 2>&1` wrote the readonly diagnostic into
-        // a file called `&1`).
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_redirect_target(redirect);
-            if !target.starts_with('&') {
-                if is_null_device(&target) {
-                    return self.execute_unset_with_stderr(
-                        &cmd.words[1..],
-                        &arrayref_flags,
-                        &mut std::io::sink(),
-                    );
-                }
-                let mut file = File::create(
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-                )?;
-                return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
-            }
-        }
-
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            if !target.starts_with('&') {
-                let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-                )?;
-                return self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut file);
-            }
-        }
-
-        // GNU execute_cmd.c: the diagnostic goes to the shell's CURRENTLY
-        // BOUND fd 2 (redir.c) — an enclosing `exec 2>/dev/null`, a dup
-        // (`2>&1`, the rubash#271 case), or a capture contains it. Route
-        // through the ordered builtin-output boundary, which resolves the
-        // command's redirect state (including dup targets that must not be
-        // opened as files).
+        // GNU execute_cmd.c:5606 (execute_builtin_or_function):
+        // do_redirections binds the command's fds exactly ONCE, before
+        // the builtin body runs, and builtin_error (builtins/common.c:98)
+        // then writes to the bound fd 2 — an enclosing `exec 2>...`
+        // binding, a dup (`2>&1`, the rubash#271 case), or a capture
+        // contains it. rubash's single application is the ordered
+        // buffered route below: the Diag speaks into a buffered stderr
+        // and write_buffered_builtin_output resolves cmd's redirect
+        // state once (dup/closed targets are fd-state resolutions,
+        // never filename opens — a `&`-prefixed target must not become
+        // a bogus file literally named `&1`, rubash#271). A target
+        // that cannot be opened is settled before the body runs by
+        // the dispatch pregate (probe_output_redirect), the same
+        // suppression GNU's failed do_redirections produces.
+        //
+        // Regression shape this replaces: the pre-migration branches
+        // opened a plain `2>file` target directly and returned; the
+        // Phase 4 migration kept those branches but appended the
+        // buffered route for the new stdout buffer (set.def
+        // CASE_HELPOPT long help prints to stdout), so the route
+        // re-applied the redirect — its second, truncating open
+        // erased the diagnostic the Diag had just flushed into the
+        // first handle, and `unset uv 2>f` lost it entirely (append
+        // targets survived: no truncation). Every other migrated
+        // family member (declare/readonly/export/local/alias) runs
+        // this buffered shape; unset now does too (A3-R1, rubash#2707).
+        let mut stdout_buf: Vec<u8> = Vec::new();
         let mut stderr = Vec::new();
-        let status = self.execute_unset_with_stderr(&cmd.words[1..], &arrayref_flags, &mut stderr);
-        let _ = self.write_buffered_builtin_output(cmd, &[], &stderr);
-        status
+        let status = self.execute_unset_with_stderr(
+            &cmd.words[1..],
+            &arrayref_flags,
+            &mut stdout_buf,
+            &mut stderr,
+        )?;
+        let _ = self.write_buffered_builtin_output(cmd, &stdout_buf, &stderr);
+        Ok(status)
     }
 
-    pub(in crate::executor) fn execute_unset_with_stderr<W>(
+    pub(in crate::executor) fn execute_unset_with_stderr<S>(
         &mut self,
         args: &[String],
         arrayref_flags: &[bool],
-        stderr: &mut W,
+        stdout: &mut S,
+        stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
     ) -> Result<i32, ExecuteError>
     where
-        W: Write,
+        S: Write,
     {
         // TODO(builtins/set.def/variables.c/execute_cmd.c): `unset` searches
         // variables and functions with nuanced attributes. Keep function table
@@ -90,6 +82,7 @@ impl Executor {
             let status = crate::builtins::set::unset_with_stderr(
                 args.iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
+                stdout,
                 stderr,
             )?;
             // Convert error statuses > EX_SHERRBASE (256) and set
@@ -104,6 +97,16 @@ impl Executor {
                 status
             });
         }
+
+        // The Diag's sink is the stderr the dispatcher bound for this
+        // command (its redirect file, the sink, or the buffered Vec),
+        // so every `unset:` diagnostic lands in the command's own fd 2
+        // (A3-R1, rubash#2707) — including the bad-subscript lines
+        // `unset_array_element` used to write to the process stderr.
+        // Built after the branch above: that path builds its own Diag
+        // over the same sink inside the builtin.
+        let row = crate::executor::builtin_table::builtin_table_row("unset").expect("unset row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
 
         let function_only = args.iter().any(|arg| arg == "-f");
         let variable_only = args.iter().any(|arg| arg == "-v");
@@ -136,11 +139,7 @@ impl Executor {
                     .iter()
                     .any(|readonly| readonly.as_str() == *name)
                 {
-                    writeln!(
-                        stderr,
-                        "{}unset: {name}: cannot unset: readonly function",
-                        self.diagnostic_prefix()
-                    )?;
+                    diag.free(format_args!("{name}: cannot unset: readonly function"));
                     function_status = 1;
                     continue;
                 }
@@ -157,16 +156,15 @@ impl Executor {
         }
 
         if function_only {
+            diag.flush_with(|| self.diagnostic_prolog());
             return Ok(function_status);
         }
 
-        // Borrowed flag args (no per-operand String clone): every later
-        // consumer only reads them.
-        let mut variable_args: Vec<&str> = args
-            .iter()
-            .filter(|arg| arg.starts_with('-') && arg.as_str() != "-f")
-            .map(String::as_str)
-            .collect();
+        // Fall-through operand names, keyed by their position in `args`:
+        // the lib re-scan below must see the arguments in the WRITTEN
+        // order (assembled after this loop), not with every `-` word
+        // hoisted ahead of the operands.
+        let mut pushed: Vec<Option<&str>> = vec![None; args.len()];
         // GNU set.def:930-931/965-966: each failed name increments
         // posix_utility_error, so the first failure is reported while the
         // remaining names are still processed.
@@ -183,20 +181,12 @@ impl Executor {
             if nameref_only {
                 if let Some(checked) = self.last_nameref_for_unset(&name) {
                     if matches!(checked.as_str(), "BASH_LINENO" | "BASH_SOURCE") {
-                        writeln!(
-                            stderr,
-                            "{}unset: {name}: cannot unset",
-                            self.diagnostic_prefix()
-                        )?;
+                        diag.free(format_args!("{name}: cannot unset"));
                         nameref_status = 1;
                         continue;
                     }
                     if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &checked) {
-                        writeln!(
-                            stderr,
-                            "{}unset: {checked}: cannot unset: readonly variable",
-                            self.diagnostic_prefix()
-                        )?;
+                        diag.free(format_args!("{checked}: cannot unset: readonly variable"));
                         nameref_status = 1;
                         continue;
                     }
@@ -241,11 +231,11 @@ impl Executor {
                     // element against the REFERENCED array (nameref15.sub:
                     // v[0] is unbound and n survives) — resolve before the
                     // element path consumes the operand.
-                    if let Some(status) = self.unset_through_nameref(&name, stderr) {
+                    if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
-                    if let Some(status) = self.unset_array_element(&name, true) {
+                    if let Some(status) = self.unset_array_element(&name, true, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
@@ -261,11 +251,9 @@ impl Executor {
                     &self.shell_state.env_vars,
                 ) {
                     if variable_only {
-                        writeln!(
-                            stderr,
-                            "{}unset: `{name}': not a valid identifier",
-                            self.diagnostic_prefix()
-                        )?;
+                        diag.error(crate::executor::builtin_diag::DiagKind::InvalidId(
+                            name.to_string(),
+                        ));
                         element_status = element_status.max(1);
                     }
                     continue;
@@ -276,7 +264,7 @@ impl Executor {
             // array's element (unset n[0] with n->v removes v[0]); a plain
             // nameref whose cell is an array reference unbinds that element
             // while keeping the nameref itself.
-            if let Some(status) = self.unset_through_nameref(&name, stderr) {
+            if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -288,7 +276,7 @@ impl Executor {
                 &self.shell_state.env_vars,
                 "array_expand_once",
             );
-            if let Some(status) = self.unset_array_element(&name, verbatim) {
+            if let Some(status) = self.unset_array_element(&name, verbatim, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -309,11 +297,7 @@ impl Executor {
                 name,
                 "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
             ) {
-                writeln!(
-                    stderr,
-                    "{}unset: {name}: cannot unset",
-                    self.diagnostic_prefix()
-                )?;
+                diag.free(format_args!("{name}: cannot unset"));
                 element_status = element_status.max(1);
                 continue;
             }
@@ -331,14 +315,53 @@ impl Executor {
             {
                 mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
             }
-            variable_args.push(name);
+            pushed[arg_index] = Some(name);
         }
 
+        // GNU set.def internal_getopt stops at the first operand: a `-`
+        // word after an operand is a NAME, not an option (`unset uv
+        // --help` unsets uv silently; `unset -v uv --help` reports
+        // `` `--help': not a valid identifier ``). The old code hoisted
+        // every `-` word ahead of the operands, so `--help`/`-x` after
+        // an operand were misread as options in the lib re-scan below.
+        // Rebuild the lib's argument list in the WRITTEN order: the
+        // option-region words (minus `-f`, whose functions the loop
+        // above already handled), the fall-through operand names at
+        // their own positions, and post-operand `-` words verbatim as
+        // names. Operands the loop handled upstream (nameref/array
+        // element) leave an empty slot — the lib must not re-unset
+        // the whole variable. Borrowed names only; every later
+        // consumer only reads them.
+        let mut variable_args: Vec<&str> = Vec::new();
+        let mut seen_operand = false;
+        for (index, arg) in args.iter().enumerate() {
+            if !seen_operand && arg.starts_with('-') {
+                if arg.as_str() != "-f" {
+                    variable_args.push(arg.as_str());
+                }
+                if arg.as_str() == "--" {
+                    seen_operand = true;
+                }
+                continue;
+            }
+            seen_operand = true;
+            if let Some(name) = pushed[index] {
+                variable_args.push(name);
+            } else if arg.starts_with('-') {
+                variable_args.push(arg.as_str());
+            }
+        }
+
+        // Flush first: the builtin builds its own Diag over the
+        // same sink, and its lines must follow the ones recorded
+        // above in the byte stream.
+        diag.flush_with(|| self.diagnostic_prolog());
         let variable_status = {
             crate::builtins::set::unset_with_stderr(
                 variable_args.iter().copied(),
                 &mut self.shell_state.env_vars,
-                stderr,
+                stdout,
+                diag.sink(),
             )
             .map_err(ExecuteError::from)?
         };
@@ -403,6 +426,7 @@ impl Executor {
         // (> EX_SHERRBASE = 256) to the final exit code, and sets
         // special_builtin_failed for special builtins. EX_USAGE (258) → 2,
         // EX_UTILERROR (263) → 1 (EXECUTION_FAILURE).
+        diag.flush_with(|| self.diagnostic_prolog());
         if raw_status > 256 {
             self.special_builtin_failed.set(true);
             let converted = match raw_status {
@@ -461,10 +485,10 @@ impl Executor {
     /// nameref resolves the subscript against the referenced array
     /// (nameref3/nameref15.sub). Returns Some(status) when this call handled
     /// the operand and the ordinary variable path must be skipped.
-    pub(in crate::executor) fn unset_through_nameref<W: Write>(
+    pub(in crate::executor) fn unset_through_nameref(
         &mut self,
         name: &str,
-        stderr: &mut W,
+        diag: &mut crate::executor::builtin_diag::Diag,
     ) -> Option<u8> {
         if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
             // GNU builtins/set.def:925/990-1014: `unset` of a nameref walks to
@@ -492,18 +516,14 @@ impl Executor {
                 .cloned()
                 .unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
-                return self.unset_array_element(&cell, false).or(Some(0));
+                return self.unset_array_element(&cell, false, diag).or(Some(0));
             }
             // GNU set.def:936-937 + 962-966: the resolved referent is
             // unbound by name; a readonly referent is an error on the
             // referent's name, and a missing referent is a silent no-op.
             if !cell.is_empty() && is_shell_name(&cell) {
                 if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &cell) {
-                    let _ = writeln!(
-                        stderr,
-                        "{}unset: {cell}: cannot unset: readonly variable",
-                        self.diagnostic_prefix()
-                    );
+                    diag.free(format_args!("{cell}: cannot unset: readonly variable"));
                     return Some(1);
                 }
                 self.shell_state.env_vars.remove(&cell);
@@ -542,7 +562,7 @@ impl Executor {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"), false)
+        self.unset_array_element(&format!("{cell}[{subscript}]"), false, diag)
             .or(Some(0))
     }
 
@@ -650,6 +670,7 @@ impl Executor {
         &mut self,
         name: &str,
         arrayref: bool,
+        diag: &mut crate::executor::builtin_diag::Diag,
     ) -> Option<u8> {
         let Some((array_name, subscript)) = parse_array_subscript(name) else {
             return None;
@@ -730,13 +751,12 @@ impl Executor {
                 // reports "[%s]: bad array subscript" via builtin_error
                 // (e.g. `unset 'dict[$b]'` with b unset → `[$b]: bad
                 // array subscript`) and returns -1 → status 1.
-                let mut buf = Vec::new();
-                let _ = writeln!(
-                    &mut buf,
-                    "{}unset: [{subscript}]: bad array subscript",
-                    self.diagnostic_prefix()
-                );
-                let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), &buf);
+                // Was written straight to the process stderr: the
+                // diagnostic bypassed the command's own `2>f` redirect
+                // entirely (A3-R1, rubash#2707). It now travels through
+                // the Diag, whose sink is the command's bound fd 2.
+                diag.free(format_args!("[{subscript}]: bad array subscript"));
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Some(1);
             }
             let mut entries = assoc_entries(&current);
@@ -812,15 +832,10 @@ impl Executor {
             // count back from end; if still negative, report "bad array
             // subscript" via builtin_error ("[%s]: %s", sub, ...).
             let Some(resolved) = resolve_indexed_array_subscript(&current, index) else {
-                // Report the bad subscript error. The caller (execute_unset)
-                // passes stderr via the executor, so emit directly.
-                let mut stderr = Vec::new();
-                let _ = writeln!(
-                    &mut stderr,
-                    "{}unset: [{subscript}]: bad array subscript",
-                    self.diagnostic_prefix()
-                );
-                let _ = std::io::Write::write_all(&mut std::io::stderr().lock(), &stderr);
+                // Same A3-R1 fix as the assoc arm above: through
+                // the Diag, never the process stderr.
+                diag.free(format_args!("[{subscript}]: bad array subscript"));
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Some(1);
             };
             let mut entries = indexed_array_entries(&current);

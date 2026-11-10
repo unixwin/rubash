@@ -1179,14 +1179,6 @@ pub struct Executor {
     /// failed `builtin name=value` names the builtin, while a bare
     /// `name=value` command prints no command segment.
     assignment_command_name: Option<String>,
-    /// GNU builtins emit assignment diagnostics through builtin_error, which
-    /// honors the builtin's redirected stderr and ordering. Builtin callers
-    /// (getopts OPTARG/name binds) set buffer_assignment_diagnostics and drain
-    /// pending_assignment_diagnostics into their buffered stderr so a
-    /// preceding buffered diagnostic (e.g. `illegal option -- h`) keeps its
-    /// position relative to the bind error.
-    buffer_assignment_diagnostics: bool,
-    pending_assignment_diagnostics: Vec<u8>,
     /// GNU getopts.def dogetopts: binding the option character into an
     /// integer-attributed OPTIND (name == "OPTIND") whose value is not
     /// arithmetic (`?`/`:`) raises an evalexp error that abandons the
