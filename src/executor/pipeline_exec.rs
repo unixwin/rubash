@@ -2735,7 +2735,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(consumers[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -3497,7 +3497,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -3784,7 +3784,7 @@ impl Executor {
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
             let parent_side_dups = self.attach_ambient_text_delivery(commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -4174,7 +4174,7 @@ impl Executor {
             // sibling paths.
             self.attach_ambient_fd_pins(command, &mut process);
             let parent_side_dups = self.attach_ambient_text_delivery(command, &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -5072,7 +5072,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#2836 slice 4: under job control every stage joins
             // one process group before exec (jobs.c:2390-2391 child

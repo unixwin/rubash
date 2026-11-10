@@ -461,7 +461,7 @@ impl Executor {
         }
         // G-02: children are born in the session cwd; the `env -C`
         // override below replaces it for its own child.
-        process.current_dir(&self.shell_state.cwd);
+        self.stamp_spawn_cwd(&mut process);
         apply_env_command_environment(&mut process, &env_vars, !config.ignore_environment);
         if let Some(chdir) = &config.chdir {
             let directory = shell_path_to_windows(chdir, &env_map);
@@ -1239,7 +1239,7 @@ impl Executor {
             exec_name.as_deref(),
         );
         // G-02: children are born in the session cwd, not the process cwd.
-        process.current_dir(&self.shell_state.cwd);
+        self.stamp_spawn_cwd(&mut process);
         self.apply_external_environment(cmd, &mut process, &spawn_program);
         self.apply_external_redirects(cmd, &mut process)?;
         // A retargeted ENOEXEC spawn takes the find_shell spawn
@@ -2059,18 +2059,170 @@ impl Executor {
     /// channel — except an injected group redirect, whose binding this
     /// entry already IS. Shared by spawn_external_process and the
     /// pipeline spawn loops, which build their stage processes by hand.
+    /// rubash#3198: stamp a spawn with the session cwd — THE one funnel
+    /// every `Command` birth in the executor goes through (foreground,
+    /// pipeline stages, compounds, comsub shortcut, procsub respawn,
+    /// fallbacks). GNU never re-resolves the cwd at spawn: cd moves the
+    /// process cwd itself (builtins/cd.def cd_builtin -> chdir) and
+    /// execute_cmd.c's execute_disk_command forks a child that simply
+    /// inherits it, so a cwd whose directory has since been unlinked
+    /// stays valid for the child. Under G-02 the process cwd is not
+    /// the session's, so the stamp cannot be dropped in general — but
+    /// `Command::current_dir(path)` re-resolves the path string in the
+    /// child and fails ENOENT for a deleted directory, refusing the
+    /// spawn entirely (rc 127 for every external command).
+    ///
+    /// The stamp therefore works in two modes:
+    /// - Path resolvable (the overwhelming common case): refresh the
+    ///   ShellState cwd anchor if it does not already name this exact
+    ///   directory inode, then stamp by path exactly as before.
+    /// - Path NOT resolvable but the anchor names this cwd (the
+    ///   directory was entered while it existed, then deleted): on
+    ///   Unix, register a pre_exec fchdir onto the anchor handle —
+    ///   the child lands in the very inode GNU's child would inherit,
+    ///   so absolute operands run, `.` is the (empty) deleted
+    ///   directory, and `..` still resolves to its real parent. On
+    ///   non-Unix targets, and on Unix when no anchor exists (the cwd
+    ///   was never observed while resolvable), leave the child
+    ///   unstamped: inheriting the process cwd is wrong in detail but
+    ///   strictly better than refusing every spawn, and it is the
+    ///   fallback the issue sanctions for the unanchored case.
+    pub(in crate::executor) fn stamp_spawn_cwd(&self, process: &mut Command) {
+        let cwd = self.shell_state.cwd.clone();
+        if self.refresh_cwd_anchor_for(&cwd) {
+            process.current_dir(cwd);
+            return;
+        }
+        // The path no longer resolves. Spend the anchor if it names
+        // this cwd; otherwise fall through unstamped (see above).
+        #[cfg(unix)]
+        {
+            let anchor_fd = {
+                let anchor = self.shell_state.cwd_anchor.borrow();
+                anchor.as_ref().and_then(|anchor| {
+                    if anchor.path == cwd {
+                        use std::os::unix::io::AsRawFd;
+                        Some(anchor.dir.as_raw_fd())
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(fd) = anchor_fd {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: the closure runs in the forked child before
+                // exec and only fchdir's onto a descriptor the parent
+                // holds open in the anchor (the Arc<File> outlives the
+                // spawn call); fchdir is async-signal-safe.
+                unsafe {
+                    process.pre_exec(move || {
+                        if libc::fchdir(fd) == 0 {
+                            Ok(())
+                        } else {
+                            Err(std::io::Error::last_os_error())
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// rubash#3198: make the ShellState cwd anchor name `cwd` if it
+    /// still resolves to a directory; returns whether `cwd` resolves.
+    /// A directory that was deleted and RECREATED at the same path is
+    /// a different inode: the (dev, ino) comparison re-opens the
+    /// anchor so a later deletion anchors the new directory, not the
+    /// ghost. Called by the spawn stamp and by the cd funnels, so the
+    /// anchor is warm from the moment a directory is entered, before
+    /// any spawn observes it.
+    pub(in crate::executor) fn refresh_cwd_anchor_for(&self, cwd: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let Ok(meta) = std::fs::metadata(cwd) else {
+                return false;
+            };
+            if !meta.is_dir() {
+                return false;
+            }
+            let fresh = {
+                let anchor = self.shell_state.cwd_anchor.borrow();
+                match anchor.as_ref() {
+                    Some(anchor) if anchor.path == cwd => {
+                        anchor.dir.metadata().is_ok_and(|held| {
+                            held.dev() == meta.dev() && held.ino() == meta.ino()
+                        })
+                    }
+                    _ => false,
+                }
+            };
+            if !fresh {
+                if let Ok(dir) = std::fs::File::open(cwd) {
+                    *self.shell_state.cwd_anchor.borrow_mut() =
+                        Some(crate::shell::state::CwdAnchor {
+                            path: cwd.to_path_buf(),
+                            dir: std::sync::Arc::new(dir),
+                        });
+                }
+            }
+            true
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::metadata(cwd).is_ok_and(|meta| meta.is_dir())
+        }
+    }
+
+    /// rubash#3198: refresh the cwd anchor for the CURRENT session
+    /// cwd (the cd funnels call this after a successful move, so the
+    /// anchor exists even if the directory is deleted before the
+    /// session's first spawn).
+    pub(in crate::executor) fn refresh_cwd_anchor(&self) {
+        let cwd = self.shell_state.cwd.clone();
+        self.refresh_cwd_anchor_for(&cwd);
+    }
+
     #[cfg(unix)]
     pub(in crate::executor) fn ambient_fd_pins_for(
         &self,
         cmd: &crate::parser::CommandNode,
+    ) -> Vec<(std::os::unix::io::RawFd, u32)> {
+        self.ambient_fd_pins_with_redirects(&cmd.redirects)
+    }
+
+    /// rubash#3201: the ambient pin set for a spawn face that has no
+    /// CommandNode redirect list to consult — the command-substitution
+    /// shortcut spawner (command_substitution_values::
+    /// run_external_command_substitution), whose body is a word list,
+    /// not a parsed command. Its stdio redirects name only fds 0-2, so
+    /// no ambient slot >= 3 is rebound by the body itself and the
+    /// empty redirect list is the honest input. Before this face
+    /// existed, the shortcut spawner registered NO pins at all: a
+    /// trivial `x=$(external …)` body deterministically delivered zero
+    /// ambient descriptors (measured 20/20 missing on the base tree),
+    /// while a non-trivial body fell through to the full executor and
+    /// delivered them — the path-selection split the issue mistook
+    /// for timing instability. GNU has no such split:
+    /// subst.c:7143 command_substitute forks, and the forked child
+    /// inherits the shell's descriptor set at its numbers.
+    #[cfg(unix)]
+    pub(in crate::executor) fn ambient_fd_pins_unbound(
+        &self,
+    ) -> Vec<(std::os::unix::io::RawFd, u32)> {
+        self.ambient_fd_pins_with_redirects(&[])
+    }
+
+    #[cfg(unix)]
+    fn ambient_fd_pins_with_redirects(
+        &self,
+        redirects: &[crate::parser::Redirect],
     ) -> Vec<(std::os::unix::io::RawFd, u32)> {
         let mut pins: Vec<(std::os::unix::io::RawFd, u32)> = Vec::new();
         for (fd, entry) in &self.fd_table.entries {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            if let Some(redirect) = cmd
-                .redirects
+            if let Some(redirect) = redirects
                 .iter()
                 .find(|redirect| redirect.fd == Some(*fd))
             {
@@ -4207,7 +4359,7 @@ impl Executor {
                                 exe_process.arg(spelling);
                                 exe_process.args(&cmd.words[1..]);
                                 // G-02: children are born in the session cwd.
-                                exe_process.current_dir(&self.shell_state.cwd);
+                                self.stamp_spawn_cwd(&mut exe_process);
                                 self.apply_external_environment(cmd, &mut exe_process, program);
                                 // rubash#2602: a redirect-setup failure
                                 // here means no child ever ran on either
@@ -4239,7 +4391,7 @@ impl Executor {
                         shell_process.arg(program);
                         shell_process.args(&cmd.words[1..]);
                         // G-02: children are born in the session cwd.
-                        shell_process.current_dir(&self.shell_state.cwd);
+                        self.stamp_spawn_cwd(&mut shell_process);
                         self.apply_external_environment(cmd, &mut shell_process, program);
                         // rubash#2602: same disarm as the re-entry
                         // spawn above — a redirect-setup failure means

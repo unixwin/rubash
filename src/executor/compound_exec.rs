@@ -1339,7 +1339,7 @@ impl Executor {
                     &mut process,
                     &program,
                 );
-                process.current_dir(&self.shell_state.cwd);
+                self.stamp_spawn_cwd(&mut process);
                 suppress_orphan_console(&mut process);
                 process.spawn().map(crate::fd::SpawnedChild::from)
             };
@@ -5660,7 +5660,7 @@ impl Executor {
                 child.pre_exec(crate::builtins::kill::child_pre_exec_unblock_sigpipe);
             }
             suppress_orphan_console(&mut child);
-            child.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut child);
             // rubash#2356: spill + apply the gathered respawn
             // environment (see the gather at the construction site).
             // A direct (foreign) child gathered nothing and keeps

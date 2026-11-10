@@ -4601,7 +4601,7 @@ impl Executor {
         child.stdin(Stdio::inherit());
         child.stdout(writer);
         child.stderr(Stdio::inherit());
-        child.current_dir(&self.shell_state.cwd);
+        self.stamp_spawn_cwd(&mut child);
         // A foreign child ignores the __RUBASH_FD_* env stamps: it
         // needs the descriptors themselves at their slot numbers
         // (rubash#1626's pin transport, reused). The pins are the
