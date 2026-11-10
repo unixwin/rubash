@@ -107,6 +107,29 @@ impl Executor {
         if self.execute_dynamic_builtin_command(&builtin_cmd, name)? {
             return Ok(());
         }
+        // rubash#2753: the named builtin's own CHECK_HELPOPT /
+        // CASE_HELPOPT — `builtin cd --help` is cd's long help with
+        // status 2, exactly as a plain `cd --help` through the funnel
+        // gate (this re-dispatch calls the handlers directly and
+        // never re-enters the funnel, so the gate must be applied
+        // here too). The decision is the shared `help_opt_requested`
+        // scan; the text rides `builtin_cmd`, which carries the
+        // outer command's redirections.
+        if let Some(row) = super::builtin_table::builtin_table_row(name) {
+            if super::builtin_opt::help_opt_requested(row, &args[1..]) {
+                let mut stdout = Vec::new();
+                crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
+                self.write_buffered_builtin_output(&builtin_cmd, &stdout, &[])?;
+                self.exit_code = 2;
+                if row
+                    .flags
+                    .contains(super::builtin_table::BuiltinFlags::SPECIAL)
+                {
+                    self.special_builtin_failed.set(true);
+                }
+                return Ok(());
+            }
+        }
         match name {
             ":" => {
                 let redirect_failed =

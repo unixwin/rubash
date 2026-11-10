@@ -6705,6 +6705,23 @@ impl Executor {
                     .iter()
                     .map(|word| self.expand_word(word))
                     .collect::<Vec<_>>();
+                // rubash#2753: CASE_HELPOPT (builtins/common.h:38-41)
+                // for the inline stage — this arm calls the trap
+                // handler directly, so the shared gate decision is
+                // applied here: `trap --help | cat` prints the long
+                // help down the pipe with status 2, exactly as the
+                // funnel gate's plain dispatch does.
+                if let Some(row) = super::builtin_table::builtin_table_row("trap") {
+                    if super::builtin_opt::help_opt_requested(row, &args) {
+                        let mut out = Vec::new();
+                        crate::builtins::help::print_builtin_help("trap", &mut out)?;
+                        return Ok(Some((
+                            crate::executor::substitution_metadata::bytes_to_shell_text(&out),
+                            String::new(),
+                            2,
+                        )));
+                    }
+                }
                 let mut env_vars = self.shell_state.env_vars.clone();
                 let mut output = Vec::new();
                 let mut stderr = Vec::new();

@@ -796,6 +796,56 @@ impl Executor {
         outcome
     }
 
+    /// rubash#2753: the shared `--help` gate — GNU's CHECK_HELPOPT /
+    /// CASE_HELPOPT (builtins/common.h:29-41), applied once here in
+    /// the simple-command funnel instead of once per builtin parser.
+    ///
+    /// Placement is load-bearing and mirrors GNU's order in
+    /// execute_cmd.c: functions have already been dispatched by the
+    /// caller (a function named like a builtin shadows it, help word
+    /// and all), a restricted refusal and the `enable -n` external
+    /// fall-through above have already won, and a loadable
+    /// (`enable -f`) builtin — which GNU's find_shell_builtin also
+    /// prefers over the static table — has already run. What remains
+    /// is a static builtin call, and for that call
+    /// `help_opt_requested` replays the exact scan GNU's
+    /// internal_getopt / CHECK_HELPOPT would have run inside the
+    /// builtin: on a help word the long help goes to the command's
+    /// stdout through the same buffered-output path every other
+    /// builtin uses (so redirections and command substitution see
+    /// it), the status is EX_USAGE (user-visible 2), and a SPECIAL
+    /// builtin additionally takes the special_builtin_failed mark
+    /// its own EX_USAGE return would have produced
+    /// (execute_cmd.c:4886-4888; the loop-control arms set the same
+    /// mark by hand for their identical first-word path).
+    ///
+    /// Handlers that already run the (row + BuiltinOpt + Diag)
+    /// triple reach the same verdict through their own scan — the
+    /// gate simply arrives first with the same text and status, so
+    /// the two layers cannot disagree; handlers with no scan at all
+    /// (the #2753 divergent set: cd, kill, trap, read, fc, bind,
+    /// history, getopts, mapfile, pwd, the complete family, ...)
+    /// are covered by this one site.
+    fn builtin_help_gate(&mut self, cmd: &CommandNode, word: &str) -> Result<bool, ExecuteError> {
+        let Some(row) = super::builtin_table::builtin_table_row(word) else {
+            return Ok(false);
+        };
+        if !super::builtin_opt::help_opt_requested(row, &cmd.words[1..]) {
+            return Ok(false);
+        }
+        let mut stdout = Vec::new();
+        crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
+        self.write_buffered_builtin_output(cmd, &stdout, &[])?;
+        self.exit_code = 2;
+        if row
+            .flags
+            .contains(super::builtin_table::BuiltinFlags::SPECIAL)
+        {
+            self.special_builtin_failed.set(true);
+        }
+        Ok(true)
+    }
+
     fn execute_prepared_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
         let Some(word) = cmd.words.first() else {
             return Ok(());
@@ -843,6 +893,9 @@ impl Executor {
         // shell_builtins (enable.def:449-466), so a loadable builtin
         // shadows the compiled table exactly like a static one.
         if self.execute_dynamic_builtin_command(cmd, word)? {
+            return Ok(());
+        }
+        if self.builtin_help_gate(cmd, word)? {
             return Ok(());
         }
         if let Some(result) = self.execute_primary_builtin_command(cmd, word)? {
