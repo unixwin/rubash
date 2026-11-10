@@ -904,8 +904,9 @@ impl ConditionalArithParser<'_> {
         }
         // GNU expr.c assigns through bind_variable: a nameref lvalue resolves
         // to its cell — an empty cell adopts the assigned text after
-        // valid_nameref_value (invalid -> sh_invalidid via the marker below),
-        // an already-invalid cell stays unchanged, and a valid cell forwards
+        // valid_nameref_value (invalid -> sh_invalidid, recorded in the
+        // evaluation-order event log at this production point), an
+        // already-invalid cell stays unchanged, and a valid cell forwards
         // the write to the referenced variable or element.
         if is_marked_var(self.env_vars, NAMEREF_VARS, name) {
             let cell = self.env_vars.get(name).cloned().unwrap_or_default();
@@ -923,8 +924,26 @@ impl ConditionalArithParser<'_> {
                             crate::builtins::hash::flush_command_hash_table(self.env_vars);
                         }
                     } else {
-                        self.env_vars
-                            .insert("__RUBASH_ARITH_NAMEREF_ERROR".to_string(), value);
+                        // rubash#3246: GNU variables.c:3076-3079
+                        // bind_variable_internal fails an empty-cell
+                        // nameref adoption of an invalid value via
+                        // sh_invalidid(value)
+                        // (builtins/common.c:208), and expr.c:331-354
+                        // expr_bind_variable does NOT longjmp on the
+                        // NULL bind — evaluation continues and the
+                        // assignment yields its RHS value. Record the
+                        // diagnostic in the evaluation-order event log
+                        // here, at the bind point, like the `a[]` bind
+                        // above: the old single-slot nameref marker
+                        // could only hold the last failure, was
+                        // reported after the boundary (out of order
+                        // with the locale warnings), forced status 1
+                        // on the (( ))/let reporters, and leaked into
+                        // the next command on the fast-assignment
+                        // route. One failed bind is one event: two
+                        // namerefs in one expression print two lines,
+                        // in order.
+                        self.record_diag(ArithEvalDiag::InvalidIdentifier(value));
                     }
                 }
                 return;
