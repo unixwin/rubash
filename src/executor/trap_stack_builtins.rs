@@ -18,6 +18,67 @@ fn decode_raw_byte_marker_bytes(bytes: &[u8]) -> Vec<u8> {
     crate::executor::substitution_metadata::shell_text_to_raw_bytes(text)
 }
 
+/// Ordered per-operand output log (rubash#2699): a builtin that emits
+/// both stdout lines and stderr diagnostics must interleave them per
+/// operand in a merged stream (GNU type.def describe loop writes
+/// through the descriptors as it goes; builtin_error is unbuffered).
+/// The shared buffered-output path collected the two streams into
+/// separate Vec buffers and emitted all of stdout before any of
+/// stderr, so the diagnostic for operand N landed after the output
+/// for operand N+1. Each writer appends one chunk per `write` call,
+/// so the log preserves the production order across both fds.
+pub(in crate::executor) struct OrderedOutputLog {
+    chunks: std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+}
+
+impl OrderedOutputLog {
+    pub(in crate::executor) fn new() -> Self {
+        OrderedOutputLog {
+            chunks: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+        }
+    }
+
+    pub(in crate::executor) fn stdout_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: 1,
+            log: self.chunks.clone(),
+        }
+    }
+
+    pub(in crate::executor) fn stderr_writer(&self) -> OrderedChunkWriter {
+        OrderedChunkWriter {
+            fd: 2,
+            log: self.chunks.clone(),
+        }
+    }
+
+    pub(in crate::executor) fn is_empty(&self) -> bool {
+        self.chunks.borrow().is_empty()
+    }
+
+    pub(in crate::executor) fn chunks(&self) -> std::cell::Ref<'_, Vec<(u8, Vec<u8>)>> {
+        self.chunks.borrow()
+    }
+}
+
+pub(in crate::executor) struct OrderedChunkWriter {
+    fd: u8,
+    log: std::rc::Rc<std::cell::RefCell<Vec<(u8, Vec<u8>)>>>,
+}
+
+impl std::io::Write for OrderedChunkWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if !buf.is_empty() {
+            self.log.borrow_mut().push((self.fd, buf.to_vec()));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Executor {
     pub(in crate::executor) fn write_buffered_builtin_output(
         &mut self,
@@ -122,6 +183,67 @@ impl Executor {
         if stderr_first {
             self.write_buffered_stderr_block(cmd, &stderr)?;
             return self.write_buffered_stdout_block(cmd, &stdout);
+        }
+        self.write_buffered_stdout_block(cmd, &stdout)?;
+        self.write_buffered_stderr_block(cmd, &stderr)
+    }
+
+    /// Chunk-ordered flush for the `OrderedOutputLog` (rubash#2699):
+    /// the preamble is item-for-item the pair path's — the same
+    /// empty-log short-circuit, the same input-redirect-error
+    /// branch, the same per-chunk marker decode — then the chunks
+    /// route in log order; a route that declines (apply walk
+    /// refused and no closed-fd/coproc arm matched) falls back to
+    /// the pair block write, stdout block then stderr block.
+    pub(in crate::executor) fn write_buffered_builtin_output_chunks(
+        &mut self,
+        cmd: &CommandNode,
+        log: &OrderedOutputLog,
+    ) -> Result<(), ExecuteError> {
+        if log.is_empty()
+            && cmd.redirects.is_empty()
+            && cmd.redirect_in.is_none()
+            && cmd.redirect_out.is_none()
+            && cmd.append.is_none()
+            && cmd.redirect_err.is_none()
+            && cmd.redirect_err_append.is_none()
+            && cmd.heredoc.is_none()
+            && cmd.heredoc_body.is_none()
+            && cmd.here_string.is_none()
+            && cmd.here_string_carrier.is_none()
+            && cmd.heredoc_redirects.is_empty()
+        {
+            self.last_builtin_write_failed.set(false);
+            return Ok(());
+        }
+        if let Some(error) = self.buffered_builtin_input_redirect_error(cmd) {
+            let mut line = Vec::new();
+            let _ = writeln!(
+                &mut line,
+                "{}{}",
+                self.diagnostic_prefix(),
+                crate::posix_errors::message(&error)
+            );
+            let _ = self.write_redirect_diagnostic_routed(cmd, &line);
+            self.exit_code = 1;
+            self.last_builtin_write_failed.set(true);
+            return Ok(());
+        }
+        let decoded: Vec<(u8, Vec<u8>)> = log
+            .chunks()
+            .iter()
+            .map(|(fd, bytes)| (*fd, decode_raw_byte_marker_bytes(bytes)))
+            .collect();
+        if self.route_builtin_buffered_output_chunks(cmd, &decoded, false)? {
+            return Ok(());
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        for (fd, bytes) in &decoded {
+            match fd {
+                1 => stdout.extend_from_slice(bytes),
+                _ => stderr.extend_from_slice(bytes),
+            }
         }
         self.write_buffered_stdout_block(cmd, &stdout)?;
         self.write_buffered_stderr_block(cmd, &stderr)
