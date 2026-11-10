@@ -478,7 +478,12 @@ impl Session {
         let (status, flow, mut classification, diagnostics) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)
-                || script_driver::script_uses_aliases(source, alias_live))
+                || script_driver::script_uses_aliases(source, alias_live)
+                // rubash#2773: a submission that may toggle `set -v`
+                // mid-read needs the grouped reader's per-line read
+                // point (flags.c:284; parse.y:2712) — the whole-source
+                // route below can only sample the entry state.
+                || script_driver::script_may_toggle_verbose(source))
         {
             let (status, _unwound, facts) =
                 script_driver::run_script_with_history_at_line_offset_classified(
@@ -532,6 +537,15 @@ impl Session {
             // echoed verbatim. The name keeps its own jobs (the
             // diagnostic values' source_name, the event record);
             // the parse receives the input text explicitly.
+            //
+            // rubash#2773: this route likewise reads the whole
+            // submission as one unit before anything in it executes
+            // (the parse_and_execute model), so its lines are echoed
+            // at this read boundary when verbose is on (flags.c:284
+            // echo_input_at_read = verbose_flag; parse.y:2712 prints
+            // shell_input_line as read). The grouped route above gets
+            // the same answer from its per-line read point.
+            script_driver::echo_verbose_input_lines(&self.executor, source);
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
                 source,
