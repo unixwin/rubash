@@ -3450,17 +3450,25 @@ impl Executor {
             // array6.sub:26). The unquoted path would treat `'` as an sq
             // opener instead.
             let expanded = if outer_double_quoted {
-                crate::executor::parameter_words::unescape_parameter_operator_result(
-                    &self.expand_embedded_parameters_mut_with_context(
-                        &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
-                            alternate,
-                            self.posix_mode_enabled(),
-                            false,
+                // rubash#3088: the walk must NOT restore expansion-result
+                // backslashes before the operator-result unescape below —
+                // it would fold them as source escapes (subst.c:4773
+                // quote_string CTLESC-protects expansion results; subst.c:4807
+                // dequote_string strips only CTLESC). The walk defers both
+                // carriers; restore them after the pass.
+                crate::executor::parameter_words::restore_deferred_operator_backslashes(
+                    &crate::executor::parameter_words::unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters_mut_with_context_no_restore(
+                            &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
+                                alternate,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
+                            SubstitutionQuoteContext::DoubleQuoted,
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     ),
-                    SubstitutionQuoteContext::DoubleQuoted,
-                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 )
             } else {
                 self.expand_alternate_parameter_word(alternate)
