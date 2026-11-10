@@ -25,6 +25,33 @@ fn shell_pwd_display_impl(path: &str) -> String {
 fn shell_pwd_display_impl(path: &str) -> String {
     path.to_string()
 }
+
+/// rubash#3268 (e): the strerror text of a failed birth getcwd, for
+/// the shell-init line — GNU prints strerror(errno) verbatim
+/// (builtins/common.c:611-614 get_working_directory).
+#[cfg(unix)]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(code) => {
+            // SAFETY: strerror returns a static string (or NULL for
+            // an unknown code); it is only read, never freed.
+            let text = unsafe { libc::strerror(code) };
+            if text.is_null() {
+                error.to_string()
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(text) }
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        }
+        None => error.to_string(),
+    }
+}
+
+#[cfg(not(unix))]
+fn getcwd_strerror(error: &std::io::Error) -> String {
+    error.to_string()
+}
 /// Process-global flag: this process is a respawned internal `rubash -c`
 /// child (the __RUBASH_SHELL_PID/__RUBASH_COPROC_CHILD marker was seen at
 /// Executor::new AND its provenance validated — see
@@ -769,9 +796,89 @@ impl Executor {
         mirror_env_remove(crate::executor::path::COMPATIBLE_SHELL_PATH_ENV);
         // Birth context: the session cwd field (set in the ShellState
         // literal below) starts at the process cwd.
+        //
+        // rubash#3268 (e): the birth cwd is captured ONCE, here, and
+        // the single value feeds both this env seed and the ShellState
+        // field below — the two used to call current_dir()
+        // independently and could disagree across a getcwd boundary.
+        // A FAILED capture has no honest string form: GNU keeps no
+        // cwd string state at all (the process inode IS the state;
+        // variables.c:907 set_pwd seeds only $PWD), so the field
+        // takes the empty path — the "unknown" spelling, which never
+        // resolves and never equals a real directory — in place of
+        // the old "/" fabrication, which transplanted the whole
+        // session to the root directory (pwd printed /, children
+        // were stamped into /, relative operands resolved against
+        // /). The inode itself is still known — the process sits in
+        // it — so the literal below opens the birth anchor on "."
+        // and the two-state anchor machinery (stamp_spawn_cwd /
+        // read_session_anchored) serves the session from the inode
+        // until the first successful cd replaces field and anchor.
+        let (birth_cwd, birth_anchor): (PathBuf, Option<crate::shell::state::CwdAnchor>) =
+            match std::env::current_dir() {
+                Ok(path) => (path, None),
+                Err(error) => {
+                    // GNU prints the shell-init line once at startup
+                    // when set_pwd's get_working_directory fails
+                    // (variables.c:907 -> builtins/common.c:611, errstr
+                    // general.c:70). A validated respawn is GNU's forked
+                    // child (execute_cmd.c), which never re-runs startup,
+                    // so it stays silent; the per-command
+                    // job-working-directory repeats GNU prints after
+                    // later commands are its working-directory cache
+                    // bookkeeping and are deliberately not followed.
+                    if !internal_respawn {
+                        eprintln!(
+                            "shell-init: error retrieving current directory: \
+                         getcwd: cannot access parent directories: {}",
+                            getcwd_strerror(&error)
+                        );
+                    }
+                    // The respawned child's fork snapshot is its
+                    // inheritance: GNU's fork child keeps
+                    // the_current_working_directory verbatim, with no
+                    // set_pwd revalidation, so a validated respawn adopts
+                    // the transported PWD as its field when it names an
+                    // absolute path — its spawner stamped it into the
+                    // very inode that string names (stamp_spawn_cwd, or
+                    // the whitelisted spawn's anchor fchdir), and the
+                    // #3275 identity gate keeps the adopted string from
+                    // ever being mistaken for a resolution of it. Any
+                    // other birth leaves the field empty: an ambient PWD
+                    // is never trusted, because variables.c:907's
+                    // same_file gate cannot pass for a directory the
+                    // kernel can no longer stat through its name.
+                    let adopted = if internal_respawn {
+                        env_vars.get("PWD").and_then(|transported| {
+                            let candidate = PathBuf::from(transported);
+                            candidate.is_absolute().then_some(candidate)
+                        })
+                    } else {
+                        None
+                    };
+                    let field = adopted.unwrap_or_default();
+                    // The process sits in the birth inode even though
+                    // its name is gone: open "." once so the anchor can
+                    // name the field from birth. Off Unix the anchor
+                    // holds no directory handle, so none is constructed
+                    // (the spawn stamp there falls back to the
+                    // unstamped spawn, as before).
+                    #[cfg(unix)]
+                    let anchor =
+                        std::fs::File::open(".")
+                            .ok()
+                            .map(|dir| crate::shell::state::CwdAnchor {
+                                path: field.clone(),
+                                dir: std::sync::Arc::new(dir),
+                            });
+                    #[cfg(not(unix))]
+                    let anchor: Option<crate::shell::state::CwdAnchor> = None;
+                    (field, anchor)
+                }
+            };
         Self::initialize_fresh_shell_env_vars(
             &mut env_vars,
-            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+            &birth_cwd,
             internal_respawn,
             process_exit,
         );
@@ -1030,12 +1137,23 @@ impl Executor {
                 // G-02: a root session is born in the process cwd (the
                 // host's directory at Executor::new, exactly what GNU's
                 // startup getcwd reports); from here on the field, not
-                // the process, carries the session's cwd.
-                cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                // the process, carries the session's cwd. The value is
+                // the single birth capture taken above (rubash#3268
+                // (e)): empty when the capture failed — the honest
+                // "unknown" — never a fabricated "/".
+                cwd: birth_cwd,
                 // rubash#3198: the cwd inode anchor is a lazy cache —
                 // it is opened by the first spawn stamp (or cd) that
                 // finds the path resolvable, never at construction.
-                cwd_anchor: std::cell::RefCell::new(None),
+                // rubash#3268 (e): the one birth exception — when the
+                // birth capture failed, the process still sits in the
+                // inode it was born in, so the anchor opens "."
+                // eagerly and names the (empty or respawn-adopted)
+                // field; the two-state machinery then serves the
+                // session from that inode. A successful capture keeps
+                // the anchor lazy: no per-birth open is added to the
+                // respawn-hot path.
+                cwd_anchor: std::cell::RefCell::new(birth_anchor),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1508,8 +1626,17 @@ impl Executor {
         // G-02: the "real CWD" is the caller's session cwd field, passed in
         // (at process birth it is the process cwd; for an in-process fresh
         // shell it is the parent session's cwd).
-        let pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
-        env_vars.insert("PWD".to_string(), pwd);
+        // rubash#3268 (e): an empty cwd is the unknown birth state
+        // (the birth getcwd failed). GNU does not rebind PWD there:
+        // set_pwd calls get_working_directory("shell-init"), which
+        // fails WITHOUT binding the variable (variables.c:907), so an
+        // imported PWD keeps its stale value and an absent one stays
+        // unbound. Seeding the empty string — or any fabrication —
+        // would assert a directory the session does not have.
+        if !cwd.as_os_str().is_empty() {
+            let pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+            env_vars.insert("PWD".to_string(), pwd);
+        }
         // Windows-only: suites write $TMPDIR/$HOME into generated scripts
         // unquoted (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`; exp.tests
         // `${x#$HOME}`), and an inherited Windows backslash path is escape

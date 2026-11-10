@@ -139,6 +139,21 @@ pub struct ShellState {
     /// relative path resolution anchors here. `$PWD` in `env_vars` is
     /// the logical display twin maintained by the cd family; this field
     /// is the physical truth the filesystem sees.
+    ///
+    /// rubash#3268 (e): the EMPTY path is a first-class value of this
+    /// field — the honest "unknown". It is installed only at birth,
+    /// when the process was started inside an already-deleted
+    /// directory and the birth getcwd failed: GNU has no string for
+    /// that state at all (its only state is the process inode), so no
+    /// string may be invented — the previous "/" fallback made the
+    /// whole session live in the root directory. The birth anchor
+    /// (below) is opened on "." at the same moment and names this
+    /// empty value, so every two-state consumer takes the anchor
+    /// route for the session's whole abnormal life; the first
+    /// successful cd replaces field and anchor and the state ends.
+    /// An empty field never resolves and never equals a real
+    /// directory — code that would join or display it must treat it
+    /// as "no known directory", not as a path.
     pub(crate) cwd: std::path::PathBuf,
     /// rubash#3198: an open directory handle anchoring `cwd`, kept so a
     /// spawn can still land a child in the session cwd after the
@@ -158,6 +173,15 @@ pub struct ShellState {
     /// the anchor is a cache of an OS resource, not session semantics —
     /// a stale anchor is only ever used when its recorded path still
     /// equals the cwd field, and the field remains the truth.
+    ///
+    /// Normally lazy (opened by the first consumer that finds the
+    /// path resolvable). rubash#3268 (e): the ONE eager case is a
+    /// birth inside an already-deleted directory — the birth capture
+    /// in Executor::new opens "." (which succeeds on a deleted
+    /// directory, exactly as it does on a live one) and installs the
+    /// anchor naming the empty "unknown" field (or a validated
+    /// respawn's adopted field), because no later moment can recover
+    /// that inode once the path is gone.
     pub(crate) cwd_anchor: RefCell<Option<CwdAnchor>>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates

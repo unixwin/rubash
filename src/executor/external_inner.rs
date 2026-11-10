@@ -2248,6 +2248,34 @@ impl Executor {
         self.refresh_cwd_anchor_for(&cwd);
     }
 
+    /// rubash#3268 (e): the anchor's raw fd when it names the CURRENT
+    /// cwd field — stamp_spawn_cwd's extraction, for the one spawn
+    /// face that builds a WhitelistedSpawn instead of a Command
+    /// (execute_background_ast_command): the fd rides the spec and
+    /// the spawner fchdirs the child into the inode when the field no
+    /// longer resolves. None when no anchor names the field — that
+    /// spawn then stays unstamped, as it was before this face had an
+    /// anchor route at all. The fd is borrowed from the anchor's
+    /// Arc<File>; the caller spends it inside the spawn call, while
+    /// the anchor lives in the session state.
+    #[cfg(unix)]
+    pub(in crate::executor) fn session_cwd_anchor_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        let cwd = self.shell_state.cwd.clone();
+        // Ask the two-state question first, exactly as the stamp
+        // does: the ask lazily opens the anchor for a field that was
+        // never observed while it resolved.
+        let _ = self.session_cwd_path_resolves(&cwd);
+        let anchor = self.shell_state.cwd_anchor.borrow();
+        anchor.as_ref().and_then(|anchor| {
+            if anchor.path == cwd {
+                use std::os::unix::io::AsRawFd;
+                Some(anchor.dir.as_raw_fd())
+            } else {
+                None
+            }
+        })
+    }
+
     /// rubash#3198: the in-process half of the cwd anchor. Spawned
     /// children are served by stamp_spawn_cwd's fchdir, but a face
     /// that opens a file IN the shell process (the emulated external
