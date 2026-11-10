@@ -1649,7 +1649,20 @@ impl Executor {
             self.last_command_substitution_status.set(Some(2));
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
-        let mut ast = crate::parser::parse(&tokens);
+        // GNU parses the body as its own input (subst.c parse_and_execute)
+        // and echoes the offending line verbatim (parse.y print_offending_line
+        // over the body's shell_input_line) — thread the body text so the
+        // near guard slices it instead of joining tokens (`( 1 + 2)x', not
+        // `( 1 + 2 ) x', rubash#2677). Tokens are seeded at body_start_line,
+        // so the offset maps them back to lines of the body text.
+        let mut ast = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(source.into()),
+                source_line_offset: body_start_line - 1,
+                ..crate::parser::ParseLoopOptions::default()
+            },
+        );
         normalize_comsub_body_statement_lines(&mut ast, &tokens);
 
         // GNU reports the body's syntax error (parse.y yyerror) even
@@ -2156,6 +2169,7 @@ impl Executor {
             comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
+            arith_fallback_comsub_body: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             // rubash#846: a forked comsub child is a fresh GNU frame with no
@@ -3048,7 +3062,7 @@ impl Executor {
         else {
             return false;
         };
-        if self.backtick_body_diagnostic.get() {
+        if self.comsub_body_parse_is_contained() {
             self.report_command_parse_error(command);
         } else {
             // GNU's read-time shape — suffixed / re-presented at the

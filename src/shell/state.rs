@@ -105,6 +105,20 @@ pub struct DynamicCellState {
     pub(crate) groups_materialized: bool,
 }
 
+/// rubash#3198: the inode anchor for the session cwd (see the
+/// `cwd_anchor` field on ShellState). `path` records which cwd value
+/// the handle was opened for; the handle is only spent when the cwd
+/// field still equals it but no longer resolves by name. On non-Unix
+/// targets there is no fchdir, so the anchor carries the path only
+/// and the spawn stamp falls back to leaving the child unstamped
+/// (inherit) instead of failing the spawn on a deleted directory.
+#[derive(Debug, Clone)]
+pub(crate) struct CwdAnchor {
+    pub(crate) path: PathBuf,
+    #[cfg(unix)]
+    pub(crate) dir: std::sync::Arc<std::fs::File>,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -126,6 +140,25 @@ pub struct ShellState {
     /// the logical display twin maintained by the cd family; this field
     /// is the physical truth the filesystem sees.
     pub(crate) cwd: std::path::PathBuf,
+    /// rubash#3198: an open directory handle anchoring `cwd`, kept so a
+    /// spawn can still land a child in the session cwd after the
+    /// directory has been UNLINKED. GNU's cwd lives in the process
+    /// (builtins/cd.def cd_builtin -> chdir), so a deleted cwd stays a
+    /// valid cwd for forked children (execute_cmd.c execute_disk_command
+    /// forks and the child inherits it; no path is ever re-resolved).
+    /// Under G-02 this port's process cwd never moves, so the path
+    /// string was the only carrier — and `Command::current_dir(path)`
+    /// re-resolves it at spawn time, failing ENOENT once the directory
+    /// is gone and refusing EVERY external spawn with 127. The anchor
+    /// is the inode-level twin of the field: refreshed whenever the
+    /// cwd is (re)entered while its path still resolves, and consumed
+    /// by the spawn stamp (executor::external_inner::stamp_spawn_cwd)
+    /// via fchdir when the path no longer resolves. A RefCell because
+    /// spawn faces include &self routes (the comsub shortcut spawner);
+    /// the anchor is a cache of an OS resource, not session semantics —
+    /// a stale anchor is only ever used when its recorded path still
+    /// equals the cwd field, and the field remains the truth.
+    pub(crate) cwd_anchor: RefCell<Option<CwdAnchor>>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
     /// duplicate segments until the next canonical render folds them. This is
@@ -966,6 +999,7 @@ impl Clone for ShellState {
             variables: self.variables.clone(),
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
+            cwd_anchor: RefCell::new(self.cwd_anchor.borrow().clone()),
             array_compact_budget: self.array_compact_budget.clone(),
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,

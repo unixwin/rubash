@@ -152,7 +152,15 @@ impl Executor {
         stderr: &[u8],
         status: i32,
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output(cmd, &[], stderr)?;
+        // rubash#3222: the staged diagnostic accompanies an outcome the
+        // caller has already decided; it is never part of the result.
+        // GNU assigns the exit status before printing (execute_cmd.c:6145
+        // shell_execve) and internal_error never observes the fprintf
+        // outcome (error.c:207-218), so a failed diagnostic write (ENOSPC
+        // on /dev/full, a closed descriptor) must not displace `status`:
+        // attempt the write, drop its result, and always record the
+        // status the caller decided.
+        let _ = self.write_buffered_builtin_output(cmd, &[], stderr);
         self.exit_code = status;
         Ok(())
     }
