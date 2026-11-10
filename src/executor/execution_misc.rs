@@ -891,6 +891,36 @@ pub(in crate::executor) fn shell_display_path(path: &str) -> String {
     path.to_string()
 }
 
+/// GNU findcmd.c:365/416 (search_for_command): a plain name resolved
+/// through PATH for execution enters the hash table with
+/// times_found=1; a repeat run bumps times_found (hashlib.c:254).
+/// The Fastpath-class faces (sleep / dirname / basename) answer
+/// in-process for exactly the name find_user_command resolves, so an
+/// ANSWERED fast path records the same resolution — otherwise
+/// `type <name>` reports the PATH body while `hash` has never heard
+/// of it (rubash#2736). Same guards as the emulated layer's record
+/// block (external_file_builtins::record_emulated_command_resolution)
+/// and tput's Separate route: slash-free name, hashall on, temp-PATH
+/// suppression. Called only from faces that actually answered: a
+/// stand-down or a declined shape falls through to execute_external,
+/// which records through the standard path.
+pub(in crate::executor) fn record_fastpath_command_resolution(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    name: &str,
+) {
+    if name.contains('/')
+        || name.contains('\\')
+        || !crate::builtins::set::shell_option_enabled(env_vars, "hashall")
+        || env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1")
+    {
+        return;
+    }
+    if let Some(program) = crate::executor::path::find_user_command(name, env_vars) {
+        let display = shell_display_path(&program.to_string_lossy().replace('\\', "/"));
+        crate::builtins::hash::record_command_resolution(env_vars, name, &display);
+    }
+}
+
 fn windows_native_to_slash_drive_display(path: &str) -> String {
     if path.len() >= 3 && path.as_bytes()[1] == b':' && path.as_bytes()[2] == b'/' {
         let drive = (path.as_bytes()[0] as char).to_ascii_lowercase();

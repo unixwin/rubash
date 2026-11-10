@@ -345,15 +345,29 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
             // reserved_word_acceptable's set) is grammatical without a `;'
             // terminator: compound_list's `newline_list list1' production
             // (parse.y:1262) accepts a single pipeline_command with no
-            // terminator, and reserved_word_acceptable (parse.y:5899,
-            // COND_END in the set) recognizes `then'/`do` there —
-            // `if [[ $x == y ]] then' inside a function body (cond.tests:230,
+            // terminator, and reserved_word_acceptable (parse.y:5899-5940,
+            // ARITH_CMD and COND_END in the predecessor set) recognizes the
+            // reserved word there — `if [[ $x == y ]] then' inside a
+            // function body (cond.tests:230,
             // shell_function_n_shortcuts/.shortcut). After a plain WORD the
             // word is still an argument (`if true then' stays rejected), and
             // after `]]' any non-reserved word keeps the old error.
+            //
+            // rubash#2646: the exemption is not `then'/`do'-only. GNU's
+            // CHECK_FOR_RESERVED_WORD (parse.y:3168) treats EVERY reserved
+            // word alike at a command boundary — the grammar level that
+            // owns the current section then decides whether that word is
+            // legal there (an if-body's `fi'/`elif'/`else' closes or
+            // continues the clause; a stray one errors at that level).
+            // The #460 value set only covered the CONDITION position, so
+            // a body-level compound (`if ((1)) then ((2)) fi',
+            // arith.tests:351; `if true; then (echo s) fi') still died
+            // here before the section stop could accept its closer.
+            // `command_boundary_keyword_allowed' is the predecessor half
+            // of reserved_word_acceptable; this guard is the word half.
             let reserved_follows_compound = tokens.get(next_i).is_some_and(|next| {
                 next.kind == TokenKind::Keyword
-                    && matches!(next.value.as_str(), "then" | "do")
+                    && crate::lexer::is_keyword(&next.value)
                     && super::command_boundary_keyword_allowed(tokens, next_i)
             });
             if !separated
@@ -2397,6 +2411,18 @@ pub(super) fn push_unexpected_token_error_named(
     let token_text = name_override.unwrap_or_else(|| {
         if tokens[i].value.starts_with('{') {
             "{"
+        } else if tokens[i].kind == TokenKind::Keyword
+            && tokens[i].value.starts_with("((")
+            && tokens[i].value.ends_with("))")
+        {
+            // GNU's ARITH_CMD token string IS the arithmetic body:
+            // parse_arith_cmd (parse.y:4963) stores the matched-pair
+            // content as the token's word, so the error names the body —
+            // `((1)) (( 2 + 3 ))' names ` 2 + 3 ', `((1)) ((x=1))' names
+            // `x=1' — never the scanner's whole folded `((…))' text
+            // (rubash#3204). The parse_dparen fold branch is the only
+            // producer of a Keyword token with this value shape.
+            &tokens[i].value[2..tokens[i].value.len() - 2]
         } else {
             tokens[i].value.as_str()
         }

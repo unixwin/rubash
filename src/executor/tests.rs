@@ -372,7 +372,10 @@ mod unit_tests {
 
     #[test]
     fn prompt_expansion_decodes_raw_escape_markers() {
-        let executor = Executor::new();
+        // rubash#3092: expand_prompt_string is `&mut self` now (prompt
+        // rendering runs funsub in the current shell), so this binding
+        // must be mut like the other prompt tests.
+        let mut executor = Executor::new();
         let marker = crate::executor::substitution_metadata::encode_raw_byte_marker(0x1b);
 
         assert_eq!(

@@ -66,6 +66,83 @@ fn logical_chars(text: &str) -> Vec<char> {
         .collect()
 }
 
+/// Single-byte locale byte domain for read splitting (rubash#2819).
+///
+/// GNU read.def hands the line to list_string (subst.c:3119), whose
+/// separator membership — string_extract_verbatim, subst.c:1148 — is
+/// per byte when MB_CUR_MAX == 1: a multibyte IFS character separates
+/// on each of its bytes. The read machinery above works on logical
+/// units (chars, marker pairs decoded); in byte mode the line and IFS
+/// are first rewritten so every byte is exactly one logical unit
+/// (bytes >= 0x80 become raw-byte marker pairs, which logical_units
+/// decodes to the byte as a Latin-1 codepoint), so the existing unit
+/// walk IS the byte walk, and each produced value is normalized back
+/// to storage text (a field whose bytes again form valid UTF-8
+/// re-forms its characters; a byte split out of a multibyte character
+/// stays a raw-byte marker). Pure-ASCII input never needs the rewrite:
+/// char and byte domains coincide there. Returns None outside byte
+/// mode (multibyte locale, or nothing non-ASCII involved).
+fn read_byte_domain(line: &str, ifs: &str) -> Option<(String, String)> {
+    if crate::locale::is_multi_byte_active() {
+        return None;
+    }
+    let non_ascii = |text: &str| text.chars().any(|ch| !ch.is_ascii());
+    if !non_ascii(line) && !non_ascii(ifs) {
+        return None;
+    }
+    Some((byte_domain_text(line), byte_domain_text(ifs)))
+}
+
+fn byte_domain_text(text: &str) -> String {
+    use crate::executor::substitution_metadata::{encode_raw_byte_marker, shell_text_to_raw_bytes};
+    shell_text_to_raw_bytes(text)
+        .iter()
+        .map(|byte| {
+            if *byte < 0x80 {
+                (*byte as char).to_string()
+            } else {
+                encode_raw_byte_marker(*byte)
+            }
+        })
+        .collect()
+}
+
+fn byte_domain_value(text: &str) -> String {
+    use crate::executor::substitution_metadata::{encode_raw_byte_marker, shell_text_to_raw_bytes};
+    let bytes = shell_text_to_raw_bytes(text);
+    let mut output = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let first = bytes[index];
+        let len = if first < 0x80 {
+            1
+        } else if first & 0xE0 == 0xC0 {
+            2
+        } else if first & 0xF0 == 0xE0 {
+            3
+        } else if first & 0xF8 == 0xF0 {
+            4
+        } else {
+            1
+        };
+        let end = (index + len).min(bytes.len());
+        if end - index == len {
+            if let Ok(valid) = std::str::from_utf8(&bytes[index..end]) {
+                output.push_str(valid);
+                index = end;
+                continue;
+            }
+        }
+        if first < 0x80 {
+            output.push(char::from(first));
+        } else {
+            output.push_str(&encode_raw_byte_marker(first));
+        }
+        index += 1;
+    }
+    output
+}
+
 /// Byte length of `text`'s first `unit_count` logical units.
 fn logical_prefix_len(text: &str, units: &[(usize, usize, char)], unit_count: usize) -> usize {
     units
@@ -250,6 +327,19 @@ fn field_value(
 /// `field_value` helper, which unescapes backslash pairs
 /// (`unescape_read_backslashes`) instead of slicing the raw line.
 pub(in crate::executor) fn read_array_field_values(line: &str, ifs: &str) -> Vec<String> {
+    // rubash#2819: single-byte locale — split in the byte domain (see
+    // read_byte_domain); the ranges the impl computes then index the
+    // rewritten line, never the caller's.
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return read_array_field_values_impl(&domain_line, &domain_ifs)
+            .into_iter()
+            .map(|value| byte_domain_value(&value))
+            .collect();
+    }
+    read_array_field_values_impl(line, ifs)
+}
+
+fn read_array_field_values_impl(line: &str, ifs: &str) -> Vec<String> {
     split_read_field_ranges(line, ifs, true)
         .into_iter()
         .map(|range| field_value(line, range, ifs, true))
@@ -328,6 +418,30 @@ pub(in crate::executor) fn read_scalar_fields_with_backslashes(
 }
 
 fn read_scalar_fields_internal(
+    line: &str,
+    names_len: usize,
+    ifs: &str,
+    interpret_backslashes: bool,
+) -> Vec<String> {
+    // rubash#2819: single-byte locale — split in the byte domain (see
+    // read_byte_domain). Every range/slice inside the impl then refers
+    // to the rewritten line, and the returned values are normalized
+    // back to storage text.
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return read_scalar_fields_impl(
+            &domain_line,
+            names_len,
+            &domain_ifs,
+            interpret_backslashes,
+        )
+        .into_iter()
+        .map(|value| byte_domain_value(&value))
+        .collect();
+    }
+    read_scalar_fields_impl(line, names_len, ifs, interpret_backslashes)
+}
+
+fn read_scalar_fields_impl(
     line: &str,
     names_len: usize,
     ifs: &str,
