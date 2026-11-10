@@ -23,6 +23,77 @@ fn echo_stdin_unit(guard: &Option<crate::fd::ConsoleOnecharGuard>, unit: &StdinU
     }
 }
 
+/// Escape-state tracker for byte-wise record loops that ask, per
+/// byte, whether a delimiter match at that byte is suppressed
+/// because the byte is escaped (read.def: the escape introducer
+/// quotes the next byte). Stateful: feed bytes in stream order.
+/// Moved here from fd_table when the fd-table readers adopted the
+/// unified FdRecordScan replay; the coproc loop still drives it.
+pub(in crate::executor) struct ReadEscapeTracker {
+    escape_aware: bool,
+    escaped: bool,
+}
+
+impl ReadEscapeTracker {
+    pub(in crate::executor) fn new(escape_aware: bool) -> Self {
+        Self {
+            escape_aware,
+            escaped: false,
+        }
+    }
+
+    /// Whether a delimiter match on `byte` is suppressed (the byte
+    /// is the escape introducer itself or is quoted by one).
+    pub(in crate::executor) fn suppresses_match(&mut self, byte: u8) -> bool {
+        if !self.escape_aware {
+            return false;
+        }
+        if self.escaped {
+            self.escaped = false;
+            return true;
+        }
+        if byte == b'\\' {
+            self.escaped = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// Arrival segments of `timing` re-expressed for a FUNCTION_STDIN
+/// mirror whose tail — everything past the record a byte-domain
+/// serve consumed — was re-encoded (rubash#3293): segments at or
+/// before the consumed cut drop out; later segments map through the
+/// tail's transport units (a segment boundary inside a re-encoded
+/// character resolves to the character's end, the position at which
+/// its bytes can be served). Segments landing on the same position
+/// keep the earliest arrival, as CaptureTiming::finish does.
+fn remap_arrivals(
+    timing: &super::timed_input::TimedInput,
+    input: &str,
+    offset: usize,
+    consumed_bytes: usize,
+    tail: &str,
+) -> Vec<(usize, std::time::Duration)> {
+    let base_bytes =
+        substitution_metadata::decode_raw_byte_markers(input[..offset].as_bytes()).len();
+    let cut = base_bytes + consumed_bytes;
+    let mut mapped: Vec<(usize, std::time::Duration)> = Vec::new();
+    for &(cum, elapsed) in timing.arrivals() {
+        let byte_pos =
+            substitution_metadata::decode_raw_byte_markers(input[..cum].as_bytes()).len();
+        if byte_pos <= cut {
+            continue;
+        }
+        let new_cum = offset + text_pos_for_byte_len(tail, byte_pos - cut);
+        match mapped.last_mut() {
+            Some((c, t)) if *c == new_cum => *t = (*t).min(elapsed),
+            _ => mapped.push((new_cum, elapsed)),
+        }
+    }
+    mapped
+}
+
 impl Executor {
     pub(in crate::executor) fn finish_read_error(
         &mut self,
@@ -1671,7 +1742,7 @@ impl Executor {
         // close the descriptor (read.def keeps the fd across builtin
         // calls; see the note at the end of this function).
         // rubash#1300: escaped bytes never terminate the record.
-        let mut escapes = crate::executor::fd_table::ReadEscapeTracker::new(escape_aware);
+        let mut escapes = ReadEscapeTracker::new(escape_aware);
         // Post-escape counting state for the char limit (rubash#1328).
         let mut escaped = false;
         // read.def:731-738: a record that is just the delimiter is served
@@ -1734,7 +1805,7 @@ impl Executor {
             self.read_eof_no_delimiter = if escape_aware {
                 // Replay the escape state: an escaped delimiter byte is
                 // record data, not a found delimiter (rubash#1300).
-                let mut replay = crate::executor::fd_table::ReadEscapeTracker::new(true);
+                let mut replay = ReadEscapeTracker::new(true);
                 !bytes.iter().any(|byte| {
                     let suppressed = replay.suppresses_match(*byte);
                     !suppressed && delimiter_byte_matches(*byte, delimiter)
@@ -2031,16 +2102,32 @@ impl Executor {
         // re-encoded (the split can leave the next record starting
         // inside a character, which only the byte form can spell; the
         // OFFSET stays at the tail's start in the rewritten mirror).
-        // The timed judge below keys on the mirror's original length,
-        // so it does not judge a byte-served record; the record itself
-        // is complete by construction.
+        // rubash#3294: a -n/-N budget over raw bytes takes the same
+        // byte-domain serve, because the character scan counts each
+        // byte of an invalid sequence as its own unit while GNU's
+        // read_mbchar consumes the run as one.
+        // rubash#3293: the byte serve is judged against the stream's
+        // production schedule exactly like the character scan's
+        // records (it used to return before the timed judge, so a -t
+        // read served here never timed out), and a mirror rewrite
+        // re-bases the schedule into the rewritten mirror's
+        // coordinates, so the judge keeps working for later reads.
         if let Some(slice) = self
             .shell_state
             .env_vars
             .get(FUNCTION_STDIN)
             .map(|input| input[offset..].to_string())
         {
-            if joined_delimiter_scan_applies(&slice, delimiter) {
+            if joined_delimiter_scan_applies(&slice, delimiter)
+                || byte_unit_scan_applies(&slice, char_limit)
+            {
+                let input = self
+                    .shell_state
+                    .env_vars
+                    .get(FUNCTION_STDIN)
+                    .cloned()
+                    .unwrap_or_default();
+                let input_len = input.len();
                 let scan = scan_text_record_bytes(
                     &slice,
                     delimiter,
@@ -2049,23 +2136,86 @@ impl Executor {
                     escape_aware,
                     raw,
                 );
-                self.read_eof_no_delimiter = !scan.delimiter_found && !scan.limit_reached;
-                let mut mirror = self
-                    .shell_state
-                    .env_vars
-                    .get(FUNCTION_STDIN)
-                    .cloned()
-                    .unwrap_or_default();
+                let mut record = scan.record;
+                let mut tail = scan.tail;
+                let mut consumed_bytes = scan.consumed_bytes;
+                let mut timed_out = false;
+                let mut schedule_matched = false;
+                if let Some(timing) = self.timed_stdin.clone() {
+                    let mut timing = timing.borrow_mut();
+                    if timing.matches_len(input_len) {
+                        schedule_matched = true;
+                        let record_end = if scan.delimiter_found || scan.limit_reached {
+                            Some(offset + text_pos_for_byte_len(&slice, scan.consumed_bytes))
+                        } else {
+                            None
+                        };
+                        if let super::timed_input::TimedVerdict::Timeout { available_end } =
+                            timing.judge(record_end, offset, self.read_deadline)
+                        {
+                            timed_out = true;
+                            self.read_timed_out = true;
+                            // Serve only the in-time prefix (read.def's
+                            // timeout assigns the input that had arrived
+                            // by the deadline); the rest of the stream
+                            // stays for later reads.
+                            let partial = scan_text_record_bytes(
+                                &input[offset..available_end],
+                                delimiter,
+                                char_limit,
+                                exact_char_limit,
+                                escape_aware,
+                                raw,
+                            );
+                            record = partial.record;
+                            consumed_bytes = partial.consumed_bytes;
+                            let slice_bytes =
+                                substitution_metadata::decode_raw_byte_markers(slice.as_bytes());
+                            tail = substitution_metadata::bytes_to_shell_text(
+                                &slice_bytes[consumed_bytes..],
+                            );
+                        }
+                    }
+                }
+                self.read_eof_no_delimiter =
+                    !timed_out && !scan.delimiter_found && !scan.limit_reached;
+                // When the consumption ends on a transport boundary of
+                // the original mirror, the remainder is already spelled
+                // there: advance the offset and leave the mirror (and
+                // its arrival schedule) untouched.
+                if let Some(aligned) = text_pos_for_byte_len_exact(&slice, consumed_bytes) {
+                    self.shell_state.env_vars.insert(
+                        FUNCTION_STDIN_OFFSET.to_string(),
+                        (offset + aligned).to_string(),
+                    );
+                    return Some(trim_read_input(
+                        record,
+                        delimiter,
+                        char_limit,
+                        exact_char_limit,
+                        escape_aware,
+                        raw,
+                    ));
+                }
+                let mut mirror = input.clone();
                 mirror.truncate(offset);
-                mirror.push_str(&scan.tail);
+                mirror.push_str(&tail);
+                let new_len = mirror.len();
                 self.shell_state
                     .env_vars
                     .insert(FUNCTION_STDIN.to_string(), mirror);
                 self.shell_state
                     .env_vars
                     .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
+                if schedule_matched {
+                    if let Some(timing) = self.timed_stdin.clone() {
+                        let mut timing = timing.borrow_mut();
+                        let mapped = remap_arrivals(&timing, &input, offset, consumed_bytes, &tail);
+                        *timing = timing.rebased(mapped, new_len);
+                    }
+                }
                 return Some(trim_read_input(
-                    scan.record,
+                    record,
                     delimiter,
                     char_limit,
                     exact_char_limit,
