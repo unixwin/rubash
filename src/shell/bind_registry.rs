@@ -48,10 +48,17 @@ pub(crate) enum BindKind {
     Keymap { name: String },
 }
 
-/// One registered binding. `keyseq` keeps the user's written form
-/// (`\C-g`, `\e[200~`, `\C-x\C-f`) — GNU's dumpers print the same
-/// backslash form (`bind -X` probe: `"\C-g" "echo bound-c-g"`), and the
-/// host translates it for its own key tables.
+/// One registered binding. `keyseq` is stored in the CANONICAL
+/// written form of its translated byte sequence
+/// ([`canonical_keyseq`]: `\C-g`, `\e[200~`, `\C-x\C-f`) — GNU's
+/// keymaps store only the bytes (rl_generic_bind, lib/readline/
+/// bind.c:383, translates via rl_translate_keyseq, bind.c:516, and
+/// walks byte slots), so every spelling of one sequence is one
+/// slot, and the dumpers render the bytes back through
+/// _rl_get_keyname (bind.c:2580) regardless of the spelling that
+/// was registered (rubash#2606). Registration canonicalizes the
+/// user's spelling before storing; the host translates the
+/// canonical form for its own key tables.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BindEntry {
     pub keyseq: String,
@@ -283,6 +290,17 @@ impl BindRegistry {
     /// current at registration time and stays there across later
     /// editing-mode flips, exactly like a slot in a C keymap.
     pub fn register(&mut self, mut entry: BindEntry) {
+        // The registry's one identity rule (rubash#2606): the slot
+        // is the translated BYTE sequence, not the spelling —
+        // rl_generic_bind (lib/readline/bind.c:383) translates with
+        // rl_translate_keyseq (bind.c:516) before walking slots, so
+        // "\C-u", "\C-U" and a raw 0x15 byte are one slot and the
+        // later bind replaces the earlier. Canonicalize the stored
+        // form at this single sink and every identity comparison
+        // below (replace, tombstone clear, keymap-slot match) is a
+        // canonical-to-canonical string compare, exactly like the
+        // C's byte-to-byte slot walk.
+        entry.keyseq = canonical_keyseq(&entry.keyseq);
         if entry.keymap.is_none() {
             entry.keymap = Some(self.current_keymap());
         }
@@ -346,13 +364,18 @@ impl BindRegistry {
     /// from one concrete map, so the tombstone must not move when the
     /// editing mode later flips (rubash#2386). Idempotent.
     fn record_removal(&mut self, keyseq: &str, keymap: Option<&str>) {
+        // Tombstones name byte sequences too (rubash#2606): a
+        // removal recorded under one spelling must shadow the
+        // default row and be cleared by a re-registration under
+        // any other spelling, so the stored form is canonical.
+        let keyseq = canonical_keyseq(keyseq);
         let wanted = self.resolve_keymap(keymap);
         let exists = self.removals.iter().any(|(seq, bound)| {
-            seq == keyseq
+            seq == &keyseq
                 && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
         });
         if !exists {
-            self.removals.push((keyseq.to_string(), Some(wanted)));
+            self.removals.push((keyseq, Some(wanted)));
             self.generation += 1;
         }
     }
@@ -360,9 +383,10 @@ impl BindRegistry {
     /// Is `keyseq` removed in `keymap` (a `bind -r`/`-u` record)?
     /// A `None` keymap is the current keymap, as in the C.
     fn is_removed(&self, keyseq: &str, keymap: Option<&str>) -> bool {
+        let keyseq = canonical_keyseq(keyseq);
         let wanted = self.resolve_keymap(keymap);
         self.removals.iter().any(|(seq, bound)| {
-            seq == keyseq
+            seq == &keyseq
                 && normalize_keymap_name(bound.as_deref().unwrap_or("emacs-standard")) == wanted
         })
     }
@@ -378,6 +402,10 @@ impl BindRegistry {
     /// binds the sequence, so defaults stay removed too (rubash#2337).
     /// Returns true when an entry was removed.
     pub fn unbind_keyseq(&mut self, keyseq: &str) -> bool {
+        // unbind_keyseq (bind.def:391) translates the argument with
+        // rl_translate_keyseq before looking the slot up, so any
+        // spelling removes the one byte-sequence slot (rubash#2606).
+        let keyseq = &canonical_keyseq(keyseq);
         let before = self.entries.len();
         // A keymap-valued binding is never removed by unbinding its
         // sequence: rl_unbind_keyseq at a keymap slot stores
@@ -385,7 +413,7 @@ impl BindRegistry {
         // map itself bound (oracle: `bind -r '\C-t'` after
         // prefix-meta keeps every `"\C-t…"` submap row).
         self.entries.retain(|entry| {
-            entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. })
+            &entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. })
         });
         let removed = self.entries.len() != before;
         let mut changed = removed;
@@ -408,7 +436,7 @@ impl BindRegistry {
         for keymap in KEYMAP_TABLE_SELECTORS {
             if crate::builtins::bind::default_bindings_for_keymap(keymap)
                 .iter()
-                .any(|(seq, _)| *seq == keyseq)
+                .any(|(seq, _)| *seq == keyseq.as_str())
             {
                 self.record_removal(keyseq, keymap);
             }
@@ -499,10 +527,14 @@ impl BindRegistry {
     /// sequence may be a DEFAULT binding, and GNU deletes those too
     /// (rubash#2337). Returns true when an entry went away.
     pub fn unbind_keyseq_for_keymap(&mut self, keyseq: &str, keymap: Option<&str>) -> bool {
+        // Same translation-first rule as unbind_keyseq (bind.def:391;
+        // rubash#2606): the argument's spelling does not matter,
+        // only its byte sequence.
+        let keyseq = &canonical_keyseq(keyseq);
         let wanted = self.resolve_keymap(keymap);
         let before = self.entries.len();
         self.entries.retain(|entry| {
-            if entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. }) {
+            if &entry.keyseq != keyseq || matches!(entry.kind, BindKind::Keymap { .. }) {
                 return true;
             }
             let bound = normalize_keymap_name(entry.keymap.as_deref().unwrap_or("emacs-standard"));
@@ -562,7 +594,7 @@ impl BindRegistry {
         let shadowed = |seq: &str| {
             self.is_removed(seq, Some(map))
                 || self.entries.iter().any(|entry| {
-                    entry.keyseq == seq
+                    entry.keyseq == canonical_keyseq(seq)
                         && normalize_keymap_name(
                             entry.keymap.as_deref().unwrap_or("emacs-standard"),
                         ) == map
@@ -574,11 +606,17 @@ impl BindRegistry {
         // recursion below — for emacs-standard the decomposition is
         // exact: the flattened table is the direct rows plus the
         // meta rows under \e and the ctlx rows under \C-x), minus
-        // removals and session-shadowed sequences.
+        // removals and session-shadowed sequences. Rows are read in
+        // canonical form (rubash#2606): stored entries and
+        // tombstones are canonical, so the table's spellings pass
+        // through the same rendering before any comparison or
+        // composition (the rendering is the identity on the
+        // tables' GNU dump spellings — see the round-trip test in
+        // this module).
         let mut seqs: Vec<String> = crate::builtins::bind::default_bindings_for_keymap(Some(map))
             .iter()
             .filter(|(_, bound)| *bound == function)
-            .map(|(seq, _)| seq.to_string())
+            .map(|(seq, _)| canonical_keyseq(seq))
             .filter(|seq| {
                 !slots
                     .iter()
@@ -661,8 +699,93 @@ impl BindRegistry {
     }
 
     pub fn snapshot(&self) -> Vec<BindEntry> {
-        self.entries.clone()
+        // The snapshot is the face `bind -X` prints from
+        // (Executor::bind_registry_snapshot → the list_execute path)
+        // and hosts mirror from. GNU's command map has no
+        // registration order to preserve: print_unix_command_map
+        // (bashline.c:4729) dumps it through rl_macro_dumper
+        // (lib/readline/bind.c:2899), whose slot scan IS
+        // translated-byte order (rubash#3194). Present the Execute
+        // entries in that scan order — derived from the same
+        // canonical byte identity as registration (rubash#2606) —
+        // by permuting them among the positions Execute entries
+        // already occupy; every other kind keeps its registry
+        // position, and per-keymap filtering of the result stays
+        // sorted because a subsequence of a sorted sequence is
+        // sorted.
+        let mut entries = self.entries.clone();
+        let mut execute: Vec<BindEntry> = entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, BindKind::Execute { .. }))
+            .cloned()
+            .collect();
+        execute.sort_by(|a, b| keyseq_scan_order(&a.keyseq, &b.keyseq));
+        let mut execute = execute.into_iter();
+        for entry in entries.iter_mut() {
+            if matches!(entry.kind, BindKind::Execute { .. }) {
+                *entry = execute
+                    .next()
+                    .expect("execute subsequence length is stable");
+            }
+        }
+        entries
     }
+}
+
+/// The canonical written form of a key sequence: translate the
+/// spelling to bytes with the engine's one decoder
+/// ([`crate::builtins::bind::keyseq_bytes`], the rl_translate_keyseq
+/// port, lib/readline/bind.c:516) and render the bytes back the way
+/// readline's dumpers do — per byte through _rl_get_keyname
+/// (bind.c:2580): ESC renders `\e`, a control byte or RUBOUT renders
+/// `\C-x` (lowercase, `?` for RUBOUT), a byte in 128..=159 renders
+/// as `\2oo` and one in 160..=255 as `\ooo` (the dumper's octal
+/// forms), `\\` and `\"` take a backslash, and every other byte
+/// stands as its own character. Two spellings are the same key
+/// sequence exactly when their canonical forms are equal, which is
+/// what makes the string the registry's single key (rubash#2606):
+/// GNU stores only the bytes in the keymap (rl_generic_bind,
+/// bind.c:383), so identity there is byte identity by construction.
+pub(crate) fn canonical_keyseq(written: &str) -> String {
+    let mut out = String::new();
+    for byte in crate::builtins::bind::keyseq_bytes(written) {
+        match byte {
+            0x1b => out.push_str("\\e"),
+            0x7f => out.push_str("\\C-?"),
+            0x00..=0x1f => {
+                out.push_str("\\C-");
+                // _rl_get_keyname: the letter is _rl_to_lower of
+                // UNCTRL(c) — the byte XOR 0x40 — and a letter that
+                // is itself a backslash or a quote takes the
+                // dumper's backslash prefix like any other byte
+                // (byte 0x1c therefore renders "\C-\\").
+                let letter = ((byte ^ 0x40) as char).to_ascii_lowercase();
+                if letter == '\\' || letter == '"' {
+                    out.push('\\');
+                }
+                out.push(letter);
+            }
+            0x80..=0x9f => {
+                // _rl_get_keyname's 128..=159 arm: "\2" followed by
+                // the two low octal digits of (byte - 128).
+                out.push_str("\\2");
+                out.push(char::from_digit(u32::from(byte - 128) / 8, 8).expect("octal digit"));
+                out.push(char::from_digit(u32::from(byte % 8), 8).expect("octal digit"));
+            }
+            0xa0..=0xff => {
+                // _rl_get_keyname's >= 160 arm: a three-digit octal
+                // escape of the byte itself.
+                out.push('\\');
+                out.push(char::from_digit(u32::from(byte >> 6) & 7, 8).expect("octal digit"));
+                out.push(char::from_digit(u32::from(byte >> 3) & 7, 8).expect("octal digit"));
+                out.push(char::from_digit(u32::from(byte & 7), 8).expect("octal digit"));
+            }
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            byte => out.push(byte as char),
+        }
+    }
+    out
 }
 
 /// The five keymaps with default tables, as selectors for
@@ -1079,6 +1202,107 @@ mod tests {
         assert_eq!(
             registry.invoking_keyseqs("transpose-words", None),
             vec![r"\et"]
+        );
+    }
+
+    #[test]
+    fn canonical_keyseq_renders_translated_bytes_like_the_dumpers() {
+        // _rl_get_keyname (lib/readline/bind.c:2580) forms, checked
+        // against the spellings the #2606 probes pinned.
+        assert_eq!(canonical_keyseq("\\C-u"), "\\C-u");
+        assert_eq!(canonical_keyseq("\\C-U"), "\\C-u");
+        assert_eq!(canonical_keyseq("\u{15}"), "\\C-u");
+        assert_eq!(canonical_keyseq("\\d"), "\\C-?");
+        assert_eq!(canonical_keyseq("\u{7f}"), "\\C-?");
+        assert_eq!(canonical_keyseq("\\M-z"), "\\ez");
+        assert_eq!(canonical_keyseq("\\ez"), "\\ez");
+        assert_eq!(canonical_keyseq("\\C-@"), "\\C-@");
+        assert_eq!(canonical_keyseq("\u{1c}"), "\\C-\\\\");
+        assert_eq!(canonical_keyseq("\\e[D"), "\\e[D");
+        // Idempotent: rendering a canonical form changes nothing.
+        for spelling in [
+            "\\C-u",
+            "\\C-?",
+            "\\ez",
+            "\\C-\\\\",
+            "\\e[D",
+            "a",
+            "\\C-x\\C-f",
+        ] {
+            assert_eq!(canonical_keyseq(&canonical_keyseq(spelling)), spelling);
+        }
+    }
+
+    #[test]
+    fn default_table_spellings_are_canonical() {
+        // The registry compares stored (canonical) sequences
+        // against the default tables' spellings in the invoking /
+        // shadow logic, so every table spelling must be a fixed
+        // point of the canonical rendering.
+        for selector in KEYMAP_TABLE_SELECTORS {
+            for (seq, _) in crate::builtins::bind::default_bindings_for_keymap(selector) {
+                assert_eq!(canonical_keyseq(seq), *seq, "table row for {selector:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn register_keys_identity_on_bytes_not_spelling() {
+        // rubash#2606: "\C-u" and the raw-byte spelling are one
+        // slot — the second registration replaces the first and
+        // reads back canonical.
+        let mut registry = BindRegistry::default();
+        registry.register(xentry("\\C-u", "one"));
+        registry.register(xentry("\u{15}", "two"));
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].keyseq, "\\C-u");
+        match &registry.entries[0].kind {
+            BindKind::Execute { command } => assert_eq!(command, "two"),
+            other => panic!("unexpected kind: {other:?}"),
+        }
+        // Removal by the other spelling removes the slot, and a
+        // re-registration under the first spelling clears the
+        // tombstone the removal recorded.
+        assert!(registry.unbind_keyseq_for_keymap("\u{15}", None));
+        assert!(registry.entries.is_empty());
+        registry.register(xentry("\\C-u", "three"));
+        assert!(!registry.is_removed("\\C-u", None));
+        assert_eq!(registry.entries.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_lists_execute_entries_in_scan_order() {
+        // rubash#3194: the snapshot (the `bind -X` face) presents
+        // shell-command entries in translated-byte scan order, not
+        // registration order; other kinds keep their positions.
+        let mut registry = BindRegistry::default();
+        registry.register(xentry("\\C-u", "u"));
+        registry.register(BindEntry {
+            keyseq: "\\C-t".to_string(),
+            kind: BindKind::Macro {
+                text: "m".to_string(),
+            },
+            keymap: None,
+        });
+        registry.register(xentry("\\C-g", "g"));
+        registry.register(xentry("\\C-x\\C-f", "xf"));
+        registry.register(xentry("\\C-x", "x"));
+        let seqs: Vec<&str> = registry
+            .snapshot()
+            .iter()
+            .filter(|entry| matches!(entry.kind, BindKind::Execute { .. }))
+            .map(|entry| entry.keyseq.as_str())
+            .collect();
+        assert_eq!(seqs, vec!["\\C-g", "\\C-u", "\\C-x\\C-f", "\\C-x"]);
+        // The stored order is untouched (registration order).
+        let stored: Vec<&str> = registry
+            .entries
+            .iter()
+            .map(|entry| entry.keyseq.as_str())
+            .collect();
+        assert_eq!(
+            stored,
+            vec!["\\C-u", "\\C-t", "\\C-g", "\\C-x\\C-f", "\\C-x"]
         );
     }
 
