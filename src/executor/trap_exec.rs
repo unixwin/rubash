@@ -8755,7 +8755,7 @@ impl Executor {
         if self.assignment_target_is_noassign(name) {
             return false;
         }
-        self.apply_shell_assignment(name, fd.to_string())
+        self.apply_shell_assignment(name, fd.to_string(), None)
     }
 
     /// GNU exec.def hands shell_execve an environment built from the

@@ -1,4 +1,5 @@
 use super::*;
+use crate::executor::builtin_diag::Diag;
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::executor) struct TimeCommandMetrics {
@@ -1508,8 +1509,9 @@ impl Executor {
         names: &[String],
         line: &str,
         raw: bool,
+        diag: &mut Diag,
     ) -> i32 {
-        self.assign_read_scalar_names_with_field_count(names, line, raw, names.len())
+        self.assign_read_scalar_names_with_field_count(names, line, raw, names.len(), diag)
     }
 
     /// rubash#776: GNU read.def under `-N` binds the record to the FIRST
@@ -1529,6 +1531,7 @@ impl Executor {
         names: &[String],
         line: &str,
         raw: bool,
+        diag: &mut Diag,
     ) -> i32 {
         let value = if raw {
             line.to_string()
@@ -1546,7 +1549,7 @@ impl Executor {
             // target (ASSIGN_DISALLOWED) fails the bind like a readonly
             // one but silently (rubash#2369).
             if self.assignment_target_is_noassign(name)
-                || !self.apply_shell_assignment_command("read", name, value)
+                || !self.apply_shell_assignment_command("read", name, value, Some(diag))
             {
                 status = if index + 1 < names.len() { 2 } else { 1 };
                 break;
@@ -1561,6 +1564,7 @@ impl Executor {
         line: &str,
         raw: bool,
         field_count: usize,
+        diag: &mut Diag,
     ) -> i32 {
         if names.len() == 1 && field_count == 0 {
             let value = if raw {
@@ -1572,7 +1576,7 @@ impl Executor {
             // failure of the last (only) name -> EXECUTION_FAILURE.
             // An att_noassign target fails silently (rubash#2369).
             return if !self.assignment_target_is_noassign(&names[0])
-                && self.apply_shell_assignment_command("read", &names[0], value)
+                && self.apply_shell_assignment_command("read", &names[0], value, Some(diag))
             {
                 0
             } else {
@@ -1603,7 +1607,7 @@ impl Executor {
             // target fails the bind like a readonly one but silently
             // (rubash#2369).
             if self.assignment_target_is_noassign(name)
-                || !self.apply_shell_assignment_command("read", name, value)
+                || !self.apply_shell_assignment_command("read", name, value, Some(diag))
             {
                 status = if index + 1 < names.len() { 2 } else { 1 };
                 break;
