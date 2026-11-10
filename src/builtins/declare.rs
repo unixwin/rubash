@@ -726,7 +726,13 @@ where
     // reports `dv=6: not found`, E1). The attr pipeline below rewrites
     // operands (base split, subscript strip), so snapshot the raw
     // words here for the print call.
-    let print_names: Vec<&str> = names.clone();
+    // The snapshot is consumed only by the print call at the end
+    // of this function, which is reachable with a non-empty name
+    // list only when the scan itself set `print` (the listing-mode
+    // flip further down fires only when `names` is empty, where
+    // the snapshot is empty either way). A plain bind therefore
+    // skips the clone (E4, PR #2968).
+    let print_names: Vec<&str> = if print { names.clone() } else { Vec::new() };
 
     let had_name_args = !names.is_empty();
     // GNU builtins/declare.def:222 declare_invalid_opts (bash 5.3): `-a'

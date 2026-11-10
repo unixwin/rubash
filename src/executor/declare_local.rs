@@ -84,6 +84,22 @@ fn declare_option_scan(
     row: &'static BuiltinRow,
     args: &[String],
 ) -> (Vec<(char, bool)>, Option<String>) {
+    // Fast path: when the row's spec takes no option arguments
+    // (no `:`/`;`/`#` kinds), the machine is a pure byte scan —
+    // every event is a flag letter, `OptArg` cannot occur, and the
+    // scan below reproduces the machine's stop rules exactly
+    // (option-word gate, `--help`, `--`, first invalid byte ends
+    // the scan with that byte as `optopt`). This predicate runs
+    // several times per declare-family call (the function-face
+    // gate, the allexport post-pass, `local`), and constructing
+    // the full machine + a discard Diag for it was a measurable
+    // per-call tax (E4, PR #2968). Specs with argument kinds keep
+    // the machine path.
+    if let OptSpec::Getopt(spec) = row.opt_spec {
+        if let Some(scanned) = scan_flag_only_spec(spec, args) {
+            return scanned;
+        }
+    }
     let mut sink = Vec::new();
     let mut diag = Diag::new(row, &mut sink);
     let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
@@ -100,6 +116,52 @@ fn declare_option_scan(
         opt.optopt()
             .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
     )
+}
+
+/// The byte-scan form of `declare_option_scan` for a flag-only
+/// spec (see the fast path there): returns the (letter, set?)
+/// pairs in scan order and the first invalid byte rendered lossy,
+/// or `None` when the spec is not flag-only (an argument-kind
+/// marker is present) and the caller must use the machine.
+fn scan_flag_only_spec(
+    spec: &'static str,
+    args: &[String],
+) -> Option<(Vec<(char, bool)>, Option<String>)> {
+    let bytes = spec.as_bytes();
+    let plus = bytes.first() == Some(&b'+');
+    let letter_bytes: &[u8] = if plus { &bytes[1..] } else { bytes };
+    // A `:` in letter position is inert to the parser (fc's
+    // leading one), but any argument-kind marker anywhere means
+    // some letter takes an argument — not flag-only.
+    if letter_bytes.iter().any(|b| matches!(b, b':' | b';' | b'#')) {
+        return None;
+    }
+    let mut letters = Vec::new();
+    let mut optopt = None;
+    'words: for word in args {
+        let word_bytes = word.as_bytes();
+        if !super::builtin_opt::is_option_word(word_bytes, plus) {
+            break;
+        }
+        if word == "--help" || word == "--" {
+            break;
+        }
+        let sign = word_bytes[0];
+        for &c in &word_bytes[1..] {
+            // An option character of ':' is always invalid,
+            // whatever the spec says (bashgetopt.c:99) — the
+            // guard above already excludes it from the set.
+            if c == b':' || !letter_bytes.contains(&c) {
+                optopt = Some(c);
+                break 'words;
+            }
+            letters.push((c as char, sign == b'-'));
+        }
+    }
+    Some((
+        letters,
+        optopt.map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+    ))
 }
 
 /// Whether a declare/typeset/local invocation diverts to the
@@ -2798,4 +2860,80 @@ pub(in crate::executor) fn declare_words_name_dirstack(words: &[String]) -> bool
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The machine-driven scan, spelled out the way
+    /// `declare_option_scan`'s slow path performs it — the
+    /// reference the flag-only fast path must agree with.
+    fn machine_scan(
+        row: &'static BuiltinRow,
+        args: &[String],
+    ) -> (Vec<(char, bool)>, Option<String>) {
+        let mut sink = Vec::new();
+        let mut diag = Diag::new(row, &mut sink);
+        let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+        let mut letters = Vec::new();
+        loop {
+            match opt.next() {
+                OptEvent::Opt(c) => letters.push((c as char, opt.opttype() == b'-')),
+                OptEvent::OptArg(_, _) => {}
+                OptEvent::Help | OptEvent::End => break,
+            }
+        }
+        (
+            letters,
+            opt.optopt()
+                .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+        )
+    }
+
+    #[test]
+    fn flag_only_fast_scan_agrees_with_machine() {
+        let row = builtin_table_row("declare").expect("declare row");
+        let OptSpec::Getopt(spec) = row.opt_spec else {
+            panic!("declare row must carry a getopt spec");
+        };
+        let shapes: &[&[&str]] = &[
+            &[],
+            &["x=1"],
+            &["-a", "x"],
+            &["-aA", "x=1"],
+            &["+a", "x"],
+            &["-p"],
+            &["--", "-a"],
+            &["--help"],
+            &["-a", "--help", "x"],
+            &["-Z"],
+            &["-aZ", "x"],
+            &["-"],
+            &["+"],
+            &["++"],
+            &["-p", "--", "-f"],
+            &["x", "-a"],
+            &["-ai", "x=1", "-r"],
+            &["-\u{c3}\u{a9}"],
+            &["-fF", "g"],
+            &["-g", "-n", "r=v"],
+        ];
+        for shape in shapes {
+            let args: Vec<String> = shape.iter().map(|s| s.to_string()).collect();
+            let fast = scan_flag_only_spec(spec, &args)
+                .expect("declare spec is flag-only and must take the fast path");
+            assert_eq!(fast, machine_scan(row, &args), "shape {shape:?}");
+            assert_eq!(declare_option_scan(row, &args), fast, "shape {shape:?}");
+        }
+    }
+
+    #[test]
+    fn flag_only_fast_scan_declines_argument_specs() {
+        let args: Vec<String> = vec!["-e".to_string(), "vi".to_string()];
+        assert!(scan_flag_only_spec("e:lnrs", &args).is_none());
+        assert!(scan_flag_only_spec("o;v", &args).is_none());
+        assert!(scan_flag_only_spec("n#", &args).is_none());
+        assert!(scan_flag_only_spec(":e:lnrs", &args).is_none());
+    }
 }
