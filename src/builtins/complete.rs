@@ -10,8 +10,8 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crate::executor::path::{
-    command_lookup_fingerprint, completion_executable_qualifies, shell_directory_entries,
-    shell_path_entries,
+    anchor_at_session_cwd, command_lookup_fingerprint, completion_executable_qualifies,
+    shell_directory_entries, shell_directory_entries_in, shell_path_entries, shell_path_to_windows,
 };
 
 use crate::api::capabilities::{Candidate, CandidateKind};
@@ -1297,6 +1297,28 @@ fn tokenize_completion_region(region: &str, wordbreaks: &str) -> Vec<(usize, usi
             }
             current_is_break_run = false;
         } else if is_break(c) {
+            // rubash#2846: a leading Windows drive prefix is not a
+            // word break. When the token so far is exactly one ASCII
+            // letter, a `:` from the break set belongs to the word:
+            // `C:/...` completes as one word, the way the host's
+            // token view already sees it. Splitting there completed
+            // only the post-colon fragment and discarded the drive,
+            // so a drive path could never complete. GNU has no drive
+            // letters (bashline.c:313 puts `:` in the default break
+            // set), so this is the engine's platform-semantics
+            // carve-out, not a GNU behavior: it fires only at a
+            // word's first two bytes, and a colon anywhere else —
+            // after a longer head, after the drive colon itself —
+            // breaks exactly as before.
+            if c == ':'
+                && in_token
+                && !current_is_break_run
+                && current.len() == 1
+                && current.as_bytes()[0].is_ascii_alphabetic()
+            {
+                current.push(c);
+                continue;
+            }
             if in_token && !current_is_break_run {
                 tokens.push((current_start, off, std::mem::take(&mut current)));
                 in_token = false;
@@ -2398,7 +2420,23 @@ fn path_completion_candidates(
         }
     }
     let (search_dir, display_prefix) = path_completion_base(word);
-    let Ok(entries) = shell_directory_entries(search_dir, env_vars) else {
+    // The directory part is a shell-namespace relative path whenever it
+    // does not lead with `/`: GNU's generator hands it verbatim to
+    // opendir (lib/readline/complete.c:2587, in
+    // rl_filename_completion_function), which resolves it against the
+    // shell's one cwd. The session cwd is a state field, not the
+    // process cwd, so the mapped directory must be anchored at it
+    // explicitly — the G-02 discipline the lookup walks already
+    // follow (executor/path.rs anchor_at_session_cwd). Unanchored, a
+    // relative directory part (a plain `sub/dir`, a bare word's `.`,
+    // or a drive-shaped first component like `C:` — an ordinary
+    // relative component on this platform: complete.c:2523-2531
+    // gates the drive reading to MS-DOS/Win32) enumerated whatever
+    // directory the host process happened to sit in, so after a
+    // session `cd` the listing missed and produced no candidates
+    // (rubash#2846, second face).
+    let physical_dir = anchor_at_session_cwd(shell_path_to_windows(search_dir, env_vars), env_vars);
+    let Ok(entries) = shell_directory_entries_in(&physical_dir) else {
         return Vec::new();
     };
 

@@ -223,6 +223,28 @@ impl Executor {
                     }
                 }
             }
+            // rubash#2635: the probes below are GNU's redir_open (their
+            // side effects stand); the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit then fails EBADF naming the
+            // redirector (redir.c r_output_direction /
+            // r_input_direction). This walk serves the no-output
+            // builtins (true / : / false), whose mirror applier below
+            // keeps no fd >= 3 verdict of its own. The null device
+            // needs no probe (its open trivially succeeds in GNU), so
+            // its gate stands alone here.
+            let gate_fd = match redirect.kind {
+                RedirectKind::Input | RedirectKind::ReadWrite => redirect.fd.unwrap_or(0),
+                _ => redirect.fd.unwrap_or(1),
+            };
+            if is_null_device(&target) {
+                if self.redirect_fd_over_limit(gate_fd) {
+                    return Ok(Some(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("{gate_fd}: Bad file descriptor"),
+                    )));
+                }
+                continue;
+            }
             let opened: Result<(), io::Error> = match redirect.kind {
                 RedirectKind::Output
                 | RedirectKind::ClobberOutput
@@ -278,6 +300,15 @@ impl Executor {
             };
             if let Err(error) = opened {
                 return Ok(Some(error));
+            }
+            // rubash#2635: see the gate note above — the probe open
+            // succeeded (GNU's redir_open), so an over-limit
+            // redirector now fails its dup2.
+            if self.redirect_fd_over_limit(gate_fd) {
+                return Ok(Some(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{gate_fd}: Bad file descriptor"),
+                )));
             }
         }
         Ok(None)
