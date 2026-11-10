@@ -1768,7 +1768,10 @@ impl Executor {
     /// (a clean integer literal; expansion-free assoc key text). Any
     /// other subscript returns `None` (undecidable): the caller skips
     /// the span and the real expansion's single fetch adjudicates it.
-    fn pre_scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+    pub(in crate::executor) fn pre_scan_operator_value(
+        &self,
+        name: &str,
+    ) -> Option<Option<String>> {
         if !name.contains('[') {
             return Some(self.parameter_error_value(name));
         }
@@ -2393,7 +2396,15 @@ impl Executor {
             if let Some(nested) = self.nested_operator_word_error(inner) {
                 return Some(nested);
             }
-            if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {
+            // rubash#3225: the scan parse must not probe through the
+            // reporting element fetch (parse_parameter_substring's NULL
+            // probe printed `bad array subscript` twice here before the
+            // real expansion printed it once) — the scan twin derives
+            // NULL-ness from the non-evaluating pre-scan probe, exactly
+            // like the verdict arm below already does.
+            if let Some((name, offset, Some(length))) =
+                self.parse_parameter_substring_for_scan(inner)
+            {
                 if length < 0 {
                     // GNU subst.c:8395 verify_substring_values, reached from
                     // parameter_brace_substring (subst.c:9050) only when the

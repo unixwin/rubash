@@ -562,6 +562,41 @@ impl Executor {
         &self,
         name: &'a str,
     ) -> Option<(&'a str, isize, Option<isize>)> {
+        self.parse_parameter_substring_impl(name, false)
+    }
+
+    /// Verdict-scan twin of [`Executor::parse_parameter_substring`]: the
+    /// parameter-expansion error pre-scan (parameter_errors.rs) is a
+    /// verdict-only pass layered over the real expansion, so its parse
+    /// must not perform the NULL probe through the REPORTING element
+    /// fetch — GNU fetches the parameter exactly once, inside the real
+    /// `parameter_brace_expand` (subst.c:9777), and a probe fetch in the
+    /// scan prints `err_badarraysub` a second (and, via
+    /// parameter_operator_value's error-value fallback, a third) time
+    /// for a bad subscript (rubash#3225, the same single-fetch
+    /// discipline #2527 applied to the operator arms). The scan parse
+    /// derives NULL-ness from `pre_scan_operator_value` instead: a
+    /// provably-set parameter continues the full parse (offset/length
+    /// evaluation included, so the negative-length verdict sees the
+    /// same operands), and anything else — provably unset, or a
+    /// subscript the probe cannot settle without evaluating — takes
+    /// the NULL shortcut, which is verdict-equivalent for the scan's
+    /// only question: GNU's substring error fires only for a non-NULL
+    /// value, and the scan's verdict arm itself re-derives invalidity
+    /// through the same probe, answering "no error" for exactly the
+    /// undecidable shapes.
+    pub(in crate::executor) fn parse_parameter_substring_for_scan<'a>(
+        &self,
+        name: &'a str,
+    ) -> Option<(&'a str, isize, Option<isize>)> {
+        self.parse_parameter_substring_impl(name, true)
+    }
+
+    fn parse_parameter_substring_impl<'a>(
+        &self,
+        name: &'a str,
+        scan_mode: bool,
+    ) -> Option<(&'a str, isize, Option<isize>)> {
         // Use split_top_level_colon to skip `:` inside $(...), ${...}, and
         // quoted regions — a plain split_once(':') would match `$( : )` in
         // `${x+ab "$( : )"}` and misroute a `+`-operator word to the substring
@@ -634,7 +669,16 @@ impl Executor {
         // the element fetch is AEPV-memoized, so a side-effecting
         // subscript still runs once per expansion. The (0, Some(0))
         // slice of the caller's empty value is the empty string.
-        if !matches!(var_name, "@" | "*") && self.parameter_operator_value(var_name).is_none() {
+        // In scan mode the probe is the non-reporting
+        // `pre_scan_operator_value` (see parse_parameter_substring_for_scan):
+        // only a provably-set parameter proceeds to offset/length
+        // evaluation; unset and undecidable shapes take the shortcut.
+        let value_is_null = if scan_mode {
+            !matches!(self.pre_scan_operator_value(var_name), Some(Some(_)))
+        } else {
+            self.parameter_operator_value(var_name).is_none()
+        };
+        if !matches!(var_name, "@" | "*") && value_is_null {
             return Some((var_name, 0, Some(0)));
         }
 
