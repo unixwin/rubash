@@ -759,6 +759,16 @@
 > consumed in-repo by the rubash#2794 consumer pins. This
 > addendum is the record, in both copies, per the update
 > rule.
+> Addendum (expansion-error discard coverage completion, 2026-11-10,
+> rubash#2794): the captain-review census completed the
+> raise-point set — the bare-arithmetic fast entry, the
+> assignment-only arithmetic nounset consumer, and the
+> `[[ ]]` arithmetic-comparison nounset trap now note the
+> verdict at their own DISCARD arms as well (the census ran
+> by full enumeration of the discard predicate's call sites
+> plus producer/consumer tracing of the nounset latches).
+> No face change: same field, same per-unit carry, no §6
+> entry added and no census count moves.
 >
 > Ledger v3 (1.5.0 Session contract publication, 2026-10-28): the
 > RFC's Tier A contract is now **published in-tree** as `rubash::api`

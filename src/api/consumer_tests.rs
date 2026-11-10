@@ -5875,3 +5875,67 @@ fn issue2794_plain_failure_and_lesser_class_stay_clear() {
     assert_eq!(outcome.flow, Flow::Completed);
     assert!(!outcome.classification.expansion_error_discard);
 }
+
+#[test]
+fn issue2794_bare_arithmetic_nounset_reports_the_face() {
+    // The bare-arithmetic fast entry makes its own DISCARD
+    // ruling on the arithmetic nounset latch (expr.c:1208-1216)
+    // without passing the generic `(( ))` route; the ruling is
+    // noted at the fast entry's own arm.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session.run("(( q6_undef + 1 ))", &options).expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+    // The record is the run's own: the next run classifies clear.
+    let outcome = session.run("true", &options).expect("run");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+
+    // The line route reports the same fact.
+    let mut session = issue863_gap1_interactive_session();
+    session.run_line("set -u").expect("run_line");
+    let outcome = session.run_line("(( q6_undef + 1 ))").expect("run_line");
+    assert_eq!(outcome.status, 1);
+    assert!(outcome.classification.expansion_error_discard);
+    let outcome = session.run_line("true").expect("run_line");
+    assert_eq!(outcome.status, 0);
+    assert!(!outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_assignment_only_arithmetic_nounset_reports_the_face() {
+    // An assignment-only command consumes the arithmetic
+    // nounset latch itself, ahead of any word-expansion
+    // consumer (expr.c:1208-1216); its DISCARD ruling rides
+    // the same face.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session
+        .run("x=$((q6_undef + 1))", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+}
+
+#[test]
+fn issue2794_conditional_arith_compare_nounset_reports_the_face() {
+    // The `[[ ]]` arithmetic-comparison nounset trap rules
+    // DISCARD where the trap fires (expr.c:1208-1216 through
+    // cond's arithcomp evaluation); the conditional wrapper
+    // only unwinds the parked status, so the note belongs to
+    // the trap, not the conversion.
+    let mut session = issue863_gap1_interactive_session();
+    let options = issue863_gap1_interactive_options();
+    session.run("set -u", &options).expect("run");
+    let outcome = session
+        .run("[[ q6_undef -eq 1 ]]", &options)
+        .expect("run");
+    assert_eq!(outcome.status, 1);
+    assert_eq!(outcome.flow, Flow::Completed);
+    assert!(outcome.classification.expansion_error_discard);
+}
