@@ -3044,11 +3044,26 @@ pub fn unclosed_comsub_eof_shape(
     // `unexpected EOF while looking for matching `)'', issue #516
     // follow-up). `echo ((` has no command-position root and keeps the
     // token-error class.
-    if let Some(&(root_idx, _, root_kind)) = stack.first() {
+    if let Some(&(root_idx, root_line, root_kind)) = stack.first() {
         if root_kind == OpenerKind::Plain
             && (opens_in_command_position(&chars, root_idx) || arith_for_pair_at(&chars, root_idx))
             && chars.get(root_idx + 1) == Some(&'(')
         {
+            // rubash#2780: the arithmetic-`for' root is the one dparen
+            // root whose EOF report the generic close-char scan gets
+            // wrong: its word machine does not carry `for' as a
+            // command-position keyword, so no frame is pushed for the
+            // pair and the scan's verdict reports the EOF line. GNU's
+            // header read is parse_arith_cmd's parse_matched_pair
+            // (parse.y:4957), whose EOF report names the pair's
+            // start_lineno (parse.y:3908-3915) like every matched pair —
+            // classify it here, where the pair is recognized. The pair's
+            // interior is that one scan in GNU, so no token-error class
+            // below can preempt it. A command-position `((` root keeps
+            // the deferral: the generic scan reports it correctly.
+            if arith_for_pair_at(&chars, root_idx) {
+                return Some((UnclosedComsubShape::ArithEof { line: root_line }, root_line));
+            }
             return None;
         }
     }
