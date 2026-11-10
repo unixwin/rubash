@@ -22,7 +22,7 @@ mod word;
 mod tests;
 
 use brace_scan::{opens_function_body_after_previous_signature, tokens_open_unclosed_brace_group};
-pub(crate) use classification::is_assignment;
+pub(crate) use classification::{is_assignment, is_keyword};
 use continuation::{compound_residuals_advance, ends_with_unquoted_backslash, has_unclosed_quotes};
 pub(crate) use continuation::{
     comsub_residuals_advance, quotes_residuals_advance, CompoundResidualState, ComsubResidualState,
@@ -61,11 +61,12 @@ pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
+pub(crate) use quotes::with_lex_extquote_pin;
 pub(crate) use quotes::{
     escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
-pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};
+pub(crate) use word::{raw_has_ansi_u_escape, raw_has_dolbrace_ansi_c, word_value_from_raw};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 
@@ -503,6 +504,18 @@ pub(crate) struct GroupScanFeeder {
     /// mid-unit; `apply_deferred_posix_at_unit_boundary` lands it at the
     /// first commit that leaves no unit open.
     deferred_posix: Option<bool>,
+    /// rubash#3205: a `shopt -s/-u extglob` flip detected while a
+    /// complete_command is still open, parked until the unit closes —
+    /// the extglob twin of `deferred_posix` above. GNU reads the
+    /// whole unit under the `extended_glob` value in effect when the
+    /// unit STARTED (parse.y:5466 read_token_word consults the flag
+    /// per token at read time, and nothing executes while a unit is
+    /// being read), so the parked flip lands only at the unit
+    /// boundary (`apply_deferred_extglob_at_unit_boundary`). Before
+    /// this, the per-line simulation applied the flip the moment its
+    /// line was pushed, so a still-open unit's later lines were
+    /// lexed under the flipped gate.
+    deferred_extglob: Option<bool>,
     /// rubash#1544: this feeder tokenizes ONE compound body that the
     /// parser extracted from a folded token. The whole body was read
     /// (in GNU) as part of the enclosing complete_command, under the
@@ -632,16 +645,17 @@ pub(crate) struct GroupScanFeeder {
     /// (parse.y yyerror + jump to top level), so the gather must stop
     /// instead of waiting for the opener forever (the PS2 wedge).
     stray_close: bool,
-    /// Set when this feeder's per-line shopt simulation EFFECTIVELY toggled
-    /// the process-global `PARSE_EXTENDED_GLOB` gate (an Enable/Disable flip
-    /// that actually changed the value). Consumers that want to reuse the
-    /// feeder's tokens in place of a fresh whole-text re-lex must refuse when
-    /// this is set: the re-lex replays the flips starting from the group-END
-    /// global, so its pre-flip lines see a different extglob gate than the
-    /// streaming feed did (parse.y:5466 gates pattern chars per token at
-    /// read time, and tokens carry the gate they were lexed under —
-    /// `Token::extglob_gate`). A fallback to the fresh re-lex preserves
-    /// today's behavior byte for byte on flipping groups.
+    /// Set when this feeder's per-line shopt simulation detected an
+    /// EFFECTIVE extglob toggle in the text (a flip whose value
+    /// differs from the gate the unit started under; the flip itself
+    /// is parked in `deferred_extglob` and lands at the unit
+    /// boundary, rubash#3205). Consumers that want to reuse the
+    /// feeder's tokens in place of a fresh whole-text re-lex must
+    /// refuse when this is set: the group then takes the caller's
+    /// re-lex path, which the caller pins to the group-entry gate
+    /// (script_driver's `entry_extended_glob`), so the two paths
+    /// agree by construction instead of depending on the streaming
+    /// feed and the re-lex replaying the flips identically.
     extglob_toggled: bool,
     /// perf21 feeder/gather battery fusion: this feeder instance is one
     /// gather group's whole life, so "the group text is append-only and
@@ -707,6 +721,7 @@ impl GroupScanFeeder {
             continuation_join_columns: Vec::new(),
             parse_posix: initial_posix,
             deferred_posix: None,
+            deferred_extglob: None,
             posix_locked,
             extglob_flips_allowed: true,
             comsub_heredocs: Vec::new(),
@@ -839,6 +854,25 @@ impl GroupScanFeeder {
         if self.awaiting_bodies.is_empty() && !self.token_level_needs_more() {
             if let Some(updated) = self.deferred_posix.take() {
                 self.parse_posix = updated;
+            }
+        }
+    }
+
+    /// Land a parked `shopt -s/-u extglob` flip (rubash#3205) at the
+    /// same complete_command boundary as the posix twin above. The
+    /// extglob gate is process-global, so a landing that changes it
+    /// also drops the boundary / opener resume checkpoints: they
+    /// embed tokenizations produced under the pre-flip gate (the
+    /// same drop the pre-#3205 immediate application performed at
+    /// detection time).
+    fn apply_deferred_extglob_at_unit_boundary(&mut self) {
+        if self.awaiting_bodies.is_empty() && !self.token_level_needs_more() {
+            if let Some(updated) = self.deferred_extglob.take() {
+                if updated != parse_extended_glob() {
+                    set_parse_extended_glob(updated);
+                    self.boundary = None;
+                    self.opener = None;
+                }
             }
         }
     }
@@ -1110,6 +1144,9 @@ impl GroupScanFeeder {
                 // header line belonged to — a parked posix flip lands
                 // here if that unit is now closed.
                 self.apply_deferred_posix_at_unit_boundary();
+                // rubash#3205: the parked extglob flip lands at the
+                // same boundary, under the same guard.
+                self.apply_deferred_extglob_at_unit_boundary();
             }
         }
     }
@@ -1652,27 +1689,39 @@ impl GroupScanFeeder {
         }
         // rubash#131: a top-level `shopt -s/-u extglob` executes before the
         // next line parses in GNU's read-execute loop; mirror that for the
-        // parse-time gate (same per-line granularity as the posix flip
-        // above). Disabled under -n (nothing executes) and after a top-level
-        // `set -n` (GNU executes `set -n` and then only parses).
+        // parse-time gate. Disabled under -n (nothing executes) and after a
+        // top-level `set -n` (GNU executes `set -n` and then only parses).
         // `tokenize_depth == 1` is the outermost script tokenization.
+        //
+        // rubash#3205: like the posix flip above, the flip is PARKED, not
+        // applied. This pass may sit inside a still-open complete_command
+        // (a multi-line unit re-lexes its earlier lines on every appended
+        // line, and its later lines are first lexed while the unit is
+        // open), and GNU reads the whole unit under the gate in effect
+        // when the unit STARTED (parse.y read_command; parse.y:5466
+        // read_token_word consults the read-time extended_glob per
+        // token) — the shopt cannot execute until the unit has been read
+        // in full. The parked flip lands at the commit that closes the
+        // unit (`apply_deferred_extglob_at_unit_boundary`). A re-scan of
+        // an accumulated line re-detects the same flip, so the parked
+        // value always tracks the last `shopt` seen in the unit so far.
+        // `extglob_toggled` still records the effective toggle at
+        // detection time (parked value differs from the gate the unit
+        // is being read under): token-reuse consumers refuse such
+        // groups and take the caller's entry-pinned re-lex instead.
         if parse_execution_expected() && self.extglob_flips_allowed && tokenize_depth == 1 {
             match line_extglob_mode_change(&line_tokens) {
                 ExtglobFlip::Enable => {
                     if !parse_extended_glob() {
-                        set_parse_extended_glob(true);
-                        self.boundary = None;
-                        self.opener = None;
                         self.extglob_toggled = true;
                     }
+                    self.deferred_extglob = Some(true);
                 }
                 ExtglobFlip::Disable => {
                     if parse_extended_glob() {
-                        set_parse_extended_glob(false);
-                        self.boundary = None;
-                        self.opener = None;
                         self.extglob_toggled = true;
                     }
+                    self.deferred_extglob = Some(false);
                 }
                 ExtglobFlip::ExecutionOff => self.extglob_flips_allowed = false,
                 ExtglobFlip::None => {}
@@ -2056,6 +2105,9 @@ impl GroupScanFeeder {
         // parked `set -o/+o posix` flip belongs to — land it before the
         // next logical line's first pass.
         self.apply_deferred_posix_at_unit_boundary();
+        // rubash#3205: the parked extglob flip lands at the same
+        // boundary, under the same guard.
+        self.apply_deferred_extglob_at_unit_boundary();
     }
 
     /// End of input: the original loop's post-loop flush (leftover open

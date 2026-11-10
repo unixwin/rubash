@@ -94,6 +94,12 @@ src/executor/parameter_case.rs::\} as char\);
 src/executor/parameter_core.rs::bytes\[index\] as char
 src/executor/path.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/executor/pipeline_exec.rs::\|byte\| byte as char
+# read_split.rs: `byte_domain_text` (#2819) widens `*byte` only after the
+# `if *byte < 0x80` guard directly above (the else branch routes >= 0x80
+# bytes to `encode_raw_byte_marker`), so the widened byte is ASCII by
+# construction — never a UTF-8 continuation byte. The widened char is
+# collected into storage text, never passed to a predicate.
+src/executor/read_split.rs::\(\*byte as char\)\.to_string\(\)
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
 # windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
 # (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the

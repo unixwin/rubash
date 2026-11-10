@@ -1546,6 +1546,14 @@ pub struct Executor {
     /// came from that upfront lex (not from a later eval-time lex) and is
     /// eligible for the read-time re-derivation.
     unit_lex_locale: std::cell::RefCell<Option<String>>,
+    /// rubash#2772: extquote state in effect when each SOURCE LINE was
+    /// first reached at reader level — the state GNU's parser applies to
+    /// that line's `$'...'` translation verdicts (parse.y:4053 translates
+    /// a span inside a `${}` body only when `extended_quote` held at the
+    /// moment the line was read, for word-region spans in double quotes).
+    /// Same recording discipline as `line_lex_locales`; consumed by the
+    /// word re-derivation in command_prepare.
+    line_lex_extquotes: std::cell::RefCell<HashMap<usize, bool>>,
     /// GNU `line_number` ambient: at top level it advances to each
     /// command's parse-end line; inside a pre-parsed body it freezes at
     /// the enclosing command's established line (execute_cmd.c — only
@@ -1857,6 +1865,18 @@ pub struct Executor {
     /// branches, failglob pattern) leaves the gate's existing behavior
     /// untouched, so an unquoted `$var` that word-splits stays ambiguous.
     redirect_target_single_glob_match: RefCell<HashSet<String>>,
+    /// The transport fact the folded target string cannot carry: keys
+    /// are folded redirect-target strings whose literal expansion
+    /// carried raw-byte transport (a stored E000 pair or E400 escape).
+    /// A folded byte char (e.g. U+009C for byte 0x9C) is
+    /// indistinguishable from a genuine char of the same code point,
+    /// so the output open funnels consult this set — cleared at each
+    /// execute_command entry like redirect_target_memo — to decide
+    /// whether the target's byte chars emit raw bytes or the name
+    /// takes the plain UTF-8 funnel. Only the literal arms of
+    /// expand_redirect_operand_fields set it; glob matches, procsub
+    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
+    redirect_target_had_transport: RefCell<HashSet<String>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.

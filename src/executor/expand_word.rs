@@ -1,6 +1,49 @@
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
+thread_local! {
+    /// Whether the fragment currently being dispatched sits inside a
+    /// quoted word context (double quotes or a here-document body) for
+    /// the extquote `$'name'` decode gate in the embedded walker.
+    ///
+    /// GNU translates a `$'...'` parameter name while READING the word
+    /// (parse.y parse_matched_pair), so the verdict is a property of
+    /// the enclosing word's quoting, and it reaches fragments nested
+    /// inside that word's pattern / replacement sub-words (the
+    /// DOLBRACE_QUOTE / DOLBRACE_QUOTE2 regions). The pattern pipeline
+    /// expands those sub-words through the context-free embedded
+    /// walker, which would otherwise re-judge the nested fragment as
+    /// unquoted and reject a name the enclosing word's quoting admits
+    /// (rubash#2650: `"${x#${$'x1'%$'t'}}"` was a bad substitution while
+    /// the same fragment in a default word expanded). The whole-word
+    /// dispatchers and the walker's own `${` arm record the context
+    /// here for the duration of one fragment dispatch; the scope is
+    /// always restored, so an unquoted fragment nested inside a quoted
+    /// one (a command-substitution body runs its own dispatches, which
+    /// record their own context) is judged on its own quoting.
+    static EXTQUOTE_NAME_QUOTED_CONTEXT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the extquote-name quoted-context record set to
+/// `quoted` (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]); the previous value
+/// is restored on return.
+pub(in crate::executor) fn with_extquote_name_quoted_context<T>(
+    quoted: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.replace(quoted));
+    let result = f();
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.set(previous));
+    result
+}
+
+/// The recorded extquote-name quoted context for the fragment being
+/// dispatched (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]).
+pub(in crate::executor) fn extquote_name_quoted_context() -> bool {
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.get())
+}
+
 /// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
 /// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
 /// the expansion). Only $'...' is accepted; single-quoted, double-quoted, and
@@ -50,6 +93,149 @@ pub(in crate::executor) fn resolve_dollar_quoted_parameter_name(name: &str) -> O
         format!("{}{}", decoded, rest)
     };
     (resolved != name).then_some(resolved)
+}
+
+/// Skip a bracketed expansion span in a raw word, starting at the
+/// opening bracket: depth-counted, and an escaped bracket neither nests
+/// nor closes. Returns the index just past the matching close, or the
+/// end of input for an unterminated span.
+fn skip_raw_expansion_span(chars: &[char], mut index: usize, open: char, close: char) -> usize {
+    let mut depth = 0usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 1,
+            ch if ch == open => depth += 1,
+            ch if ch == close => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return index + 1;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    index
+}
+
+/// rubash#3089: does the raw word carry anything whose IFS protection
+/// depends on mark_quoted_ifs_from_raw's raw simulation? That pass
+/// protects exactly two things, and only when its simulation reproduces
+/// the cooked word (a mismatch returns the word with no quoted marks
+/// applied): IFS characters inside quoted spans, recorded per character
+/// (its push_quoted_char), and expansion results at quoted sites,
+/// recorded per introducer. Everything else is protected without it:
+/// literal non-whitespace IFS characters are glued by
+/// mark_literal_ifs_chars unconditionally, and `$'...'`-decoded or
+/// backslash-escaped blanks ride their ANSI_C_IFS_GUARD pairs from the
+/// decode itself. So when the raw word contains neither a quoted IFS
+/// character nor a quoted expansion introducer, a simulation bail
+/// cannot leave an IFS character unprotected in the marked expansion,
+/// and the field splitter's count on it is trustworthy even when no
+/// protection carrier survives into the expansion (a quoted character
+/// that is not an IFS character at all — IFS=`:` and a quoted space —
+/// needs no carrier).
+///
+/// Conservative by construction (a hit only ever withholds trust):
+/// expansion spans outside quotes are skipped whole (quotes inside
+/// them are the expansion's own syntax, not word quoting), and an IFS
+/// character inside a `$'...'` / `$"..."` span counts as dependent —
+/// its decoded form is word data, and only the span's blanks are
+/// self-guarded.
+fn raw_word_has_simulation_dependent_ifs(raw: &str, ifs: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if in_single {
+            // Single-quoted span: every char is data (a backslash does
+            // not escape here); an IFS char is simulation-recorded.
+            if ch == '\'' {
+                in_single = false;
+            } else if ifs.contains(ch) {
+                return true;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '\\' {
+            // Outside single quotes a backslash escapes the next char —
+            // inside double quotes only before $ ` " \ or newline; before
+            // anything else there the backslash itself is span data and
+            // the next char keeps its normal reading (the marking walk's
+            // double-quote backslash arm).
+            if in_double {
+                match chars.get(index + 1).copied() {
+                    Some('$' | '`' | '"' | '\\' | '\n') => index += 2,
+                    _ => {
+                        if ifs.contains(ch) {
+                            return true;
+                        }
+                        index += 1;
+                    }
+                }
+            } else {
+                index += 2;
+            }
+            continue;
+        }
+        if in_double {
+            match ch {
+                '"' => in_double = false,
+                // A quoted expansion site: its result's protection is
+                // one of the simulation's recordings.
+                '$' | '`' => return true,
+                _ if ifs.contains(ch) => return true,
+                _ => {}
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' => in_single = true,
+            '"' => in_double = true,
+            '`' => {
+                // Command substitution outside quotes: command text,
+                // not word data — skip to the closing backquote.
+                index += 1;
+                while index < chars.len() && chars[index] != '`' {
+                    if chars[index] == '\\' {
+                        index += 1;
+                    }
+                    index += 1;
+                }
+            }
+            '$' => match chars.get(index + 1).copied() {
+                Some(quote @ ('\'' | '"')) => {
+                    // $'...' / $"..." span: skip it, counting any IFS
+                    // character in the span as dependent (see the doc).
+                    index += 2;
+                    while index < chars.len() && chars[index] != quote {
+                        if chars[index] == '\\' {
+                            index += 1;
+                        } else if ifs.contains(chars[index]) {
+                            return true;
+                        }
+                        index += 1;
+                    }
+                }
+                Some('{') => {
+                    index = skip_raw_expansion_span(&chars, index + 1, '{', '}');
+                    continue;
+                }
+                Some('(') => {
+                    index = skip_raw_expansion_span(&chars, index + 1, '(', ')');
+                    continue;
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// The literal a redirect operand becomes when pathname expansion does not
@@ -130,10 +316,27 @@ impl Executor {
         target: &str,
     ) -> bool {
         let extglob = crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob");
+        let posix_nosplit = self.posix_mode_enabled() && !self.invocation_interactive();
+        // rubash#3089: the expansion's own field-count verdict (recorded
+        // by expand_redirect_target from the IFS-marked expansion, the
+        // #1769 single-glob fact's sibling) wins over the textual gate in
+        // both directions: a quoted segment's whitespace is one field
+        // however many unquoted introducers the raw word carries, and an
+        // unquoted result that splits on a non-whitespace IFS character
+        // is several fields however little whitespace the target shows.
+        // POSIX mode suppresses the split itself (W_NOSPLIT), so the
+        // verdict — computed with splitting — does not apply there.
+        if !posix_nosplit {
+            if self.redirect_target_resolved_single_field(redirect) {
+                return false;
+            }
+            if self.redirect_target_resolved_multi_field(redirect) {
+                return true;
+            }
+        }
         if !target.chars().any(char::is_whitespace) {
             return redirect_target_is_ambiguous(raw, target, extglob);
         }
-        let posix_nosplit = self.posix_mode_enabled() && !self.invocation_interactive();
         if posix_nosplit {
             let branched = self.is_brace_expand_enabled()
                 && super::command_prepare::expand_braces_with_optional_raw(
@@ -219,14 +422,113 @@ impl Executor {
         if let Some(hit) = self.redirect_target_memo.borrow().get(&key) {
             return hit.clone();
         }
-        let expanded = self.expand_word(&redirect.target);
+        // rubash#3089: expand through the SAME IFS marking the argument
+        // pipeline applies (command_prepare.rs expand_command_word):
+        // GNU's walk CTLESC-protects quoted characters as it goes
+        // (subst.c:4773 quote_string, via subst.c:11862 add_quoted_string),
+        // so word_list_split (subst.c:12397) never splits inside a quoted
+        // segment, while an unquoted expansion result splits on the live
+        // IFS. The cooked redirect word has lost its quote positions, so
+        // without the marking pass the ambiguity gate had only the joined
+        // String and misread a quoted segment's space as a field split
+        // whenever an unquoted suffix expansion stood next to it
+        // (`> 'a b c'$(printf '')` reported ambiguous; GNU creates the
+        // file). The marked expansion runs ONCE (side effects still run
+        // exactly once); the field count the splitter reports on the
+        // marked form rides the memo (below) as the gate's verdict, and
+        // a trusted single field IS the filename (below).
+        //
+        // The verdict is trusted under either of two conditions. (a) The
+        // marked expansion carries protection (a bare IFS_GLUE / the
+        // ANSI-C guard): protection demonstrably flowed into the
+        // expansion, so the splitter saw quoted whitespace as data. (b)
+        // The raw word carries nothing whose protection depends on
+        // mark_quoted_ifs_from_raw's simulation
+        // (raw_word_has_simulation_dependent_ifs): that pass protects
+        // exactly the quoted IFS characters and the quoted expansion
+        // sites it records, and only when its simulation reproduces the
+        // cooked word — but when the raw word contains neither, a
+        // simulation bail cannot leave an IFS character unprotected
+        // (literal non-whitespace IFS characters are glued by
+        // mark_literal_ifs_chars either way, and decoded/escaped blanks
+        // ride their guard pairs), so the count is sound even when no
+        // carrier survives. The shape that needs condition (b) is a
+        // quoted character that is not an IFS character at all
+        // (IFS=`:`, a quoted space): it needs no carrier, so under
+        // condition (a) alone the count stayed unread and the textual
+        // gate misreported the target ambiguous. Every other shape
+        // keeps the textual gate's behavior.
+        let raw = redirect.target_metadata.raw.as_str();
+        let needs_ifs_marking = !redirect.target.starts_with(STORAGE_WORD_PREFIX)
+            && !redirect
+                .target
+                .starts_with(crate::executor::markers::QUOTED_WORD_PREFIX)
+            && (super::command_words::raw_word_has_unquoted_parameter_expansion(raw)
+                || super::execution_misc::word_has_unquoted_command_substitution(raw));
+        let mut field_count: Option<usize> = None;
+        let expanded = if needs_ifs_marking {
+            let ifs = self
+                .shell_state
+                .env_vars
+                .get("IFS")
+                .map(String::as_str)
+                .unwrap_or("");
+            let mut marked = super::command_prepare::mark_literal_ifs_chars(&redirect.target, ifs);
+            marked = super::command_prepare::mark_quoted_ifs_from_raw(
+                raw,
+                &marked,
+                ifs,
+                self.posix_mode_enabled(),
+            );
+            let marked_expanded = self.expand_word(&marked);
+            let fields = crate::executor::arrays::field_split_values_with_ifs(
+                &crate::executor::markers::ansi_c_ifs_guard_to_ifs_glue(&marked_expanded),
+                self.shell_state.env_vars.get("IFS").map(String::as_str),
+            );
+            let mut single_field: Option<String> = None;
+            if crate::executor::markers::contains_bare_sentinel(
+                &marked_expanded,
+                crate::executor::markers::IFS_GLUE,
+            ) || crate::executor::markers::contains_bare_sentinel(
+                &marked_expanded,
+                crate::executor::markers::ANSI_C_IFS_GUARD,
+            ) || !raw_word_has_simulation_dependent_ifs(raw, ifs)
+            {
+                field_count = Some(fields.len());
+                if fields.len() == 1 {
+                    single_field = fields.into_iter().next();
+                }
+            }
+            match single_field {
+                // GNU's operand is the field itself (redir.c:298 takes
+                // the one word of the expanded list): the splitter has
+                // already consumed the IFS delimiters at the field's
+                // edges, so an expansion result's leading/trailing IFS
+                // whitespace is gone — the joined carrier-stripped
+                // expansion would keep a trailing IFS blank and name a
+                // file GNU never opens (`> 'a b'${V}`, V='x ', is the
+                // single field `a bx`, not `a bx `).
+                Some(field) => field,
+                // No trusted single field: the filename stays the
+                // joined marked expansion with its protection carriers
+                // stripped, exactly as before (multi-field operands are
+                // never opened; untrusted and zero-field shapes keep
+                // the callers' existing rules).
+                None => crate::executor::markers::strip_ansi_c_ifs_guard(
+                    &marked_expanded.replace(crate::executor::markers::IFS_GLUE, ""),
+                ),
+            }
+        } else {
+            self.expand_word(&redirect.target)
+        };
         // GNU redir.c:905 do_redirection_internal resolves every file-redirect
         // operand through redirection_expand (redir.c:298), which runs the
         // full word-list pipeline (expand_words_no_vars): brace expansion,
         // the word expansion, then pathname expansion. Heredoc/herestring
         // operands do NOT (redir.c:396-397 heredoc_expand uses
         // expand_string_to_string — single string, no field list, no glob).
-        let (expanded, single_glob_match) = self.expand_redirect_operand_fields(redirect, expanded);
+        let (expanded, single_glob_match, field_verdict) =
+            self.expand_redirect_operand_fields(redirect, expanded, field_count);
         // The lexer's fully-quoted-word role marker (lexer/word.rs, the
         // STORAGE_WORD_PREFIX sentinel for words that are wholly quoted and
         // contain ${..}) is word-LEVEL role information — GNU's
@@ -254,6 +556,17 @@ impl Executor {
             self.redirect_target_single_glob_match
                 .borrow_mut()
                 .insert(key);
+        }
+        // rubash#3089: record the field verdict under derived memo keys
+        // (same span and clearing as the target memo itself). Only the
+        // literal outcomes of expand_redirect_operand_fields carry one;
+        // glob, brace and failglob outcomes leave the gate to its
+        // existing facts, exactly like the single-glob set.
+        if let Some(single) = field_verdict {
+            self.redirect_target_memo.borrow_mut().insert(
+                Self::redirect_target_field_memo_key(redirect, single),
+                String::new(),
+            );
         }
         expanded
     }
@@ -284,6 +597,67 @@ impl Executor {
             .contains(&Self::redirect_target_memo_key(redirect))
     }
 
+    /// The derived memo key for a redirect target's field verdict
+    /// (rubash#3089): prefixed so it can never collide with a plain
+    /// target-memo key, which always begins with the Debug form of the
+    /// redirect kind.
+    fn redirect_target_field_memo_key(redirect: &crate::parser::Redirect, single: bool) -> String {
+        format!(
+            "{}\x1f{}",
+            if single {
+                "field-single"
+            } else {
+                "field-multi"
+            },
+            Self::redirect_target_memo_key(redirect)
+        )
+    }
+
+    /// True when this redirect's IFS-marked expansion field-split into
+    /// exactly one field (see expand_redirect_target): one field by the
+    /// redir.c:298/subst.c:12397 count, so a quoted segment's whitespace
+    /// is filename data, not a split (rubash#3089). False when no
+    /// verdict was recorded (glob/brace outcomes, unmarkable words,
+    /// another span) and the caller falls back to its existing facts.
+    pub(in crate::executor) fn redirect_target_resolved_single_field(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> bool {
+        self.redirect_target_memo
+            .borrow()
+            .contains_key(&Self::redirect_target_field_memo_key(redirect, true))
+    }
+
+    /// True when this redirect's IFS-marked expansion field-split into
+    /// more than one field (rubash#3089): the AMBIGUOUS_REDIRECT
+    /// condition even when the joined target carries no whitespace of
+    /// its own (a split on a non-whitespace IFS character). Same
+    /// fallback contract as the single-field verdict.
+    pub(in crate::executor) fn redirect_target_resolved_multi_field(
+        &self,
+        redirect: &crate::parser::Redirect,
+    ) -> bool {
+        self.redirect_target_memo
+            .borrow()
+            .contains_key(&Self::redirect_target_field_memo_key(redirect, false))
+    }
+
+    /// Record that a redirect target's literal expansion carried
+    /// raw-byte transport (see `redirect_target_had_transport`): the
+    /// folded target string alone cannot tell a byte char (e.g. U+009C
+    /// for byte 0x9C) from a genuine char of the same code point, so
+    /// the output open funnels consult this set to decide whether the
+    /// target's byte chars emit raw bytes. Keyed by the folded literal
+    /// string; recorded only when the pre-literal expansion carried
+    /// decodable transport. (rubash#3104 p23)
+    fn note_redirect_target_transport(&self, literal: &str, expanded: &str) {
+        if crate::executor::markers::contains_decodable_transport(expanded) {
+            self.redirect_target_had_transport
+                .borrow_mut()
+                .insert(literal.to_string());
+        }
+    }
+
     /// GNU redir.c:298 redirection_expand → subst.c:12590
     /// expand_words_no_vars: a file-redirect operand goes through the same
     /// word-list pipeline as command arguments — brace expansion first (on
@@ -306,17 +680,29 @@ impl Executor {
     /// field even when its name contains whitespace (rubash#1769). Every
     /// other arm returns false and leaves the gate's existing behavior
     /// untouched (an unquoted `$var` that word-splits stays ambiguous).
+    ///
+    /// The third return is the rubash#3089 field verdict derived from
+    /// `field_count` (the IFS-marked expansion's split count, computed by
+    /// expand_redirect_target): `Some(true)` for exactly one field,
+    /// `Some(false)` for more than one, `None` when this call's outcome
+    /// is not the marked expansion's literal word — glob matches are
+    /// judged by the single-glob fact and the textual gate, brace
+    /// alternatives by their own join, a brace-rewritten single branch
+    /// by its re-expansion (the marked count described the un-rewritten
+    /// word), and a zero-field count by the callers' anchored-empty
+    /// rules — so those arms all report `None` and keep prior behavior.
     fn expand_redirect_operand_fields(
         &self,
         redirect: &crate::parser::Redirect,
         expanded: String,
-    ) -> (String, bool) {
+        field_count: Option<usize>,
+    ) -> (String, bool, Option<bool>) {
         use crate::parser::RedirectKind;
         if matches!(
             redirect.kind,
             RedirectKind::HereDoc | RedirectKind::HereString
         ) {
-            return (expanded, false);
+            return (expanded, false, None);
         }
         let raw = redirect.target_metadata.raw.as_str();
         // Pathname expansion obeys quoting exactly like an argument word
@@ -352,16 +738,30 @@ impl Executor {
                     .collect::<Vec<_>>()
                     .join(" "),
                 false,
+                None,
             );
         }
         // A single branch that the brace machinery rewrote (`> out{1..1}`
         // -> `out1`) replaces the operand for the rest of the pipeline;
         // an unchanged word keeps the already-expanded string so word
-        // substitution side effects still run exactly once.
-        let expanded = if branches.len() == 1 && branches[0] != redirect.target {
+        // substitution side effects still run exactly once. The marked
+        // field count described the UN-rewritten word, so a rewritten
+        // branch drops the verdict (conservative: the textual gate keeps
+        // its prior say for those shapes).
+        let branch_rewritten = branches.len() == 1 && branches[0] != redirect.target;
+        let expanded = if branch_rewritten {
             self.expand_word(&branches[0])
         } else {
             expanded
+        };
+        let field_verdict = if branch_rewritten {
+            None
+        } else {
+            match field_count {
+                Some(1) => Some(true),
+                Some(n) if n > 1 => Some(false),
+                _ => None,
+            }
         };
         // The operand becomes a FILENAME -- a value boundary: drop the
         // ANSI_C_IFS_GUARD pairs (decoded `$'...'` blanks) here, or the
@@ -373,7 +773,9 @@ impl Executor {
             // GNU subst.c:12683-12688 (expand_words_no_vars else-branch): a
             // word that does not glob is still DEQUOTED before it becomes
             // the literal filename.
-            return (redirect_operand_literal(&expanded), false);
+            let literal = redirect_operand_literal(&expanded);
+            self.note_redirect_target_transport(&literal, &expanded);
+            return (literal, false, field_verdict);
         }
         match glob::pathname_expand_word(
             &expanded,
@@ -385,7 +787,7 @@ impl Executor {
             // matches): joined for the ambiguity gate, GNU reports
             // AMBIGUOUS_REDIRECT and opens nothing.
             glob::PathnameExpansion::Matches(matches) if matches.len() > 1 => {
-                (matches.join(" "), false)
+                (matches.join(" "), false, None)
             }
             // A single match is the resolved filename GNU opens
             // (`> amb1*` with one match opens amb1); an empty match list
@@ -395,7 +797,7 @@ impl Executor {
             // when its name contains whitespace (rubash#1769).
             glob::PathnameExpansion::Matches(matches) => {
                 let single = matches.len() == 1;
-                (matches.into_iter().next().unwrap_or_default(), single)
+                (matches.into_iter().next().unwrap_or_default(), single, None)
             }
             // NoMatch keeps the literal pattern (nullglob off, glob.c
             // returns the pattern itself) — DEQUOTED, because GNU replaces
@@ -408,7 +810,11 @@ impl Executor {
             // boundary — a `>"@(zz)q"` target opens `@(zz)q`, not a name
             // led by the CTLESC byte \x11 (rubash#424: Windows open()
             // failed ERROR_INVALID_NAME on the carrier byte).
-            glob::PathnameExpansion::NoMatch => (redirect_operand_literal(&expanded), false),
+            glob::PathnameExpansion::NoMatch => {
+                let literal = redirect_operand_literal(&expanded);
+                self.note_redirect_target_transport(&literal, &expanded);
+                (literal, false, field_verdict)
+            }
             // GNU subst.c:12663-12668 (fail_glob_expansion): report_error
             // `no match: WORD' (the dequoted word) and exp_jump_to_
             // top_level(DISCARD) — the redirection NEVER opens and the
@@ -435,7 +841,7 @@ impl Executor {
                 }
                 self.shell_state.redirect_failglob_error.set(true);
                 self.shell_state.redirect_failglob_seen.set(true);
-                (pattern, false)
+                (pattern, false, None)
             }
         }
     }
@@ -868,7 +1274,11 @@ impl Executor {
         let expanded = if compound_assignment {
             self.expand_embedded_parameters_compound(value)
         } else if tilde_first {
-            self.expand_embedded_parameters(&self.expand_assignment_tilde(value))
+            // rubash#2651: the tilde pass result is data for the rest
+            // of the walk (GNU subst.c:11862 add_quoted_string); the
+            // protected form carrier-encodes the resolved prefixes so
+            // this second walk cannot rescan them.
+            self.expand_embedded_parameters(&self.expand_assignment_tilde_protected(value))
         } else {
             self.expand_embedded_parameters(value)
         };

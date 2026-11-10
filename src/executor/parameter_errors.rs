@@ -878,14 +878,20 @@ impl Executor {
         if base.is_empty() {
             return false;
         }
-        if let Some(prefix) = base.strip_suffix(['@', '*']) {
-            return !prefix.is_empty() && is_shell_name(prefix);
-        }
+        // The body may BE a special parameter (`${!*}`, `${!@}`,
+        // `${!#}`...): subst.c:122 VALID_INDIR_PARAM takes `*`/`@` as
+        // the indirect SOURCE itself. This check must run before the
+        // prefix-list arm below — a body of exactly `*` or `@` also
+        // "strips" to an empty prefix, which shadowed the special and
+        // misreported the form as a bad substitution (rubash#2649).
         if matches!(base, "@" | "*" | "#" | "?" | "$" | "-" | "!" | "0")
             || base.parse::<usize>().is_ok()
             || is_shell_name(base)
         {
             return true;
+        }
+        if let Some(prefix) = base.strip_suffix(['@', '*']) {
+            return !prefix.is_empty() && is_shell_name(prefix);
         }
         // GNU also accepts a valid leading name followed by an operator
         // expression applied to the indirect value (${!x//c/x}, ${!x:-y},
@@ -1762,7 +1768,10 @@ impl Executor {
     /// (a clean integer literal; expansion-free assoc key text). Any
     /// other subscript returns `None` (undecidable): the caller skips
     /// the span and the real expansion's single fetch adjudicates it.
-    fn pre_scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+    pub(in crate::executor) fn pre_scan_operator_value(
+        &self,
+        name: &str,
+    ) -> Option<Option<String>> {
         if !name.contains('[') {
             return Some(self.parameter_error_value(name));
         }
@@ -2207,6 +2216,26 @@ impl Executor {
                         }
                     }
                 }
+                // GNU subst.c:7883-7952 parameter_brace_expand_indir on a
+                // SPECIAL source: `${!*}` / `${!@}` indirect through the
+                // positional parameters themselves. find_indir expands
+                // the source with PF_ASSIGNRHS + no-split dollar star
+                // (subst.c:7847-7861): `*` joins with IFS[0], `@` joins
+                // with a space. The joined text is then judged exactly
+                // like any other t (subst.c:7947): non-empty and not a
+                // valid brace-expansion word reports
+                // `<t>: invalid variable name`; an empty join (no
+                // positionals) proceeds silently (rubash#2649).
+                if indirect == "*" || indirect == "@" {
+                    let t = if indirect == "*" {
+                        self.positional_params_star_joined()
+                    } else {
+                        self.shell_state.positional_window().join(" ")
+                    };
+                    if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                        return Some((t, "invalid variable name".to_string(), 1));
+                    }
+                }
                 if Self::is_indirect_array_operator_expression(indirect) {
                     // GNU treats `${!name[@]<op>...}` as indirection through
                     // the VALUE of `name` re-expanded as a parameter
@@ -2367,7 +2396,15 @@ impl Executor {
             if let Some(nested) = self.nested_operator_word_error(inner) {
                 return Some(nested);
             }
-            if let Some((name, offset, Some(length))) = self.parse_parameter_substring(inner) {
+            // rubash#3225: the scan parse must not probe through the
+            // reporting element fetch (parse_parameter_substring's NULL
+            // probe printed `bad array subscript` twice here before the
+            // real expansion printed it once) — the scan twin derives
+            // NULL-ness from the non-evaluating pre-scan probe, exactly
+            // like the verdict arm below already does.
+            if let Some((name, offset, Some(length))) =
+                self.parse_parameter_substring_for_scan(inner)
+            {
                 if length < 0 {
                     // GNU subst.c:8395 verify_substring_values, reached from
                     // parameter_brace_substring (subst.c:9050) only when the
@@ -2421,11 +2458,17 @@ impl Executor {
                             })
                     };
                     if is_invalid {
-                        return Some((
-                            length.to_string(),
-                            "substring expression < 0".to_string(),
-                            1,
-                        ));
+                        // GNU subst.c:8487/8502 reports the RAW length
+                        // slice (text after the separator colon, verbatim)
+                        // in this diagnostic, not the evaluated number:
+                        // `${arr[@]: 1: -1}` reads ` -1: substring
+                        // expression < 0` with the leading blank kept
+                        // (rubash#2713). The evaluated value remains the
+                        // fallback for any shape the raw split cannot see.
+                        let display = Self::parameter_substring_raw_length_text(inner)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| length.to_string());
+                        return Some((display, "substring expression < 0".to_string(), 1));
                     }
                 }
             }

@@ -654,8 +654,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -671,8 +682,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -1761,6 +1783,42 @@ fn contains_extglob_pattern(pattern: &str) -> bool {
     false
 }
 
+/// Whether the raw spelling of a `[[ == ]]` / `[[ != ]]` RHS carries an
+/// extglob group operator in an unquoted span. GNU forces
+/// `extended_glob = 1` for the conditional pattern test
+/// (execute_cmd.c:4116-4118) and expands the RHS with mode 1
+/// (execute_cmd.c:4068), so quoting inside a group only makes the quoted
+/// characters literal — the group itself stays live, with or without
+/// `shopt extglob`. The cooked pattern cannot carry this decision (a
+/// fully quoted `"@(a)"` cooks to text shaped like a group), so the raw
+/// spelling is scanned: nested expansion bodies, backslash escapes and
+/// quoted spans are skipped as units, and only an operator character met
+/// in the remaining unquoted text counts.
+fn raw_rhs_has_unquoted_extglob_group(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(&chars, index) {
+            index = next;
+            continue;
+        }
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if let Some((_, _, end)) = raw_quote_at(&chars, index) {
+            index = end + 1;
+            continue;
+        }
+        if matches!(chars[index], '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(')
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 fn raw_quote_at(chars: &[char], start: usize) -> Option<(QuoteKind, usize, usize)> {
     let (kind, opener_len, terminator) = match chars.get(start)? {
         '$' if chars.get(start + 1) == Some(&'\'') => (QuoteKind::AnsiC, 2, '\''),
@@ -2578,7 +2636,18 @@ fn regexp_error_reason(pattern: &str) -> &'static str {
 
 fn append_literal_glob_text(output: &mut String, text: &str) {
     for ch in text.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
+        // GNU pathexp.c:212 quote_string_for_globbing backslash-escapes
+        // every quoted character in pathexp.c:164 glob_char_p's set;
+        // under EXTENDED_GLOB that set includes the group-grammar
+        // characters `(`, `|`, `)` alongside the plain glob operators.
+        // A quoted paren or pipe that reached the pattern bare would be
+        // read by the extglob scanner as group structure (opening,
+        // closing, or splitting the group), so `@("a(b")` never matched
+        // (rubash#3231). The matchers' `\` arms (and the group scanners'
+        // escape skips, lib/glob/sm_loop.c:676 PATSCAN) treat `\(`,
+        // `\)`, `\|` as the literal characters, in both the extglob and
+        // the plain pattern matcher.
+        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|') {
             output.push('\\');
         }
         output.push(ch);
