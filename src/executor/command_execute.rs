@@ -1242,14 +1242,28 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
-        // Bash must parse extglob syntax while the extglob option is
-        // enabled.  A pathname such as `@(name)` in a simple command is
-        // therefore a syntax error when the option is off; treating it as a
-        // literal silently accepts malformed scripts.  Conditional RHS
-        // patterns are handled separately and intentionally remain eligible
-        // for Bash's conditional-pattern semantics.
+        // GNU adjudicates extglob legality at READ time: parse.y:5466
+        // read_token_word consumes a `(` group as pattern text only
+        // while the read-time `extended_glob` is on, and a group met
+        // with the gate off fails the parse itself. At execution the
+        // pattern text is inert data — pathname expansion and strmatch
+        // consult the LIVE flag (pathexp.c unquoted_glob_pattern_p;
+        // pathexp.h FNMATCH_EXTFLAG), so a group that WAS consumed as
+        // a pattern at read time degrades to literal text/matching
+        // when a same-unit `shopt -u extglob` has already executed
+        // (rubash#3224) and must not be vetoed here. The diagnostic
+        // below therefore belongs only to patterns whose producing
+        // pass did not consume them as patterns
+        // (ExtglobPattern::read_gate_on == false): for those, treating
+        // the word as a literal would silently accept a script GNU
+        // rejects at read time. Conditional RHS patterns are handled
+        // separately and intentionally remain eligible for Bash's
+        // conditional-pattern semantics.
         if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
-            && !cmd.extglob_patterns.is_empty()
+            && cmd
+                .extglob_patterns
+                .iter()
+                .any(|pattern| !pattern.read_gate_on)
             && cmd.conditional_command.is_none()
             && cmd.case_command.is_none()
         {

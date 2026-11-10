@@ -2639,7 +2639,18 @@ fn regexp_error_reason(pattern: &str) -> &'static str {
 
 fn append_literal_glob_text(output: &mut String, text: &str) {
     for ch in text.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
+        // GNU pathexp.c:212 quote_string_for_globbing backslash-escapes
+        // every quoted character in pathexp.c:164 glob_char_p's set;
+        // under EXTENDED_GLOB that set includes the group-grammar
+        // characters `(`, `|`, `)` alongside the plain glob operators.
+        // A quoted paren or pipe that reached the pattern bare would be
+        // read by the extglob scanner as group structure (opening,
+        // closing, or splitting the group), so `@("a(b")` never matched
+        // (rubash#3231). The matchers' `\` arms (and the group scanners'
+        // escape skips, lib/glob/sm_loop.c:676 PATSCAN) treat `\(`,
+        // `\)`, `\|` as the literal characters, in both the extglob and
+        // the plain pattern matcher.
+        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|') {
             output.push('\\');
         }
         output.push(ch);

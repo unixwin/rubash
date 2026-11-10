@@ -4015,6 +4015,20 @@ fn run_source_impl(
         suppress_unclosed_diagnostic,
         !source_run_prior,
     );
+    // rubash#2680: a unit that ended in a parse error has that error's
+    // status as its own $? — GNU's reader abandons the unit with the
+    // parse failure's status (parse_and_execute's yyparse failure,
+    // evalstring.c:584-600). The parser's own error path already
+    // records it, but the unclosed-diagnostics route only RETURNS its
+    // status (2, or 1 for the array-list family) without recording
+    // it, so a grouped reader's parse-abort adjudication — which
+    // reads last_exit_code — inherited the PREVIOUS unit's status
+    // and a script whose last group died in the route exited with a
+    // stale code (0 after a successful `shopt`). Record the unit's
+    // status whenever the parse-error latch is still standing.
+    if executor.parse_error_pending() {
+        executor.set_last_exit_code(status);
+    }
     executor.source_run_active.set(source_run_prior);
     status
 }
