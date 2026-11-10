@@ -658,6 +658,17 @@ pub struct Executor {
     /// fact per group (the pending itself is consumed inside
     /// run_source_impl and never reached the classification).
     unit_signal_discard: bool,
+    /// rubash#2794: the unit's terminal word-expansion error was
+    /// adjudicated an interactive DISCARD — the FATAL class
+    /// (`${var:?}`, nounset unbound, bad @-transform) took
+    /// subst.c:10416-10418's error branch at its raise point
+    /// instead of the fatal FORCE_EOF branch. The raise points
+    /// note it where the adjudication is made
+    /// (`note_unit_expansion_error_discard`); the driver layer
+    /// takes it per unit like `unit_signal_discard`, so the run
+    /// classification can carry the discard fact the fate alone
+    /// (status 1, Completed) cannot express.
+    unit_expansion_error_discard: bool,
     /// rubash#2233, generalized by rubash#2346: set by the signal
     /// dispatch when an untrapped terminating signal is delivered on a
     /// path GNU settles through termsig_handler (sig.c:590): the termsig
@@ -1701,6 +1712,19 @@ pub struct Executor {
     /// (error.c get_name_for_error with yy_input_name()=="command
     /// substitution") and a newline-terminated body reader.
     backtick_body_diagnostic: Cell<bool>,
+    /// An arithmetic-fallback command-substitution body is being
+    /// expanded RIGHT NOW — a `$((` span that failed GNU's
+    /// chk_arithsub and fell back to a command substitution
+    /// (subst.c:10841-10866 LPAREN arm -> comsub). Like a backtick
+    /// body it is parsed in the substituted child at execution time
+    /// (subst.c:7143 parse_and_execute), never read-parsed, so its
+    /// parse error is contained: `command substitution: line N:`
+    /// prefix, substitution empty, status 2, script continues
+    /// (rubash#2677). Only the containment decision points consult
+    /// this flag (see `comsub_body_parse_is_contained`); the
+    /// backtick-only reader semantics (newline termination, the
+    /// unclosed-input verdict) keep reading `backtick_body_diagnostic`.
+    arith_fallback_comsub_body: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending

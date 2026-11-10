@@ -191,17 +191,34 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// Whether a command-substitution body parse error is CONTAINED
+    /// in the substituted child — GNU parses the body in the child at
+    /// execution time (subst.c string_locale -> parse_and_execute) —
+    /// when the body is an old-style backtick substitution (ambient
+    /// `backtick_body_diagnostic`, issue #515) or an arithmetic
+    /// fallback (ambient `arith_fallback_comsub_body`, rubash#2677:
+    /// a `$((` span that failed chk_arithsub and fell back to a
+    /// command substitution, subst.c:10841-10866). A contained error
+    /// kills only the child — substitution empty, status 2, script
+    /// continues — while a plain `$(`-body error is a read-time
+    /// failure of the enclosing command and stays fatal.
+    pub(in crate::executor) fn comsub_body_parse_is_contained(&self) -> bool {
+        self.backtick_body_diagnostic.get() || self.arith_fallback_comsub_body.get()
+    }
+
     /// Latch a command-substitution body parse error. When the failing
     /// body is an old-style backtick substitution (ambient
-    /// `backtick_body_diagnostic`), the companion backtick latch records
-    /// the origin: GNU parses a backtick body in the substituted child at
-    /// execution time (subst.c string_locale -> parse_and_execute), so the
-    /// error kills only the child — substitution empty, status 2, script
-    /// continues (issue #515) — while a `$(`-body error is a read-time
-    /// failure of the enclosing command and stays fatal.
+    /// `backtick_body_diagnostic`) or an arithmetic fallback
+    /// (ambient `arith_fallback_comsub_body`, rubash#2677), the
+    /// companion backtick latch records the contained origin: GNU
+    /// parses such a body in the substituted child at execution time
+    /// (subst.c string_locale -> parse_and_execute), so the error
+    /// kills only the child — substitution empty, status 2, script
+    /// continues (issue #515) — while a `$(`-body error is a
+    /// read-time failure of the enclosing command and stays fatal.
     pub(in crate::executor) fn latch_command_substitution_parse_error(&self) {
         self.last_command_substitution_parse_error.set(true);
-        if self.backtick_body_diagnostic.get() {
+        if self.comsub_body_parse_is_contained() {
             self.last_command_substitution_parse_error_backtick
                 .set(true);
         }
@@ -298,9 +315,10 @@ impl Executor {
         // execute_command arm for top-level nodes): a node carrying the
         // EOF_COMPOUND marker reports `syntax error: unexpected end of
         // file from `X' command on line N' — the plain-marker arm below
-        // would misrender it as the near shape. Under the ambient backtick
-        // window the prefix is GNU's parse_and_execute child name (issue
-        // #515); otherwise the enclosing script's.
+        // would misrender it as the near shape. Under the ambient
+        // contained-child window (backtick, issue #515, or
+        // arith-fallback, rubash#2677) the prefix is GNU's
+        // parse_and_execute child name; otherwise the enclosing script's.
         if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
             let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
             let compound_name = fields.next().unwrap_or("(");
@@ -312,7 +330,7 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(eof_line)
             } else {
                 self.parser_error_prefix_for_line(eof_line)
@@ -335,7 +353,8 @@ impl Executor {
         // delegate sites (a backtick body whose error is a malformed
         // conditional): render it like execute_command's COND arm —
         // each classifier message, then the near/EOF tail — under the
-        // ambient backtick child prefix when that window is live. The
+        // ambient contained-child prefix (backtick or arith-fallback)
+        // when that window is live. The
         // bare-message fallback below would drop the whole report
         // (`` `[[ a ==]]` ``, rubash#2751).
         if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
@@ -348,7 +367,7 @@ impl Executor {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
             let prefix_for = |this: &Self, line: usize| {
-                if this.backtick_body_diagnostic.get() {
+                if this.comsub_body_parse_is_contained() {
                     this.comsub_eof_error_diagnostic(line)
                 } else {
                     this.parser_error_prefix_for_line(line)
@@ -419,7 +438,7 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_else(|| cmd.line.unwrap_or(1));
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(line)
             } else {
                 self.parser_error_prefix_for_line(line)
@@ -447,7 +466,7 @@ impl Executor {
         // shape execute_command's EOF arm renders.
         if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
             let eof_line = cmd.line.map(|line| line + 1).unwrap_or(1);
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(eof_line)
             } else {
                 self.parser_error_prefix_for_line(eof_line)
@@ -473,13 +492,14 @@ impl Executor {
         // CURRENT_LINE is the LAST line read, not the failure line
         // (rubash#390: `while :; do case x in\nesac) ...` reports the
         // `esac)' line, not the `done' line).
-        // A BACKTICK body's report renders under GNU's parse_and_execute
-        // child name (subst.c:7413 passes "command substitution" as whom;
-        // error.c:300-316 prefixes `name: command substitution: line N: `)
-        // — the enclosing script's prefix is the `$(`-body shape, where the
-        // outer parse owns the diagnostic (issue #515).
+        // A BACKTICK or arith-fallback body's report renders under GNU's
+        // parse_and_execute child name (subst.c:7413 passes "command
+        // substitution" as whom; error.c:300-316 prefixes `name: command
+        // substitution: line N: `) — the enclosing script's prefix is the
+        // `$(`-body shape, where the outer parse owns the diagnostic
+        // (issue #515, rubash#2677).
         let prefix = match cmd.line {
-            Some(line) if self.backtick_body_diagnostic.get() => {
+            Some(line) if self.comsub_body_parse_is_contained() => {
                 self.comsub_eof_error_diagnostic(line)
             }
             Some(line) => self.parser_error_prefix_for_line(line),
@@ -977,6 +997,24 @@ impl Executor {
     /// Q6 arm B: take-style read of the unit signal-discard record.
     pub fn take_unit_signal_discard(&mut self) -> bool {
         std::mem::take(&mut self.unit_signal_discard)
+    }
+
+    /// rubash#2794: record that the current unit's terminal
+    /// word-expansion error was adjudicated an interactive
+    /// discard (see Executor::unit_expansion_error_discard).
+    /// Called at the FATAL class's discard arms, where
+    /// `expansion_error_is_interactive_discard` selects
+    /// subst.c:10416-10418's error branch over the fatal one —
+    /// the adjudication point itself, never a downstream
+    /// re-derivation from the unit's status.
+    pub fn note_unit_expansion_error_discard(&mut self) {
+        self.unit_expansion_error_discard = true;
+    }
+
+    /// rubash#2794: take-style read of the unit
+    /// expansion-error-discard record.
+    pub fn take_unit_expansion_error_discard(&mut self) -> bool {
+        std::mem::take(&mut self.unit_expansion_error_discard)
     }
 
     /// rubash#2233: non-consuming read of the hangup-death mark — the

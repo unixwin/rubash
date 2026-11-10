@@ -19,6 +19,40 @@ use crate::executor::local_helpers::sync_shell_assignment_process_env;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use crate::executor::types::ARRAY_FIELD_SPLIT_MARKER;
 
+/// Per-operand record of the locale-funnel fires this assign pass
+/// itself performs (rubash#3066/#3097). GNU declare runs
+/// stupidly_hack_special_variables after EVERY variable it processes
+/// (builtins/declare.def:1105); declare::execute owes that hack fire
+/// exactly for the operands whose assign-phase fire was not already
+/// playing the hack's role:
+///
+/// * a plain scalar bind fires once here and that fire IS the
+///   declare-side hack (GNU's bind_variable_value does not fire on
+///   its own) — no second fire is owed;
+/// * a compound bind fires here for the pre-declaration assignment
+///   (subst.c:8169's do_assignment hack, which the expanded compound
+///   word runs before the builtin sees it) — the declare hack is
+///   still owed on top;
+/// * operands with no assign-phase fire at all (attribute-only
+///   conversions, element binds) are owed the hack outright.
+///
+/// Keyed by operand INDEX, not name: GNU's loop is per operand, so
+/// two operands naming the same variable are adjudicated separately.
+#[derive(Default)]
+pub(super) struct LocaleFunnelRecord {
+    pub(super) fired: std::collections::HashSet<usize>,
+    pub(super) compound: std::collections::HashSet<usize>,
+}
+
+impl LocaleFunnelRecord {
+    fn note(&mut self, operand_index: usize, compound: bool) {
+        self.fired.insert(operand_index);
+        if compound {
+            self.compound.insert(operand_index);
+        }
+    }
+}
+
 pub(super) fn assign_declare_names<W>(
     command_name: &str,
     names: &[&str],
@@ -34,6 +68,7 @@ pub(super) fn assign_declare_names<W>(
     stderr: &mut W,
     oob_word: &mut Option<String>,
     written_hints: &mut super::WrittenOperandHints,
+    locale_funnel: &mut LocaleFunnelRecord,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -47,7 +82,12 @@ where
     let binds_bashcompat = names
         .iter()
         .any(|name| crate::builtins::shopt::binds_bashcompat_operand(name));
+    let mut operand_index = 0usize;
     for name in names {
+        // Taken before any `continue` below so every operand keeps its
+        // own index for the LocaleFunnelRecord.
+        let current_index = operand_index;
+        operand_index += 1;
         let Some((var_name, value)) = name.split_once('=') else {
             // GNU declare.def: a "name[subscript]" operand without '=' is a
             // declaration with a size hint; the subscript is discarded and
@@ -539,6 +579,7 @@ where
                         warning
                     )?;
                 }
+                locale_funnel.note(current_index, false);
                 unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
                 continue;
             }
@@ -804,6 +845,31 @@ where
         // assoc keys never fold — rubash#1398).
         let value = declare_case_convert_storage(&value, compound_operand, variables, var_name);
         variables.insert(var_name.to_string(), value.clone());
+        // rubash#3097: the funnel below reads this binding through
+        // locale.rs's stored_scalar_value, which judges array-ness
+        // from the variable's attribute bits — the same bits every
+        // other reader (scalar_parameter_value included) consults.
+        // A compound operand's ARRAY/ASSOC bit, however, was only set
+        // by the attribute pass AFTER this bind (and by the mark that
+        // used to sit below the warning), so the funnel read the raw
+        // storage render (`\x1d([0]="...")`, `(([0]=...))`) instead of
+        // the scalar projection GNU's get_string_value hands
+        // sv_locale (variables.c:2495). Align the bits with the bind
+        // result BEFORE the funnel reads it — the exact state the
+        // attribute pass would leave — and the warning names element
+        // 0 / the "0" key, or takes the silent reset path when an
+        // assoc bind has no "0" key.
+        if compound_operand {
+            if assoc || variables.is_marked(ASSOC_VARS, var_name) {
+                mark_typed(variables, ASSOC_VARS, var_name);
+            } else {
+                mark_typed(variables, ARRAY_VARS, var_name);
+            }
+        } else if array && value.starts_with(STORAGE_WORD_PREFIX) {
+            mark_typed(variables, ARRAY_VARS, var_name);
+        } else if assoc && value.starts_with('(') && value.ends_with(')') {
+            mark_typed(variables, ASSOC_VARS, var_name);
+        }
         // rubash#1531: this path writes VarTable directly, bypassing
         // the assignment funnel (the BASH_COMPAT hook above exists for
         // the same reason), so fire the process-env mirror explicitly:
@@ -822,10 +888,8 @@ where
                 warning
             )?;
         }
+        locale_funnel.note(current_index, compound_operand);
         unmark_typed(variables, DECLARED_UNSET_VARS, var_name);
-        if compound_operand && !assoc && !variables.is_marked(ASSOC_VARS, var_name) {
-            mark_typed(variables, ARRAY_VARS, var_name);
-        }
         // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
         // rubash#635): an out-of-range subscript stops the whole
         // declaration here; the partial store above stays, and the
