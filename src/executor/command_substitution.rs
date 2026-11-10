@@ -3338,9 +3338,10 @@ fn command_parse_error_marker_non_candidate(command: &CommandNode) -> Option<&Co
 /// substitution extraction. Raw spellings (which keep their quotes)
 /// and expanded values are both collected, deduplicated: extraction
 /// is text-level, and either form can be the one that exposes a
-/// substitution the other hides. Here-document bodies are
-/// deliberately absent (data, never screened); a here-document
-/// redirect's TARGET word is an ordinary word and is collected.
+/// substitution the other hides. Here-documents are deliberately
+/// absent: a here-document redirect is skipped as a whole, so
+/// neither its body (data, never screened) nor its target word
+/// is collected.
 fn command_word_texts<'a>(command: &'a CommandNode) -> Vec<&'a str> {
     fn push<'a>(texts: &mut Vec<&'a str>, text: &'a str) {
         if !text.is_empty() && !texts.contains(&text) {
