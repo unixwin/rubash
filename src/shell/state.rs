@@ -602,8 +602,8 @@ pub struct ShellState {
     pub(crate) arithmetic_fatal_error: Cell<bool>,
     pub(crate) arithmetic_nounset_error: Cell<bool>,
     /// rubash#1238: the readonly diagnostic for a failed arithmetic bind
-    /// was already printed by report_arithmetic_readonly_error; the
-    /// command-layer reporters must not follow it with a synthesized
+    /// was already printed by the evaluation-order drain's Readonly arm;
+    /// the command-layer reporters must not follow it with a synthesized
     /// syntax error (GNU prints exactly one line for `((ro++))`).
     pub(crate) arithmetic_readonly_error: Cell<bool>,
     /// Latch for a nounset fatal raised while expanding a `[[ =~ ]]`

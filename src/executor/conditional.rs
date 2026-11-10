@@ -1584,7 +1584,7 @@ impl Executor {
             // Mirror the per-eval boundary: a successful eval clears the
             // stale evalerror record and leaves no diagnostics.
             let _ = crate::executor::arithmetic::take_arith_eval_error();
-            let _ = crate::executor::arithmetic::take_arith_eval_diags();
+            crate::executor::arithmetic::clear_arith_eval_events();
             self.xtrace_conditional_term(op, left, Some(right));
             // A literal can never queue an arithmetic write, but keep the
             // boundary identical to the full path (the take-walk is empty).

@@ -1179,14 +1179,6 @@ pub struct Executor {
     /// failed `builtin name=value` names the builtin, while a bare
     /// `name=value` command prints no command segment.
     assignment_command_name: Option<String>,
-    /// GNU builtins emit assignment diagnostics through builtin_error, which
-    /// honors the builtin's redirected stderr and ordering. Builtin callers
-    /// (getopts OPTARG/name binds) set buffer_assignment_diagnostics and drain
-    /// pending_assignment_diagnostics into their buffered stderr so a
-    /// preceding buffered diagnostic (e.g. `illegal option -- h`) keeps its
-    /// position relative to the bind error.
-    buffer_assignment_diagnostics: bool,
-    pending_assignment_diagnostics: Vec<u8>,
     /// GNU getopts.def dogetopts: binding the option character into an
     /// integer-attributed OPTIND (name == "OPTIND") whose value is not
     /// arithmetic (`?`/`:`) raises an evalexp error that abandons the
@@ -1712,6 +1704,19 @@ pub struct Executor {
     /// (error.c get_name_for_error with yy_input_name()=="command
     /// substitution") and a newline-terminated body reader.
     backtick_body_diagnostic: Cell<bool>,
+    /// An arithmetic-fallback command-substitution body is being
+    /// expanded RIGHT NOW — a `$((` span that failed GNU's
+    /// chk_arithsub and fell back to a command substitution
+    /// (subst.c:10841-10866 LPAREN arm -> comsub). Like a backtick
+    /// body it is parsed in the substituted child at execution time
+    /// (subst.c:7143 parse_and_execute), never read-parsed, so its
+    /// parse error is contained: `command substitution: line N:`
+    /// prefix, substitution empty, status 2, script continues
+    /// (rubash#2677). Only the containment decision points consult
+    /// this flag (see `comsub_body_parse_is_contained`); the
+    /// backtick-only reader semantics (newline termination, the
+    /// unclosed-input verdict) keep reading `backtick_body_diagnostic`.
+    arith_fallback_comsub_body: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending

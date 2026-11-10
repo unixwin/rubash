@@ -14,10 +14,10 @@
 //! unchanged. Array-element refusals name the array (`A: readonly
 //! variable`).
 //!
-//! rubash drains the arithmetic readonly marker through
-//! executor/arithmetic/mod.rs:1464-1481
-//! `report_arithmetic_readonly_error`, which prints with a raw
-//! `eprintln!` to the process stderr (line 1477), bypassing the
+//! rubash drains the arithmetic readonly marker in
+//! executor/arithmetic/mod.rs (the evaluation-order drain's
+//! Readonly arm), which prints with a raw
+//! `eprintln!` to the process stderr, bypassing the
 //! executor's per-command output/redirection plumbing — so every
 //! redirection shape leaks. Evaluation errors (division by zero)
 //! instead travel as values to the command layer and are printed

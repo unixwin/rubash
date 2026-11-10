@@ -671,9 +671,11 @@ impl Executor {
             }
         }
         let mut sink: Vec<u8> = Vec::new();
+        let mut out_sink: Vec<u8> = Vec::new();
         let _ = crate::builtins::set::unset_with_stderr(
             [name].into_iter(),
             &mut self.shell_state.env_vars,
+            &mut out_sink,
             &mut sink,
         );
         self.shell_state.variables.remove(name);

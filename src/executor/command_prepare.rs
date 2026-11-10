@@ -779,7 +779,7 @@ impl Executor {
             }
             self.pending_scalar_assignment =
                 expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
-            if !self.apply_shell_assignment(name, expanded_value) {
+            if !self.apply_shell_assignment(name, expanded_value, None) {
                 // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
                 // a failed standalone assignment (readonly violation, invalid
                 // nameref value, ...) prints its diagnostic and then
@@ -1708,6 +1708,10 @@ impl Executor {
             // node's line identity (Simple->line) — carry it like `line`
             // or the rebuilt command loses the continuation-aware stamp.
             first_word_end_line: cmd.first_word_end_line,
+            // rubash#3209/#3053: the first-element facts ride with
+            // the stamp they belong to.
+            first_element_redirect: cmd.first_element_redirect,
+            time_prefix_first_element_end_line: cmd.time_prefix_first_element_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at

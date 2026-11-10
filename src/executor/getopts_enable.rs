@@ -327,10 +327,12 @@ impl Executor {
     }
 
     /// GNU getopts binds through bind_variable whose diagnostics go to the
-    /// builtin's stderr — collect them into the buffered stream so they keep
-    /// their position relative to diagnostics the caller already buffered
-    /// (e.g. `illegal option -- h` precedes `getopts: `?': not a valid
-    /// identifier`, nameref11.sub:31).
+    /// builtin's stderr — route them through a Diag over the buffered
+    /// stream so they keep their position relative to diagnostics the
+    /// caller already buffered (e.g. `illegal option -- h` precedes
+    /// `getopts: `?': not a valid identifier`, nameref11.sub:31).
+    /// Stage-2 ④ Phase 4 (A3-R1): this replaces the deleted
+    /// buffer_assignment_diagnostics mechanism.
     fn getopts_apply_bind<W>(
         &mut self,
         command: &str,
@@ -341,12 +343,11 @@ impl Executor {
     where
         W: Write,
     {
-        self.buffer_assignment_diagnostics = true;
-        let ok = self.apply_shell_assignment_command(command, variable, value.to_string());
-        self.buffer_assignment_diagnostics = false;
-        let pending = std::mem::take(&mut self.pending_assignment_diagnostics);
-        let _ = stderr.write_all(&pending);
-        ok
+        let row = crate::executor::builtin_table::builtin_table_row(command)
+            .or_else(|| crate::executor::builtin_table::builtin_table_row("getopts"))
+            .expect("getopts row");
+        let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
+        self.apply_shell_assignment_command(command, variable, value.to_string(), Some(&mut diag))
     }
 
     /// bind_variable("OPTARG", ...): a readonly OPTARG reports the

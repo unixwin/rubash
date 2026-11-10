@@ -767,6 +767,16 @@ impl Executor {
                             .retain(|(name, _)| !name.starts_with("__RUBASH_PARSE"));
                         let mut fixed = function.as_ref().clone();
                         fixed.body = body;
+                        // rubash#3209: same definition-line restamp
+                        // as the parser path (bare `name()` only).
+                        if !fixed.keyword && fixed.has_parentheses {
+                            if let Some(definition_line) = cmd.line {
+                                crate::parser::restamp_function_body_first_command(
+                                    &mut fixed.body,
+                                    definition_line,
+                                );
+                            }
+                        }
                         fixed.unparsed_body_source = None;
                         fixed_cmd.function_command = Some(Box::new(fixed));
                         let fixed_function =
