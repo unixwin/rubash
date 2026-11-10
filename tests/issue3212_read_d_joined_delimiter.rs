@@ -11,9 +11,11 @@
 //! argument (builtins/read.def:385 `delim = (unsigned char)*list_optarg`)
 //! compared byte-by-byte against the raw stream (read.def:834
 //! `(unsigned char)c == delim`). Expectations below were measured
-//! against the oracle with script files under LC_ALL=C in BOTH the C
-//! and C.UTF-8 locales (identical for every cell here) and are
-//! byte-exact on stdout and exit status.
+//! against the oracle with script files: the first ten cells under
+//! LC_ALL=C (the oracle gives identical results for them under
+//! C.UTF-8 as well), the remaining four under LC_ALL=C.UTF-8, where
+//! read_mbchar consumption changes which bytes may terminate a
+//! record. All expectations are byte-exact on stdout and exit status.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -22,16 +24,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn run_script(script: &str) -> (String, String, Option<i32>) {
+    run_script_locale(script, "C")
+}
+
+fn run_script_locale(script: &str, locale: &str) -> (String, String, Option<i32>) {
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let dir: PathBuf =
-        std::env::temp_dir().join(format!("rubash-3212-{}-{n}", std::process::id()));
+    let dir: PathBuf = std::env::temp_dir().join(format!("rubash-3212-{}-{n}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     let path = dir.join("probe.sh");
     std::fs::write(&path, script).expect("write script");
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg(path.to_str().expect("utf8 path"))
-        .env("LC_ALL", "C")
+        .env("LC_ALL", locale)
         .env("TMPDIR", &dir)
         .stdin(Stdio::null())
         .output()
@@ -144,6 +149,69 @@ fn read_d_joined_escaped_delimiter_byte_is_data() {
     );
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "esc=<$'a\\303\\251b'> rc=0\n");
+}
+
+#[test]
+fn read_d_joined_utf8_locale_pipe_loop() {
+    // Multibyte locale residual (the read_helpers.rs face): GNU still
+    // terminates on the delimiter's FIRST BYTE (read_mbchar consumes
+    // the rest of any character the read head is NOT sitting on, but
+    // the byte the read head sits on is compared first — read.def:834
+    // runs before the add_char consumption). The mirror must split
+    // 'é' and leave its continuation byte to the next record, exactly
+    // as in the byte locale.
+    let (stdout, _, code) = run_script_locale(
+        "printf 'a\\303\\251b\\303\\251' | \
+         while IFS= read -rd $'\\303\\251' w; do printf '<%q>\\n' \"$w\"; done\n",
+        "C.UTF-8",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "<a>\n<$'\\251b'>\n");
+}
+
+#[test]
+fn read_d_joined_utf8_locale_other_char_lead_byte() {
+    // Stream holds 'è' (0xC3 0xA8), delimiter word names 'é': GNU
+    // splits at the shared lead byte 0xC3 inside 'è' too — the byte
+    // comparison does not ask which character the byte belongs to.
+    let (stdout, _, code) = run_script_locale(
+        "printf 'a\\303\\250b\\303\\250' | \
+         while IFS= read -rd $'\\303\\251' w; do printf '<%q>\\n' \"$w\"; done\n",
+        "C.UTF-8",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "<a>\n<$'\\250b'>\n");
+}
+
+#[test]
+fn read_d_joined_utf8_locale_continuation_byte_is_data_control() {
+    // Control / exemption lock: the delimiter word names the single
+    // byte 0xA9, which in a multibyte locale is only ever a
+    // continuation byte — GNU's read_mbchar consumption means it can
+    // never terminate a record, so the loop prints nothing. A fix
+    // that byte-scans in multibyte locales the way the byte locale
+    // does would wrongly split inside 'é' here.
+    let (stdout, _, code) = run_script_locale(
+        "printf 'a\\303\\251b\\303\\251' | \
+         while IFS= read -rd $'\\251' w; do printf '<%q>\\n' \"$w\"; done\n",
+        "C.UTF-8",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "");
+}
+
+#[test]
+fn read_d_joined_utf8_locale_herestring_delimiter_char_control() {
+    // Control: in a multibyte locale the delimiter CHARACTER itself
+    // terminates the record (GNU consumes its first byte as the
+    // delimiter and read_mbchar never runs on it).
+    let (stdout, _, code) = run_script_locale(
+        "IFS= read -rd $'\\303\\251' x <<< $'a\\303\\251b'; \
+         printf 'hs=<%q> rc=%s\\n' \"$x\" \"$?\"\n",
+        "C.UTF-8",
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "hs=<a> rc=0\n");
 }
 
 #[test]
