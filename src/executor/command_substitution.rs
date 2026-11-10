@@ -1968,6 +1968,7 @@ impl Executor {
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout

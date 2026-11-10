@@ -658,6 +658,17 @@ pub struct Executor {
     /// fact per group (the pending itself is consumed inside
     /// run_source_impl and never reached the classification).
     unit_signal_discard: bool,
+    /// rubash#2794: the unit's terminal word-expansion error was
+    /// adjudicated an interactive DISCARD — the FATAL class
+    /// (`${var:?}`, nounset unbound, bad @-transform) took
+    /// subst.c:10416-10418's error branch at its raise point
+    /// instead of the fatal FORCE_EOF branch. The raise points
+    /// note it where the adjudication is made
+    /// (`note_unit_expansion_error_discard`); the driver layer
+    /// takes it per unit like `unit_signal_discard`, so the run
+    /// classification can carry the discard fact the fate alone
+    /// (status 1, Completed) cannot express.
+    unit_expansion_error_discard: bool,
     /// rubash#2233, generalized by rubash#2346: set by the signal
     /// dispatch when an untrapped terminating signal is delivered on a
     /// path GNU settles through termsig_handler (sig.c:590): the termsig
