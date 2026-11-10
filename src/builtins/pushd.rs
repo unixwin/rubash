@@ -382,13 +382,48 @@ where
                     } else if no_cd {
                         dir.clone()
                     } else {
-                        let resolved = normalize_stack_dir(&dir, env_vars);
+                        // pushd.def:296-302 delegates this operand to
+                        // cd_builtin, so cd's own search funnel decides
+                        // the spelling that lands on the stack: the
+                        // CDPATH loop first (cd.def:353-388), then the
+                        // plain operand, then cdable_vars — all inside
+                        // cd::resolve_search_operand (rubash#3196). A
+                        // search hit is announced the way cd announces
+                        // it, before pushd's dirs listing (cd_builtin
+                        // runs before dirs_builtin): a non-empty CDPATH
+                        // unit echoes the found directory, cdable_vars
+                        // echoes the variable's raw value.
+                        let mut verbatim_announce: Option<String> = None;
+                        let mut announce_resolved = false;
+                        let effective = match crate::builtins::cd::resolve_search_operand(
+                            &dir, env_vars, cwd,
+                        ) {
+                            Some(crate::builtins::cd::SearchResolution::CdPath {
+                                candidate,
+                                announce,
+                            }) => {
+                                announce_resolved = announce;
+                                candidate
+                            }
+                            Some(crate::builtins::cd::SearchResolution::CdableVars { value }) => {
+                                verbatim_announce = Some(value.clone());
+                                value
+                            }
+                            None => dir.clone(),
+                        };
+                        let resolved = normalize_stack_dir(&effective, env_vars);
                         if !logical_dir_exists(&resolved, env_vars) {
                             diag.free(format_args!(
                                 "{dir}: {}",
                                 dir_operand_error_text(&resolved, env_vars)
                             ));
                             return Ok(EXECUTION_FAILURE);
+                        }
+                        if announce_resolved {
+                            writeln!(stdout, "{resolved}")?;
+                        }
+                        if let Some(value) = &verbatim_announce {
+                            writeln!(stdout, "{value}")?;
                         }
                         resolved
                     };
