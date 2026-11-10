@@ -1071,6 +1071,15 @@ impl Executor {
                 .insert(elem_base.to_string(), new_value);
             self.shell_state.env_vars.clear_array_cells_dirty();
             self.exit_code = 0;
+            // rubash#3097: an element bind is a completed bind — GNU's
+            // assignment driver runs stupidly_hack_special_variables
+            // after assign_array_element just as after bind_variable
+            // (subst.c:8169), and sv_locale (variables.c:6272) reads the
+            // NEW scalar projection (get_string_value, variables.c:2495:
+            // element 0 / the "0" key). This arm returns before the
+            // generic store tail, so the funnel note lives here, at the
+            // store — one bind, one note, recorded nowhere else.
+            self.note_locale_assignment(elem_base);
             return true;
         }
         // arrayfunc.c array_expand_index -> evalexp under no_expand rules:
@@ -1139,6 +1148,10 @@ impl Executor {
             .insert(elem_base.to_string(), format_indexed_array_storage(entries));
         self.shell_state.env_vars.clear_array_cells_dirty();
         self.exit_code = 0;
+        // rubash#3097: same funnel note as the assoc arm above — the
+        // element bind completed here, before the generic store tail
+        // could ever see it (subst.c:8169 -> variables.c:6272).
+        self.note_locale_assignment(elem_base);
         true
     }
 
@@ -2244,6 +2257,14 @@ impl Executor {
                 self.mark_exported(base_name);
             }
             self.exit_code = 0;
+            // rubash#3097: this arm is a completed bind too — GNU's
+            // bind lands in element 0 (variables.c:3128-3142) and the
+            // driver hack reads it back (subst.c:8169; for the for-loop
+            // caller, execute_cmd.c:3093/3097-3100). The arm returns
+            // before the generic tail, so the funnel note lives here:
+            // one bind, one note, at the store (the #3060 discipline —
+            // the for caller must not note a second time).
+            self.note_locale_assignment(base_name);
             return true;
         }
         if !is_array {
@@ -2295,6 +2316,11 @@ impl Executor {
                 self.mark_exported(base_name);
             }
             self.exit_code = 0;
+            // rubash#3097: the assoc twin of the scalar-over-array arm
+            // above — the bind landed on the "0" key (variables.c:
+            // 3139-3140) and the funnel reads that projection; note it
+            // here, once, at the store.
+            self.note_locale_assignment(base_name);
             return true;
         }
         // rubash#616 (1a): final mirror write — a compound `a=(...)` render

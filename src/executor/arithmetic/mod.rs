@@ -74,6 +74,32 @@ thread_local! {
     /// which GNU also leaves unredirected.
     static OPERAND_SUBSCRIPT_DIAG_CAPTURE: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+
+    /// rubash#3199 (S2 trace): the first unbound `$name` read found in a
+    /// raw indexed subscript by `expand_arith_indexed_subscripts`. GNU
+    /// traps it during expand_arith_string — param_expand's
+    /// `unbound_variable:` label (subst.c:11024-11037) reports the name
+    /// after the `$` — which is BEFORE evalexp runs, so the trace is
+    /// consulted ahead of the post-expansion nounset scan (whose
+    /// subject, the array name, is only an evalexp-time read). The
+    /// expansion itself erases the name (it expands to empty), so
+    /// without this trace the scan can never see it. Entries clear the
+    /// slot before their own expansion pass and take it at their
+    /// nounset scan point, so a trace cannot outlive the evaluation
+    /// whose subscript pass produced it.
+    static ARITH_SUBSCRIPT_UNBOUND: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+
+    /// rubash#3200: the unbound name an evaluator value read trapped
+    /// on (expr.c:1190-1199 expr_streval, reached through the value
+    /// recursion at expr.c:1241). The failure category travels as
+    /// `ArithmeticErrorCategory::UnboundVariable`; the NAME rides here
+    /// so the evaluation entries can render GNU's
+    /// `{name}: unbound variable` line. Cleared at every fresh
+    /// evaluation (eval_mutable_arith_result) and taken by the entry
+    /// that maps the category onto the nounset flags.
+    static ARITH_UNBOUND_NAME: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Arm the operand-subscript diagnostic capture (see the thread-local).
@@ -99,6 +125,45 @@ pub(in crate::executor) fn peek_arith_eval_error() -> Option<ArithEvalError> {
 /// Take (and clear) the non-fatal diagnostics of the last evaluation.
 pub(in crate::executor) fn take_arith_eval_diags() -> Vec<ArithEvalDiag> {
     ARITH_EVAL_DIAGS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+/// Record the #3199 subscript trace (first unbound `$name` wins: GNU's
+/// expand_arith_string walks the string left to right and traps on the
+/// first unbound expansion it performs).
+pub(super) fn record_arith_subscript_unbound(name: String) {
+    ARITH_SUBSCRIPT_UNBOUND.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(name);
+        }
+    });
+}
+
+/// Take (and clear) the #3199 subscript trace.
+pub(super) fn take_arith_subscript_unbound() -> Option<String> {
+    ARITH_SUBSCRIPT_UNBOUND.with(|slot| slot.borrow_mut().take())
+}
+
+/// Drop any #3199 subscript trace (evaluation-entry boundary).
+pub(super) fn clear_arith_subscript_unbound() {
+    ARITH_SUBSCRIPT_UNBOUND.with(|slot| *slot.borrow_mut() = None);
+}
+
+/// Record the #3200 evaluator-trap name (first trap wins: the
+/// innermost value frame is where expr_streval raised, and outer
+/// frames only propagate the failure).
+pub(super) fn record_arith_unbound_name(name: String) {
+    ARITH_UNBOUND_NAME.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(name);
+        }
+    });
+}
+
+/// Take (and clear) the #3200 evaluator-trap name.
+pub(super) fn take_arith_unbound_name() -> Option<String> {
+    ARITH_UNBOUND_NAME.with(|slot| slot.borrow_mut().take())
 }
 
 pub(super) fn record_arith_write(name: &str, old_value: Option<String>) {
@@ -333,6 +398,13 @@ pub(crate) enum ArithmeticErrorCategory {
     /// GNU expr.c:484-485: `curtok != 0` after `EXP_LOWEST()` — trailing
     /// input after a successful parse, e.g. `(( x=9 y=41 ))`.
     TrailingInput,
+    /// GNU expr.c:1190-1199 expr_streval: a read of a name with no
+    /// binding under nounset, reached through the value recursion
+    /// (expr.c:1241) where the entry-level text scan cannot see it
+    /// (rubash#3200). No evalerror record is raised for this class;
+    /// the entries render `{name}: unbound variable` from the
+    /// ARITH_UNBOUND_NAME slot and latch the nounset flags.
+    UnboundVariable,
 }
 
 /// GNU expr.c diagnostic class for the unparsed remainder of an arithmetic
@@ -734,6 +806,7 @@ impl Executor {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
+        clear_arith_subscript_unbound();
         // Stale nested-subscript failure marker (lvalue.rs records the
         // subscript text so evalerror reports it, GNU array_expand_index
         // style); each new evaluation starts clean.
@@ -860,7 +933,12 @@ impl Executor {
         if !skip_nounset
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
         {
-            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            // rubash#3199: a `$name` trapped inside a subscript during
+            // the pre-expansion precedes every evalexp-time read (GNU
+            // expands before evaluating), so the S2 trace is consulted
+            // before the scan can report the array name.
+            if let Some(name) = take_arith_subscript_unbound()
+                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
             {
                 *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 self.shell_state.arithmetic_nounset_error.set(true);
@@ -975,6 +1053,7 @@ impl Executor {
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
+        self.report_arithmetic_unbound_variable_error(category);
         self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
         // GNU prints bind/subscript diagnostics (`a[]: bad array
@@ -1143,7 +1222,11 @@ impl Executor {
         // arithmetic-subscript entry (rubash#639); without it
         // `set -u; a[k]=v` silently stored.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            // rubash#3199: same S2 consultation as the command entry —
+            // a trace recorded by an outer evaluation's subscript
+            // pre-expansion precedes this entry's own reads.
+            if let Some(name) = take_arith_subscript_unbound()
+                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
             {
                 *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 self.shell_state.arithmetic_nounset_error.set(true);
@@ -1173,6 +1256,7 @@ impl Executor {
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
+        self.report_arithmetic_unbound_variable_error(category);
         self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
         self.flush_arith_diags(None);
@@ -1349,6 +1433,7 @@ impl Executor {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
         let _ = take_arith_eval_diags();
+        clear_arith_subscript_unbound();
         self.shell_state
             .env_vars
             .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
@@ -1409,7 +1494,9 @@ impl Executor {
         let expression = normalize_arithmetic_quotes(&expanded);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            if let Some(name) = arithmetic_unbound_variable(&expression, &self.shell_state.env_vars)
+            // rubash#3199: same S2 consultation as the command entry.
+            if let Some(name) = take_arith_subscript_unbound()
+                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
             {
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1444,6 +1531,7 @@ impl Executor {
         self.shell_state
             .arithmetic_last_error_category
             .set(category);
+        self.report_arithmetic_unbound_variable_error(category);
         self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
         // Expansion context: this_command_name is NULL inside evalexp for
@@ -1459,6 +1547,29 @@ impl Executor {
         sync_arith_writes_to_shell_state(self);
 
         value
+    }
+
+    /// rubash#3200: map an evaluator value-recursion nounset trap
+    /// (expr.c:1190-1199 expr_streval, reached through the value
+    /// recursion at expr.c:1241) onto the same flags + diagnostic line
+    /// the entry-level scan produces, so the command reporters abort
+    /// with 127 exactly as for a scanned name.
+    fn report_arithmetic_unbound_variable_error(
+        &mut self,
+        category: Option<ArithmeticErrorCategory>,
+    ) {
+        if category != Some(ArithmeticErrorCategory::UnboundVariable) {
+            return;
+        }
+        let Some(name) = take_arith_unbound_name() else {
+            return;
+        };
+        self.shell_state.arithmetic_nounset_error.set(true);
+        if !self.shell_state.arithmetic_expansion_error.replace(true) {
+            eprintln!("{}{}: unbound variable", self.error_prefix(), name);
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+        }
     }
 
     /// GNU expr.c:350: an att_noassign bind inside arithmetic fails
@@ -1755,6 +1866,26 @@ impl Executor {
                     // product — pass it through so a second pass stays
                     // idempotent (same rule as the assoc scanner above).
                     if !raw.is_empty() && !raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
+                        // rubash#3199: GNU traps an unbound `$name`
+                        // inside the subscript during THIS expansion
+                        // (subst.c:11024-11037), before the array
+                        // itself is evaluated — leave the S2 trace for
+                        // the evaluation entry's nounset scan point,
+                        // which consults it ahead of the
+                        // post-expansion scan (the expansion below
+                        // erases the name to empty text).
+                        if crate::builtins::set::shell_option_enabled(
+                            &self.shell_state.env_vars,
+                            "nounset",
+                        ) {
+                            if let Some(name) = first_unbound_dollar_read(
+                                raw,
+                                &self.shell_state.env_vars,
+                                self.shell_state.positional_window().len(),
+                            ) {
+                                record_arith_subscript_unbound(name);
+                            }
+                        }
                         let expanded = self.expand_arithmetic_expression_mut(raw);
                         output.push_str(name);
                         output.push('[');
@@ -2277,6 +2408,287 @@ pub(crate) fn eval_conditional_arith_value_categorized_with_writes(
     (result, writes, category)
 }
 
+/// Whether an arithmetic read of `name` has no binding — the shared
+/// nounset predicate behind [`arithmetic_unbound_variable`] and the
+/// raw-subscript `$` scan (rubash#3199). Dynamic parameters resolved
+/// by the evaluator without an env_vars entry (RANDOM/SRANDOM advance
+/// the RNG state; BASHPID/BASH_SUBSHELL/... come from the Executor's
+/// dynamic_values snapshot) count as bound: GNU expr_streval sees all
+/// of them through find_variable — unless `unset -v` unbound the
+/// dynamic name (variables.c:3839 unbind_variable).
+pub(super) fn arithmetic_name_is_unbound(
+    name: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> bool {
+    if env_vars.contains_key(name) {
+        return false;
+    }
+    !(matches!(
+        name,
+        "RANDOM"
+            | "SRANDOM"
+            | "SECONDS"
+            | "EPOCHSECONDS"
+            | "EPOCHREALTIME"
+            | "BASH_MONOSECONDS"
+            | "LINENO"
+            | "BASHPID"
+            | "BASH_SUBSHELL"
+            | "BASH_ARGV0"
+            | "FUNCNAME"
+            | "GROUPS"
+            | "BASH_COMMAND"
+            | "SHELLOPTS"
+            | "BASHOPTS"
+            | "PIPESTATUS"
+    ) && !is_marked_var(env_vars, UNSET_DYNAMIC_VARS, name))
+}
+
+/// The first unbound `$name` / `${name}` read in RAW (pre-expansion)
+/// subscript text, or None. GNU expands a subscript as a unit before
+/// the array itself is evaluated (arrayfunc.c:1368-1378
+/// array_expand_index; subst.c:11107 expand_array_subscript), and
+/// param_expand traps an unbound read at its `unbound_variable:` label
+/// (subst.c:11024-11037), naming the name after the `$`. The expansion
+/// erases the name (an unbound read expands to empty), so the
+/// post-expansion nounset scan can never see it; the read must be
+/// found here, on the raw text, under param_expand's own rules:
+/// - plain `$name` / `${name}` (and the name in `${name[...]}`) read
+///   the name; a `${name[...]}` subscript is expanded first, so its
+///   own `$` reads trap first;
+/// - the `-` / `=` / `+` operator family (with or without `:`) guards
+///   the name — only a `$` read inside the word after the operator
+///   can trap;
+/// - the `#` / `%` / `/` / `^` / `,` / `@` and substring-`:` forms
+///   read the name, then their pattern/word text expands like the
+///   enclosing text;
+/// - `?` / `:?` raise their own diagnostic, never `unbound variable`;
+/// - `$(...)`, `` `...` `` and `$((...))` are separate frames whose
+///   own machinery traps inside them; `$'...'` / `$"..."` hold no
+///   `$` reads; a `\` escape makes the next character data;
+/// - the special parameters (`$@`, `$*`, `$#`, `$?`, `$$`, `$!`,
+///   `$-`, `$0`) are always bound; positional reads (`$1`..`$9`,
+///   `${10}`..) trap past the positional count.
+fn first_unbound_dollar_read(
+    text: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
+) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_arith_backquote_span(bytes, index),
+            b'$' => {
+                let rest = &text[index + 1..];
+                match rest.chars().next() {
+                    // Command substitution and arithmetic expansion are
+                    // separate frames; their own entries trap inside.
+                    Some('(') => index = skip_arith_paren_span(bytes, index + 1),
+                    Some('{') => {
+                        let Some(end) =
+                            crate::executor::parameter_ops::matching_parameter_brace(&rest[1..])
+                        else {
+                            // Unterminated: the bad-substitution face
+                            // owns this text, not the nounset scan.
+                            return None;
+                        };
+                        let inner = &rest[1..1 + end];
+                        if let Some(name) =
+                            unbound_in_parameter_expansion(inner, env_vars, positional_count)
+                        {
+                            return Some(name);
+                        }
+                        index += end + 3;
+                    }
+                    Some('\'') => index = skip_arith_quoted_span(bytes, index + 1, b'\'', true),
+                    Some('"') => index = skip_arith_quoted_span(bytes, index + 1, b'"', true),
+                    Some(c) if c == '_' || c.is_ascii_alphabetic() => {
+                        let name_end = rest
+                            .find(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
+                            .unwrap_or(rest.len());
+                        let name = &rest[..name_end];
+                        if arithmetic_name_is_unbound(name, env_vars) {
+                            return Some(name.to_string());
+                        }
+                        index += 1 + name_end;
+                    }
+                    Some(c) if c.is_ascii_digit() => {
+                        // $0 is the program name; $1..$9 are positional.
+                        let digit = c as usize - '0' as usize;
+                        if digit >= 1 && digit > positional_count {
+                            return Some(digit.to_string());
+                        }
+                        index += 2;
+                    }
+                    // $@ $* $# $? $$ $! $- and a stray or trailing $:
+                    // always bound, or plain data.
+                    _ => index += 1,
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// The unbound read inside one `${...}` body (`inner` excludes the
+/// braces), applying the operator rules documented on
+/// [`first_unbound_dollar_read`].
+fn unbound_in_parameter_expansion(
+    inner: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
+) -> Option<String> {
+    let mut rest = inner;
+    // `${#name}` (length) reads the name; `${#}` and `${#@}` / `${#*}`
+    // are the positional count / set — always bound, nothing follows.
+    if let Some(stripped) = rest.strip_prefix('#') {
+        if stripped.is_empty() || stripped.starts_with(['@', '*']) {
+            return None;
+        }
+        rest = stripped;
+    }
+    // `${!name}` indirection reads the name it dereferences.
+    if let Some(stripped) = rest.strip_prefix('!') {
+        rest = stripped;
+    }
+    let bytes = rest.as_bytes();
+    let name_end = if bytes.first().is_some_and(u8::is_ascii_digit) {
+        bytes
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(bytes.len())
+    } else if bytes
+        .first()
+        .is_some_and(|b| *b == b'_' || b.is_ascii_alphabetic())
+    {
+        bytes
+            .iter()
+            .position(|b| !(*b == b'_' || b.is_ascii_alphanumeric()))
+            .unwrap_or(bytes.len())
+    } else {
+        // A special parameter (${@}, ${?}, ...): always bound. Any
+        // operator word after it can still hold a trapping read.
+        let after = rest.char_indices().nth(1).map_or(rest.len(), |(i, _)| i);
+        return first_unbound_dollar_read(&rest[after..], env_vars, positional_count);
+    };
+    let name = &rest[..name_end];
+    let name_unbound = if bytes.first().is_some_and(u8::is_ascii_digit) {
+        // ${0} is the program name; ${10}.. are positional.
+        name.parse::<usize>()
+            .is_ok_and(|n| n >= 1 && n > positional_count)
+    } else {
+        arithmetic_name_is_unbound(name, env_vars)
+    };
+    let mut remainder = &rest[name_end..];
+    // A subscripted name expands its subscript (expand_subscript_string)
+    // before the array is fetched, so a trapping read inside the
+    // brackets precedes the name's own read.
+    if remainder.starts_with('[') {
+        let end = assoc_subscript_end(remainder.as_bytes(), 0);
+        if end > 1 && remainder.as_bytes()[end - 1] == b']' {
+            if let Some(found) =
+                first_unbound_dollar_read(&remainder[1..end - 1], env_vars, positional_count)
+            {
+                return Some(found);
+            }
+            remainder = &remainder[end..];
+        }
+    }
+    match remainder.chars().next() {
+        None => name_unbound.then(|| name.to_string()),
+        // Guarded family: the name cannot trap; the word can.
+        Some('-' | '=' | '+') => {
+            first_unbound_dollar_read(&remainder[1..], env_vars, positional_count)
+        }
+        Some(':') => match remainder.chars().nth(1) {
+            Some('-' | '=' | '+') => {
+                first_unbound_dollar_read(&remainder[2..], env_vars, positional_count)
+            }
+            // `:?` raises its own diagnostic, never `unbound variable`.
+            Some('?') => None,
+            // Substring form: the name is read; the offset/length text
+            // is arithmetic and can hold its own `$` reads.
+            _ if name_unbound => Some(name.to_string()),
+            _ => first_unbound_dollar_read(&remainder[1..], env_vars, positional_count),
+        },
+        // `?` raises its own diagnostic, never `unbound variable`.
+        Some('?') => None,
+        // Pattern / case / transform operators read the name; their
+        // pattern or word text expands like the enclosing text.
+        Some('#' | '%' | '/' | '^' | ',' | '@') => {
+            if name_unbound {
+                Some(name.to_string())
+            } else {
+                first_unbound_dollar_read(&remainder[1..], env_vars, positional_count)
+            }
+        }
+        _ => name_unbound.then(|| name.to_string()),
+    }
+}
+
+/// Skip a `(...)` span whose opening paren is at `open`, honoring
+/// quotes, backquotes and escapes so a paren inside them does not
+/// unbalance the count. Returns the index just past the matching `)`
+/// (or the end of input when unbalanced).
+fn skip_arith_paren_span(bytes: &[u8], open: usize) -> usize {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'\'' => index = skip_arith_quoted_span(bytes, index, b'\'', false),
+            b'"' => index = skip_arith_quoted_span(bytes, index, b'"', true),
+            b'`' => index = skip_arith_backquote_span(bytes, index),
+            b'(' => {
+                depth += 1;
+                index += 1;
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Skip a quoted span whose opening quote is at `open`. With
+/// `backslash_escapes` an escaped character cannot close the span
+/// (double quotes and ANSI-C `$'...'`); in a plain single-quoted span
+/// a backslash is literal data.
+fn skip_arith_quoted_span(bytes: &[u8], open: usize, quote: u8, backslash_escapes: bool) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if backslash_escapes => index += 2,
+            ch if ch == quote => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Skip a backquote span whose opening backquote is at `open`
+/// (backquotes process backslash escapes of `` ` ``, `$` and `\`).
+fn skip_arith_backquote_span(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
 pub(super) fn arithmetic_unbound_variable(
     expression: &str,
     env_vars: &crate::shell::var_table::VarTable,
@@ -2369,34 +2781,7 @@ pub(super) fn arithmetic_unbound_variable(
             previous = name.chars().last();
             continue;
         }
-        if !env_vars.contains_key(&name)
-            && !(matches!(
-                name.as_str(),
-                // Dynamic parameters resolved by the evaluator without an
-                // env_vars entry (RANDOM/SRANDOM advance the RNG state;
-                // BASHPID/BASH_SUBSHELL/... come from the Executor's
-                // dynamic_values snapshot). GNU expr_streval sees all of
-                // them through find_variable, so under `set -u` they are
-                // bound — unless `unset -v` unbound the dynamic name
-                // (variables.c:3839 unbind_variable).
-                "RANDOM"
-                    | "SRANDOM"
-                    | "SECONDS"
-                    | "EPOCHSECONDS"
-                    | "EPOCHREALTIME"
-                    | "BASH_MONOSECONDS"
-                    | "LINENO"
-                    | "BASHPID"
-                    | "BASH_SUBSHELL"
-                    | "BASH_ARGV0"
-                    | "FUNCNAME"
-                    | "GROUPS"
-                    | "BASH_COMMAND"
-                    | "SHELLOPTS"
-                    | "BASHOPTS"
-                    | "PIPESTATUS"
-            ) && !is_marked_var(env_vars, UNSET_DYNAMIC_VARS, &name))
-        {
+        if arithmetic_name_is_unbound(&name, env_vars) {
             return Some(name);
         }
         previous = name.chars().last();
@@ -3534,6 +3919,8 @@ fn eval_mutable_arith_result(
     // run the parser).
     let _ = take_arith_eval_error();
     let _ = take_arith_eval_diags();
+    // rubash#3200: the evaluator-trap name slot is per-evaluation too.
+    let _ = take_arith_unbound_name();
     // Parse-cache fast path (first knife): the key is the raw expression
     // text (no normalization) plus the no_expand flag. A hit executes the
     // specialized closure with live reads; a load that finds a
@@ -3620,6 +4007,15 @@ fn eval_mutable_arith_result(
             // Executor layer prints the `readonly variable` diagnostic
             // from the marker. GNU raises no evalerror here, so record
             // none — synthesizing "operand expected" would double-report.
+        } else if value.is_none()
+            && parser.error_category == Some(ArithmeticErrorCategory::UnboundVariable)
+        {
+            // rubash#3200: a value-recursion read trapped on an
+            // unbound name under nounset (expr.c:1190-1199 via
+            // expr.c:1241). GNU raises no evalerror here either —
+            // the entries render `{name}: unbound variable` from the
+            // ARITH_UNBOUND_NAME slot — so record none, mirroring
+            // the readonly arm above.
         } else if value.is_none() {
             // The parser returned no value without recording a cause —
             // GNU exp0's operand-expected (expr.c:1120) with lasttp at the

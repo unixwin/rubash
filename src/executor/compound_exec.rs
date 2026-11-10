@@ -257,7 +257,7 @@ impl Executor {
         // the respawn child's re-parse collapses every body onto the
         // prelude's own lines, so the recorded span is the only way
         // back to per-command definition lines. Each entry is `name=`
-        // plus comma-joined `line.end_line.logical_line` triples
+        // plus the comma-joined span list format_line_spans renders
         // (0 = None) in collect_command_line_spans traversal order;
         // the set rides the indexed-array codec like its siblings.
         let span_entries: Vec<String> = self
@@ -266,18 +266,7 @@ impl Executor {
             .map(|(name, body)| {
                 let mut spans = Vec::new();
                 crate::parser::collect_command_line_spans(&body.commands, &mut spans);
-                let rendered = spans
-                    .iter()
-                    .map(|span| {
-                        format!(
-                            "{}.{}.{}",
-                            span.line.unwrap_or(0),
-                            span.end_line.unwrap_or(0),
-                            span.logical_line.unwrap_or(0)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let rendered = format_line_spans(&spans);
                 format!("{name}={rendered}")
             })
             .collect();
@@ -301,28 +290,40 @@ fn parse_span_slot(text: &str) -> Option<Option<usize>> {
     }
 }
 
-/// rubash#2332: parse a comma-joined `line.end_line.logical_line`
-/// triple list (the encoding both span carriers share). Returns None
-/// when any triple is malformed — a span that cannot be parsed must
-/// never reach a re-seed. The empty string is an empty vector.
-fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
+/// rubash#2332: parse a comma-joined
+/// `line.end_line.logical_line.first_word_end_line` list (the
+/// encoding both span carriers share; the fourth field is
+/// rubash#3054). Returns None when any entry is malformed — a span
+/// that cannot be parsed must never reach a re-seed. The empty
+/// string is an empty vector. A three-field entry is the pre-#3054
+/// form and reads with no first-element stamp; parent and child are
+/// the same binary, so it can only arrive from a hand-built stamp,
+/// never from a live transport.
+fn parse_line_spans(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
     let mut spans = Vec::new();
     if !text.is_empty() {
-        for triple in text.split(',') {
-            let fields: Vec<&str> = triple.split('.').collect();
-            if fields.len() != 3 {
+        for entry in text.split(',') {
+            let fields: Vec<&str> = entry.split('.').collect();
+            if fields.len() != 3 && fields.len() != 4 {
                 return None;
             }
+            let first_word_end_line = if fields.len() == 4 {
+                parse_span_slot(fields[3])
+            } else {
+                Some(None)
+            };
             match (
                 parse_span_slot(fields[0]),
                 parse_span_slot(fields[1]),
                 parse_span_slot(fields[2]),
+                first_word_end_line,
             ) {
-                (Some(line), Some(end_line), Some(logical_line)) => {
+                (Some(line), Some(end_line), Some(logical_line), Some(first_word_end_line)) => {
                     spans.push(crate::parser::CommandLineSpan {
                         line,
                         end_line,
                         logical_line,
+                        first_word_end_line,
                     });
                 }
                 _ => return None,
@@ -332,17 +333,18 @@ fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineS
     Some(spans)
 }
 
-/// rubash#2332: format spans in the triple-list encoding
-/// parse_line_span_triples reads (None renders as 0).
-fn format_line_span_triples(spans: &[crate::parser::CommandLineSpan]) -> String {
+/// rubash#2332: format spans in the list encoding parse_line_spans
+/// reads (None renders as 0).
+fn format_line_spans(spans: &[crate::parser::CommandLineSpan]) -> String {
     spans
         .iter()
         .map(|span| {
             format!(
-                "{}.{}.{}",
+                "{}.{}.{}.{}",
                 span.line.unwrap_or(0),
                 span.end_line.unwrap_or(0),
-                span.logical_line.unwrap_or(0)
+                span.logical_line.unwrap_or(0),
+                span.first_word_end_line.unwrap_or(0)
             )
         })
         .collect::<Vec<_>>()
@@ -361,7 +363,7 @@ pub(in crate::executor) fn decode_function_line_spans(
         let Some((name, nodes)) = entry.split_once('=') else {
             continue;
         };
-        if let Some(spans) = parse_line_span_triples(nodes) {
+        if let Some(spans) = parse_line_spans(nodes) {
             map.insert(name.to_string(), spans);
         }
     }
@@ -371,15 +373,12 @@ pub(in crate::executor) fn decode_function_line_spans(
 /// rubash#2332: encode a __RUBASH_FORK_ROOT_SPANS stamp value —
 /// element 0 is the count of prelude function-definition commands
 /// ahead of the body in the child's `-c` source, element 1 the root
-/// body's span triples.
+/// body's span list.
 pub(in crate::executor) fn encode_root_line_spans(
     prelude_defs: usize,
     spans: &[crate::parser::CommandLineSpan],
 ) -> String {
-    format_indexed_array_values(vec![
-        prelude_defs.to_string(),
-        format_line_span_triples(spans),
-    ])
+    format_indexed_array_values(vec![prelude_defs.to_string(), format_line_spans(spans)])
 }
 
 /// rubash#2332: decode a __RUBASH_FORK_ROOT_SPANS stamp value into
@@ -391,7 +390,7 @@ pub(in crate::executor) fn decode_root_line_spans(
 ) -> Option<(usize, Vec<crate::parser::CommandLineSpan>)> {
     let values = array_values(value);
     let prelude_defs: usize = values.first()?.parse().ok()?;
-    let spans = parse_line_span_triples(values.get(1)?)?;
+    let spans = parse_line_spans(values.get(1)?)?;
     Some((prelude_defs, spans))
 }
 
@@ -1339,7 +1338,7 @@ impl Executor {
                     &mut process,
                     &program,
                 );
-                process.current_dir(&self.shell_state.cwd);
+                self.stamp_spawn_cwd(&mut process);
                 suppress_orphan_console(&mut process);
                 process.spawn().map(crate::fd::SpawnedChild::from)
             };
@@ -5660,7 +5659,7 @@ impl Executor {
                 child.pre_exec(crate::builtins::kill::child_pre_exec_unblock_sigpipe);
             }
             suppress_orphan_console(&mut child);
-            child.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut child);
             // rubash#2356: spill + apply the gathered respawn
             // environment (see the gather at the construction site).
             // A direct (foreign) child gathered nothing and keeps
@@ -6826,7 +6825,15 @@ impl Executor {
                     {
                         return false;
                     }
-                    if case_pattern_has_extglob(&stripped) {
+                    // rubash#3224: the extglob route is taken only while
+                    // the LIVE gate is on — GNU execute_cmd.c:3736 matches
+                    // case patterns through strmatch with FNMATCH_EXTFLAG
+                    // evaluated from the live `extended_glob` (pathexp.h),
+                    // so with the gate off (e.g. a same-unit `shopt -u`
+                    // already executed) the operators are literal text
+                    // and the plain glob matcher below is the correct
+                    // route.
+                    if case_pattern_has_extglob(&stripped) && self.extglob_enabled() {
                         // Extglob staging needs the word chars immediately
                         // (no literal fast path in extglob_matches_at); seed
                         // the lazy cell here.

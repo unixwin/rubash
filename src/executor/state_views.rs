@@ -744,6 +744,8 @@ impl Executor {
         match status {
             Ok(0) => {
                 self.sync_cd_variables();
+                // rubash#3198: see execute_cd's anchor warm-up.
+                self.refresh_cwd_anchor();
                 true
             }
             _ => false,

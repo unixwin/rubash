@@ -2192,6 +2192,23 @@ pub(in crate::executor) fn decode_double_quotes_in_quoted_parameter_word(
             index = end;
             continue;
         }
+        // rubash#3086: `$"..."` locale string — GNU's extraction-time
+        // reader turns it into a genuine double-quoted span before the
+        // word is ever scanned (parse.y:5546-5610 read_token_word:
+        // locale_expand, then the sh_mkdoublequoted re-wrap at
+        // parse.y:5582-5595; the ${...} extraction scan rides the same
+        // reader, parse.y:4095-4126). Consume the `$` sigil and let the
+        // double-quote sentence decode below process the span exactly
+        // like a bare `"..."`. Without this the span's opening quote was
+        // consumed as a plain sentence opener and the orphaned `$`
+        // reached the expansion walker, which read the span's first
+        // word as a parameter name (`${q-$"a b"}` expanded `$a` and
+        // lost it). Heredoc words keep the raw text: GNU's
+        // here-document scan does not locale-decode inside ${...}
+        // words either (the `$'` arm above is gated the same way).
+        if chars[index] == '$' && chars.get(index + 1) == Some(&'"') && !heredoc {
+            index += 1;
+        }
         if chars[index] != '"' {
             output.push(chars[index]);
             index += 1;

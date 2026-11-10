@@ -38,7 +38,7 @@ use crate::executor::builtin_diag::{Diag, DiagKind, PrologParts};
 use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
 use crate::executor::builtin_table::builtin_table_row;
 use crate::shell::VariableStore;
-use assign::assign_declare_names;
+use assign::{assign_declare_names, LocaleFunnelRecord};
 use attrs::{apply_declare_attrs, DeclareOptions};
 use marks::unmark_typed;
 use names::{
@@ -1275,6 +1275,7 @@ where
     // the pflag branch runs before all making-variables machinery, so a
     // valued print operand is never bound (`declare -p dv=6` reports
     // `dv=6: not found`, E1). The assign stage is skipped outright.
+    let mut locale_funnel = LocaleFunnelRecord::default();
     if !print
         && assign_declare_names(
             command_name,
@@ -1292,6 +1293,7 @@ where
             prolog,
             oob_word,
             written_hints,
+            &mut locale_funnel,
         )? != EXECUTION_SUCCESS
     {
         attr_status = EXECUTION_FAILURE;
@@ -1373,6 +1375,41 @@ where
         });
         if names_path {
             crate::builtins::hash::flush_command_hash_table(variables);
+        }
+        // GNU builtins/declare.def:1105: stupidly_hack_special_variables
+        // runs after EVERY variable the declare loop processes, on top
+        // of any fire the bind itself produced (rubash#3066). The
+        // assign pass's record (see LocaleFunnelRecord) says which
+        // operands still owe that hack fire: compound binds (their
+        // assign-phase fire was the pre-declaration assignment's,
+        // subst.c:8169) and operands that never fired there
+        // (attribute-only conversions of an existing scalar —
+        // `LC_ALL=bogus; declare -a LC_ALL` warns again with the
+        // converted element value — and element binds). A plain
+        // scalar bind's assign-phase fire already plays the hack's
+        // role and is not doubled. The hack runs here, after the
+        // attribute pass, so a conversion's storage and marks are in
+        // their final shape when sv_locale reads the projection
+        // (variables.c:6272 -> get_string_value, variables.c:2495).
+        for (index, operand) in names.iter().enumerate() {
+            let base = operand
+                .split_once('=')
+                .map(|(base, _)| base)
+                .unwrap_or(operand)
+                .trim_end_matches('+');
+            let base = base.split('[').next().unwrap_or(base);
+            if deleted_names.contains(base) {
+                continue;
+            }
+            // A compound operand's assign-phase fire was not the hack
+            // (it is still owed); a plain bind's was (skip); anything
+            // else never fired in the assign pass (owed outright).
+            if locale_funnel.fired.contains(&index) && !locale_funnel.compound.contains(&index) {
+                continue;
+            }
+            if let Some(warning) = crate::locale::locale_assignment_warning(base, variables) {
+                bare_diag_line(diag, prolog, variables, &format!("warning: {warning}"));
+            }
         }
     }
 
