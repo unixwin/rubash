@@ -4553,6 +4553,22 @@ fn run_source_impl_inner_body(
             line,
         );
     }
+    // rubash#2789: GNU validates substitution bodies when the
+    // enclosing command is READ (parse.y:4451 parse_comsub), so a
+    // body grammar failure is this unit's first read error and kills
+    // it before anything executes — see
+    // Executor::screen_comsub_bodies_at_read. It runs ahead of the
+    // unit voiding below for the same reason (a top-level marker
+    // later in the unit is an error GNU's reader never reaches).
+    // Interactive readers keep their own per-line error reporting
+    // and discard shape; diagnostic-owned prefix runs
+    // (suppress_unclosed_diagnostic) keep their caller's single
+    // report and unchanged behavior.
+    if !interactive && !suppress_unclosed_diagnostic {
+        if let Some(status) = executor.screen_comsub_bodies_at_read(&ast.commands) {
+            return status;
+        }
+    }
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
             eprintln!("{error}");
