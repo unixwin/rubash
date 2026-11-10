@@ -128,6 +128,23 @@ where
         return Ok(true);
     }
 
+    // rubash#2717: a slash-bearing name is qualified by file_status
+    // alone (FS_EXECABLE; see slash_name_is_describable in
+    // executor::path) and reported verbatim — the find_user_command
+    // lose-on report below serves slash-free names only, whose
+    // existing non-executable PATH hits GNU does report.
+    if crate::executor::path::has_path_separator(name) {
+        let env_vars = describe_env(use_standard_path);
+        if !crate::executor::path::slash_name_is_describable(name, &env_vars) {
+            return Ok(false);
+        }
+        match mode {
+            DescribeMode::Reusable => writeln!(stdout, "{name}")?,
+            DescribeMode::Verbose => writeln!(stdout, "{name} is {name}")?,
+        }
+        return Ok(true);
+    }
+
     let Some(path) = find_in_path(name, use_standard_path) else {
         return Ok(false);
     };
@@ -146,12 +163,7 @@ fn is_shell_builtin(name: &str) -> bool {
     crate::executor::builtin_table::is_table_builtin_name(name)
 }
 
-fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
-    // GNU builtins/type.def:371-379 describe_command(): `command -p`
-    // (CDESC_STDPATH) walks conf_standard_path(); every other mode calls
-    // find_user_command (findcmd.c:247) — the same FS_EXEC_PREFERRED +
-    // file_to_lose_on walk the executor uses to run commands. Delegating
-    // to crate::executor::path keeps describe and execute on one lookup.
+fn describe_env(use_standard_path: bool) -> HashMap<String, String> {
     let mut env_vars: HashMap<String, String> = crate::executor::env_helpers::process_env_pairs()
         .into_iter()
         .collect();
@@ -161,6 +173,16 @@ fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
             crate::executor::path::standard_path(&env_vars),
         );
     }
+    env_vars
+}
+
+fn find_in_path(name: &str, use_standard_path: bool) -> Option<PathBuf> {
+    // GNU builtins/type.def:371-379 describe_command(): `command -p`
+    // (CDESC_STDPATH) walks conf_standard_path(); every other mode calls
+    // find_user_command (findcmd.c:247) — the same FS_EXEC_PREFERRED +
+    // file_to_lose_on walk the executor uses to run commands. Delegating
+    // to crate::executor::path keeps describe and execute on one lookup.
+    let env_vars = describe_env(use_standard_path);
     crate::executor::path::find_user_command(name, &env_vars)
 }
 

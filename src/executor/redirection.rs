@@ -1681,7 +1681,15 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.command_output_redirect_fails_impl(cmd, true);
         }
-        match self.apply_dynamic_fd_var_redirects(cmd, true) {
+        // rubash#2629: this bracket is a verdict-only pass on the
+        // PARENT executor — the stage element's own applier run is
+        // the list's real evaluation (in the forked child, GNU's
+        // model), so the deferred writes this pass's expansions
+        // queue must not survive it (the #2558 pre-scan discipline):
+        // mark the queue and roll it back on every exit.
+        let writes_mark = Self::scan_pending_writes_mark();
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
                 let result = self.command_output_redirect_fails_impl(cmd, true);
                 self.undo_child_fd_var_redirects();
@@ -1695,7 +1703,9 @@ impl Executor {
                 Ok(true)
             }
             Err(error) => Err(error),
-        }
+        };
+        Self::scan_pending_writes_rollback(writes_mark);
+        verdict
     }
 
     fn command_output_redirect_fails_impl(
@@ -3087,8 +3097,7 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
                     match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
                         Some(error) => Err(crate::posix_errors::path_error(&target, error)),
@@ -3295,7 +3304,23 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         }
-        let applied = matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
+        // rubash#2629: when an earlier applier run for this same
+        // list already produced the binds (the stage executor's own
+        // apply, or a gate bracket's), rebind from that record
+        // instead of running the applier again — a second run
+        // re-expands the `{var}` target words, and the stage body's
+        // intervening execute_command entries have cleared the
+        // target memo by now, so a side-effect target (`$((i+=1))`
+        // in the filename) would evaluate twice for one element,
+        // where GNU's single do_redirections pass evaluates it
+        // once. The replay falls back to the real applier when no
+        // matching record exists.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let applied = self.replay_dynamic_fd_var_snapshot(cmd, true)
+            || matches!(
+                self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable),
+                Ok(false)
+            );
         let result = self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         if applied {
             self.undo_child_fd_var_redirects();

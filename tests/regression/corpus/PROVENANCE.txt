@@ -3,8 +3,12 @@ Provenance (vendored test corpus, do not edit):
   file header). Source of record: D:/repo/rubash/target-ecosys5/tools/nvm
   (ecosys5 lane clone, 2026-09-27).
 - corpus/ruby-build/ruby-build + LICENSE: rbenv/ruby-build master bin script,
-  MIT. Source: D:/repo/rubash/target-ecosys5/tools/ruby-build. Used only as
-  a parse/perf canary; not executed against the network.
+  MIT. Source: D:/repo/rubash/target-ecosys5/tools/ruby-build. Formerly only
+  a parse/perf canary; since rubash#2908 it is also EXECUTED offline (never
+  against the network) by the GNU-diff golden fixture
+  tests/regression/fixtures/issue2908-ruby-build-exec.sh: --definitions and
+  --resolve over a fixture registry plus file:// fake-definition installs
+  with checksum/extract/hook flow, byte-pinned to GNU bash 5.3.20.
 GPL-licensed corpora (bash_completion, git-completion.bash) are NOT vendored
 per target-ecosys/REPORT.md license guidance; their verified shapes are
 codified as minimal license-clean fixtures instead.
