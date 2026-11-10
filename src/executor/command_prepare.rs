@@ -1708,6 +1708,10 @@ impl Executor {
             // node's line identity (Simple->line) — carry it like `line`
             // or the rebuilt command loses the continuation-aware stamp.
             first_word_end_line: cmd.first_word_end_line,
+            // rubash#3209/#3053: the first-element facts ride with
+            // the stamp they belong to.
+            first_element_redirect: cmd.first_element_redirect,
+            time_prefix_first_element_end_line: cmd.time_prefix_first_element_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
