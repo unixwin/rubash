@@ -246,7 +246,7 @@ impl Executor {
     /// (`( :; ) 2>cap.txt > /missing` lands in cap.txt, rubash#940 R1).
     /// Any other IoError (body write errors, rubash#440 closed-output)
     /// keeps the direct stderr write so the reported bytes are identical.
-    fn report_io_error_routed(
+    pub(in crate::executor) fn report_io_error_routed(
         &mut self,
         command: &CommandNode,
         error: &std::io::Error,
