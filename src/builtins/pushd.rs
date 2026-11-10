@@ -657,20 +657,14 @@ fn bindpwd_write(
     // GNU error.c:453 err_readonly (report_error family): the bare
     // `VAR: readonly variable` bind diagnostic honors gnu_errfmt
     // (rubash#1038), unlike the builtin_error lines sharing this file.
-    // The no-script fallback matches the executor-supplied
-    // diagnostic_prefix ("bash: "), not this file's local "rubash: ".
-    let error_prefix = if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            format!("{script}:{line}: ")
-        } else {
-            format!("{script}: line {line}: ")
-        }
-    } else {
-        "bash: ".to_string()
-    };
+    // Every arm derives from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791): the old no-pair arm's literal
+    // "bash: " discarded a present script/line arm and named every
+    // renamed shell "bash".
+    let error_prefix = crate::builtins::prefix::readonly_error_prefix(
+        &|key: &str| env_vars.get(key).cloned(),
+        crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt"),
+    );
     let mut failed = false;
     if var_is_readonly(env_vars, "OLDPWD") {
         diag.sink()
