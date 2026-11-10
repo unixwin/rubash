@@ -174,10 +174,7 @@ fn issue3198_relative_missing_file_fails_like_gnu() {
 #[test]
 fn issue3198_comsub_external_runs() {
     let dir = scratch("comsub");
-    let script = format!(
-        "{}x=$(id -u); echo \"uid:$x rc=$?\"\n",
-        prelude(&dir.0)
-    );
+    let script = format!("{}x=$(id -u); echo \"uid:$x rc=$?\"\n", prelude(&dir.0));
     let (stdout, stderr, code) = run_rubash(&dir.0, &script);
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert!(
@@ -192,10 +189,7 @@ fn issue3198_pipeline_stage_still_runs() {
     // tree (its stages are born through a different spawn shape) and
     // must keep working through the shared stamp.
     let dir = scratch("pipe");
-    let script = format!(
-        "{}printf 'x\\n' | wc -l; echo rc=$?\n",
-        prelude(&dir.0)
-    );
+    let script = format!("{}printf 'x\\n' | wc -l; echo rc=$?\n", prelude(&dir.0));
     let (stdout, stderr, code) = run_rubash(&dir.0, &script);
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(stdout, "1\nrc=0\n", "stderr:\n{stderr}");

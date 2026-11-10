@@ -124,7 +124,10 @@ fn staged(dir: &Path, body: &str) -> String {
     std::fs::write(dir.join("f3.txt"), "F3\n").expect("write f3");
     std::fs::write(dir.join("f5.txt"), "F5\n").expect("write f5");
     let enum_path = write_enum(dir);
-    format!("exec 3<f3.txt 5<f5.txt\nx=$({body})\necho \"BEGIN\"\necho \"$x\"\necho \"END\"\n", body = body.replacen("ENUM", &enum_path, 1))
+    format!(
+        "exec 3<f3.txt 5<f5.txt\nx=$({body})\necho \"BEGIN\"\necho \"$x\"\necho \"END\"\n",
+        body = body.replacen("ENUM", &enum_path, 1)
+    )
 }
 
 #[test]
@@ -150,9 +153,7 @@ fn issue3201_trivial_comsub_write_fd_delivered() {
     let dir = scratch("writefd");
     std::fs::write(dir.0.join("f3.txt"), "F3\n").expect("write f3");
     let enum_path = write_enum(&dir.0);
-    let script = format!(
-        "exec 3<f3.txt 9>f9.txt\nx=$(/usr/bin/bash {enum_path})\necho \"$x\"\n"
-    );
+    let script = format!("exec 3<f3.txt 9>f9.txt\nx=$(/usr/bin/bash {enum_path})\necho \"$x\"\n");
     let (stdout, stderr, code) = run_rubash(&dir.0, &script);
     assert_eq!(code, Some(0), "stderr:\n{stderr}");
     assert_eq!(

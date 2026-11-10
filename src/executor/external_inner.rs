@@ -2148,11 +2148,10 @@ impl Executor {
             let fresh = {
                 let anchor = self.shell_state.cwd_anchor.borrow();
                 match anchor.as_ref() {
-                    Some(anchor) if anchor.path == cwd => {
-                        anchor.dir.metadata().is_ok_and(|held| {
-                            held.dev() == meta.dev() && held.ino() == meta.ino()
-                        })
-                    }
+                    Some(anchor) if anchor.path == cwd => anchor
+                        .dir
+                        .metadata()
+                        .is_ok_and(|held| held.dev() == meta.dev() && held.ino() == meta.ino()),
                     _ => false,
                 }
             };
@@ -2222,10 +2221,7 @@ impl Executor {
             if *fd < 3 || entry.closed {
                 continue;
             }
-            if let Some(redirect) = redirects
-                .iter()
-                .find(|redirect| redirect.fd == Some(*fd))
-            {
+            if let Some(redirect) = redirects.iter().find(|redirect| redirect.fd == Some(*fd)) {
                 // The command rebinds this slot itself (see the doc
                 // comment); only the injected-group case falls through
                 // and pins the entry that already is its binding.
