@@ -578,7 +578,7 @@ impl Executor {
             // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
             // IFS default). Without this the in-process child fell back to
             // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
-            Self::initialize_fresh_shell_env_vars(
+            let child_logical_cwd = Self::initialize_fresh_shell_env_vars(
                 &mut child_env,
                 &self.shell_state.cwd.clone(),
                 // An exec'd shell image is a genuinely new shell:
@@ -595,6 +595,10 @@ impl Executor {
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
             self.shell_state.env_vars = child_env;
+            // variables.c:907 set_pwd: the fresh child's logical cwd
+            // is the adoption the initializer just performed against
+            // its inherited $PWD (rubash#2799).
+            self.shell_state.logical_cwd = Some(child_logical_cwd);
             self.shell_state.variables =
                 crate::shell::VariableStore::from_environment(&self.shell_state.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh

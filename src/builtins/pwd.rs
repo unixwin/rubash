@@ -39,14 +39,19 @@ where
         .into_iter()
         .collect();
     // Standalone entry (no session): the process cwd is the only cwd.
+    // A one-shot process is a fresh shell, so its logical cwd is the
+    // set_pwd adoption of the inherited $PWD (variables.c:907), or the
+    // process cwd itself when the inherited value does not name it.
     let cwd = env::current_dir().unwrap_or_default();
-    execute_with_env_and_io(args, &env_vars, &cwd, stdout, stderr)
+    let logical = adopted_logical_pwd(&env_vars, &cwd).unwrap_or_else(|| shell_display_path(&cwd));
+    execute_with_env_and_io(args, &env_vars, &cwd, Some(&logical), stdout, stderr)
 }
 
 pub(crate) fn execute_with_env_and_io<'a, I, W, E>(
     args: I,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
+    logical_cwd: Option<&str>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -97,7 +102,7 @@ where
         }
     }
 
-    let Some(directory) = current_directory(mode, env_vars, cwd)? else {
+    let Some(directory) = current_directory(mode, env_vars, cwd, logical_cwd, stderr)? else {
         return Ok(EXECUTION_FAILURE);
     };
 
@@ -105,14 +110,37 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
-fn current_directory(
+fn current_directory<E>(
     mode: Mode,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
-) -> io::Result<Option<String>> {
+    logical_cwd: Option<&str>,
+    stderr: &mut E,
+) -> io::Result<Option<String>>
+where
+    E: Write,
+{
     if mode == Mode::Physical {
         if let Some(physical) = env_vars.get("__RUBASH_PHYSICAL_PWD") {
             return Ok(Some(physical.clone()));
+        }
+        // GNU builtins/cd.def pwd_builtin: physical mode runs
+        // sh_physpath on the_current_working_directory; when that
+        // fails it resets through get_working_directory
+        // (builtins/common.c:592), whose getcwd() call fails for a
+        // deleted cwd and prints the diagnostic with the caller name
+        // "pwd" — pwd then returns EXECUTION_FAILURE and prints
+        // nothing (rubash#2798). The session cwd field is this port's
+        // getcwd truth (G-02), so its resolvability is the gate: a
+        // deleted cwd no longer canonicalizes.
+        if let Err(error) = cwd.canonicalize() {
+            writeln!(
+                stderr,
+                "pwd: error retrieving current directory: getcwd: \
+                 cannot access parent directories: {}",
+                crate::posix_errors::message(&error)
+            )?;
+            return Ok(None);
         }
     }
     // G-02: the physical truth is the session cwd field, not the
@@ -120,8 +148,27 @@ fn current_directory(
     let physical = cwd.to_path_buf();
 
     if mode == Mode::Logical {
+        // GNU cd.def pwd_builtin prints the_current_working_directory
+        // — the shell's own logical cwd — never the $PWD variable: a
+        // bare assignment to $PWD desynchronizes the variable and the
+        // logical value stands (rubash#2797). The stored value prints
+        // verbatim; it was canonicalized when cd (or startup adoption)
+        // established it, and the one uncanonicalized form GNU stores
+        // (the canon-failed `cd .` make_absolute form) prints verbatim
+        // too.
+        if let Some(tcwd) = logical_cwd {
+            if logical_value_names_cwd(tcwd, &physical, env_vars) {
+                return Ok(Some(tcwd.replace('\\', "/")));
+            }
+        }
+        // No stored logical value (or a mover outside the cd family
+        // invalidated it): derive it from $PWD as before, but print
+        // the CANONICAL spelling — GNU's logical value was
+        // canonicalized by sh_canonpath when it was established, so a
+        // valid-but-non-canonical $PWD spelling (`/.`, trailing `/`,
+        // `/../` components) never reaches the output (rubash#2797).
         if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {
-            return Ok(Some(logical));
+            return Ok(Some(canonical_logical_spelling(&logical)));
         }
     }
 
@@ -176,6 +223,78 @@ pub(crate) fn logical_pwd_if_current(
     }
 }
 
+/// Textual canonicalization of a logical path spelling: `.`
+/// components drop, `..` pops the previous component, empty
+/// components collapse — the sh_canonpath result for a spelling whose
+/// components name real directories (builtins/cd.def
+/// change_to_directory's PATH_CHECKDOTDOT processing), WITHOUT
+/// resolving symlinks. Exactly two leading slashes survive (the POSIX
+/// `//` root, rubash#1415); three or more collapse to one.
+pub(crate) fn canonical_logical_spelling(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            other => parts.push(other),
+        }
+    }
+    let joined = parts.join("/");
+    let normalized = if path.starts_with('/') {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".to_string()
+    } else {
+        joined
+    };
+    if path.starts_with("//") && !path.starts_with("///") && !normalized.starts_with("//") {
+        format!("/{normalized}")
+    } else {
+        normalized
+    }
+}
+
+/// Whether a logical cwd VALUE names the session's current directory
+/// — the `same_file(temp_string, ".")` judgment of variables.c:907
+/// set_pwd, in the runtime form logical_pwd_if_current already uses:
+/// canonical equality when both sides resolve. When either side
+/// cannot be resolved (a deleted cwd resolves on neither side), the
+/// judgment falls back to canonical-spelling equality: the stored
+/// logical value and the session cwd field spell the same directory,
+/// which is the only same-directory evidence a deleted cwd leaves.
+pub(crate) fn logical_value_names_cwd(
+    value: &str,
+    cwd: &Path,
+    env_vars: &HashMap<String, String>,
+) -> bool {
+    let value_fs = crate::executor::path::shell_path_to_windows(value, env_vars);
+    if let (Ok(value_physical), Ok(current_physical)) =
+        (value_fs.canonicalize(), cwd.canonicalize())
+    {
+        return value_physical == current_physical;
+    }
+    canonical_logical_spelling(value) == canonical_logical_spelling(&shell_display_path(cwd))
+}
+
+/// The startup adoption of an inherited $PWD (variables.c:907
+/// set_pwd): when the imported value is absolute and names the
+/// current directory, the shell's logical cwd is its sh_canonpath
+/// canonicalization (spelling canonicalization, NO symlink
+/// resolution). The $PWD variable itself is a separate question —
+/// set_pwd leaves the imported spelling in the variable in
+/// non-POSIX mode (rubash#2799). None when the value names another
+/// directory (or no directory), in which case the logical cwd is
+/// the physical cwd.
+pub(crate) fn adopted_logical_pwd(
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> Option<String> {
+    let verbatim = logical_pwd_if_current(cwd, env_vars)?;
+    Some(canonical_logical_spelling(&verbatim))
+}
+
 fn shell_display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
@@ -228,6 +347,7 @@ mod tests {
             ["-P"].iter().copied(),
             &env_vars,
             &verbatim,
+            None,
             &mut stdout,
             &mut stderr,
         )

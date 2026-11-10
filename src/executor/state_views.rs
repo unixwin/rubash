@@ -736,6 +736,7 @@ impl Executor {
             [arg.as_str()].into_iter(),
             &mut self.shell_state.env_vars,
             &mut self.shell_state.cwd,
+            &mut self.shell_state.logical_cwd,
             &mut stdout,
             &mut stderr,
         );

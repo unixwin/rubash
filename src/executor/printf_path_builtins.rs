@@ -554,6 +554,7 @@ impl Executor {
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
                 &mut self.shell_state.cwd,
+                &mut self.shell_state.logical_cwd,
                 &mut stdout_sink,
                 &mut stderr_sink,
             )?;
