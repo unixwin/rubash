@@ -1445,11 +1445,10 @@ impl Executor {
                                     // flag drives expand_command_words'
                                     // ExpansionFailure(1) so the list is
                                     // abandoned and the script continues.
-                                } else if (actual_fatal
+                                } else if actual_fatal
                                     || crate::executor::arithmetic::arithmetic_expansion_is_fatal(
                                         &expression,
-                                    ))
-                                    && !embedded_command_substitution_expression(&expression)
+                                    )
                                 {
                                     self.shell_state.arithmetic_fatal_error.set(true);
                                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1476,19 +1475,36 @@ impl Executor {
                                         }
                                     }
                                 } else {
-                                    let value = protect_command_substitution_output(
-                                        &self.expand_command_substitution_mut_with_context(
-                                            &expression,
-                                            context,
-                                        ),
-                                    );
-                                    if expansion_ws_marked(alternate, preserve_quotes, in_double) {
-                                        output.push_str(&mark_expansion_whitespace(
-                                            &value,
-                                            preserve_quotes,
-                                        ));
-                                    } else {
-                                        output.push_str(&value);
+                                    // rubash#2715: the classification
+                                    // above is final (subst.c:10842-10862
+                                    // decides arithmetic vs comsub BEFORE
+                                    // expansion, on paren balance alone).
+                                    // An evalexp failure on the spliced
+                                    // text is expand_wdesc_error — the
+                                    // expansion is discarded with the
+                                    // arithmetic diagnostic, and the
+                                    // spliced text is NEVER executed as
+                                    // commands (the old retry here ran
+                                    // `;`-spliced text and produced
+                                    // `3: command not found`).
+                                    self.shell_state.arithmetic_nonfatal_error.set(true);
+                                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                                        let eval_input =
+                                            self.arithmetic_last_eval_input.borrow().clone();
+                                        let display = if eval_input.is_empty() {
+                                            expression.as_str()
+                                        } else {
+                                            eval_input.as_str()
+                                        };
+                                        if let Some(message) =
+                                            crate::executor::arithmetic::arithmetic_error_message(
+                                                display,
+                                                true,
+                                                &self.shell_state.env_vars,
+                                            )
+                                        {
+                                            eprintln!("{}{}", self.error_prefix(), message);
+                                        }
                                     }
                                 }
                             }
@@ -2240,6 +2256,11 @@ impl Executor {
         // `cat` command, not the line of the outer `$(`).
         let has_heredoc = source.contains("<<");
         let leading_newlines = source.chars().take_while(|ch| *ch == '\n').count();
+        // rubash#2785: the untrimmed body text rides along to the
+        // body-error report — trimming here destroyed the evidence
+        // that a closing `)` was separated from the body's last
+        // token by a blank (the conditional near-token walk).
+        let raw_source = source;
         let source = if has_heredoc {
             source.trim()
         } else {
@@ -2339,7 +2360,9 @@ impl Executor {
             // source so run_ast's own splice performs the single expansion
             // (re-expanding joined words would expand the alias a second
             // time — parse.y never re-reads pushed text twice).
-            if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+            if let Some(output) =
+                self.run_ast_command_substitution_with_context(source, context, raw_source)
+            {
                 return output;
             }
         }
@@ -2368,7 +2391,9 @@ impl Executor {
             .any(|word| word.contains(';') || matches!(word.as_str(), "&&" | "||"))
             || source.contains('\n')
         {
-            if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+            if let Some(output) =
+                self.run_ast_command_substitution_with_context(source, context, raw_source)
+            {
                 return output;
             }
         }
@@ -2386,7 +2411,9 @@ impl Executor {
                 context,
             );
         }
-        if let Some(output) = self.run_ast_command_substitution_with_context(source, context) {
+        if let Some(output) =
+            self.run_ast_command_substitution_with_context(source, context, raw_source)
+        {
             return output;
         }
         let output = self.expand_command_substitution_with_context(source, context);
@@ -2412,6 +2439,9 @@ impl Executor {
         &mut self,
         source: &str,
         context: SubstitutionQuoteContext,
+        // The untrimmed extracted body, carried only for the
+        // body-error report (rubash#2785).
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         if command_substitution_contains_heredoc(source) {
             return None;
@@ -2463,7 +2493,7 @@ impl Executor {
         // early commands and re-report through the execute arms
         // under the enclosing script's prefix, with the enclosing
         // command's escalation printing a second line.
-        if self.report_comsub_body_error_if_any(&commands.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&commands.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
         if !command_substitution_needs_ast_execution(&commands.commands) {
@@ -2911,10 +2941,6 @@ fn command_substitution_needs_ast_execution(commands: &[CommandNode]) -> bool {
 // GNU subst.c treats a syntactically command-like $((...)) body as a
 // command substitution fallback, even though arithmetic parsing rejects it.
 // Keep ordinary arithmetic diagnostics (notably 1/0 and invalid octal 08).
-fn embedded_command_substitution_expression(expression: &str) -> bool {
-    expression.contains(';') && expression.contains('(')
-}
-
 fn collect_dollar_paren_arithmetic_expansion(
     chars: &mut std::iter::Peekable<std::str::Chars<'_>>,
 ) -> (String, bool) {

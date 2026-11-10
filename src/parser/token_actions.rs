@@ -639,6 +639,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             } else {
                 // Save current command with pipe flag
                 state.current_cmd.subshell |= state.in_subshell;
+                // rubash#3028: the connector token is this stage's last
+                // token; its line is the stage's parse-end line. The
+                // dangling-pipeline EOF fold anchors its carrier on it
+                // (GNU reports the end-of-input line: the last token's
+                // physical line + 1 — a connector reached via a
+                // continuation sits on the later line).
+                state.current_cmd.end_line = Some(token.position);
                 state.current_cmd.pipe = Some(if token.kind == TokenKind::PipeErr {
                     2
                 } else {
@@ -736,15 +743,36 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         );
                         *i = joined_i;
                     } else {
-                        process_substitution.word_index = Some(state.current_cmd.words.len());
-                        let target = process_substitution.target.clone();
+                        // rubash#2802: every word intake pairs the word
+                        // with its metadata (push_command_word, the
+                        // compound-operand arm, the replace arm above) —
+                        // the words/word_metadata index alignment is the
+                        // invariant index-based consumers read by (the
+                        // respawn serializer in command_text.rs). This
+                        // arm pushed the word alone, so the serializer
+                        // matched no metadata for the procsub word (nor
+                        // for any word after it) and single-quoted it
+                        // as literal data: async/coproc respawns ran
+                        // `cat '<(echo via)'`. Assemble the word the
+                        // replace arm's way — span plus glued suffix,
+                        // one word (GNU parse.y:5305 read_token_word
+                        // builds the word in one pass) — with its
+                        // metadata, and consume the suffix tokens.
+                        let word_index = state.current_cmd.words.len();
+                        process_substitution.word_index = Some(word_index);
+                        let value = format!("{}{}", process_substitution.target, suffix);
+                        let raw = format!("{}{}", process_substitution.target, suffix_raw);
                         state
                             .current_cmd
                             .process_substitutions
                             .push(process_substitution);
-                        state.current_cmd.words.push(target);
+                        state
+                            .current_cmd
+                            .word_metadata
+                            .push(build_word_metadata(word_index, &value, &raw));
+                        state.current_cmd.words.push(value);
                         state.current_cmd.word_kinds.push(TokenKind::Word);
-                        *i = next_i;
+                        *i = joined_i;
                     }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     let (dup_value, dup_raw) =
@@ -762,6 +790,10 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
+                    correct_first_word_end_for_redirect_target(
+                        &mut state.current_cmd,
+                        &tokens[*i + 1],
+                    );
                     *i += 1;
                 } else if let Some(error) = missing_redirect_target_node(
                     tokens,
@@ -916,6 +948,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     state.current_cmd.heredoc_delimiter =
                         Some(super::redirections::heredoc_delimiter_text(&delimiter));
                 }
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, delimiter_token);
                 *i += 1;
             } else if let Some(error) = missing_redirect_target_node(
                 tokens,
@@ -954,6 +987,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     &tokens[*i + 1].raw,
                     redirect_fd_var_prefix(tokens, *i),
                 );
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[*i + 1]);
                 *i += 1;
             } else if let Some(error) = missing_redirect_target_node(
                 tokens,
@@ -995,6 +1029,9 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 // list connector on simple commands. Full Bash grammar needs
                 // a list AST with compound commands and proper precedence.
                 state.current_cmd.subshell |= state.in_subshell;
+                // rubash#3028: same parse-end stamp as the Pipe arm —
+                // the dangling and-or EOF fold anchors on it.
+                state.current_cmd.end_line = Some(token.position);
                 state.current_cmd.and_or = Some(token.kind == TokenKind::And);
                 state
                     .ast
@@ -1522,7 +1559,7 @@ fn process_substitution_is_adjacent_to_previous_word(tokens: &[Token], index: us
     adjacent_word_token(previous) && tokens[index].column == previous.column + previous.raw.len()
 }
 
-fn collect_process_substitution_suffix(
+pub(super) fn collect_process_substitution_suffix(
     tokens: &[Token],
     close_index: usize,
 ) -> (String, String, usize) {
