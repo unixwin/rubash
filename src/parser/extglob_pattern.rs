@@ -6,12 +6,16 @@ pub(super) fn record_extglob_patterns_for_assignment(
     value: &str,
     raw_value: &str,
     word_index: Option<usize>,
+    read_gate_on: bool,
 ) {
     let patterns = extglob_patterns_in_word_with_raw(value, raw_value)
         .into_iter()
         .map(|mut pattern| {
             pattern.assignment_name = Some(assignment_name.to_string());
             pattern.word_index = word_index;
+            // rubash#3224: the read-time gate of the producing token
+            // (see ExtglobPattern::read_gate_on).
+            pattern.read_gate_on = read_gate_on;
             pattern
         });
     command.extglob_patterns.extend(patterns);
@@ -193,6 +197,10 @@ fn extglob_pattern(chars: &[char], start: usize) -> Option<(ExtglobPattern, usiz
             alternatives,
             word_index: None,
             assignment_name: None,
+            // Stamped by the recording intake (see
+            // ExtglobPattern::read_gate_on); the bare text scan does
+            // not know the producing pass's gate.
+            read_gate_on: false,
         },
         close + 1,
     ))
