@@ -803,8 +803,14 @@ impl BindRegistry {
 /// but bytes: a pair-carried 0x15 is byte 0x15, not the pair's
 /// UTF-8 — comparing the pair's UTF-8 instead was the blind-
 /// consumer shape that left the raw-byte spelling family in its
-/// own slots (captain review of PR #3237).
-fn keyseq_identity(written: &str) -> Vec<u8> {
+/// own slots (captain review of PR #3237). This is also the one
+/// byte derivation the tier-A bind view's capture
+/// (`BindView::capture`) reads for its `bytes` fields: registry
+/// identity and view bytes are the same function, so the API
+/// face can never leak the carrier pair's UTF-8 as a binding's
+/// bytes while the registry itself slots the entry by the
+/// folded byte (PR #3237 continuation).
+pub(crate) fn keyseq_identity(written: &str) -> Vec<u8> {
     let folded =
         crate::executor::substitution_metadata::decode_raw_byte_markers(written.as_bytes());
     translate_keyseq_bytes(&folded)
