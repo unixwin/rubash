@@ -10,8 +10,8 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crate::executor::path::{
-    command_lookup_fingerprint, completion_executable_qualifies, shell_directory_entries,
-    shell_path_entries,
+    anchor_at_session_cwd, command_lookup_fingerprint, completion_executable_qualifies,
+    shell_directory_entries, shell_directory_entries_in, shell_path_entries, shell_path_to_windows,
 };
 
 use crate::api::capabilities::{Candidate, CandidateKind};
@@ -2322,7 +2322,23 @@ fn path_completion_candidates(
         }
     }
     let (search_dir, display_prefix) = path_completion_base(word);
-    let Ok(entries) = shell_directory_entries(search_dir, env_vars) else {
+    // The directory part is a shell-namespace relative path whenever it
+    // does not lead with `/`: GNU's generator hands it verbatim to
+    // opendir (lib/readline/complete.c:2587, in
+    // rl_filename_completion_function), which resolves it against the
+    // shell's one cwd. The session cwd is a state field, not the
+    // process cwd, so the mapped directory must be anchored at it
+    // explicitly — the G-02 discipline the lookup walks already
+    // follow (executor/path.rs anchor_at_session_cwd). Unanchored, a
+    // relative directory part (a plain `sub/dir`, a bare word's `.`,
+    // or a drive-shaped first component like `C:` — an ordinary
+    // relative component on this platform: complete.c:2523-2531
+    // gates the drive reading to MS-DOS/Win32) enumerated whatever
+    // directory the host process happened to sit in, so after a
+    // session `cd` the listing missed and produced no candidates
+    // (rubash#2846, second face).
+    let physical_dir = anchor_at_session_cwd(shell_path_to_windows(search_dir, env_vars), env_vars);
+    let Ok(entries) = shell_directory_entries_in(&physical_dir) else {
         return Vec::new();
     };
 
