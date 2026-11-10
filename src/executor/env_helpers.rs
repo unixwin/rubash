@@ -49,19 +49,32 @@ pub(crate) fn process_env_pairs() -> Vec<(String, String)> {
 ///   would have in a script file.
 /// * every other (user) value takes the DATA encoding
 ///   (entry_encode_value_text, the bytes_to_shell_text parity).
+/// Per-name entry encoding for a single RAW host/env value (rubash#3207):
+/// the channel rule `entry_encode_imported_env` applies to the whole
+/// imported environment, factored out so the host API faces
+/// (`SessionBuilder` env seeds, `VariablesView::set` / `set_array` /
+/// `set_assoc`) encode each value at their own boundary instead of
+/// landing it bare in storage (rubash#3105's contract, extended here).
+/// `__RUBASH_*` names are the shell's own cross-process transport and
+/// pass verbatim; `BASH_FUNC_*%%` names take the SOURCE encoding; every
+/// other (user) value takes the DATA encoding.
+pub(crate) fn entry_encode_imported_env_value(name: &str, value: &str) -> String {
+    if name.starts_with("__RUBASH_") {
+        value.to_string()
+    } else if super::function_env::imported_function_name(name).is_some() {
+        crate::executor::substitution_metadata::escape_marker_zone_chars(value)
+    } else {
+        crate::executor::substitution_metadata::entry_encode_value_text(value)
+    }
+}
+
 pub(in crate::executor) fn entry_encode_imported_env(
     values: HashMap<String, String>,
 ) -> HashMap<String, String> {
     values
         .into_iter()
         .map(|(name, value)| {
-            let value = if name.starts_with("__RUBASH_") {
-                value
-            } else if super::function_env::imported_function_name(&name).is_some() {
-                crate::executor::substitution_metadata::escape_marker_zone_chars(&value)
-            } else {
-                crate::executor::substitution_metadata::entry_encode_value_text(&value)
-            };
+            let value = entry_encode_imported_env_value(&name, &value);
             (name, value)
         })
         .collect()
