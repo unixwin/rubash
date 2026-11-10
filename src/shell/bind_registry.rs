@@ -589,10 +589,23 @@ impl BindRegistry {
     /// map's rows compose under the slot's prefix, and the target's
     /// ANYOTHERKEY fallback lists at the bare prefix. The merged list
     /// is sorted in the C scan's order ([`keyseq_scan_order`]).
+    /// The returned sequences are PRESENTATION strings: the dumpers
+    /// and `bind -q` print readline's canonical rendering of the
+    /// byte identity (_rl_get_keyname, bind.c:2580), never the
+    /// spelling a sequence was registered under — a function bound
+    /// via `"\M-z"` is reported invocable via `"\ez"`, and one bound
+    /// under a raw-byte spelling via its `\C-x` form (rubash#2606).
+    /// Storage keeps the written forms; only this listing face (and
+    /// [`BindRegistry::snapshot`], [`BindRegistry::macro_bindings`])
+    /// renders canonical, exactly like the C dumpers.
     pub fn invoking_keyseqs(&self, function: &str, keymap: Option<&str>) -> Vec<String> {
         let wanted = self.resolve_keymap(keymap);
         let mut path = vec![wanted.clone()];
-        let mut seqs = self.invoking_in(function, &wanted, &mut path);
+        let mut seqs: Vec<String> = self
+            .invoking_in(function, &wanted, &mut path)
+            .iter()
+            .map(|seq| canonical_keyseq(seq))
+            .collect();
         seqs.sort_by(|a, b| keyseq_scan_order(a, b));
         seqs.dedup();
         seqs
@@ -677,11 +690,18 @@ impl BindRegistry {
     /// bind.c:2899) recurses keymaps exactly like the function
     /// dumper: a macro bound in a target map lists under each of
     /// this map's keymap-valued slots, and a target map's macro
-    /// fallback lists at the bare prefix.
+    /// fallback lists at the bare prefix. The sequences are the
+    /// dumper's canonical renderings of the byte identity, like
+    /// [`BindRegistry::invoking_keyseqs`] — storage keeps the
+    /// written forms (rubash#2606).
     pub fn macro_bindings(&self, keymap: Option<&str>) -> Vec<(String, String)> {
         let wanted = self.resolve_keymap(keymap);
         let mut path = vec![wanted.clone()];
-        let mut macros = self.macros_in(&wanted, &mut path);
+        let mut macros: Vec<(String, String)> = self
+            .macros_in(&wanted, &mut path)
+            .into_iter()
+            .map(|(seq, text)| (canonical_keyseq(&seq), text))
+            .collect();
         macros.sort_by(|a, b| keyseq_scan_order(&a.0, &b.0));
         macros.dedup();
         macros
@@ -759,8 +779,7 @@ impl BindRegistry {
 }
 
 /// Byte identity of a written key sequence: the translated byte
-/// sequence ([`crate::builtins::bind::keyseq_bytes`], the
-/// rl_translate_keyseq port, lib/readline/bind.c:516). GNU's
+/// sequence (rl_translate_keyseq, lib/readline/bind.c:516). GNU's
 /// registry is keyed on bytes, not spellings — rl_generic_bind
 /// (bind.c:383) translates before walking slots and
 /// unbind_keyseq (builtins/bind.def:391) translates first too —
@@ -771,12 +790,174 @@ impl BindRegistry {
 /// verbatim: the tier-A bind view contract pins exactly that
 /// split (niubash#863 GAP-3 — the view's keyseq field is the
 /// written form, its bytes field this translation).
+///
+/// The translation runs on the DECODED byte string, never on the
+/// transport text: a raw byte that reaches the builtin through
+/// $'...' quoting rides the raw-byte marker pair protocol
+/// (RAW_BYTE_MARKER_*, src/executor/markers.rs), so the written
+/// form is first folded back to the bytes the script produced by
+/// the protocol's one byte-domain decoder
+/// ([`crate::executor::substitution_metadata::decode_raw_byte_markers`])
+/// and the escape walk then runs on those bytes
+/// ([`translate_keyseq_bytes`]). GNU's translator sees nothing
+/// but bytes: a pair-carried 0x15 is byte 0x15, not the pair's
+/// UTF-8 — comparing the pair's UTF-8 instead was the blind-
+/// consumer shape that left the raw-byte spelling family in its
+/// own slots (captain review of PR #3237).
 fn keyseq_identity(written: &str) -> Vec<u8> {
-    crate::builtins::bind::keyseq_bytes(written)
+    let folded =
+        crate::executor::substitution_metadata::decode_raw_byte_markers(written.as_bytes());
+    translate_keyseq_bytes(&folded)
+}
+
+/// rl_translate_keyseq (lib/readline/bind.c:516) over an already
+/// decoded byte string: the same escape walk as
+/// [`crate::builtins::bind::keyseq_bytes`], but on bytes, because
+/// GNU's translator consumes the byte string the script's quoting
+/// produced — a raw byte that happens to be 0x5C enters the walk
+/// as an escape introducer exactly like a written backslash, and
+/// a byte >= 0x80 stands as itself rather than as a UTF-8 lead
+/// byte. Kept arm-for-arm parallel to `keyseq_bytes`; the two
+/// agree on every input that carries no marker pairs.
+fn translate_keyseq_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    // The base byte of a \C- or \M- argument: one byte, or an
+    // escape pair when the base is itself backslash/quote (\C-\\).
+    let read_base = |bytes: &[u8], i: &mut usize| -> u32 {
+        match bytes.get(*i) {
+            Some(b'\\') => {
+                let base = match bytes.get(*i + 1) {
+                    Some(b'\\') => 0x5c,
+                    Some(b'"') => 0x22,
+                    _ => 0x5c,
+                };
+                *i += 2;
+                u32::from(base)
+            }
+            Some(&c) => {
+                *i += 1;
+                u32::from(c)
+            }
+            None => 0,
+        }
+    };
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c != b'\\' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        match bytes.get(i + 1) {
+            Some(b'C') if bytes.get(i + 2) == Some(&b'-') => {
+                i += 3;
+                let base = read_base(bytes, &mut i);
+                out.push(if base == u32::from(b'?') {
+                    0x7f
+                } else {
+                    (base & 0x1f) as u8
+                });
+            }
+            Some(b'M') if bytes.get(i + 2) == Some(&b'-') => {
+                i += 3;
+                let base = read_base(bytes, &mut i);
+                out.push(0x1b);
+                out.push(base as u8);
+            }
+            Some(b'e') => {
+                out.push(0x1b);
+                i += 2;
+            }
+            Some(b'd') => {
+                out.push(0x7f);
+                i += 2;
+            }
+            Some(b'\\') => {
+                out.push(0x5c);
+                i += 2;
+            }
+            Some(b'a') => {
+                out.push(0x07);
+                i += 2;
+            }
+            Some(b'b') => {
+                out.push(0x08);
+                i += 2;
+            }
+            Some(b'f') => {
+                out.push(0x0c);
+                i += 2;
+            }
+            Some(b'n') => {
+                out.push(0x0a);
+                i += 2;
+            }
+            Some(b'r') => {
+                out.push(0x0d);
+                i += 2;
+            }
+            Some(b't') => {
+                out.push(0x09);
+                i += 2;
+            }
+            Some(b'v') => {
+                out.push(0x0b);
+                i += 2;
+            }
+            Some(b'x') => {
+                let hex = &bytes[(i + 2).min(bytes.len())..(i + 4).min(bytes.len())];
+                let value = std::str::from_utf8(hex)
+                    .ok()
+                    .filter(|text| !text.is_empty())
+                    .and_then(|text| u8::from_str_radix(text, 16).ok());
+                match value {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 2 + hex.len();
+                    }
+                    None => {
+                        out.push(b'x');
+                        i += 2;
+                    }
+                }
+            }
+            Some(&d) if d.is_ascii_digit() => {
+                let digits = &bytes[i + 1..]
+                    .iter()
+                    .take(3)
+                    .take_while(|d| d.is_ascii_digit())
+                    .copied()
+                    .collect::<Vec<u8>>();
+                let value = std::str::from_utf8(digits)
+                    .ok()
+                    .and_then(|text| u32::from_str_radix(text, 8).ok());
+                match value {
+                    Some(value) => {
+                        out.push(value as u8);
+                        i += 1 + digits.len();
+                    }
+                    None => {
+                        out.push(d);
+                        i += 2;
+                    }
+                }
+            }
+            Some(&other) => {
+                out.push(other);
+                i += 2;
+            }
+            None => {
+                out.push(0x5c);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// The canonical written form of a key sequence: translate the
-/// spelling to bytes with the engine's one decoder and render
+/// spelling to its byte identity ([`keyseq_identity`]) and render
 /// the bytes back the way readline's dumpers do — per byte
 /// through _rl_get_keyname (bind.c:2580): ESC renders `\e`, a
 /// control byte or RUBOUT renders `\C-x` (lowercase, `?` for
@@ -790,7 +971,7 @@ fn keyseq_identity(written: &str) -> Vec<u8> {
 /// are functions of the one byte identity.
 pub(crate) fn canonical_keyseq(written: &str) -> String {
     let mut out = String::new();
-    for byte in crate::builtins::bind::keyseq_bytes(written) {
+    for byte in keyseq_identity(written) {
         match byte {
             0x1b => out.push_str("\\e"),
             0x7f => out.push_str("\\C-?"),
@@ -855,8 +1036,8 @@ const KEYMAP_TABLE_SELECTORS: [Option<&str>; 5] = [
 /// `"\C-x\C-u", "\C-x", "\C-_"`). Modelled by comparing the
 /// translated bytes with end-of-sequence counting as 256.
 pub(crate) fn keyseq_scan_order(a: &str, b: &str) -> std::cmp::Ordering {
-    let a = crate::builtins::bind::keyseq_bytes(a);
-    let b = crate::builtins::bind::keyseq_bytes(b);
+    let a = keyseq_identity(a);
+    let b = keyseq_identity(b);
     for i in 0..a.len().max(b.len()) {
         let x = a.get(i).map_or(256u32, |byte| u32::from(*byte));
         let y = b.get(i).map_or(256u32, |byte| u32::from(*byte));
@@ -1320,6 +1501,106 @@ mod tests {
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].keyseq, "\\C-u");
+    }
+
+    /// The transport spelling of raw bytes: each byte rides a
+    /// raw-byte marker pair (RAW_BYTE_MARKER_*, src/executor/
+    /// markers.rs), which is the form a $'...' byte actually has
+    /// when it reaches the builtin (captain review of PR #3237 —
+    /// a bare "\u{15}" char was never the failing shape).
+    fn raw_pair_spelling(bytes: &[u8]) -> String {
+        let escape =
+            char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).expect("escape char");
+        let mut spelling = String::new();
+        for byte in bytes {
+            spelling.push(escape);
+            spelling.push(
+                char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_FIRST + u32::from(*byte))
+                    .expect("payload char"),
+            );
+        }
+        spelling
+    }
+
+    #[test]
+    fn identity_folds_raw_byte_carrier_pairs() {
+        // rubash#2606, captain rework: identity is computed on the
+        // decoded byte string, so the pair-carried spellings of
+        // 0x15 / 0x07 / 0x7f share the slots of "\C-u" / "\C-g" /
+        // "\C-?", and a pair-carried high byte stands as the byte
+        // itself (the folded [0xC3, 0xA9] is also the written
+        // form é's identity — GNU's slot bytes either way).
+        assert_eq!(keyseq_identity(&raw_pair_spelling(&[0x15])), vec![0x15]);
+        assert_eq!(
+            keyseq_identity(&raw_pair_spelling(&[0x15])),
+            keyseq_identity("\\C-u")
+        );
+        assert_eq!(
+            keyseq_identity(&raw_pair_spelling(&[0x07])),
+            keyseq_identity("\\C-g")
+        );
+        assert_eq!(
+            keyseq_identity(&raw_pair_spelling(&[0x7f])),
+            keyseq_identity("\\C-?")
+        );
+        assert_eq!(
+            keyseq_identity(&raw_pair_spelling(&[0xc3, 0xa9])),
+            keyseq_identity("é")
+        );
+        assert_eq!(canonical_keyseq(&raw_pair_spelling(&[0x15])), "\\C-u");
+    }
+
+    #[test]
+    fn register_keys_identity_on_raw_pair_spelling() {
+        // The pair-carried raw spelling replaces, is removed by
+        // the backslash spelling, and its re-registration clears
+        // the tombstone — the whole spelling family is one slot
+        // (the PR #3237 head left these in parallel slots).
+        let mut registry = BindRegistry::default();
+        registry.register(xentry("\\C-u", "one"));
+        registry.register(xentry(&raw_pair_spelling(&[0x15]), "two"));
+        assert_eq!(registry.entries.len(), 1);
+        match &registry.entries[0].kind {
+            BindKind::Execute { command } => assert_eq!(command, "two"),
+            other => panic!("unexpected kind: {other:?}"),
+        }
+        assert!(registry.unbind_keyseq_for_keymap("\\C-u", None));
+        assert!(registry.entries.is_empty());
+        registry.register(xentry(&raw_pair_spelling(&[0x15]), "three"));
+        assert!(!registry.is_removed("\\C-u", None));
+        // Removal by the bare pair spelling removes a slot that
+        // was registered under the backslash spelling.
+        assert!(registry.unbind_keyseq_for_keymap(&raw_pair_spelling(&[0x15]), None));
+        assert!(registry.entries.is_empty());
+    }
+
+    #[test]
+    fn listing_faces_render_canonical_spellings() {
+        // rubash#2606: the invoking listing (`bind -q` / -p) and
+        // the macro listing (`bind -s`) print the canonical
+        // rendering of the byte identity — a function bound via
+        // "\M-z" lists as "\ez", a macro bound under the pair-
+        // carried raw spelling lists as "\C-u".
+        let mut registry = BindRegistry::default();
+        registry.register(BindEntry {
+            keyseq: "\\M-z".to_string(),
+            kind: BindKind::Function {
+                name: "kill-whole-line".to_string(),
+            },
+            keymap: None,
+        });
+        let seqs = registry.invoking_keyseqs("kill-whole-line", None);
+        assert!(seqs.contains(&"\\ez".to_string()), "got {seqs:?}");
+        assert!(!seqs.iter().any(|seq| seq == "\\M-z"), "got {seqs:?}");
+        registry.register(BindEntry {
+            keyseq: raw_pair_spelling(&[0x15]),
+            kind: BindKind::Macro {
+                text: "text".to_string(),
+            },
+            keymap: None,
+        });
+        let macros = registry.macro_bindings(None);
+        assert_eq!(macros, vec![("\\C-u".to_string(), "text".to_string())]);
     }
 
     #[test]
