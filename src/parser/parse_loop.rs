@@ -751,18 +751,30 @@ fn mark_parse_time_extglob_errors(ast: &mut Ast, tokens: &[Token]) {
     let mut saw_shopt = false;
     let mut saw_enable = false;
     let mut extglob_enabled_in_unit = false;
+    // rubash#3205: the shopt that arms this marker must itself have
+    // been read under the OFF gate. Every token carries the gate of
+    // the pass that lexed it (`Token::extglob_gate`); if the gate
+    // was already on when this unit started — an earlier unit's
+    // shopt executed, or the invocation state — the pattern words
+    // later in the unit were read legitimately under that state,
+    // and a same-line `shopt -s` merely re-asserts it: GNU decides
+    // pattern validity at read time from the unit-start state
+    // (parse.y:5466), so there is no error to mark.
+    let mut shopt_read_with_gate_off = false;
 
     for token in tokens {
         if token.kind == TokenKind::Semicolon && !token.line_break {
-            if saw_shopt && saw_enable {
+            if saw_shopt && saw_enable && shopt_read_with_gate_off {
                 extglob_enabled_in_unit = true;
             }
             saw_shopt = false;
             saw_enable = false;
+            shopt_read_with_gate_off = false;
             continue;
         }
         if token.value == "shopt" {
             saw_shopt = true;
+            shopt_read_with_gate_off = !token.extglob_gate;
             continue;
         }
         if saw_shopt && token.value == "-s" {
@@ -786,6 +798,7 @@ fn mark_parse_time_extglob_errors(ast: &mut Ast, tokens: &[Token]) {
         if token.kind != TokenKind::Semicolon {
             saw_shopt = false;
             saw_enable = false;
+            shopt_read_with_gate_off = false;
         }
     }
 }
