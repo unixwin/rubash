@@ -22,6 +22,8 @@ impl Executor {
             return Ok(true);
         }
 
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
         let action = {
             let row = super::builtin_table::builtin_table_row("command")
                 .expect("command row in BUILTIN_TABLE");
