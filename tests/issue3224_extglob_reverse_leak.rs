@@ -24,16 +24,17 @@
 //! (script files run with cwd = a fixture directory holding
 //! exactly `ab abcx abcz ba bbc cab`).
 //!
-//! Defect cells (red before the fix): a1, a2, a6, e1 — the live
-//! execution state vetoes a legally-read pattern node with
-//! `syntax error near unexpected token '('` (rc=2, the rest of the
-//! script is abandoned); GNU prints the word literally and runs
-//! on (rc=0). The b/c cells pin the matching faces of the same
-//! adjudication relation and the d cells pin the conditional
-//! exception; the *c cells and a4/d2 are controls (green before
-//! and after): a4 keeps the read-time error for a gate that was
-//! never on, the *c cells keep full extglob semantics when the
-//! gate stays on.
+//! Defect cells (red before the fix): a1, a2, a6, e1, p5, p6 —
+//! the live execution state vetoes a legally-read pattern node
+//! with `syntax error near unexpected token '('` (rc=2, the rest
+//! of the script is abandoned); GNU prints the word literally and
+//! runs on (rc=0). p5/p6 route the same veto through an if-body
+//! node and an assignment-RHS record. The b/c cells pin the
+//! matching faces of the same adjudication relation and the d
+//! cells pin the conditional exception; the *c cells and a4/d2
+//! are controls (green before and after): a4 keeps the read-time
+//! error for a gate that was never on, the *c cells keep full
+//! extglob semantics when the gate stays on.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -206,5 +207,23 @@ fn e1_function_body_pattern_falls_back_to_literal() {
         "e1",
         "shopt -s extglob\nf() { echo !(bbc); }\nshopt -u extglob\nf\necho after\n",
         "!(bbc)\nafter\n",
+    );
+}
+
+#[test]
+fn p5_if_body_pattern_falls_back_to_literal() {
+    assert_literal_fallback(
+        "p5",
+        "shopt -s extglob\nif true; then shopt -u extglob; echo !(bbc); fi\necho after\n",
+        "!(bbc)\nafter\n",
+    );
+}
+
+#[test]
+fn p6_assignment_pattern_value_stays_literal() {
+    assert_literal_fallback(
+        "p6",
+        "shopt -s extglob\nshopt -u extglob; x=@(bbc); echo \"x=$x\"\necho after\n",
+        "x=@(bbc)\nafter\n",
     );
 }
