@@ -17,6 +17,27 @@ use crate::executor::{
 };
 use std::collections::HashMap;
 
+/// One entry of the evaluation-order event log (see ARITH_EVAL_EVENTS).
+#[derive(Clone, Debug)]
+pub(crate) enum ArithEvalEvent {
+    /// A non-fatal diagnostic produced during evaluation
+    /// (`` `a[]': not a valid identifier ``, `a[]: bad array subscript`).
+    Diag(ArithEvalDiag),
+    /// A locale-family scalar bind: (written name, stored value,
+    /// LC_ALL value at bind time, LC_ALL array mark at bind time,
+    /// LC_ALL assoc mark at bind time). GNU expr.c:352 runs the
+    /// sv_locale hook with the value bound at that moment
+    /// (rubash#3059); the LC_ALL marks ride along so the probe table
+    /// can project a compound LC_ALL binding to its scalar value
+    /// exactly as get_string_value does (rubash#3065).
+    LocaleBind(String, String, String, bool, bool),
+    /// A readonly bind failure, recorded at the bind point. The env
+    /// marker (`__RUBASH_ARITH_READONLY_ERROR`) stays as the state
+    /// signal (core exit suppression, the (( ))/let reporters); this
+    /// event only owns the diagnostic's position in evaluation order.
+    Readonly(String),
+}
+
 thread_local! {
     /// Variable writes performed by the arithmetic evaluator between the
     /// start and end of one top-level evaluation: (name, value before the
@@ -25,22 +46,6 @@ thread_local! {
     static ARITH_WRITES: std::cell::RefCell<Vec<(String, Option<String>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 
-    /// Locale-family scalar binds performed by the arithmetic evaluator
-    /// in the current evaluation window: (written name, stored value,
-    /// LC_ALL value at bind time, LC_ALL array mark at bind time,
-    /// LC_ALL assoc mark at bind time). GNU expr.c:331
-    /// expr_bind_variable runs stupidly_hack_special_variables on the
-    /// written lhs after every bind (expr.c:352), so sv_locale
-    /// (variables.c:6272) fires per bind with the value bound at that
-    /// moment; the journal captures both at bind time and the
-    /// evaluation boundary drains it (rubash#3059). The LC_ALL marks
-    /// ride along so the probe table can project a compound LC_ALL
-    /// binding to its scalar value exactly as get_string_value does
-    /// (rubash#3065).
-    static ARITH_LOCALE_BINDS: std::cell::RefCell<
-        Vec<(String, String, String, bool, bool)>,
-    > = const { std::cell::RefCell::new(Vec::new()) };
-
     /// The evalerror record left by the most recent evaluation — GNU's
     /// `expression`/`lasttp` globals at the moment evalerror ran
     /// (expr.c:1524-1535). The record belongs to the frame that failed,
@@ -48,11 +53,21 @@ thread_local! {
     static ARITH_EVAL_ERROR: std::cell::RefCell<Option<ArithEvalError>> =
         const { std::cell::RefCell::new(None) };
 
-    /// Non-fatal diagnostics produced during the most recent evaluation
-    /// (`` `a[]': not a valid identifier ``, `a[]: bad array subscript`) —
-    /// GNU prints these from the bind/subscript helpers while evaluation
-    /// continues, so they are emitted even when the expression succeeds.
-    static ARITH_EVAL_DIAGS: std::cell::RefCell<Vec<ArithEvalDiag>> =
+    /// One evaluation-order event log for every arithmetic stderr line
+    /// that is not a fatal evalerror (rubash#3078). GNU emits each line
+    /// synchronously at its point in evaluation order: a locale bind
+    /// warning fires at the bind (expr.c:331 expr_bind_variable ->
+    /// expr.c:352 stupidly_hack_special_variables -> variables.c:6272
+    /// sv_locale -> locale.c:185 set_locale_var -> internal_warning),
+    /// a non-fatal diagnostic fires where the bind/subscript helper
+    /// produces it (variables.c:3403 sh_invalidid; arrayfunc.c:402
+    /// err_badarraysub), and a readonly bind failure fires at its bind
+    /// point (expr.c:350). Two separate logs (diagnostics vs locale
+    /// binds) drained in a fixed boundary order could never reproduce
+    /// an interleaving such as diag -> warning -> diag, so producers
+    /// append to this single log at the production point and the
+    /// evaluation boundary drains it once, in order.
+    static ARITH_EVAL_EVENTS: std::cell::RefCell<Vec<ArithEvalEvent>> =
         const { std::cell::RefCell::new(Vec::new()) };
 
     /// First-knife arithmetic parse cache (rubash#156 follow-up): one
@@ -122,9 +137,41 @@ pub(in crate::executor) fn peek_arith_eval_error() -> Option<ArithEvalError> {
     ARITH_EVAL_ERROR.with(|slot| slot.borrow().clone())
 }
 
-/// Take (and clear) the non-fatal diagnostics of the last evaluation.
-pub(in crate::executor) fn take_arith_eval_diags() -> Vec<ArithEvalDiag> {
-    ARITH_EVAL_DIAGS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+/// Take (and clear) the whole evaluation-order event log.
+pub(in crate::executor) fn take_arith_eval_events() -> Vec<ArithEvalEvent> {
+    ARITH_EVAL_EVENTS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+/// Clear the evaluation-order event log (stale-event protection at
+/// evaluation entries: events of an earlier, undrained evaluation
+/// must never surface inside a later one).
+pub(in crate::executor) fn clear_arith_eval_events() {
+    ARITH_EVAL_EVENTS.with(|slot| slot.borrow_mut().clear());
+}
+
+/// Record one non-fatal diagnostic at its production point, in
+/// evaluation order (rubash#3078).
+pub(super) fn record_arith_eval_diag(diag: ArithEvalDiag) {
+    ARITH_EVAL_EVENTS.with(|slot| slot.borrow_mut().push(ArithEvalEvent::Diag(diag)));
+}
+
+/// Record a readonly bind failure at its bind point, in evaluation
+/// order (rubash#3078). Deduplicated by name: the marker mechanism
+/// itself is single-shot (the env slot holds one name), so a second
+/// record of the same name in one window would double-print what
+/// GNU prints once per failed bind attempt that reaches the
+/// boundary — nested frames re-marking the same bind must not
+/// duplicate the event.
+pub(super) fn record_arith_readonly_event(name: &str) {
+    ARITH_EVAL_EVENTS.with(|slot| {
+        let mut log = slot.borrow_mut();
+        if !log
+            .iter()
+            .any(|event| matches!(event, ArithEvalEvent::Readonly(existing) if existing == name))
+        {
+            log.push(ArithEvalEvent::Readonly(name.to_string()));
+        }
+    });
 }
 
 /// Record the #3199 subscript trace (first unbound `$name` wins: GNU's
@@ -190,8 +237,8 @@ pub(super) fn record_arith_locale_bind(
     if !crate::locale::is_locale_family_name(name) {
         return;
     }
-    ARITH_LOCALE_BINDS.with(|log| {
-        log.borrow_mut().push((
+    ARITH_EVAL_EVENTS.with(|log| {
+        log.borrow_mut().push(ArithEvalEvent::LocaleBind(
             name.to_string(),
             value.to_string(),
             lc_all.to_string(),
@@ -201,19 +248,38 @@ pub(super) fn record_arith_locale_bind(
     });
 }
 
+/// Extract only the locale-bind events, in order, leaving every
+/// other event in the log at its position. The boundary sync's
+/// fallback path (callers that sync writes without draining the
+/// event log) uses this; the ordered boundary drain takes the whole
+/// log instead (rubash#3078).
 fn take_arith_locale_binds() -> Vec<(String, String, String, bool, bool)> {
-    ARITH_LOCALE_BINDS.with(|log| std::mem::take(&mut *log.borrow_mut()))
+    ARITH_EVAL_EVENTS.with(|slot| {
+        let mut log = slot.borrow_mut();
+        let mut binds = Vec::new();
+        let mut rest = Vec::new();
+        for event in std::mem::take(&mut *log) {
+            match event {
+                ArithEvalEvent::LocaleBind(name, value, lc_all, array, assoc) => {
+                    binds.push((name, value, lc_all, array, assoc));
+                }
+                other => rest.push(other),
+            }
+        }
+        *log = rest;
+        binds
+    })
 }
 
 /// Whether the current evaluation window has recorded a locale bind.
 /// Admission gates that skip or defer the boundary sync must see an
 /// empty log, exactly as for ARITH_WRITES.
 pub(super) fn arith_locale_bind_log_is_empty() -> bool {
-    ARITH_LOCALE_BINDS.with(|log| log.borrow().is_empty())
-}
-
-fn clear_arith_locale_binds() {
-    ARITH_LOCALE_BINDS.with(|log| log.borrow_mut().clear());
+    ARITH_EVAL_EVENTS.with(|log| {
+        !log.borrow()
+            .iter()
+            .any(|event| matches!(event, ArithEvalEvent::LocaleBind(..)))
+    })
 }
 
 /// Whether the current evaluation window has recorded an arithmetic
@@ -342,8 +408,11 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
     }
     // rubash#3059: GNU expr_bind_variable runs the sv_locale hook
     // after EVERY arithmetic bind (expr.c:352); the evaluator records
-    // the binds as they complete and the shared locale funnel runs
-    // here, at the same boundary that syncs the writes, in bind order.
+    // the binds as they complete. Fallback for sync points that do
+    // not drain the event log (trap/compound boundaries): extract
+    // only the locale-bind events and run the funnel in bind order.
+    // The ordered boundaries drain the whole log themselves
+    // (rubash#3078), so this loop is empty there.
     for (name, value, lc_all, lc_all_array, lc_all_assoc) in take_arith_locale_binds() {
         emit_arith_locale_bind(executor, &name, &value, &lc_all, lc_all_array, lc_all_assoc);
     }
@@ -739,7 +808,21 @@ impl Executor {
     }
 
     pub(crate) fn eval_arithmetic_command_value(&mut self, expression: &str) -> Option<i128> {
-        self.eval_arithmetic_command_value_with_flags(expression, true, "((")
+        self.eval_arithmetic_command_value_with_flags(expression, true, Some("(("))
+    }
+
+    /// Command-pipeline evaluation whose diagnostics carry NO command
+    /// label: the whole-value `$((...))` fast assignment route
+    /// (assignment_expansion.rs) evaluates an EXPANSION, where GNU's
+    /// this_command_name is NULL, so an InvalidIdentifier line must
+    /// not gain the `((:` prefix the command entry adds
+    /// (rubash#3078 §2.4). Only the rendering label differs; the
+    /// evaluation pipeline is the command one, unchanged.
+    pub(crate) fn eval_arithmetic_command_value_unlabeled(
+        &mut self,
+        expression: &str,
+    ) -> Option<i128> {
+        self.eval_arithmetic_command_value_with_flags(expression, true, None)
     }
 
     /// State half of the #607 fast-ticket gate: the current bindings must
@@ -794,18 +877,18 @@ impl Executor {
         &mut self,
         expression: &str,
     ) -> Option<i128> {
-        self.eval_arithmetic_command_value_with_flags(expression, false, "let")
+        self.eval_arithmetic_command_value_with_flags(expression, false, Some("let"))
     }
 
     fn eval_arithmetic_command_value_with_flags(
         &mut self,
         expression: &str,
         expand: bool,
-        label: &'static str,
+        label: Option<&'static str>,
     ) -> Option<i128> {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
-        let _ = take_arith_eval_diags();
+        clear_arith_eval_events();
         clear_arith_subscript_unbound();
         // Stale nested-subscript failure marker (lvalue.rs records the
         // subscript text so evalerror reports it, GNU array_expand_index
@@ -1012,7 +1095,6 @@ impl Executor {
             // before the clear: a recorded write means a nested entry).
             self.reconcile_pipestatus_mirror();
             ARITH_WRITES.with(|log| log.borrow_mut().clear());
-            clear_arith_locale_binds();
         }
         // Fast ticket: the state gate proved no operand can observe the
         // dynamic context (no dynamic-context name is spelled, and every
@@ -1054,13 +1136,14 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_unbound_variable_error(category);
-        self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
-        // GNU prints bind/subscript diagnostics (`a[]: bad array
-        // subscript`, `` `a[]': not a valid identifier ``) while the
-        // evaluation continues — they surface even when the expression
-        // succeeds (`(( a[]=24 ))` -> status 0).
-        self.flush_arith_diags(Some(label));
+        // GNU prints every non-fatal arithmetic stderr line at its
+        // point in evaluation order while the evaluation continues —
+        // they surface even when the expression succeeds
+        // (`(( a[]=24 ))` -> status 0). One ordered drain of the
+        // event log (diagnostics, locale warnings, the readonly
+        // line) reproduces that order (rubash#3078).
+        self.drain_arith_eval_events(label);
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent variable expansions see the updated values.
@@ -1076,46 +1159,137 @@ impl Executor {
         value
     }
 
-    /// Print the non-fatal diagnostics recorded during the last
-    /// evaluation. `label` is this_command_name (`((`, `let`, `[[`) or
-    /// None — GNU's subscript/bind helpers run with this_command_name
-    /// NULL inside array_expand_index (arrayfunc.c:1374-1378), so
+    /// Drain the evaluation-order event log once, rendering every
+    /// event at its recorded position (rubash#3078). `label` is
+    /// this_command_name (`((`, `let`, `[[`) or None — GNU's
+    /// subscript/bind helpers run with this_command_name NULL inside
+    /// array_expand_index (arrayfunc.c:1374-1378), so
     /// expansion-context diagnostics carry no command label.
-    pub(in crate::executor) fn flush_arith_diags(&self, label: Option<&str>) {
+    ///
+    /// This replaces the former three-stage boundary (readonly
+    /// direct print, then all diagnostics, then all locale warnings
+    /// inside the write sync): GNU emits all three classes at their
+    /// evaluation points, so only a single ordered drain reproduces
+    /// interleavings such as diag -> warning -> diag.
+    pub(in crate::executor) fn drain_arith_eval_events(&mut self, label: Option<&str>) {
         let mut printed = false;
-        for diag in take_arith_eval_diags() {
-            // Diag payloads are built from parser-input text, and on the
-            // EXP_EXPANDED entries (`let`, `[[`) that input carries the
-            // subscript carrier encoding (`a[<0x1e><hex>]`) from the
-            // indexed-subscript rewrite. GNU echoes the lvalue token as
-            // written (expr.c:1526-1535), so decode the carrier spans at
-            // this single rendering point — every producer (plain and
-            // compound binds, read and bind diagnostics) is covered
-            // (rubash#2341's `let` bind line leaked the raw encoding).
-            match (&diag, label) {
-                (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => eprintln!(
-                    "{}{}: `{}': not a valid identifier",
-                    self.diagnostic_prefix(),
-                    label,
-                    parser::de_carrier_arith_text(display)
-                ),
-                (ArithEvalDiag::InvalidIdentifier(display), None) => eprintln!(
-                    "{}`{}': not a valid identifier",
-                    self.diagnostic_prefix(),
-                    parser::de_carrier_arith_text(display)
-                ),
-                (ArithEvalDiag::BadSubscript(display), _) => eprintln!(
-                    "{}{}: bad array subscript",
-                    self.error_prefix(),
-                    parser::de_carrier_arith_text(display)
-                ),
+        for event in take_arith_eval_events() {
+            match event {
+                ArithEvalEvent::Diag(diag) => {
+                    self.print_arith_diag(&diag, label);
+                    printed = true;
+                }
+                ArithEvalEvent::LocaleBind(name, value, lc_all, lc_all_array, lc_all_assoc) => {
+                    // The funnel reads the bind-time values recorded
+                    // in the event; a LANG bind only mirrors the
+                    // process locale and prints nothing.
+                    if name == "LANG" {
+                        self.note_locale_assignment(&name);
+                    } else {
+                        let mut probe_env = crate::shell::var_table::VarTable::default();
+                        probe_env.insert("LC_ALL".to_string(), lc_all);
+                        if lc_all_assoc {
+                            probe_env.mark_name(crate::executor::types::ASSOC_VARS, "LC_ALL");
+                        } else if lc_all_array {
+                            probe_env.mark_name(crate::executor::types::ARRAY_VARS, "LC_ALL");
+                        }
+                        probe_env.insert(name.clone(), value);
+                        if let Some(warning) =
+                            crate::locale::locale_assignment_warning(&name, &probe_env)
+                        {
+                            let line =
+                                format!("{}warning: {}\n", self.diagnostic_prefix(), warning);
+                            let _ = self.write_default_stderr(line.as_bytes());
+                            printed = true;
+                        }
+                    }
+                }
+                ArithEvalEvent::Readonly(name) => {
+                    // Consume the marker for THIS name only: the
+                    // marker is the state signal (core-exit
+                    // suppression, reporter latching); the event owns
+                    // the print position. A marker naming a different
+                    // variable belongs to a bind outside this log's
+                    // window and stays for its own reporter.
+                    let marker_matches = self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_ARITH_READONLY_ERROR")
+                        .is_some_and(|marked| marked == &name);
+                    if marker_matches {
+                        self.shell_state
+                            .env_vars
+                            .remove("__RUBASH_ARITH_READONLY_ERROR");
+                    }
+                    // rubash#1238: remember the diagnostic was printed
+                    // so the (( ))/let reporters don't add a
+                    // synthesized syntax error after it (GNU's bind
+                    // failure produces exactly one diagnostic line).
+                    self.shell_state.arithmetic_readonly_error.set(true);
+                    if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                        // GNU error.c:453 err_readonly (report_error
+                        // family): the diagnostic goes to fd 2 AS BOUND
+                        // by the command's redirections —
+                        // `(( a = 6 )) 2>&1` lands it on stdout, `2>f`
+                        // in f. Route through arith_diag
+                        // (write_diagnostic_fd2) like every sibling
+                        // arithmetic diagnostic; a raw eprintln! here
+                        // bypasses the binding and leaks to the shell's
+                        // real stderr (rubash#2707, A3-R1). This arm
+                        // carries the routing fix the standalone
+                        // report_arithmetic_readonly_error held before
+                        // PR #3244 folded that reporter into this log.
+                        self.arith_diag(&format!(
+                            "{}{}: readonly variable\n",
+                            self.error_prefix(),
+                            name
+                        ));
+                        printed = true;
+                    }
+                }
             }
-            printed = true;
         }
         if printed {
             use std::io::Write;
             let _ = std::io::stderr().flush();
         }
+    }
+
+    /// Print one non-fatal diagnostic. Diag payloads are built from
+    /// parser-input text, and on the EXP_EXPANDED entries (`let`,
+    /// `[[`) that input carries the subscript carrier encoding
+    /// (`a[<0x1e><hex>]`) from the indexed-subscript rewrite. GNU
+    /// echoes the lvalue token as written (expr.c:1526-1535), so
+    /// decode the carrier spans at this single rendering point —
+    /// every producer (plain and compound binds, read and bind
+    /// diagnostics) is covered (rubash#2341's `let` bind line leaked
+    /// the raw encoding).
+    fn print_arith_diag(&self, diag: &ArithEvalDiag, label: Option<&str>) {
+        match (diag, label) {
+            (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => eprintln!(
+                "{}{}: `{}': not a valid identifier",
+                self.diagnostic_prefix(),
+                label,
+                parser::de_carrier_arith_text(display)
+            ),
+            (ArithEvalDiag::InvalidIdentifier(display), None) => eprintln!(
+                "{}`{}': not a valid identifier",
+                self.diagnostic_prefix(),
+                parser::de_carrier_arith_text(display)
+            ),
+            (ArithEvalDiag::BadSubscript(display), _) => eprintln!(
+                "{}{}: bad array subscript",
+                self.error_prefix(),
+                parser::de_carrier_arith_text(display)
+            ),
+        }
+    }
+
+    /// Legacy name for the ordered drain, kept for the `[[ ]]`
+    /// boundary in conditional.rs, whose four call sites drain after
+    /// each operand evaluation and then sync writes.
+    pub(in crate::executor) fn flush_arith_diags(&mut self, label: Option<&str>) {
+        self.drain_arith_eval_events(label);
     }
 
     /// GNU arrayfunc.c:1353-1391 `array_expand_index` -> `evalexp`: evaluate
@@ -1178,7 +1352,7 @@ impl Executor {
         }
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
-        let _ = take_arith_eval_diags();
+        clear_arith_eval_events();
         self.shell_state
             .env_vars
             .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
@@ -1243,7 +1417,6 @@ impl Executor {
         // reconcile_pipestatus_mirror; checked before the clear).
         self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
-        clear_arith_locale_binds();
         let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
@@ -1257,9 +1430,8 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_unbound_variable_error(category);
-        self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
-        self.flush_arith_diags(None);
+        self.drain_arith_eval_events(None);
         sync_arith_writes_to_shell_state(self);
         if let Some(key) = memo_key {
             crate::executor::expand_braced_indices::sub_idx_store(
@@ -1432,7 +1604,7 @@ impl Executor {
     pub(crate) fn eval_arithmetic_expansion_value(&mut self, expression: &str) -> Option<i128> {
         self.shell_state.arithmetic_last_error_category.set(None);
         let _ = take_arith_eval_error();
-        let _ = take_arith_eval_diags();
+        clear_arith_eval_events();
         clear_arith_subscript_unbound();
         self.shell_state
             .env_vars
@@ -1515,7 +1687,6 @@ impl Executor {
         // reconcile_pipestatus_mirror; checked before the clear).
         self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
-        clear_arith_locale_binds();
         // GNU expr.c: the expansion pass above already ran, so the parser
         // evaluates under evalexp's already-expanded rules — a surviving
         // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
@@ -1532,11 +1703,10 @@ impl Executor {
             .arithmetic_last_error_category
             .set(category);
         self.report_arithmetic_unbound_variable_error(category);
-        self.report_arithmetic_readonly_error();
         self.report_arithmetic_noassign_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
-        self.flush_arith_diags(None);
+        self.drain_arith_eval_events(None);
         // GNU $((r=0)) with an empty nameref cell still yields the assigned
         // value while reporting the failed bind without a command label.
         self.report_arithmetic_nameref_error(None);
@@ -1590,35 +1760,6 @@ impl Executor {
         }
         self.shell_state.arithmetic_readonly_error.set(true);
         let _ = self.shell_state.arithmetic_expansion_error.replace(true);
-    }
-
-    fn report_arithmetic_readonly_error(&mut self) {
-        let Some(name) = self
-            .shell_state
-            .env_vars
-            .remove("__RUBASH_ARITH_READONLY_ERROR")
-        else {
-            return;
-        };
-        // rubash#1238: remember the diagnostic was printed so the
-        // (( ))/let reporters don't add a synthesized syntax error after
-        // it (GNU's bind failure produces exactly one diagnostic line).
-        self.shell_state.arithmetic_readonly_error.set(true);
-        if !self.shell_state.arithmetic_expansion_error.replace(true) {
-            // GNU error.c:453 err_readonly (report_error family):
-            // the diagnostic goes to fd 2 AS BOUND by the command's
-            // redirections — `(( a = 6 )) 2>&1` lands it on stdout,
-            // `2>f` in f. Route through arith_diag
-            // (write_diagnostic_fd2) like every sibling arithmetic
-            // diagnostic; the raw eprintln! here bypassed the
-            // binding and leaked to the shell's real stderr
-            // (rubash#2707, A3-R1).
-            self.arith_diag(&format!(
-                "{}{}: readonly variable\n",
-                self.error_prefix(),
-                name
-            ));
-        }
     }
 
     /// A fatal arithmetic evaluation error (expr.c evalerror) raised while
@@ -2202,7 +2343,6 @@ pub(in crate::executor) fn trailing_input_token(
         error_category: None,
         no_expand: false,
         error: None,
-        diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
         noeval: 0,
@@ -2256,7 +2396,6 @@ fn indexed_noexpand_error_token(resolved: &str) -> String {
         error_category: None,
         no_expand: true,
         error: None,
-        diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
         noeval: 0,
@@ -3914,11 +4053,14 @@ fn eval_mutable_arith_result(
     no_expand: bool,
     cells: Option<&crate::shell::VariableStore>,
 ) -> (Option<i128>, Option<ArithmeticErrorCategory>) {
-    // Fresh evaluation: a stale record/diagnostic from an earlier
-    // expression must not label this one (early-return paths below never
-    // run the parser).
+    // Fresh evaluation: a stale error record from an earlier
+    // expression must not label this one (early-return paths below
+    // never run the parser). The event log is NOT cleared here:
+    // nested evaluations append their events to the enclosing
+    // evaluation's log at their production points, which is exactly
+    // the global evaluation order the boundary drain renders
+    // (rubash#3078).
     let _ = take_arith_eval_error();
-    let _ = take_arith_eval_diags();
     // rubash#3200: the evaluator-trap name slot is per-evaluation too.
     let _ = take_arith_unbound_name();
     // Parse-cache fast path (first knife): the key is the raw expression
@@ -3963,7 +4105,6 @@ fn eval_mutable_arith_result(
         error_category: None,
         no_expand,
         error: None,
-        diags: Vec::new(),
         last_tok_start: 0,
         last_tok_operand: false,
         noeval: 0,
@@ -4035,7 +4176,6 @@ fn eval_mutable_arith_result(
         }
     });
     ARITH_EVAL_ERROR.with(|slot| *slot.borrow_mut() = parser.error);
-    ARITH_EVAL_DIAGS.with(|slot| *slot.borrow_mut() = parser.diags);
     (value, category)
 }
 
