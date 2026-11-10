@@ -274,6 +274,90 @@ fn chain_file_then_stdout() {
 }
 
 // ---------------------------------------------------------------------
+// Additional binding surfaces for the same drain, probed against the
+// GNU 5.3.20 oracle in the #2641 close-out lane (2026-11-11, master
+// d9555905): the diagnostic must follow fd 2 as bound at the point of
+// the `let` call, however that binding was established. On the
+// pre-#2968 tree these shapes leak like the seed cell; they are
+// pinned here so the drain's routing cannot regress on the adjacent
+// surfaces the issue's own cells do not reach.
+// ---------------------------------------------------------------------
+
+#[test]
+fn comsub_capture_redirect() {
+    // Inside a command substitution, `2>&1` binds the let's fd 2 to
+    // the capture pipe: the diagnostic lands in the captured value,
+    // not on the process stderr.
+    let out = run("readonly R=1; x=$(let \"R=2\" 2>&1); echo rc=$?; echo \"cap:[$x]\"");
+    let stdout_lines = lines(&out.stdout);
+    assert_eq!(
+        stdout_lines.len(),
+        2,
+        "comsub: stdout must have 2 lines; got {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(stdout_lines[0], "rc=1", "comsub: the failed let sets rc 1");
+    assert!(
+        stdout_lines[1].starts_with("cap:[")
+            && stdout_lines[1].ends_with(']')
+            && stdout_lines[1].contains(": R: readonly variable"),
+        "comsub: the diagnostic must be captured into x; got {:?}",
+        stdout_lines[1]
+    );
+    assert!(
+        out.stderr.is_empty(),
+        "comsub: stderr must be empty; got {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(out.code, 0, "comsub: rc must be 0");
+}
+
+#[test]
+fn function_callsite_redirect() {
+    // The redirection is on the function CALL, not inside the body:
+    // fd 2 as bound when `let` executes is what counts.
+    expect_redirected(
+        "readonly R=1; f(){ let \"R=2\"; }; f 2>&1; echo rc=$?",
+        "R",
+        &["rc=1"],
+        "function call site: f 2>&1 with an unredirected let inside",
+    );
+}
+
+#[test]
+fn compound_assign_redirect() {
+    expect_redirected(
+        "readonly R=1; let \"R+=1\" 2>&1; echo rc=$?; echo R=$R",
+        "R",
+        &["rc=1", "R=1"],
+        "compound assignment: let R+=1 2>&1",
+    );
+}
+
+#[test]
+fn unquoted_operand_redirect() {
+    expect_redirected(
+        "readonly R=1; let R=2 2>&1; echo rc=$?",
+        "R",
+        &["rc=1"],
+        "unquoted operand: let R=2 2>&1",
+    );
+}
+
+#[test]
+fn multi_operand_redirect() {
+    // A failing first operand does not stop evaluation of the rest;
+    // the status is still 1 and the single diagnostic follows the
+    // redirection.
+    expect_redirected(
+        "readonly R=1; let \"R=2\" \"3+4\" 2>&1; echo rc=$?",
+        "R",
+        &["rc=1"],
+        "multi-operand: let R=2 3+4 2>&1",
+    );
+}
+
+// ---------------------------------------------------------------------
 // Regression locks / positive controls: shapes that already agree
 // with GNU on the base tree and must not move.
 // ---------------------------------------------------------------------
