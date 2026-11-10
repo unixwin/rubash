@@ -346,6 +346,32 @@ fn read_array_field_values_impl(line: &str, ifs: &str) -> Vec<String> {
         .collect()
 }
 
+/// Field values for `read -r -a` (raw mode): the elements are the raw
+/// field slices — no unescaping — but they must be produced at VALUE
+/// level, not by slicing the caller's line with the ranges of
+/// `split_read_field_ranges`. In a single-byte locale the split runs
+/// in the byte domain (rubash#2819's `read_byte_domain`, as the scalar
+/// and non-raw array producers do): there a multibyte IFS character
+/// is one delimiter PER BYTE (GNU subst.c list_string separator
+/// membership is per byte when MB_CUR_MAX == 1), the byte ranges can
+/// fall inside a multibyte character of the original line, and
+/// slicing it cannot express the empty fields between the two
+/// delimiter bytes (rubash#3191: IFS 'é', line 'xéyéz' — GNU n=5
+/// <x><><y><><z>, the range-slicing producer gave n=3). Outside the
+/// byte domain this is exactly the historical range slicing.
+pub(in crate::executor) fn read_array_raw_values(line: &str, ifs: &str) -> Vec<String> {
+    if let Some((domain_line, domain_ifs)) = read_byte_domain(line, ifs) {
+        return split_read_field_ranges(&domain_line, &domain_ifs, false)
+            .into_iter()
+            .map(|(start, end)| byte_domain_value(&domain_line[start..end]))
+            .collect();
+    }
+    split_read_field_ranges(line, ifs, false)
+        .into_iter()
+        .map(|(start, end)| line[start..end].to_string())
+        .collect()
+}
+
 /// First-field extraction for the last (or only) `read` variable,
 /// mirroring GNU subst.c:3268 get_word_from_string: scan to the first
 /// unescaped IFS character (an escape pair is data when backslashes
