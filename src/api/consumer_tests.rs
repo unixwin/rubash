@@ -5914,9 +5914,7 @@ fn issue2794_assignment_only_arithmetic_nounset_reports_the_face() {
     let mut session = issue863_gap1_interactive_session();
     let options = issue863_gap1_interactive_options();
     session.run("set -u", &options).expect("run");
-    let outcome = session
-        .run("x=$((q6_undef + 1))", &options)
-        .expect("run");
+    let outcome = session.run("x=$((q6_undef + 1))", &options).expect("run");
     assert_eq!(outcome.status, 1);
     assert_eq!(outcome.flow, Flow::Completed);
     assert!(outcome.classification.expansion_error_discard);
@@ -5932,9 +5930,7 @@ fn issue2794_conditional_arith_compare_nounset_reports_the_face() {
     let mut session = issue863_gap1_interactive_session();
     let options = issue863_gap1_interactive_options();
     session.run("set -u", &options).expect("run");
-    let outcome = session
-        .run("[[ q6_undef -eq 1 ]]", &options)
-        .expect("run");
+    let outcome = session.run("[[ q6_undef -eq 1 ]]", &options).expect("run");
     assert_eq!(outcome.status, 1);
     assert_eq!(outcome.flow, Flow::Completed);
     assert!(outcome.classification.expansion_error_discard);
