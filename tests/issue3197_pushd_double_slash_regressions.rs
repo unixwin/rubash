@@ -46,7 +46,15 @@ fn run_script(dir: &Path, script: &str) -> String {
         "probe failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8_lossy(&output.stdout).replace(&dir.to_string_lossy().into_owned(), "WORK")
+    // Normalize the scratch path to WORK. The scratch spelling itself
+    // starts with `/`, so a preserved `//` prefix in a value fuses with
+    // it into one string (`//` + `/tmp/…`); replacing the bare scratch
+    // first would match from the second slash and eat the very prefix
+    // this pin exists to verify. Replace the fused form first.
+    let scratch = dir.to_string_lossy().into_owned();
+    String::from_utf8_lossy(&output.stdout)
+        .replace(&format!("/{scratch}"), "//WORK")
+        .replace(&scratch, "WORK")
 }
 
 #[test]
