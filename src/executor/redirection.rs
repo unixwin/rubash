@@ -1681,7 +1681,15 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.command_output_redirect_fails_impl(cmd, true);
         }
-        match self.apply_dynamic_fd_var_redirects(cmd, true) {
+        // rubash#2629: this bracket is a verdict-only pass on the
+        // PARENT executor — the stage element's own applier run is
+        // the list's real evaluation (in the forked child, GNU's
+        // model), so the deferred writes this pass's expansions
+        // queue must not survive it (the #2558 pre-scan discipline):
+        // mark the queue and roll it back on every exit.
+        let writes_mark = Self::scan_pending_writes_mark();
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let verdict = match self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable) {
             Ok(false) => {
                 let result = self.command_output_redirect_fails_impl(cmd, true);
                 self.undo_child_fd_var_redirects();
@@ -1695,7 +1703,9 @@ impl Executor {
                 Ok(true)
             }
             Err(error) => Err(error),
-        }
+        };
+        Self::scan_pending_writes_rollback(writes_mark);
+        verdict
     }
 
     fn command_output_redirect_fails_impl(
@@ -1982,6 +1992,129 @@ impl Executor {
         } else {
             self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
             self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
+        }
+        Ok(true)
+    }
+
+    /// Chunk-ordered variant of the buffered route (rubash#2699):
+    /// the chunks carry their production order across fds 1/2, so
+    /// the walk writes them in log order instead of the whole
+    /// stdout block before the whole stderr block. The preamble
+    /// mirrors `route_builtin_buffered_output_ordered` exactly
+    /// (state build, `apply_ordered_output_redirects`,
+    /// `first_open_error`, `redirect_failed`, closed-fd branches —
+    /// emptiness judged on the per-fd concatenated buffers).
+    /// `resolve_only_numbered` / `foreign_drain` stay false at the
+    /// only call site: type/command are not a post-external face.
+    pub(in crate::executor) fn route_builtin_buffered_output_chunks(
+        &mut self,
+        cmd: &CommandNode,
+        chunks: &[(u8, Vec<u8>)],
+        resolve_only_numbered: bool,
+    ) -> Result<bool, ExecuteError> {
+        self.last_builtin_write_failed.set(false);
+        let mut state = self.command_output_fd_state();
+        state.persist_move_closes = true;
+        state.resolve_only_numbered = resolve_only_numbered;
+        state.foreign_drain = resolve_only_numbered;
+        state.open_failure_via_error = true;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        for (fd, bytes) in chunks {
+            match fd {
+                1 => stdout.extend_from_slice(bytes),
+                _ => stderr.extend_from_slice(bytes),
+            }
+        }
+        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
+            if !stdout.is_empty()
+                && state
+                    .fd_target(1)
+                    .is_some_and(|target| *target == OutputTarget::Closed)
+            {
+                if state.foreign_drain {
+                    // rubash#2378: the foreign child's write to the
+                    // closed fd already failed inside the child; drop
+                    // the drained bytes, route stderr on its own
+                    // binding, and leave the child's status alone.
+                    self.write_state_output_or_diagnostic(cmd, &state, 1, &stdout)?;
+                    self.write_state_output_or_diagnostic(cmd, &state, 2, &stderr)?;
+                    return Ok(true);
+                }
+                if builtin_output_write_is_unchecked(cmd) {
+                    return Ok(true);
+                }
+                self.write_bad_output_fd_diagnostic(cmd, &state)?;
+                self.exit_code = 1;
+                self.last_builtin_write_failed.set(true);
+                return Ok(true);
+            }
+            if !stderr.is_empty()
+                && state
+                    .fd_target(2)
+                    .is_some_and(|target| *target == OutputTarget::Closed)
+            {
+                // A closed fd 2 drops diagnostics silently and leaves the
+                // command's status alone (GNU builtin_error writes to fd 2;
+                // with fd 2 closed the write is lost and sh_chkwrite folds
+                // only stdout's ferror — rubash#699 R1.3). Route stdout
+                // through the state first so it is not lost with stderr.
+                self.write_state_output_or_diagnostic(cmd, &state, 1, &stdout)?;
+                let _ = self.write_state_output_or_diagnostic(cmd, &state, 2, &stderr)?;
+                return Ok(true);
+            }
+            if !stdout.is_empty()
+                && matches!(state.fd_target(1), Some(OutputTarget::CoprocStdin(_)))
+            {
+                self.write_state_output_or_diagnostic(cmd, &state, 1, &stdout)?;
+                return Ok(true);
+            }
+            if !stderr.is_empty()
+                && matches!(state.fd_target(2), Some(OutputTarget::CoprocStdin(_)))
+            {
+                self.write_state_output_or_diagnostic(cmd, &state, 2, &stderr)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        if let Some((kind, message)) = state.first_open_error.borrow_mut().take() {
+            return Err(ExecuteError::IoError(std::io::Error::new(kind, message)));
+        }
+        if state.redirect_failed {
+            // rubash#1871: see the ordered route — the walk already
+            // printed the diagnostic and set exit_code; fold the
+            // failure into the write-failure flag so wrappers that
+            // assign the builtin's own return value afterwards
+            // return 1 too.
+            self.last_builtin_write_failed.set(true);
+            return Ok(true);
+        }
+
+        if !stdout.is_empty()
+            && state
+                .fd_target(1)
+                .is_some_and(|target| *target == OutputTarget::Closed)
+        {
+            if builtin_output_write_is_unchecked(cmd) {
+                return Ok(true);
+            }
+            if !state.foreign_drain {
+                self.write_bad_output_fd_diagnostic(cmd, &state)?;
+                self.exit_code = 1;
+                self.last_builtin_write_failed.set(true);
+                return Ok(true);
+            }
+            // rubash#2378 (foreign drain): fall through to the
+            // ordered writes below — write_state_output_or_diagnostic
+            // drops the closed stream silently and still routes the
+            // other one.
+        }
+        // A closed fd 2 (rubash#699 R1.3) is not special-cased here:
+        // the chunk walk below writes in log order, and the Closed
+        // target drops the fd-2 bytes silently and leaves the status
+        // untouched.
+        for (fd, bytes) in chunks {
+            self.write_state_output_or_diagnostic(cmd, &state, u32::from(*fd), bytes)?;
         }
         Ok(true)
     }
@@ -3017,8 +3150,7 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
                     match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
                         Some(error) => Err(crate::posix_errors::path_error(&target, error)),
@@ -3189,7 +3321,23 @@ impl Executor {
         if !command_has_dynamic_fd_var_redirects(cmd) {
             return self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         }
-        let applied = matches!(self.apply_dynamic_fd_var_redirects(cmd, true), Ok(false));
+        // rubash#2629: when an earlier applier run for this same
+        // list already produced the binds (the stage executor's own
+        // apply, or a gate bracket's), rebind from that record
+        // instead of running the applier again — a second run
+        // re-expands the `{var}` target words, and the stage body's
+        // intervening execute_command entries have cleared the
+        // target memo by now, so a side-effect target (`$((i+=1))`
+        // in the filename) would evaluate twice for one element,
+        // where GNU's single do_redirections pass evaluates it
+        // once. The replay falls back to the real applier when no
+        // matching record exists.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(cmd);
+        let applied = self.replay_dynamic_fd_var_snapshot(cmd, true)
+            || matches!(
+                self.apply_dynamic_fd_var_redirects(cmd, true, fd_var_walk_undoable),
+                Ok(false)
+            );
         let result = self.route_pipeline_stage_streams_inner(cmd, stdout, stderr, status);
         if applied {
             self.undo_child_fd_var_redirects();

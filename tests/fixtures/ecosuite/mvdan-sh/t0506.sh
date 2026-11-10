@@ -1,0 +1,3 @@
+<<EOF | b
+foo
+EOF

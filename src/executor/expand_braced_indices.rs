@@ -466,6 +466,17 @@ impl Executor {
                 );
             }
         }
+        // The substring form is tried BEFORE the `#`-prefix arms below:
+        // `${#:0:1}` is a substring of the `$#` value, but the `#` arm
+        // claims every `#`-initial name and returns None for non-length
+        // operands, so a substring arm placed after them never saw it
+        // (rubash#3063). The parse admits only a bare `#`
+        // name before the colon, so the length forms (`${#arr[@]}`,
+        // `${#?}`, `${#v}`) — none of which carry a top-level colon
+        // after a bare `#` — still fall through to the arms below.
+        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
+            return Some(self.expand_braced_substring_parameter(var_name, offset, length));
+        }
         if let Some(array_name) = name.strip_prefix('#').and_then(|name| {
             name.strip_suffix("[@]")
                 .or_else(|| name.strip_suffix("[*]"))
@@ -564,9 +575,8 @@ impl Executor {
             }
             return None;
         }
-        if let Some((var_name, offset, length)) = self.parse_parameter_substring(name) {
-            return Some(self.expand_braced_substring_parameter(var_name, offset, length));
-        }
+        // (The substring form is handled near the top of this function,
+        // before the `#`-prefix arms — see the comment there.)
         // GNU valid_array_reference only treats NAME[...] as an array
         // subscript when NAME is a valid identifier. A pattern-replacement
         // word like `z//[^;]` extracts array name "z//" here; without the
@@ -906,6 +916,19 @@ impl Executor {
                 .unwrap_or_default();
         }
         if let Some(value) = self.array_element_parameter_value(var_name) {
+            return parameter_substring(&value, offset, length);
+        }
+        // GNU param_expand fetches the parameter's value generically
+        // BEFORE the substring dispatch and hands it to
+        // parameter_brace_substring (subst.c:9050, call site
+        // subst.c:10179) — special parameters included (`?` is
+        // itos(last_command_exit_value)). Resolve them here, in the
+        // callee, the same way expand_braced_length_parameter does:
+        // two of the call sites used to fetch the value on this
+        // function's behalf, but the plain-word dispatcher path did
+        // not, so the whole family sliced empty there (rubash#3063).
+        if is_special_parameter_name(var_name) || var_name.parse::<usize>().is_ok() {
+            let value = self.expand_parameter_named_value(var_name);
             return parameter_substring(&value, offset, length);
         }
         if is_shell_name(var_name) {

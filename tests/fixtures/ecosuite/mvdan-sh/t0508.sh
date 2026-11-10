@@ -1,0 +1,3 @@
+<<EOF && { bar; }
+hdoc
+EOF
