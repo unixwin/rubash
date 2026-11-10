@@ -827,7 +827,7 @@ fn translate_keyseq_bytes(bytes: &[u8]) -> Vec<u8> {
     let read_base = |bytes: &[u8], i: &mut usize| -> u32 {
         match bytes.get(*i) {
             Some(b'\\') => {
-                let base = match bytes.get(*i + 1) {
+                let base: u8 = match bytes.get(*i + 1) {
                     Some(b'\\') => 0x5c,
                     Some(b'"') => 0x22,
                     _ => 0x5c,
