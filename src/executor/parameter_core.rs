@@ -558,6 +558,86 @@ impl Executor {
         t.parse::<isize>().ok()
     }
 
+    /// The RAW length text of a substring operand, exactly as written
+    /// after the offset/length separator colon (GNU subst.c:8395
+    /// verify_substring_values: `t = skiparith(substr, ':')`, then `t++`
+    /// past the colon; the negative-length diagnostic at subst.c:8487/
+    /// 8502 reports that slice verbatim — `${v:1: -1}` reports ` -1`,
+    /// leading blank included, never the evaluated number; rubash#2713).
+    /// `None` when the operand has no top-level separator colon or no
+    /// length part.
+    pub(in crate::executor) fn parameter_substring_raw_length_text<'a>(
+        name: &'a str,
+    ) -> Option<&'a str> {
+        let (_var_name, rest, has_colon) = split_top_level_colon(name);
+        if !has_colon {
+            return None;
+        }
+        let (_offset, length, has_length) = split_top_level_colon(rest);
+        if has_length {
+            Some(length)
+        } else {
+            None
+        }
+    }
+
+    /// GNU verify_substring_values' `len` (subst.c:8428-8452): the bound
+    /// an offset is range-checked against, by value kind — VT_POSPARMS
+    /// (`@`/`*`): `number_of_args() + 1`, plus one when the offset is 0
+    /// (counting from $0); VT_ARRAYVAR under `[@]`/`[*]`: assoc element
+    /// count / indexed max index, plus one for a negative offset;
+    /// VT_VARIABLE / VT_ARRAYMEMBER: the value's character length.
+    /// `None` when this layer cannot price the bound (e.g. no storage
+    /// rendering for the array); the caller then keeps the eager
+    /// evaluation order rather than guessing.
+    fn substring_offset_bound(&self, var_name: &str, offset: isize) -> Option<i128> {
+        if var_name == "@" || var_name == "*" {
+            let mut bound = self.shell_state.positional_window().len() as i128 + 1;
+            if offset == 0 {
+                bound += 1;
+            }
+            return Some(bound);
+        }
+        if let Some(base) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            if self.parameter_is_array_variable(base) {
+                let storage = self.parameter_array_storage(base)?;
+                if self.is_assoc_parameter_array(base) {
+                    let count =
+                        crate::executor::assignment_helpers::assoc_entries(&storage).len() as i128;
+                    return Some(if offset < 0 { count + 1 } else { count });
+                }
+                let entries = crate::executor::arrays::indexed_array_entries(&storage);
+                let max_index = entries
+                    .keys()
+                    .next_back()
+                    .map(|index| *index as i128)
+                    .unwrap_or(-1);
+                return Some(if offset < 0 { max_index + 1 } else { max_index });
+            }
+        }
+        let value = self.parameter_operator_value(var_name)?;
+        Some(crate::executor::expand_braced_indices::parameter_char_length(&value) as i128)
+    }
+
+    /// GNU subst.c:8459-8464: a negative offset is first adjusted by the
+    /// bound; the offset is out of range when it then exceeds the bound
+    /// or is still negative, and verify_substring_values returns -1
+    /// BEFORE the length text is expanded or evaluated (rubash#2752).
+    fn substring_offset_out_of_range(&self, var_name: &str, offset: isize) -> bool {
+        let Some(bound) = self.substring_offset_bound(var_name, offset) else {
+            return false;
+        };
+        let adjusted = if offset < 0 {
+            offset as i128 + bound
+        } else {
+            offset as i128
+        };
+        adjusted > bound || adjusted < 0
+    }
+
     pub(in crate::executor) fn parse_parameter_substring<'a>(
         &self,
         name: &'a str,
@@ -712,6 +792,15 @@ impl Executor {
                 }
             }
         };
+        // GNU verify_substring_values (subst.c:8459-8464): the offset
+        // bounds check runs BEFORE the length text is expanded or
+        // evaluated — an out-of-range offset returns -1 (empty result,
+        // no diagnostic), so the length operand's side effects and
+        // errors never happen (rubash#2752). The (0, Some(0)) sentinel
+        // is the same empty slice the unset early return above yields.
+        if self.substring_offset_out_of_range(var_name, offset) {
+            return Some((var_name, 0, Some(0)));
+        }
         let length = if !has_length {
             None
         } else if length_str.is_empty() {
@@ -744,6 +833,14 @@ impl Executor {
         &self,
         value: &str,
     ) -> Option<isize> {
+        // GNU verify_substring_values (subst.c:8395) hands the RAW operand
+        // text to expand_arith_string/evalexp; evalerror (expr.c:1526-1537)
+        // skips only the expression's LEADING whitespace at display time
+        // and reports lasttp verbatim, trailing blanks included. Trimming
+        // the tail here would rewrite both the echoed expression and the
+        // error token (`${v: 1 + }` must report token "+ ", not "+";
+        // rubash#2713), so only the head is trimmed — display layers skip
+        // leading blanks exactly like evalerror does.
         let expression = value
             .strip_prefix("$((")
             .and_then(|inner| inner.strip_suffix("))"))
@@ -753,7 +850,7 @@ impl Executor {
                     .and_then(|inner| inner.strip_suffix(')'))
             })
             .unwrap_or(value)
-            .trim();
+            .trim_start();
         // GNU subst.c:11395-11404 expand_array_subscript (under Q_ARITH):
         // a `name[sub]` inside the offset/length expands its subscript once
         // and backslash-quotes the products (abstab), so `A[$k]` with
@@ -923,11 +1020,13 @@ impl Executor {
         // double-quoted `${x:1:"2"}` form the quotes are not stripped
         // (rubash#539: `${x:1:'2'}` is an arithmetic error, never `bc`).
         if let Some(span) = single_quoted_operand_span(offset_str) {
-            self.report_single_quoted_substring_operand(var_name, &span);
+            let display = quoted_operand_display_text(offset_str, &span);
+            self.report_single_quoted_substring_operand(var_name, &display);
             return Some((var_name, 0, Some(0)));
         }
         if let Some(span) = single_quoted_operand_span(length_str) {
-            self.report_single_quoted_substring_operand(var_name, &span);
+            let display = quoted_operand_display_text(length_str, &span);
+            self.report_single_quoted_substring_operand(var_name, &display);
             return Some((var_name, 0, Some(0)));
         }
 
@@ -961,6 +1060,12 @@ impl Executor {
                 }
             }
         };
+        // Same verify_substring_values bounds gate as the &self parse:
+        // an out-of-range offset discards the length operand
+        // unevaluated (subst.c:8459-8464; rubash#2752).
+        if self.substring_offset_out_of_range(var_name, offset) {
+            return Some((var_name, 0, Some(0)));
+        }
         let length = if !has_length {
             None
         } else if length_str.is_empty() {
@@ -990,6 +1095,9 @@ impl Executor {
     }
 
     fn eval_parameter_substring_offset_mut(&mut self, value: &str) -> Option<isize> {
+        // Raw operand text, head-trimmed only — same GNU evalerror
+        // contract as eval_parameter_substring_offset (subst.c:8395,
+        // expr.c:1526-1537; rubash#2713).
         let expression = value
             .strip_prefix("$((")
             .and_then(|inner| inner.strip_suffix("))"))
@@ -999,7 +1107,7 @@ impl Executor {
                     .and_then(|inner| inner.strip_suffix(')'))
             })
             .unwrap_or(value)
-            .trim();
+            .trim_start();
         // Same expand_array_subscript protection as the &self variant:
         // encode `name[sub]` assoc subscripts before the $-passes, so
         // expansion products inside the subscript stay verbatim keys.
@@ -1085,10 +1193,11 @@ impl Executor {
 
     /// GNU verify_substring_values → evalexp on the raw single-quoted
     /// operand: expr.c readtok fails a quoted span as a string operand —
-    /// `<var>: <span>: arithmetic syntax error: operand expected (error
-    /// token is "<span>")` — with the varname from this_command_name
-    /// (parameter_brace_substring), no trailing blank in the token
-    /// (rubash#539).
+    /// `<var>: <text>: arithmetic syntax error: operand expected (error
+    /// token is "<text>")` — with the varname from this_command_name
+    /// (parameter_brace_substring). `span` is the display text chosen by
+    /// quoted_operand_display_text: the bare span (rubash#539), or the
+    /// whole operand when trailing blanks belong to it (rubash#2713).
     fn report_single_quoted_substring_operand(&self, var_name: &str, span: &str) {
         self.shell_state.arithmetic_fatal_error.set(true);
         if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1105,6 +1214,21 @@ impl Executor {
             use std::io::Write;
             let _ = std::io::stderr().flush();
         }
+    }
+}
+
+/// GNU verify_substring_values hands evalexp the raw operand text, so
+/// when the operand is exactly one single-quoted span plus surrounding
+/// blanks, evalerror's echoed expression and its lasttp token are the
+/// whole (leading-trimmed) operand — trailing blanks included
+/// (`${v: '1' }` reports `'1' ` as both, rubash#2713). A span embedded in
+/// a larger expression keeps the span-only report (rubash#539).
+fn quoted_operand_display_text(operand: &str, span: &str) -> String {
+    let display = operand.trim_start();
+    if display.trim_end() == span {
+        display.to_string()
+    } else {
+        span.to_string()
     }
 }
 
