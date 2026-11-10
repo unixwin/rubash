@@ -604,13 +604,24 @@ pub(crate) fn record_standard_path_resolution(
 pub(crate) fn record_command_resolution(env_vars: &mut VarTable, name: &str, shell_path: &str) {
     let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    if let Some((_, hits, _)) = table.get_mut(name.as_str()) {
+    let recorded = if let Some((stored, hits, _)) = table.get_mut(name.as_str()) {
         *hits += 1;
+        stored.clone()
     } else {
         table.insert(
             name.to_string(),
             (shell_path.to_string(), 1, next_hash_seq(&table)),
         );
-    }
+        shell_path.to_string()
+    };
     store_hash_table(env_vars, &table);
+    // GNU search_for_command consults hashed_filenames FIRST on the
+    // next lookup (findcmd.c:367-380) and shell_execve executes the
+    // recorded string verbatim — the lookup mirror must serve the
+    // same recorded spelling, or execution re-walks PATH under the
+    // new cwd and a relative spelling (`./rel1/foo`) is lost after
+    // `cd` (rubash#2696). record_standard_path_resolution syncs its
+    // mirror entry for the same reason (rubash#1648).
+    let cached_path = crate::executor::path::shell_path_to_windows(&recorded, env_vars);
+    crate::executor::path::set_command_lookup_cache(&name, Some(cached_path), env_vars);
 }

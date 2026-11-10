@@ -650,6 +650,17 @@ impl Executor {
         tilde_expand::expand_assignment_value(value, &self.shell_state.env_vars)
     }
 
+    /// rubash#2651: like [`Self::expand_assignment_tilde`], but the
+    /// resolved tilde prefixes are carrier-encoded as data so the
+    /// caller's second expansion walk cannot rescan them (GNU joins
+    /// the tilde result as a quoted string, subst.c:11862).
+    pub(in crate::executor) fn expand_assignment_tilde_protected(&self, value: &str) -> String {
+        if value.contains('=') {
+            return value.to_string();
+        }
+        tilde_expand::expand_assignment_value_protected(value, &self.shell_state.env_vars)
+    }
+
     pub(in crate::executor) fn home_value(&self) -> String {
         tilde_expand::home_value(&self.shell_state.env_vars)
     }

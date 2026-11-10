@@ -61,11 +61,12 @@ pub use skip::{unclosed_comsub_eof_shape, UnclosedComsubShape};
 use crate::executor::markers::DATA_DOLLAR;
 pub(crate) use ansi::decode_ansi_c_quoted;
 pub(crate) use quotes::remove_shell_quotes;
+pub(crate) use quotes::with_lex_extquote_pin;
 pub(crate) use quotes::{
     escape_decoded_ansi_c_quotes, ANSI_C_DQUOTE_MARKER, ANSI_C_QUOTE_MARKER, PARAM_NAME_END_MARKER,
 };
 pub use token::{Token, TokenKind};
-pub(crate) use word::{raw_has_ansi_u_escape, word_value_from_raw};
+pub(crate) use word::{raw_has_ansi_u_escape, raw_has_dolbrace_ansi_c, word_value_from_raw};
 
 pub(crate) const QUOTED_HEREDOC_MARKER: &str = crate::executor::markers::QUOTED_HEREDOC_MARKER;
 

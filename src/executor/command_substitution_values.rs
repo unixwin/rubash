@@ -1553,6 +1553,20 @@ fn quoted_positional_at_segments(
                     literal_start = index;
                     continue;
                 }
+                // A plain quoted span with no word-list source still
+                // carries a quoted-site verdict (rubash#2759): emit it
+                // as a quoted literal segment so its expansion result is
+                // IFS-protected at the junction. Declined spans stay in
+                // the literal run, byte-for-byte the historic path.
+                if push_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 1..end],
+                ) {
+                    index = end + 1;
+                    literal_start = index;
+                    continue;
+                }
                 index = end + 1;
                 continue;
             }
@@ -1562,6 +1576,77 @@ fn quoted_positional_at_segments(
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
                 index = skip_single_quote(&chars, index + 2)?;
+                continue;
+            }
+            '$' if chars.get(index + 1) == Some(&'"')
+                && (index == 0 || chars[index - 1] != '$') =>
+            {
+                // A `$"..."` locale string expands exactly like a plain
+                // `"..."` span (the `$` only requests message-catalog
+                // translation of the literal text), so it goes through
+                // the same segment attempts as the `'"'` arm
+                // (rubash#2759). `$$"..."` is the PID expansion followed
+                // by a plain quoted span, so a `$` directly before this
+                // one leaves the span to the plain-quote arm below.
+                let Some(end) = skip_double_quote(&chars, index + 2) else {
+                    return None;
+                };
+                let body = &chars[index + 2..end];
+                if body == "$@".chars().collect::<Vec<_>>().as_slice() {
+                    push_quoted_positional_literal_segment(
+                        &mut segments,
+                        &chars[literal_start..index],
+                        false,
+                    )?;
+                    segments.push(QuotedPositionalAtSegment::PositionalAt(true));
+                    saw_positional_at = true;
+                    index = end + 1;
+                    literal_start = index;
+                    continue;
+                }
+                if body.first() == Some(&'$')
+                    && body.get(1) == Some(&'{')
+                    && body.len() > 6
+                    && body[body.len() - 4..] == ['[', '@', ']', '}']
+                {
+                    let array_name: String = body[2..body.len() - 4].iter().collect();
+                    if is_shell_name(&array_name) {
+                        push_quoted_positional_literal_segment(
+                            &mut segments,
+                            &chars[literal_start..index],
+                            false,
+                        )?;
+                        segments.push(QuotedPositionalAtSegment::ArrayAt(array_name, true));
+                        saw_positional_at = true;
+                        index = end + 1;
+                        literal_start = index;
+                        continue;
+                    }
+                }
+                if let Some(body_segments) =
+                    quoted_body_positional_at_segments(body, env_vars, nameref_target)
+                {
+                    push_quoted_positional_literal_segment(
+                        &mut segments,
+                        &chars[literal_start..index],
+                        false,
+                    )?;
+                    segments.extend(body_segments);
+                    saw_positional_at = true;
+                    index = end + 1;
+                    literal_start = index;
+                    continue;
+                }
+                if push_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 2..end],
+                ) {
+                    index = end + 1;
+                    literal_start = index;
+                    continue;
+                }
+                index = end + 1;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'{') => {
@@ -1938,6 +2023,34 @@ fn quoted_body_positional_at_segments(
     }
     push_body_piece(&mut segments, &body[piece_start..])?;
     Some(segments)
+}
+
+/// Emit a plain double-quoted span (no word-list source inside) as a
+/// quoted literal segment, flushing the pending unquoted literal run
+/// first — the segment-level carrier of the quoted-site verdict,
+/// mirroring what push_body_piece does for pieces inside a quoted body
+/// (rubash#2759). The segment expander IFS-protects a quoted literal's
+/// whole expansion result; leaving the span inside the unquoted run
+/// cooked it into unquoted text and the junction split landed inside
+/// it. Returns false — leaving the span in the run, byte-for-byte the
+/// historic path — when either piece carries backtick/backslash
+/// content, which the literal pushers decline by design.
+fn push_quoted_span_segment(
+    segments: &mut Vec<QuotedPositionalAtSegment>,
+    run: &[char],
+    body: &[char],
+) -> bool {
+    let admissible = |piece: &[char]| !piece.iter().any(|ch| matches!(ch, '`' | '\\'));
+    if !admissible(run) || !admissible(body) {
+        return false;
+    }
+    if push_quoted_positional_literal_segment(segments, run, false).is_none() {
+        return false;
+    }
+    if push_body_piece(segments, body).is_none() {
+        return false;
+    }
+    true
 }
 
 fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]) -> Option<()> {

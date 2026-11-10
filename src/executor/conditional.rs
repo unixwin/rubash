@@ -137,7 +137,12 @@ impl Executor {
             return if left == 0 {
                 self.execute_conditional(&args[index + 1..])
             } else {
-                1
+                // GNU execute_cmd.c:3997-4001 (COND_AND): a non-zero
+                // left result — including an error code such as the
+                // rc 2 a `-t` operand raises (test.c:106
+                // TEST_ERREXIT_STATUS) — propagates verbatim; only a
+                // success evaluates the right side.
+                left
             };
         }
 
@@ -499,7 +504,10 @@ impl Executor {
                 self.conditional_status_with_metadata(&args[index + 1..], &metadata[index + 1..])
                     .unwrap_or_else(|| self.execute_conditional(&args[index + 1..]))
             } else {
-                1
+                // Same GNU COND_AND rule as execute_conditional
+                // (execute_cmd.c:3997-4001): propagate the left
+                // result verbatim, error codes included.
+                left
             });
         }
 
