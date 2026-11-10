@@ -813,7 +813,22 @@ impl Executor {
                 },
             );
             let expanded = if expand {
-                self.expand_arithmetic_expression_mut(&with_assoc_keys)
+                // GNU subst.c:11107 expand_array_subscript (reached from
+                // expand_word_internal's `[` arm, subst.c:11395-11405):
+                // during expand_arith_string every `name[...]` span —
+                // indexed as well as associative — has its subscript
+                // expanded as a unit and protected before splicing, so
+                // brackets a value carries cannot re-lex as expression
+                // syntax. The EXP_EXPANDED entries (let/`[[`) already
+                // run that pass via expand_arith_eval_subscripts; the
+                // expand entries must run it too — without it the
+                // whole-string expansion below splices a subscript value
+                // like `0],b[1` raw, the parser reads a truncated
+                // subscript plus a well-formed comma expression, and
+                // the subscript's own evalexp error is silently
+                // swallowed (rubash#2654).
+                let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+                self.expand_arithmetic_expression_mut(&with_indexed_keys)
             } else {
                 self.expand_arith_eval_subscripts(&with_assoc_keys)
             };
@@ -1382,7 +1397,12 @@ impl Executor {
         // or an expansion carrier, so a removal-route string has
         // nothing for it to do.
         let expanded = if arith_expansion_char_present(&with_assoc_keys) {
-            self.expand_arithmetic_expression_mut(&with_assoc_keys)
+            // Same expand_array_subscript unit law as the command entry
+            // (subst.c:11107 via subst.c:11395-11405): indexed
+            // subscripts are expanded and protected as units before the
+            // whole-string pass splices anything (rubash#2654).
+            let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+            self.expand_arithmetic_expression_mut(&with_indexed_keys)
         } else {
             arith_string_quote_removal(&with_assoc_keys).into_owned()
         };
@@ -2254,6 +2274,31 @@ pub(super) fn arithmetic_unbound_variable(
     let mut chars = expression.chars().peekable();
     let mut previous = None;
     while let Some(ch) = chars.next() {
+        if ch == ARITH_ASSOC_KEY_MARKER {
+            // A pre-expanded subscript (expand_arithmetic_assoc_subscripts /
+            // expand_arith_indexed_subscripts) reaches this scan hex-encoded
+            // behind the carrier marker, so its identifiers are invisible to
+            // the char walk below. GNU evaluates an indexed subscript in its
+            // own evalexp frame (arrayfunc.c:1368-1378 array_expand_index),
+            // where expr_streval (expr.c:1190-1216) traps an unset read the
+            // same as at the top level — decode the payload and scan it with
+            // the same rules. Associative keys never reach this arm: the
+            // scan skips an associative subscript whole at its `name[`
+            // branch above, so key text stays data here as it is in GNU.
+            let mut hex = String::new();
+            while chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) {
+                hex.push(chars.next().expect("peeked hex digit"));
+            }
+            if let Some(decoded) =
+                decode_arithmetic_assoc_key(&format!("{ARITH_ASSOC_KEY_MARKER}{hex}"))
+            {
+                if let Some(name) = arithmetic_unbound_variable(&decoded, env_vars) {
+                    return Some(name);
+                }
+            }
+            previous = Some(ch);
+            continue;
+        }
         if !(ch == '_' || ch.is_ascii_alphabetic()) {
             previous = Some(ch);
             continue;

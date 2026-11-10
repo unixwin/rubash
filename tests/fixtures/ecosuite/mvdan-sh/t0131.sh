@@ -1,0 +1,3 @@
+foo <<-'EOF'
+	bar
+EOF
