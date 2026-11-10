@@ -57,6 +57,7 @@ impl Executor {
         self.unit_lex_locale
             .replace(Some(crate::locale::locale_name()));
         self.line_lex_locales.borrow_mut().clear();
+        self.line_lex_extquotes.borrow_mut().clear();
 
         // G-01: EXECUTION_LOCK is no longer held for the whole run.
         // EXECUTION_LOCK_DEPTH is now only the run-nesting marker (it
@@ -961,6 +962,21 @@ impl Executor {
                             .borrow_mut()
                             .entry(line)
                             .or_insert_with(crate::locale::locale_name);
+                        // rubash#2772: same first-reach record for the
+                        // extquote state — the state GNU's parser applies
+                        // to this line's `$'...'` translation verdicts
+                        // (parse.y:4053's extended_quote gate is evaluated
+                        // when the line is READ, and the first command of
+                        // the line fixes it for the whole list).
+                        self.line_lex_extquotes
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(|| {
+                                crate::builtins::shopt::option_enabled(
+                                    &self.shell_state.env_vars,
+                                    "extquote",
+                                )
+                            });
                     }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
