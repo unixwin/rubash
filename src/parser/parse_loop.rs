@@ -1594,7 +1594,23 @@ pub(crate) fn reclassify_leading_assignment_words(command: &mut CommandNode) {
             (name.to_string(), value.to_string(), raw_rhs)
         };
         let pattern_name = name.strip_suffix('+').unwrap_or(&name).to_string();
-        record_extglob_patterns_for_assignment(command, &pattern_name, &value, &raw_rhs, None);
+        // rubash#3224: this reclassification has no token at hand; the
+        // word's patterns were already recorded (and gate-stamped) by
+        // the word intake under their word index, so inherit the stamp
+        // from that record — unstamped words stay unstamped.
+        let read_gate_on = command
+            .extglob_patterns
+            .iter()
+            .filter(|pattern| pattern.word_index == Some(consumed))
+            .any(|pattern| pattern.read_gate_on);
+        record_extglob_patterns_for_assignment(
+            command,
+            &pattern_name,
+            &value,
+            &raw_rhs,
+            None,
+            read_gate_on,
+        );
         command.insert_assignment_with_raw(name, value, raw_rhs);
         consumed += 1;
     }
