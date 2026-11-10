@@ -592,41 +592,29 @@ impl Executor {
         if read_fd.is_none() {
             if cmd.heredoc_body.is_some() {
                 let input = self.expand_heredoc_body_mut_from_carrier(&cmd.heredoc_body);
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
             if let Some(heredoc) = &cmd.heredoc {
                 let input = self.expand_heredoc_body_mut(heredoc);
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
 
@@ -896,22 +884,16 @@ impl Executor {
                     // `!record_contains_delimiter(..)` misreports EOF when
                     // a -n/-N limit stopped the trim before the end of the
                     // slurped text; replay the per-unit walk instead.
-                    self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                        &output,
-                        delimiter,
-                        char_limit,
-                        exact_char_limit,
-                        escape_aware,
-                        raw,
-                    );
-                    return Some(trim_read_input(
+                    let (record, eof_no_delimiter) = slurped_record(
                         output,
                         delimiter,
                         char_limit,
                         exact_char_limit,
                         escape_aware,
                         raw,
-                    ));
+                    );
+                    self.read_eof_no_delimiter |= eof_no_delimiter;
+                    return Some(record);
                 }
             }
 
@@ -1078,22 +1060,16 @@ impl Executor {
                 if input.is_empty() {
                     return None;
                 }
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
             // rubash#2091: a /dev/tcp|udp target is judged by the
             // registry on its shell spelling too — it has no filesystem
@@ -1415,22 +1391,16 @@ impl Executor {
             if input.is_empty() {
                 return None;
             }
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
 
         // Here-strings are command-local input. Persistent virtual fds must
@@ -1452,22 +1422,16 @@ impl Executor {
                 .any(|redirect| redirect.fd == Some(0));
         if has_fd0_body {
             if let Some(line) = self.stdin_string_for_command_mut(cmd) {
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &line,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     line,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
 
@@ -2057,6 +2021,57 @@ impl Executor {
         }
         if char_limit == Some(0) {
             return Some(String::new());
+        }
+
+        // rubash#3212: when the delimiter byte is joined into a literal
+        // character of the mirror text it exists in no form the
+        // character scan below can match — serve the record from the
+        // decoded byte domain and write the unconsumed remainder back
+        // re-encoded (the split can leave the next record starting
+        // inside a character, which only the byte form can spell; the
+        // OFFSET stays at the tail's start in the rewritten mirror).
+        // The timed judge below keys on the mirror's original length,
+        // so it does not judge a byte-served record; the record itself
+        // is complete by construction.
+        if let Some(slice) = self
+            .shell_state
+            .env_vars
+            .get(FUNCTION_STDIN)
+            .map(|input| input[offset..].to_string())
+        {
+            if joined_delimiter_scan_applies(&slice, delimiter) {
+                let scan = scan_text_record_bytes(
+                    &slice,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                );
+                self.read_eof_no_delimiter = !scan.delimiter_found && !scan.limit_reached;
+                let mut mirror = self
+                    .shell_state
+                    .env_vars
+                    .get(FUNCTION_STDIN)
+                    .cloned()
+                    .unwrap_or_default();
+                mirror.truncate(offset);
+                mirror.push_str(&scan.tail);
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN.to_string(), mirror);
+                self.shell_state
+                    .env_vars
+                    .insert(FUNCTION_STDIN_OFFSET.to_string(), offset.to_string());
+                return Some(trim_read_input(
+                    scan.record,
+                    delimiter,
+                    char_limit,
+                    exact_char_limit,
+                    escape_aware,
+                    raw,
+                ));
+            }
         }
 
         // One record scan over a window of the stream; re-run on the
