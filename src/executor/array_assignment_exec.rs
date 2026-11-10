@@ -608,6 +608,18 @@ impl Executor {
                         // (rubash#1510). NoCell leaves no structured cell,
                         // so the helper no-ops there.
                         self.note_typed_cell_synced(name);
+                        // rubash#3097: the element bind completed here.
+                        // A bare element statement dispatches to THIS
+                        // executor, never through apply_shell_assignment,
+                        // so the locale funnel note lives at this store:
+                        // GNU's assignment driver runs
+                        // stupidly_hack_special_variables after
+                        // assign_array_element (subst.c:8169) and
+                        // sv_locale (variables.c:6272) reads the NEW
+                        // scalar projection (get_string_value,
+                        // variables.c:2495: element 0 / the "0" key).
+                        // One bind, one note, recorded nowhere else.
+                        self.note_locale_assignment(name);
                         self.exit_code = 0;
                         return true;
                     }
@@ -713,6 +725,10 @@ impl Executor {
             // The canonical render above synced the cell from the same
             // entry list it folded into the mirror (rubash#1510).
             self.note_typed_cell_synced(name);
+            // rubash#3097: same funnel note as the fast-append arm
+            // above — the element bind completed at this store
+            // (subst.c:8169 -> variables.c:6272).
+            self.note_locale_assignment(name);
             self.exit_code = 0;
             return true;
         }
@@ -1198,6 +1214,12 @@ impl Executor {
             .map(|(index, element)| (index as i64, element.trim().parse::<i32>().unwrap_or(0)))
             .collect();
         }
+        // rubash#3097: every indexed store arm above (in-place append,
+        // budgeted overwrite, canonical rebuild) converges here with
+        // the element bind complete — the funnel note lives at this
+        // single convergence, one bind, one note (subst.c:8169 ->
+        // variables.c:6272), reading the NEW projection.
+        self.note_locale_assignment(name);
         self.exit_code = 0;
         true
     }
