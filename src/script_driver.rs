@@ -1077,6 +1077,8 @@ pub(crate) fn read_next_source_group(
     // holds because the streaming expander only ever appends committed
     // output (it never revises text it already released).
     let mut text_scans = GroupTextScans::new(posix);
+    text_scans.extglob_seed =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
     // perf21 battery fusion: heredoc-body lines live in the pending mirror
     // but not in the feeder's logical-line mirror, so a group that saw any
     // must keep advancing the battery's quotes/comsub machines itself.
@@ -1638,6 +1640,11 @@ struct GroupTextScans {
     /// Exact char mirror of the accumulated `pending` group text.
     chars: Vec<char>,
     posix: bool,
+    /// rubash#3229: the reader's executed `extended_glob` state when
+    /// this gather started; seeds the extglob-group arm of
+    /// `needs_more` (whose in-text `shopt` mirror cannot see `shopt`
+    /// lines that were earlier, already-executed groups).
+    extglob_seed: bool,
     quotes: Option<ScanCheckpoint<crate::lexer::QuotesResidualState>>,
     comsub: Option<ScanCheckpoint<crate::lexer::ComsubResidualState>>,
     balanced: Option<ScanCheckpoint<crate::lexer::BalancedResidualState>>,
@@ -1652,6 +1659,7 @@ impl GroupTextScans {
         Self {
             chars: Vec::new(),
             posix,
+            extglob_seed: false,
             quotes: Some(ScanCheckpoint {
                 resume: 0,
                 snapshot: crate::lexer::QuotesResidualState::default(),
@@ -1728,6 +1736,15 @@ impl GroupTextScans {
             return true;
         }
         if self.advance_close_char() {
+            return true;
+        }
+        // rubash#3229: an unclosed extglob pattern group
+        // (parse.y:5466-5489) — word-internal, so no parked machine
+        // above can see it (the word tokenizer folds the group into
+        // the word). A fresh probe over the pending text instead; the
+        // scan's operator-byte fast reject keeps it at memchr speed
+        // for the groups that carry no group opener.
+        if crate::lexer::unclosed_extglob_group_line(pending, self.extglob_seed).is_some() {
             return true;
         }
         // parse.y:5379-5384: trailing unquoted backslash keeps the line
@@ -2586,6 +2603,13 @@ fn token_walk_verdict(source: &str) -> TokenWalkVerdict {
 /// stack and trailing-connector answer across appended lines.
 pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
     if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
+        return true;
+    }
+    // rubash#3229: an unclosed extglob pattern group keeps the reader
+    // open (parse.y:5466-5489). Seeded closed here — `shopt` lines
+    // inside the text itself open the scan's mirror; the parked
+    // gather (GroupTextScans) seeds it with the executed state.
+    if crate::lexer::unclosed_extglob_group_line(source, false).is_some() {
         return true;
     }
     // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
@@ -4031,6 +4055,7 @@ fn run_source_impl_inner(
                     Some(open_line + line_offset),
                 );
             }
+            executor.set_last_exit_code(2);
             return 2;
         }
     }
@@ -4058,12 +4083,29 @@ fn run_source_impl_inner(
     // instead of failing and the parser is NOT the authority. The
     // verification only pays on inputs the scanner flagged (and never on
     // heredoc inputs, which the gate already excludes).
-    if pre_lexed.is_none()
+    // rubash#3229: an unclosed extglob pattern group is a
+    // read_token_word matched-pair EOF (parse.y:5466-5489 ->
+    // parse.y:3901-3912) that no existing gate arm can see — the `(`
+    // is word-internal, so the close-char scan opens no frame for it,
+    // and the tokenizer folds the group into the word silently (a
+    // pre-lexed group therefore skips the gate below on the perf19
+    // certification even though its text was never pair-scanned). The
+    // dedicated scan is seeded with the EXECUTED gate state: in a
+    // grouped run the `shopt` line is an earlier group, so the group
+    // text alone cannot show the gate live.
+    let extglob_live =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
+    let extglob_eof_line = if interactive {
+        None
+    } else {
+        crate::lexer::unclosed_extglob_group_line(input, extglob_live)
+    };
+    let unclosed_route = pre_lexed.is_none()
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix)
-    {
+        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+    if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
         // `unexpected EOF while looking for matching `]'' at the line the
@@ -4075,7 +4117,7 @@ fn run_source_impl_inner(
         // closer char and report line are the QUOTE's (`a["x]=15` reports
         // `"' at the `"` line, not `]' at the `[` line).
         if let Some((open_line, closer, construct_line, inside_compassign)) =
-            crate::lexer::unclosed_array_subscript_eof(input)
+            crate::lexer::unclosed_array_subscript_eof_seeded(input, extglob_live)
         {
             let source = input.trim_end_matches('\n');
             // The prefix of COMPLETE commands stops at the `[` construct's
@@ -4119,9 +4161,12 @@ fn run_source_impl_inner(
             // error.c:324-327 forces exit status 2 whenever errexit is live
             // at the parser_error (rubash#306).
             if inside_compassign && executor.errexit_live_at_diagnostic() {
+                executor.set_last_exit_code(2);
                 return 2;
             }
-            return if inside_compassign { 1 } else { 2 };
+            let status = if inside_compassign { 1 } else { 2 };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
         // parse_matched_pair grouping scan opened by read_token_word's
@@ -4175,6 +4220,65 @@ fn run_source_impl_inner(
                 );
             }
             executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
+            return 2;
+        }
+        // rubash#3229: an unclosed extglob pattern group — GNU
+        // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
+        // reaches EOF and reports the pair's closer at the line the
+        // group opened (parse.y:3901-3912) with exit status 2. The
+        // word read bails, so nothing on the group's line runs, while
+        // complete commands before it already executed (the prefix
+        // model every arm of this route follows).
+        if let Some(open_line) = extglob_eof_line {
+            let source = input.trim_end_matches('\n');
+            let prefix = if open_line > 1 {
+                source
+                    .lines()
+                    .take(open_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            // Same #1589 retreat as the close-char section below: when
+            // the group's line sits inside a keyword compound that is
+            // itself unclosed at EOF (`case ab in` above the pattern
+            // line), GNU's reader died inside the compound — none of
+            // it ran — so the prefix must retreat to the compound's
+            // opening line instead of running the header standalone
+            // (which would print the compound's own EOF diagnostic
+            // ahead of the group's).
+            let prefix = match unclosed_compound_open_line(&prefix) {
+                Some(open) if open > 1 => {
+                    prefix.lines().take(open - 1).collect::<Vec<_>>().join("\n")
+                }
+                Some(_) => String::new(),
+                None => prefix,
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_prefix_diagnostic_owned(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            unclosed_report!(
+                "{}unexpected EOF while looking for matching `)'",
+                executor.parser_error_prefix_for_line(open_line + line_offset)
+            );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    "unexpected EOF while looking for matching `)'".to_string(),
+                    Some(open_line + line_offset),
+                );
+            }
+            executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
             return 2;
         }
         // GNU's incremental reader executes complete input lines before the
@@ -4283,6 +4387,7 @@ fn run_source_impl_inner(
                             unclosed_report!("{prefix}`{offending}'");
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // rubash#390 q1: a `((` at command position is NOT a
@@ -4317,6 +4422,7 @@ fn run_source_impl_inner(
                             );
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // Class B: the group closed but the next char was not
@@ -4339,8 +4445,10 @@ fn run_source_impl_inner(
                             );
                         }
                         if executor.errexit_live_at_diagnostic() {
+                            executor.set_last_exit_code(2);
                             return 2;
                         }
+                        executor.set_last_exit_code(1);
                         return 1;
                     }
                     unclosed_report!(
@@ -4372,9 +4480,11 @@ fn run_source_impl_inner(
                 // but error.c:324-327 forces exit status 2 whenever
                 // errexit is live at the parser_error (rubash#306).
                 if array_list && executor.errexit_live_at_diagnostic() {
+                    executor.set_last_exit_code(2);
                     return 2;
                 }
                 if array_list {
+                    executor.set_last_exit_code(1);
                     return 1;
                 }
             }
@@ -4388,6 +4498,7 @@ fn run_source_impl_inner(
                 }
             }
         }
+        executor.set_last_exit_code(2);
         return 2;
     }
 

@@ -500,6 +500,141 @@ fn unclosed_regex_paren_line_in_raw(raw: &str, base_line: usize) -> Option<usize
     (depth > 0).then_some(open_line)
 }
 
+/// parse.y:5466-5489 read_token_word under PST_EXTPAT (`==` / `!=` /
+/// `=`): the pattern word is read with the extglob group machinery
+/// armed, so a PATTERN_CHAR (`@ * + ? !`, syntax.h:90-92) directly
+/// before `(` hands the group to parse_matched_pair — when the group
+/// never closes, the scan dies at EOF. Returns the line the group's
+/// `(` sits on, or None when every group closes. The value form (the
+/// word was one unquoted fragment): only backslash escapes state; a
+/// `(` counts only as a PATTERN_CHAR tail at depth 0 — inside a group
+/// every paren nests, exactly as parse_matched_pair counts.
+fn unclosed_pattern_group_line(word: &str, base_line: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut open_line = base_line;
+    let mut line = base_line;
+    let mut escaped = false;
+    let mut prev_op = false;
+    for ch in word.chars() {
+        if ch == '\n' {
+            line += 1;
+        }
+        if escaped {
+            escaped = false;
+            prev_op = false;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                escaped = true;
+                prev_op = false;
+            }
+            '(' => {
+                if depth == 0 {
+                    if prev_op {
+                        open_line = line;
+                        depth = 1;
+                    }
+                } else {
+                    depth += 1;
+                }
+                prev_op = false;
+            }
+            ')' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+                prev_op = false;
+            }
+            '@' | '*' | '+' | '?' | '!' => prev_op = true,
+            _ => prev_op = false,
+        }
+    }
+    (depth > 0).then_some(open_line)
+}
+
+/// The same group scan over a merged RHS argument's RAW text
+/// (rubash#3229, mirroring `unclosed_regex_paren_line_in_raw`): quote
+/// characters are consumed as nested matched pairs whose contents
+/// never supply a PATTERN_CHAR (parse.y:4040-4051), so a quoted or
+/// escaped operator never opens a group.
+fn unclosed_pattern_group_line_in_raw(raw: &str, base_line: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    let mut open_line = base_line;
+    let mut line = base_line;
+    let mut escaped = false;
+    let mut quote: Option<char> = None;
+    let mut quote_dollar_single = false;
+    let mut prev_op = false;
+    let mut prev = '\0';
+    for ch in raw.chars() {
+        if ch == '\n' {
+            line += 1;
+        }
+        match quote {
+            Some('\'') => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' && quote_dollar_single {
+                    escaped = true;
+                } else if ch == '\'' {
+                    quote = None;
+                }
+                prev_op = false;
+            }
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+                prev_op = false;
+            }
+            None => {
+                if escaped {
+                    escaped = false;
+                    prev_op = false;
+                } else {
+                    match ch {
+                        '\\' => {
+                            escaped = true;
+                            prev_op = false;
+                        }
+                        '\'' | '"' | '`' => {
+                            quote_dollar_single = ch == '\'' && prev == '$';
+                            quote = Some(ch);
+                            prev_op = false;
+                        }
+                        '(' => {
+                            if depth == 0 {
+                                if prev_op {
+                                    open_line = line;
+                                    depth = 1;
+                                }
+                            } else {
+                                depth += 1;
+                            }
+                            prev_op = false;
+                        }
+                        ')' => {
+                            if depth > 0 {
+                                depth -= 1;
+                            }
+                            prev_op = false;
+                        }
+                        '@' | '*' | '+' | '?' | '!' => prev_op = true,
+                        _ => prev_op = false,
+                    }
+                }
+            }
+        }
+        prev = ch;
+    }
+    (depth > 0).then_some(open_line)
+}
+
 /// error_token_from_text (parse.y:6772-6808): the reported token is the
 /// run of non-break characters (` \n\t;|&` are the breaks) ending at
 /// token_end — glued fragments BEFORE the offending one merge into it
@@ -919,6 +1054,12 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
                     CondTok::Word => cursor.args[index.unwrap()].0 == "=~",
                     _ => false,
                 };
+                let op_is_pattern = match &tok {
+                    CondTok::Word => {
+                        matches!(cursor.args[index.unwrap()].0.as_str(), "==" | "!=" | "=")
+                    }
+                    _ => false,
+                };
                 let (tok, line, index, anchor) = cursor.next();
                 // parse.y:5443-5460 read_token_word under PST_REGEXP: an
                 // unquoted `(' in the regex word opens parse_matched_pair
@@ -953,6 +1094,40 @@ fn cond_term(cursor: &mut CondCursor) -> Result<(), CondFail> {
                             messages: vec![
                                 (
                                     paren_line,
+                                    "unexpected EOF while looking for matching `)'".to_string(),
+                                ),
+                                (
+                                    eof_line,
+                                    "unexpected argument to conditional binary operator"
+                                        .to_string(),
+                                ),
+                            ],
+                            offending: CondOffending::BareEof,
+                        });
+                    }
+                }
+                // parse.y:5466-5489 read_token_word under PST_EXTPAT:
+                // the pattern word is read with the extglob group
+                // machinery armed, so a PATTERN_CHAR tail's group goes
+                // to parse_matched_pair and its EOF is the same pair of
+                // reports as the PST_REGEXP arm above (the pair EOF at
+                // the group's line, then the dangling-operator report
+                // at the EOF line, PST_NOERROR suppressing the tail) —
+                // rubash#3229: `[[ ab == @(ab ]]` printed the generic
+                // `]]' EOF shape instead.
+                if op_is_pattern && tok == CondTok::Word {
+                    let (value, raw, _, arg_line) = &cursor.args[index.unwrap()];
+                    let group_line = if raw == value {
+                        unclosed_pattern_group_line(value, *arg_line)
+                    } else {
+                        unclosed_pattern_group_line_in_raw(raw, *arg_line)
+                    };
+                    if let Some(group_line) = group_line {
+                        let eof_line = cursor.stream_eof_line;
+                        return Err(CondFail {
+                            messages: vec![
+                                (
+                                    group_line,
                                     "unexpected EOF while looking for matching `)'".to_string(),
                                 ),
                                 (
