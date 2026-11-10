@@ -35,8 +35,18 @@ impl Executor {
                 return Some(path);
             }
         }
-        if name.starts_with('/') {
-            return Some(name.to_string());
+        // rubash#2717: a slash-bearing name is never PATH-walked at
+        // the describe faces — GNU describe_command qualifies it by
+        // file_status alone (FS_EXECABLE) and reports it verbatim.
+        // The unconditional absolute-name shortcut and the lose-on
+        // find_user_command fallthrough below both reported
+        // non-executable files and missing paths as found.
+        if crate::executor::path::has_path_separator(name) {
+            return crate::executor::path::slash_name_is_describable(
+                name,
+                &self.shell_state.env_vars,
+            )
+            .then(|| name.to_string());
         }
         // Windows suite bridge: GNU test replays expect mv/cat/ls to
         // describe even on hosts whose PATH never holds them (type.tests:39
@@ -229,8 +239,14 @@ impl Executor {
             }
         }
 
-        if name.starts_with('/') {
-            paths.push(name.to_string());
+        // rubash#2717: same file_status qualification as
+        // command_path — a slash-bearing name is reported (verbatim,
+        // once) only when executable; the PATH enumeration below
+        // never applies to it (GNU absolute_program).
+        if crate::executor::path::has_path_separator(name) {
+            if crate::executor::path::slash_name_is_describable(name, &self.shell_state.env_vars) {
+                paths.push(name.to_string());
+            }
             return paths;
         }
         // Same Windows/unix split as command_path above: the /bin-namespace

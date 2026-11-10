@@ -487,8 +487,14 @@ impl ShellInvocation {
             // becomes dollar_vars[0]; BASH_ARGV0 mirrors it (variables.c).
             // Hosts like niu pre-seed BASH_ARGV0 with their own name, so the
             // explicit operand must overwrite it or `$0` keeps the host name.
+            // rubash#3105: the operand is host-supplied RAW data seeding a
+            // shell-visible variable — entry-encode it (the reader-name
+            // carrier keeps the raw spelling).
             executor.set_env("__RUBASH_SCRIPT_NAME", name);
-            executor.set_env("BASH_ARGV0", name);
+            executor.set_env(
+                "BASH_ARGV0",
+                &crate::executor::substitution_metadata::entry_encode_value_text(name),
+            );
         } else if self.command.is_some() && executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
             // GNU `bash -c` without explicit $0 reports as "bash: -c: ...".
             // Internal respawns (coproc / async `&` children) carry the
@@ -519,7 +525,19 @@ impl ShellInvocation {
         // not clear the seed. An invocation that DOES carry parameters
         // wins verbatim, as before.
         if !self.positional_params.is_empty() || executor.positional_params().is_empty() {
-            executor.set_positional_params(self.positional_params.clone());
+            // rubash#3105: `positional_params` carries host-supplied
+            // RAW argv — entry-encode each value at this boundary.
+            // The shared setter stays unencoded: its other callers
+            // (the `set` builtin, function calls, source args) hand
+            // it cooked shell words.
+            executor.set_positional_params(
+                self.positional_params
+                    .iter()
+                    .map(|value| {
+                        crate::executor::substitution_metadata::entry_encode_value_text(value)
+                    })
+                    .collect(),
+            );
         }
         Ok(())
     }
