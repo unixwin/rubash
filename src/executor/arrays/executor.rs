@@ -664,6 +664,30 @@ impl Executor {
             // while `'x'` survives as literal text (sq is data in dq context)
             // and evalexp then rejects it as a string operand — `a[' ']`
             // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            // rubash#3085: a `$'...'` span in the raw subscript is ANSI-C
+            // decoded to BARE content before the arith-context pass — GNU
+            // expand_subscript_string -> expand_word_internal's `$'` arm
+            // (ansicstr) — so `${a[$'1+2']}` evaluates `1+2` and
+            // `${a[$'x y']}` errors on the trailing `y`, exactly like the
+            // decoded text was written bare. Without this the span reached
+            // the pass raw and its `$` plus the lexer's \x17 carrier
+            // leaked into the error token. The decoded bytes ride the
+            // span-data carriers (transform_arith_ansi_c_spans, Decode)
+            // so the arith pass cannot re-read them as syntax; runs
+            // before the `$"` decode below, the same order
+            // expand_subscript_string_inner uses (a `$"` produced inside
+            // a `$'...'` span is single-quoted data, and the locale
+            // decoder's sq tracking leaves it alone).
+            let decoded_ansi;
+            let key = if key.contains("$'") {
+                decoded_ansi = crate::executor::subscript_expansion::transform_arith_ansi_c_spans(
+                    key,
+                    crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
+                );
+                decoded_ansi.as_str()
+            } else {
+                key
+            };
             // rubash#3023: a `$"..."` span in the raw subscript is a
             // double-quoted span with quote-syntax markup (the lexer cooks
             // it that way, but raw subscript text bypasses the lexer).

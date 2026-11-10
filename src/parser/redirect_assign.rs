@@ -60,12 +60,23 @@ pub(super) fn assign_redirect_out_target(
     if let Some((mut process_substitution, next_i)) =
         output_process_substitution_word_target(tokens, index)
     {
-        process_substitution.word_index = Some(command.words.len());
-        let target = process_substitution.target.clone();
+        // rubash#2802: pair the word with its metadata and assemble
+        // its glued suffix, exactly like the input form's intake arm
+        // (token_actions.rs) — a word pushed without metadata broke
+        // the words/word_metadata index alignment and the respawn
+        // serializer single-quoted the span as literal data.
+        let (suffix, suffix_raw, joined_i) = collect_process_substitution_suffix(tokens, next_i);
+        let word_index = command.words.len();
+        process_substitution.word_index = Some(word_index);
+        let value = format!("{}{}", process_substitution.target, suffix);
+        let raw = format!("{}{}", process_substitution.target, suffix_raw);
         command.process_substitutions.push(process_substitution);
-        command.words.push(target);
+        command
+            .word_metadata
+            .push(build_word_metadata(word_index, &value, &raw));
+        command.words.push(value);
         command.word_kinds.push(TokenKind::Word);
-        return Some(next_i);
+        return Some(joined_i);
     }
 
     let target = redirect_target_token(tokens, index)?;

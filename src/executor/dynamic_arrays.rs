@@ -1939,15 +1939,83 @@ impl Executor {
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
         let storage = self.bash_aliases_storage();
-        self.shell_state
-            .env_vars
-            .insert("BASH_ALIASES".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
+        self.publish_dynamic_assoc_var("BASH_ALIASES", &storage);
         let storage = self.bash_cmds_storage();
+        self.publish_dynamic_assoc_var("BASH_CMDS", &storage);
+    }
+
+    /// Publish one dynamic associative variable's owner-table render as
+    /// its mirror, refreshing a live typed cell from the same render.
+    ///
+    /// GNU has ONE object here: `get_aliasvar` / `get_hashcmd`
+    /// (variables.c:1745 / :1675) rebuild the assoc cell from the alias
+    /// table / `hashed_filenames` on every access, so the cell can never
+    /// disagree with its owner. Rubash splits the object into the
+    /// env mirror plus a typed `AssociativeArray` cell; republishing
+    /// the mirror under a live cell without refreshing the cell leaves
+    /// the pair incoherent — the next command boundary's verifier
+    /// panics, and element reads trust the stale cell (rubash#3107:
+    /// `declare -p BASH_ALIASES; alias ll='ls -l'; declare -p
+    /// BASH_ALIASES`). An absent cell stays absent, exactly like
+    /// `sync_dirstack_cell` (rubash#2424): the cell materializes only
+    /// on named access.
+    fn publish_dynamic_assoc_var(&mut self, name: &str, storage: &str) {
         self.shell_state
             .env_vars
-            .insert("BASH_CMDS".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
+            .insert(name.to_string(), storage.to_string());
+        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, name);
+        if matches!(
+            self.shell_state
+                .variables
+                .get(name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            super::arrays::sync_typed_assoc_storage(&mut self.shell_state.variables, name, storage);
+            self.note_typed_cell_synced(name);
+        }
+    }
+
+    /// Command-boundary reconciliation for the two dynamic associative
+    /// variables (rubash#3107). Their owner tables mutate WITHOUT a
+    /// mirror write — `alias` / `unalias` rewrite `shell_state.aliases`
+    /// (alias.c add_alias / remove_alias), and `hash -p` / `hash -d` /
+    /// `hash -r` plus ordinary command lookups rewrite
+    /// `hashed_filenames` (hashcmd.c phash_insert / phash_remove /
+    /// phash_flush) — so a typed cell materialized by an earlier named
+    /// access goes stale in place, with neither half of the pair
+    /// recording the write. GNU's getters rebuild the cell from the
+    /// owner on every access (variables.c:1745 build_aliasvar,
+    /// variables.c:1675 build_hashcmd); the boundary is rubash's
+    /// rebuild point. Only a name with a live typed cell pays the
+    /// render, and only when the render actually moved: an unmaterialized
+    /// name keeps the mirror-only state every read already renders live.
+    pub(in crate::executor) fn sync_dynamic_assoc_cells(&mut self) {
+        for name in ["BASH_ALIASES", "BASH_CMDS"] {
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+                continue;
+            }
+            if !matches!(
+                self.shell_state
+                    .variables
+                    .get(name)
+                    .map(|variable| &variable.value),
+                Some(crate::shell::ShellValue::AssociativeArray(_))
+            ) {
+                continue;
+            }
+            let storage = if name == "BASH_ALIASES" {
+                self.bash_aliases_storage()
+            } else {
+                self.bash_cmds_storage()
+            };
+            if self.shell_state.env_vars.get(name) == Some(&storage)
+                && self.shell_state.env_vars.cell_is_fresh(name)
+            {
+                continue;
+            }
+            self.publish_dynamic_assoc_var(name, &storage);
+        }
     }
 
     /// True while the dynamic DIRSTACK variable does NOT own its name,

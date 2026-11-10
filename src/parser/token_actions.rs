@@ -426,6 +426,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         &raw_assignment_value,
                         None,
+                        token.extglob_gate,
                     );
                     state.current_cmd.insert_assignment_with_raw(
                         var_name,
@@ -589,6 +590,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             raw_assignment_value,
                             Some(word_index),
+                            token.extglob_gate,
                         );
                     }
                     state
@@ -743,15 +745,36 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         );
                         *i = joined_i;
                     } else {
-                        process_substitution.word_index = Some(state.current_cmd.words.len());
-                        let target = process_substitution.target.clone();
+                        // rubash#2802: every word intake pairs the word
+                        // with its metadata (push_command_word, the
+                        // compound-operand arm, the replace arm above) —
+                        // the words/word_metadata index alignment is the
+                        // invariant index-based consumers read by (the
+                        // respawn serializer in command_text.rs). This
+                        // arm pushed the word alone, so the serializer
+                        // matched no metadata for the procsub word (nor
+                        // for any word after it) and single-quoted it
+                        // as literal data: async/coproc respawns ran
+                        // `cat '<(echo via)'`. Assemble the word the
+                        // replace arm's way — span plus glued suffix,
+                        // one word (GNU parse.y:5305 read_token_word
+                        // builds the word in one pass) — with its
+                        // metadata, and consume the suffix tokens.
+                        let word_index = state.current_cmd.words.len();
+                        process_substitution.word_index = Some(word_index);
+                        let value = format!("{}{}", process_substitution.target, suffix);
+                        let raw = format!("{}{}", process_substitution.target, suffix_raw);
                         state
                             .current_cmd
                             .process_substitutions
                             .push(process_substitution);
-                        state.current_cmd.words.push(target);
+                        state
+                            .current_cmd
+                            .word_metadata
+                            .push(build_word_metadata(word_index, &value, &raw));
+                        state.current_cmd.words.push(value);
                         state.current_cmd.word_kinds.push(TokenKind::Word);
-                        *i = next_i;
+                        *i = joined_i;
                     }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     let (dup_value, dup_raw) =
@@ -1538,7 +1561,7 @@ fn process_substitution_is_adjacent_to_previous_word(tokens: &[Token], index: us
     adjacent_word_token(previous) && tokens[index].column == previous.column + previous.raw.len()
 }
 
-fn collect_process_substitution_suffix(
+pub(super) fn collect_process_substitution_suffix(
     tokens: &[Token],
     close_index: usize,
 ) -> (String, String, usize) {

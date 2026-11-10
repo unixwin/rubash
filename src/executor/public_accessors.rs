@@ -536,6 +536,27 @@ impl Executor {
         }
     }
 
+    /// rubash#2783: the offending-line echo for a command-substitution
+    /// body error — the physical line of the ENCLOSING input at the
+    /// error's line (GNU print_offending_line, parse.y:6814, over
+    /// shell_input_line), read out of the reader unit text the driver
+    /// parked on the shell state for the executing unit's extent.
+    /// Falls back to the body fragment stored on the error node when
+    /// no unit text is parked (eval strings run through their own
+    /// parse_and_execute route, not the reader-unit driver) or when
+    /// the line sits outside the parked unit.
+    pub(in crate::executor) fn comsub_body_echo_source(&self, line: usize, stored: &str) -> String {
+        let unit = self.shell_state.reader_unit_source.borrow();
+        if let Some((text, offset)) = unit.as_ref() {
+            if line > *offset {
+                if let Some(found) = text.lines().nth(line - offset - 1) {
+                    return found.to_string();
+                }
+            }
+        }
+        stored.to_string()
+    }
+
     /// rubash#2751: report a `$(`-body parse error in GNU's read-time
     /// shape. GNU parses the body inside the enclosing reader with
     /// shell_eof_token = `)' (parse.y:4519-4521), so the report is the
@@ -556,9 +577,10 @@ impl Executor {
     ///   conditional that does not end the body keeps its body-level
     ///   near. `body_text` is the extracted body, whose end is where
     ///   the enclosing paren sat.
-    /// The stored `__RUBASH_PARSE_SOURCE__` echo is the body fragment;
-    /// GNU echoes the enclosing line, which no driver→executor channel
-    /// carries today — the fragment is what the node has.
+    /// The echo line is the physical line of the enclosing input at
+    /// the error's line, read from the reader unit text the driver
+    /// parks on the shell state (see [`Self::comsub_body_echo_source`]);
+    /// routes with no parked unit text keep the stored body fragment.
     pub(in crate::executor) fn report_comsub_body_parse_error(
         &self,
         cmd: &crate::parser::CommandNode,
@@ -635,11 +657,12 @@ impl Executor {
                     }
                     if self.offending_line_echo_enabled() {
                         if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                            let source = self.comsub_body_echo_source(aux_b, source);
                             self.write_diagnostic_fd2(
                                 format!(
                                     "{}`{}'\n",
                                     self.parser_error_prefix_for_line(aux_b),
-                                    super::command_execute::parse_error_source_display(source)
+                                    super::command_execute::parse_error_source_display(&source)
                                 )
                                 .as_bytes(),
                             );
@@ -674,6 +697,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(line, source);
                     self.write_diagnostic_fd2(
                         format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                             .as_bytes(),
@@ -707,6 +731,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -737,6 +762,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -773,6 +799,7 @@ impl Executor {
                 }
                 if self.offending_line_echo_enabled() {
                     if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        let source = self.comsub_body_echo_source(line, source);
                         self.write_diagnostic_fd2(
                             format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                                 .as_bytes(),
@@ -806,6 +833,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -949,6 +977,24 @@ impl Executor {
     /// Q6 arm B: take-style read of the unit signal-discard record.
     pub fn take_unit_signal_discard(&mut self) -> bool {
         std::mem::take(&mut self.unit_signal_discard)
+    }
+
+    /// rubash#2794: record that the current unit's terminal
+    /// word-expansion error was adjudicated an interactive
+    /// discard (see Executor::unit_expansion_error_discard).
+    /// Called at the FATAL class's discard arms, where
+    /// `expansion_error_is_interactive_discard` selects
+    /// subst.c:10416-10418's error branch over the fatal one —
+    /// the adjudication point itself, never a downstream
+    /// re-derivation from the unit's status.
+    pub fn note_unit_expansion_error_discard(&mut self) {
+        self.unit_expansion_error_discard = true;
+    }
+
+    /// rubash#2794: take-style read of the unit
+    /// expansion-error-discard record.
+    pub fn take_unit_expansion_error_discard(&mut self) -> bool {
+        std::mem::take(&mut self.unit_expansion_error_discard)
     }
 
     /// rubash#2233: non-consuming read of the hangup-death mark — the
@@ -1360,6 +1406,28 @@ impl Executor {
             || self.shell_state.completion_specs.get("-D").is_some()
             || self.shell_state.completion_specs.get("-E").is_some()
             || self.shell_state.completion_specs.get("-I").is_some()
+    }
+
+    /// Whether the special compspec of one class is registered
+    /// (rubash#2738): the selective form of
+    /// [`Executor::has_compspec`], which ORs the command's own
+    /// registration and all three special slots together. A host
+    /// gate for the positions the command name cannot name — the
+    /// `-E` empty line and the `-I` initial word — needs to open
+    /// for exactly the governing class without also paying for the
+    /// others, so this answers for a single slot: `-D`
+    /// ([`SpecialCompspecKind::Default`]), `-E`
+    /// ([`SpecialCompspecKind::Empty`]) or `-I`
+    /// ([`SpecialCompspecKind::Initial`]). Like the name form this
+    /// is a pure registration query; whether a spec *governs* a
+    /// concrete position is [`Executor::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: crate::api::SpecialCompspecKind) -> bool {
+        let key = match kind {
+            crate::api::SpecialCompspecKind::Default => "-D",
+            crate::api::SpecialCompspecKind::Empty => "-E",
+            crate::api::SpecialCompspecKind::Initial => "-I",
+        };
+        self.shell_state.completion_specs.get(key).is_some()
     }
 
     /// Whether a compspec governs completion at `(line, cursor)` — the
@@ -2294,9 +2362,18 @@ impl Executor {
         // snapshot whose region never touched the mask) re-apply the
         // same value.
         let fork_saved_process_umask = saved_state.fork_saved_process_umask;
+        // rubash#2636: the region also ran its `ulimit` sets against
+        // this same PROCESS (builtins/ulimit.rs drives the real
+        // setrlimit on unix); GNU's fork discards them with the
+        // child. Re-apply the save point's rlimit snapshot alongside
+        // the umask, at the same LAST position.
+        let fork_saved_process_rlimits = saved_state.fork_saved_process_rlimits.clone();
         self.shell_state = saved_state;
         if let Some(mask) = fork_saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        if let Some(rlimits) = &fork_saved_process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
         // Re-seat the stopped jobs into the restored table. The id
         // allocator takes highest-occupied-id + 1, so a re-inserted id
@@ -3513,6 +3590,24 @@ impl Executor {
             }
             _ => format!("{}: ", self.error_report_name()),
         }
+    }
+
+    /// GNU error.c error_prolog with the line suppressed — the
+    /// sys_error family. sys_error (error.c) is the one reporter
+    /// built on error_prolog(0): its prolog is the error name alone,
+    /// never a line segment, in script or interactive context alike.
+    /// The shell_execve bad-interpreter refusal reports through it
+    /// (execute_cmd.c:6184), while its sibling classifications use
+    /// internal_error / file_error (error_prolog(1)) and keep the
+    /// line (rubash#2755).
+    pub fn sys_error_prefix(&self) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        format!("{}: ", self.error_report_name())
     }
 
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)

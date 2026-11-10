@@ -1507,7 +1507,7 @@ impl Executor {
 /// screen buffer / file object, shared file pointer, written live by the
 /// child (redir.c:1169-1170 dup2 semantics). Falls back to the null device
 /// when the process has no such handle (GUI-subsystem edge).
-fn dup_process_handle(fd: u32) -> std::io::Result<File> {
+pub(in crate::executor) fn dup_process_handle(fd: u32) -> std::io::Result<File> {
     let handle = crate::fd::process_std_handle(fd);
     if handle == 0 || handle == -1 {
         // Plain write open for the null device (see

@@ -25,6 +25,7 @@ pub mod history;
 pub mod jobs;
 pub mod kill;
 pub mod logout;
+pub(crate) mod prefix;
 pub mod printf;
 pub mod pushd;
 pub mod pwd;

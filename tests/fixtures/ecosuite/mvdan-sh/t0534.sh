@@ -1,0 +1,1 @@
+${${foo#head}%tail}

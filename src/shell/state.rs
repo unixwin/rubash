@@ -458,6 +458,20 @@ pub struct ShellState {
     /// clone_for_child_save, so the wholesale boundary restore
     /// reverts it to the parent's value like every other field here.
     pub(crate) subshell_source_text: Option<String>,
+    /// The reader unit currently executing: its verbatim source text
+    /// and the line offset the driver parsed it under (absolute line =
+    /// offset + string-relative line). GNU's parser holds the current
+    /// input in shell_input_line while it reads, so a syntax error
+    /// inside a command-substitution body — parsed by GNU inside the
+    /// enclosing reader — echoes the ENCLOSING line verbatim
+    /// (parse.y:6814 print_offending_line); rubash parses the body at
+    /// expansion time, when only the body fragment survives on the
+    /// error node, so the driver parks the unit text here for the
+    /// unit's extent (run_source_impl_inner's guard) and the comsub
+    /// body reporter reads the physical line back out of it
+    /// (rubash#2783). Fork copies inherit it through Clone exactly as
+    /// a forked child inherits the parent's input stream position.
+    pub(crate) reader_unit_source: std::cell::RefCell<Option<(std::rc::Rc<str>, usize)>>,
     /// execute_cmd.c subshell_environment & SUBSHELL_COMSUB — set while a
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
@@ -513,11 +527,21 @@ pub struct ShellState {
     /// gen_progcomp_completions saves/restores around nesting) so the bare
     /// `compopt` form can operate on it (complete.def:862-886
     /// compopt_builtin). `None` outside a completion function run.
-    pub(crate) pcomp_curcs: Option<crate::builtins::complete::Compspec>,
+    ///
+    /// The handle is SHARED across state clones, like `bind_registry`
+    /// below: in GNU these are process globals, and rubash runs `compgen`
+    /// in-process, so a completion function that reaches `compgen` through
+    /// a command substitution executes on a fork-copy executor whose
+    /// `compopt` mutation must still land on the attempt's live copy and
+    /// fold back into candidate generation (rubash#2611; the copy is
+    /// installed and restored value-wise by the attempt owner, so sharing
+    /// the cell does not leak it across attempts).
+    pub(crate) pcomp_curcs: Rc<RefCell<Option<crate::builtins::complete::Compspec>>>,
     /// pcomplete.c:181 `pcomp_curcmd` port: the command name whose compspec
     /// `pcomp_curcs` governs (printed by the bare `compopt` report form,
-    /// complete.def:872 print_compopts (pcomp_curcmd, ...)).
-    pub(crate) pcomp_curcmd: Option<String>,
+    /// complete.def:872 print_compopts (pcomp_curcmd, ...)). Shares the
+    /// `pcomp_curcs` handle.
+    pub(crate) pcomp_curcmd: Rc<RefCell<Option<String>>>,
     /// Readline's RL_STATE_COMPLETING port: the depth of the host
     /// completion attempts currently in flight
     /// (`Executor::complete_line`, including nested `compgen`
@@ -635,6 +659,18 @@ pub struct ShellState {
     /// own copy is inert. None where there is no process umask
     /// (Windows) or when the state was never a fork snapshot.
     pub(crate) fork_saved_process_umask: Option<u32>,
+    /// rubash#2636: the PROCESS rlimit set recorded at the same
+    /// fork-save point as `fork_saved_process_umask`. The `ulimit`
+    /// builtin drives the real setrlimit on unix
+    /// (builtins/ulimit.rs plat::set), and a flat `( )` region has no
+    /// fork to discard the child's limits the way GNU's
+    /// execute_in_subshell (execute_cmd.c:1576) does — so the save
+    /// point snapshots the process rlimits into the saved state and
+    /// `restore_flat_subshell` re-applies them when the region ends.
+    /// Only the SAVED snapshot's copy is ever read; the live state's
+    /// own copy is inert. None where there are no process rlimits
+    /// (Windows: the emulated table rides the env save/restore).
+    pub(crate) fork_saved_process_rlimits: Option<Vec<(char, u64, u64)>>,
 }
 
 /// The shape of the PIPESTATUS variable cell (variables.c:6291
@@ -786,6 +822,13 @@ pub(crate) struct InteriorSnapshot {
     /// cannot reach the parent (the `( )` boundary's twin fix rides
     /// `fork_saved_process_umask` on the full-state snapshot).
     process_umask: Option<u32>,
+    /// rubash#2636: the PROCESS rlimit set at the command-
+    /// substitution boundary — a `ulimit` inside `$( )` re-limits
+    /// this same process (builtins/ulimit.def set_limit ->
+    /// setrlimit), while GNU's substitution child discards its
+    /// limits at exit. Twin of `process_umask` above; the `( )`
+    /// boundary's version rides `fork_saved_process_rlimits`.
+    process_rlimits: Option<Vec<(char, u64, u64)>>,
 }
 
 impl InteriorSnapshot {
@@ -843,6 +886,7 @@ impl ShellState {
             xtrace_fd: self.xtrace_fd.get(),
             xtrace_fd_source: self.xtrace_fd_source.borrow().clone(),
             process_umask: crate::builtins::umask::snapshot_process_umask(),
+            process_rlimits: crate::builtins::ulimit::snapshot_process_rlimits(),
         }
     }
 
@@ -863,6 +907,11 @@ impl ShellState {
         // same process, so only a snapshot taken NOW lets the restore
         // put the parent's mask back (see the field docs).
         saved.fork_saved_process_umask = crate::builtins::umask::snapshot_process_umask();
+        // rubash#2636: the same fork boundary snapshots the PROCESS
+        // rlimit set — a `ulimit` set inside the region re-limits
+        // this process, and only a snapshot taken NOW lets the
+        // restore put the parent's limits back (see the field docs).
+        saved.fork_saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
         saved
     }
 
@@ -903,6 +952,10 @@ impl ShellState {
         // InteriorSnapshot field docs).
         if let Some(mask) = snapshot.process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        // rubash#2636: the same for the boundary's process rlimits.
+        if let Some(rlimits) = &snapshot.process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
     }
 }
@@ -962,6 +1015,7 @@ impl Clone for ShellState {
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             job_control: Cell::new(self.job_control.get()),
             subshell_source_text: self.subshell_source_text.clone(),
+            reader_unit_source: std::cell::RefCell::new(self.reader_unit_source.borrow().clone()),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),
@@ -1004,6 +1058,7 @@ impl Clone for ShellState {
             // its own ad-hoc carriers.
             procsub_adhoc_carriers: RefCell::new(Vec::new()),
             fork_saved_process_umask: self.fork_saved_process_umask,
+            fork_saved_process_rlimits: self.fork_saved_process_rlimits.clone(),
         }
     }
 }
