@@ -554,6 +554,63 @@ impl Executor {
         }
     }
 
+    /// GNU verify_substring_values' `len` (subst.c:8428-8452): the bound
+    /// an offset is range-checked against, by value kind — VT_POSPARMS
+    /// (`@`/`*`): `number_of_args() + 1`, plus one when the offset is 0
+    /// (counting from $0); VT_ARRAYVAR under `[@]`/`[*]`: assoc element
+    /// count / indexed max index, plus one for a negative offset;
+    /// VT_VARIABLE / VT_ARRAYMEMBER: the value's character length.
+    /// `None` when this layer cannot price the bound (e.g. no storage
+    /// rendering for the array); the caller then keeps the eager
+    /// evaluation order rather than guessing.
+    fn substring_offset_bound(&self, var_name: &str, offset: isize) -> Option<i128> {
+        if var_name == "@" || var_name == "*" {
+            let mut bound = self.shell_state.positional_window().len() as i128 + 1;
+            if offset == 0 {
+                bound += 1;
+            }
+            return Some(bound);
+        }
+        if let Some(base) = var_name
+            .strip_suffix("[@]")
+            .or_else(|| var_name.strip_suffix("[*]"))
+        {
+            if self.parameter_is_array_variable(base) {
+                let storage = self.parameter_array_storage(base)?;
+                if self.is_assoc_parameter_array(base) {
+                    let count =
+                        crate::executor::assignment_helpers::assoc_entries(&storage).len() as i128;
+                    return Some(if offset < 0 { count + 1 } else { count });
+                }
+                let entries = crate::executor::arrays::indexed_array_entries(&storage);
+                let max_index = entries
+                    .keys()
+                    .next_back()
+                    .map(|index| *index as i128)
+                    .unwrap_or(-1);
+                return Some(if offset < 0 { max_index + 1 } else { max_index });
+            }
+        }
+        let value = self.parameter_operator_value(var_name)?;
+        Some(crate::executor::expand_braced_indices::parameter_char_length(&value) as i128)
+    }
+
+    /// GNU subst.c:8459-8464: a negative offset is first adjusted by the
+    /// bound; the offset is out of range when it then exceeds the bound
+    /// or is still negative, and verify_substring_values returns -1
+    /// BEFORE the length text is expanded or evaluated (rubash#2752).
+    fn substring_offset_out_of_range(&self, var_name: &str, offset: isize) -> bool {
+        let Some(bound) = self.substring_offset_bound(var_name, offset) else {
+            return false;
+        };
+        let adjusted = if offset < 0 {
+            offset as i128 + bound
+        } else {
+            offset as i128
+        };
+        adjusted > bound || adjusted < 0
+    }
+
     pub(in crate::executor) fn parse_parameter_substring<'a>(
         &self,
         name: &'a str,
@@ -659,6 +716,15 @@ impl Executor {
                 }
             }
         };
+        // GNU verify_substring_values (subst.c:8459-8464): the offset
+        // bounds check runs BEFORE the length text is expanded or
+        // evaluated — an out-of-range offset returns -1 (empty result,
+        // no diagnostic), so the length operand's side effects and
+        // errors never happen (rubash#2752). The (0, Some(0)) sentinel
+        // is the same empty slice the unset early return above yields.
+        if self.substring_offset_out_of_range(var_name, offset) {
+            return Some((var_name, 0, Some(0)));
+        }
         let length = if !has_length {
             None
         } else if length_str.is_empty() {
@@ -913,6 +979,12 @@ impl Executor {
                 }
             }
         };
+        // Same verify_substring_values bounds gate as the &self parse:
+        // an out-of-range offset discards the length operand
+        // unevaluated (subst.c:8459-8464; rubash#2752).
+        if self.substring_offset_out_of_range(var_name, offset) {
+            return Some((var_name, 0, Some(0)));
+        }
         let length = if !has_length {
             None
         } else if length_str.is_empty() {
