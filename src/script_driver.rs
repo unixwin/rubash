@@ -5488,7 +5488,19 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     st.cursor = 0;
                     accept_line!(&line);
                 }
-                eof = true;
+                // rubash#3051: a byte-level ^D on an empty buffer is the
+                // parse.y handle_eof_input_unit EOF — run the same job
+                // check as the piped path's Ok(0) arm. On deferral keep
+                // reading (the next EOF is immediate: the deferral
+                // pinned this/last to Exit). A nonempty buffer is the
+                // accept-line shape, not a true EOF, so it still folds.
+                if st.buffer.is_empty() && executor.invocation_interactive() {
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
+                }
             } else if let Some(src_abs) = operate_next {
                 preload_operate_and_get_next(executor, &mut st, src_abs);
             }
@@ -5621,13 +5633,18 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     group.clear();
                     st = EditState::default();
                 } else if eof_now {
+                    // Whether this EOF is a terminal hangup (pty master
+                    // closed): GNU's termsig settlement preempts the fold,
+                    // so a hangup never consults the job table
+                    // (rubash#2233) — only a genuine ^D defers.
+                    let mut hangup = false;
                     if read_dead {
                         // The terminal itself ended the input (pty
                         // master closed / read error): classify a
                         // pending untrapped SIGHUP before folding,
                         // exactly like the cooked path's Ok(0)/Err
                         // arms (rubash#2233).
-                        let hangup = executor.poll_untrapped_hangup()
+                        hangup = executor.poll_untrapped_hangup()
                             || (tty_fd_shows_hangup()
                                 && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET));
                         if !hangup && executor.invocation_interactive() {
@@ -5647,7 +5664,20 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         st.cursor = 0;
                         accept_line!(&line);
                     }
-                    eof = true;
+                    // rubash#3051: a genuine ^D on an empty buffer is
+                    // the parse.y handle_eof_input_unit EOF — same job
+                    // check as the piped path's Ok(0) arm. On
+                    // deferral keep reading (the next EOF is
+                    // immediate: the deferral pinned this/last to
+                    // Exit). A hangup EOF and the accept-line shape
+                    // still fold at once.
+                    if !hangup && st.buffer.is_empty() && executor.invocation_interactive() {
+                        if !executor.defer_interactive_eof_for_jobs() {
+                            eof = true;
+                        }
+                    } else {
+                        eof = true;
+                    }
                 } else if let Some(src_abs) = operate_next {
                     preload_operate_and_get_next(executor, &mut st, src_abs);
                 }
@@ -5817,7 +5847,24 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
             match apply_edit_char(executor, &mut st, c) {
                 EditOutcome::None => {}
-                EditOutcome::Eof => eof = true,
+                EditOutcome::Eof => {
+                    // rubash#3051: a ^D byte in a cooked line is the
+                    // same parse.y handle_eof_input_unit EOF as the
+                    // tty branches — echo the synthesized `exit`
+                    // (builtins/exit.def:59-62, before the check) and
+                    // run the same job check as the Ok(0) arm. On
+                    // deferral drop the rest of this batched line and
+                    // keep reading; the next EOF is immediate because
+                    // the deferral pinned this/last to Exit.
+                    if executor.invocation_interactive() {
+                        let login = executor.invocation_login();
+                        eprintln!("{}", if login { "logout" } else { "exit" });
+                        if executor.defer_interactive_eof_for_jobs() {
+                            break;
+                        }
+                    }
+                    eof = true;
+                }
                 EditOutcome::Accept {
                     line,
                     operate_and_get_next,
