@@ -6,6 +6,60 @@ pub(super) struct TimeZoneRule {
     start_rule: Option<MonthWeekdayRule>,
     end_rule: Option<MonthWeekdayRule>,
     system_local: bool,
+    /// A resolved TZif database entry (an Olson name, an absolute
+    /// path, or a POSIX-looking name that exists as a file — glibc
+    /// tries the file first in every case). When present it owns
+    /// `local_time`; the POSIX fields above are all inert.
+    tzif: Option<TzifZone>,
+}
+
+/// One ttinfo record from a TZif file: a fixed UTC offset, its DST
+/// flag, and the abbreviation %Z renders.
+#[derive(Debug, Clone)]
+struct TzifType {
+    offset: i32,
+    is_dst: bool,
+    abbrev: String,
+}
+
+/// A parsed TZif file (RFC 8536): the transition table plus the POSIX
+/// footer rule that extrapolates past the last transition.
+#[derive(Debug, Clone)]
+struct TzifZone {
+    transitions: Vec<i64>,
+    transition_types: Vec<usize>,
+    types: Vec<TzifType>,
+    /// Type for epochs before the first transition: the first
+    /// standard-time type in file order (glibc's choice), else type 0.
+    first_type: usize,
+    footer: Option<Box<TimeZoneRule>>,
+}
+
+impl TzifZone {
+    fn local_time(&self, epoch: i64) -> LocalTimeParts {
+        // Past the explicit table the file's POSIX footer rule owns
+        // the rendering (glibc extrapolates the same way); at the
+        // last transition itself both agree by construction.
+        if let (Some(last), Some(footer)) = (self.transitions.last(), &self.footer) {
+            if epoch >= *last {
+                return footer.local_time(epoch);
+            }
+        }
+        let ty = &self.types[self.type_index_at(epoch)];
+        let mut parts = epoch_to_parts(epoch + i64::from(ty.offset));
+        parts.zone_name = ty.abbrev.clone();
+        parts.offset = ty.offset;
+        parts.epoch = epoch;
+        parts
+    }
+
+    fn type_index_at(&self, epoch: i64) -> usize {
+        if self.transitions.is_empty() || epoch < self.transitions[0] {
+            return self.first_type;
+        }
+        let passed = self.transitions.partition_point(|at| *at <= epoch);
+        self.transition_types[passed - 1]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,13 +85,21 @@ pub(super) struct LocalTimeParts {
 }
 
 impl TimeZoneRule {
-    pub(super) fn from_env(tz: Option<&str>) -> Self {
+    pub(super) fn from_env(tz: Option<&str>, tzdir: Option<&str>) -> Self {
         // glibc localtime (GNU printf.def:633 calls localtime after
-        // sv_tz): a set TZ string is parsed as POSIX rules; TZ="" is UTC;
-        // an UNSET TZ falls back to the system default timezone — on
-        // Windows that is the registry timezone (GetTimeZoneInformation),
-        // on other platforms UTC (rubash#326: %(fmt)T formatted UTC on a
-        // CST host because the unset-TZ case defaulted to UTC).
+        // sv_tz) resolves a set TZ in tzset order: a leading ':' is
+        // stripped, the name is looked up as a TZif file first (under
+        // TZDIR when set, else the system zoneinfo directory — an
+        // absolute TZ is the path itself), and only a name with no
+        // file is parsed as POSIX rules. A string matching neither
+        // renders at offset zero under its leading name (oracle:
+        // TZ=Not/AZone -> %Z "Not", +0000). TZ="" is UTC; an UNSET TZ
+        // falls back to the system default timezone — on Windows that
+        // is the registry timezone (GetTimeZoneInformation), on other
+        // platforms UTC (rubash#326: %(fmt)T formatted UTC on a CST
+        // host because the unset-TZ case defaulted to UTC).
+        // rubash#2705: the TZif step is new — Olson names previously
+        // fell through the POSIX parse straight into the UTC fallback.
         match tz {
             // glibc maps an empty TZ to UTC under the name "Universal".
             Some(value) if value.is_empty() => Self {
@@ -48,8 +110,37 @@ impl TimeZoneRule {
                 start_rule: None,
                 end_rule: None,
                 system_local: false,
+                tzif: None,
             },
-            Some(_) => tz.and_then(parse_posix_timezone).unwrap_or_else(Self::utc),
+            Some(value) => {
+                let name = value.strip_prefix(':').unwrap_or(value);
+                if let Some(zone) = load_tzif(name, tzdir) {
+                    return Self {
+                        standard_name: String::new(),
+                        daylight_name: None,
+                        standard_offset: 0,
+                        daylight_offset: 0,
+                        start_rule: None,
+                        end_rule: None,
+                        system_local: false,
+                        tzif: Some(zone),
+                    };
+                }
+                if let Some(rule) = parse_posix_timezone(name) {
+                    return rule;
+                }
+                let mut index = 0;
+                Self {
+                    standard_name: read_tz_name(name, &mut index).unwrap_or_default(),
+                    daylight_name: None,
+                    standard_offset: 0,
+                    daylight_offset: 0,
+                    start_rule: None,
+                    end_rule: None,
+                    system_local: false,
+                    tzif: None,
+                }
+            }
             None => system_timezone().unwrap_or_else(Self::utc),
         }
     }
@@ -63,10 +154,14 @@ impl TimeZoneRule {
             start_rule: None,
             end_rule: None,
             system_local: false,
+            tzif: None,
         }
     }
 
     pub(super) fn local_time(&self, epoch: i64) -> LocalTimeParts {
+        if let Some(zone) = &self.tzif {
+            return zone.local_time(epoch);
+        }
         // GNU printf.def:633 formats `localtime(&secs)`; with TZ unset libc
         // resolves the system zone (/etc/localtime), so delegate per-epoch
         // to localtime_r — a fixed snapshot offset would misrender DST
@@ -123,6 +218,7 @@ fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
             start_rule: None,
             end_rule: None,
             system_local: false,
+            tzif: None,
         });
     }
 
@@ -178,10 +274,236 @@ fn parse_posix_timezone(value: &str) -> Option<TimeZoneRule> {
         start_rule,
         end_rule,
         system_local: false,
+        tzif: None,
+    })
+}
+
+/// Zoneinfo directories glibc searches when TZDIR is not set (its
+/// compiled-in TZDIR is /usr/share/zoneinfo; the lib path and the
+/// Android location cover the other hosts this engine ships on).
+const DEFAULT_ZONEINFO_DIRS: &[&str] = &[
+    "/usr/share/zoneinfo",
+    "/usr/share/lib/zoneinfo",
+    "/system/usr/share/zoneinfo",
+];
+
+/// Resolve a TZ name to a TZif zone, glibc tzfile order: an absolute
+/// name is the path itself; a relative name is looked up under TZDIR
+/// when TZDIR is set (that directory alone), else under the default
+/// zoneinfo directories. A `..` path element never resolves (glibc
+/// refuses parent traversal in TZ names). Any failure — missing file,
+/// malformed contents — returns None and the caller falls through to
+/// the POSIX parse, exactly like tzset.
+fn load_tzif(name: &str, tzdir: Option<&str>) -> Option<TzifZone> {
+    if name.is_empty() || name.split('/').any(|part| part == "..") {
+        return None;
+    }
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if name.starts_with('/') {
+        candidates.push(std::path::PathBuf::from(name));
+    } else if let Some(dir) = tzdir.filter(|dir| !dir.is_empty()) {
+        candidates.push(std::path::PathBuf::from(dir).join(name));
+    } else {
+        candidates.extend(
+            DEFAULT_ZONEINFO_DIRS
+                .iter()
+                .map(|dir| std::path::PathBuf::from(dir).join(name)),
+        );
+    }
+    for path in candidates {
+        if let Ok(bytes) = std::fs::read(&path) {
+            if let Some(zone) = parse_tzif(&bytes) {
+                return Some(zone);
+            }
+        }
+    }
+    None
+}
+
+/// A byte cursor over a TZif image; every read is bounds-checked so a
+/// malformed file degrades to None instead of panicking.
+struct TzifCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> TzifCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Option<&'a [u8]> {
+        let slice = self.data.get(self.pos..self.pos.checked_add(count)?)?;
+        self.pos += count;
+        Some(slice)
+    }
+
+    fn skip(&mut self, count: usize) -> Option<()> {
+        self.take(count).map(|_| ())
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|slice| slice[0])
+    }
+
+    fn be_u32(&mut self) -> Option<u32> {
+        self.take(4)
+            .map(|slice| u32::from_be_bytes(slice.try_into().expect("4-byte slice")))
+    }
+
+    fn be_i32(&mut self) -> Option<i32> {
+        self.be_u32().map(|value| value as i32)
+    }
+
+    fn be_i64(&mut self) -> Option<i64> {
+        self.take(8)
+            .map(|slice| i64::from_be_bytes(slice.try_into().expect("8-byte slice")))
+    }
+}
+
+/// The six header counters of one TZif block (RFC 8536 section 3.1).
+/// The cursor must sit just past the 4-byte magic; the version byte
+/// and the 15 reserved bytes (16 total) precede the counters.
+struct TzifCounts {
+    isutcnt: usize,
+    isstdcnt: usize,
+    leapcnt: usize,
+    timecnt: usize,
+    typecnt: usize,
+    charcnt: usize,
+}
+
+fn read_tzif_counts(cursor: &mut TzifCursor) -> Option<TzifCounts> {
+    cursor.skip(16)?;
+    Some(TzifCounts {
+        isutcnt: cursor.be_u32()? as usize,
+        isstdcnt: cursor.be_u32()? as usize,
+        leapcnt: cursor.be_u32()? as usize,
+        timecnt: cursor.be_u32()? as usize,
+        typecnt: cursor.be_u32()? as usize,
+        charcnt: cursor.be_u32()? as usize,
+    })
+}
+
+fn parse_tzif(data: &[u8]) -> Option<TzifZone> {
+    if data.len() < 44 || &data[0..4] != b"TZif" {
+        return None;
+    }
+    let version = data[4];
+    let mut cursor = TzifCursor::new(data);
+    cursor.skip(4)?;
+    let counts = read_tzif_counts(&mut cursor)?;
+    if version == 0 {
+        // Version 1: the single block uses 32-bit transition times and
+        // 8-byte leap-second records, and carries no footer.
+        return parse_tzif_block(&mut cursor, &counts, false, None);
+    }
+    // Versions 2-4: skip the v1 block, parse the 64-bit block, then
+    // read the footer TZ string enclosed in newlines.
+    skip_tzif_block(&mut cursor, &counts, false)?;
+    cursor.skip(4)?;
+    let counts = read_tzif_counts(&mut cursor)?;
+    let mut zone = parse_tzif_block(&mut cursor, &counts, true, None)?;
+    let rest = &data[cursor.pos.min(data.len())..];
+    if rest.len() >= 2 && rest[0] == b'\n' {
+        if let Some(end) = rest[1..].iter().position(|byte| *byte == b'\n') {
+            let footer_text = String::from_utf8_lossy(&rest[1..1 + end]).into_owned();
+            if !footer_text.is_empty() {
+                zone.footer = parse_posix_timezone(&footer_text).map(Box::new);
+            }
+        }
+    }
+    Some(zone)
+}
+
+fn skip_tzif_block(cursor: &mut TzifCursor, counts: &TzifCounts, wide: bool) -> Option<()> {
+    let time_size = if wide { 8 } else { 4 };
+    let leap_size = if wide { 12 } else { 8 };
+    cursor.skip(counts.timecnt.checked_mul(time_size)?)?;
+    cursor.skip(counts.timecnt)?;
+    cursor.skip(counts.typecnt.checked_mul(6)?)?;
+    cursor.skip(counts.charcnt)?;
+    cursor.skip(counts.leapcnt.checked_mul(leap_size)?)?;
+    cursor.skip(counts.isstdcnt)?;
+    cursor.skip(counts.isutcnt)?;
+    Some(())
+}
+
+fn parse_tzif_block(
+    cursor: &mut TzifCursor,
+    counts: &TzifCounts,
+    wide: bool,
+    footer: Option<Box<TimeZoneRule>>,
+) -> Option<TzifZone> {
+    if counts.typecnt == 0 {
+        return None;
+    }
+    let mut transitions = Vec::with_capacity(counts.timecnt);
+    for _ in 0..counts.timecnt {
+        transitions.push(if wide {
+            cursor.be_i64()?
+        } else {
+            i64::from(cursor.be_i32()?)
+        });
+    }
+    let mut transition_types = Vec::with_capacity(counts.timecnt);
+    for _ in 0..counts.timecnt {
+        let index = cursor.u8()? as usize;
+        if index >= counts.typecnt {
+            return None;
+        }
+        transition_types.push(index);
+    }
+    let mut raw_types = Vec::with_capacity(counts.typecnt);
+    for _ in 0..counts.typecnt {
+        let offset = cursor.be_i32()?;
+        let is_dst = cursor.u8()? != 0;
+        let abbrev_index = cursor.u8()? as usize;
+        raw_types.push((offset, is_dst, abbrev_index));
+    }
+    let abbrev_bytes = cursor.take(counts.charcnt)?;
+    let mut types = Vec::with_capacity(counts.typecnt);
+    for (offset, is_dst, abbrev_index) in raw_types {
+        let tail = abbrev_bytes.get(abbrev_index..)?;
+        let end = tail
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(tail.len());
+        types.push(TzifType {
+            offset,
+            is_dst,
+            abbrev: String::from_utf8_lossy(&tail[..end]).into_owned(),
+        });
+    }
+    let leap_size = if wide { 12 } else { 8 };
+    cursor.skip(counts.leapcnt.checked_mul(leap_size)?)?;
+    cursor.skip(counts.isstdcnt)?;
+    cursor.skip(counts.isutcnt)?;
+    let first_type = types.iter().position(|ty| !ty.is_dst).unwrap_or(0);
+    Some(TzifZone {
+        transitions,
+        transition_types,
+        types,
+        first_type,
+        footer,
     })
 }
 
 fn read_tz_name(value: &str, index: &mut usize) -> Option<String> {
+    // POSIX TZ names are either a run of alphabetic characters or a
+    // <...> quoted form whose contents (digits, '+' and '-' included,
+    // e.g. <+09>) are the name — glibc accepts both, and TZif footer
+    // strings use the quoted form for numeric abbreviations.
+    if value[*index..].starts_with('<') {
+        let rest = &value[*index + 1..];
+        let end = rest.find('>')?;
+        if end == 0 {
+            return None;
+        }
+        let name = rest[..end].to_string();
+        *index += end + 2;
+        return Some(name);
+    }
     let start = *index;
     while let Some(ch) = value[*index..].chars().next() {
         if !ch.is_ascii_alphabetic() {
@@ -336,6 +658,7 @@ fn system_timezone() -> Option<TimeZoneRule> {
         start_rule: has_dst.then(|| rule(&info.DaylightDate)).flatten(),
         end_rule: has_dst.then(|| rule(&info.StandardDate)).flatten(),
         system_local: false,
+        tzif: None,
     })
 }
 
@@ -354,6 +677,7 @@ fn system_timezone() -> Option<TimeZoneRule> {
             start_rule: None,
             end_rule: None,
             system_local: true,
+            tzif: None,
         });
     }
     #[cfg(not(unix))]

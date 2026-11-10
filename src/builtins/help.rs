@@ -35,10 +35,41 @@ pub fn execute(args: &[String]) -> io::Result<i32> {
     execute_with_io(args, &mut stdout, &mut stderr)
 }
 
+/// The bare-listing layout inputs the rendering cannot see from the
+/// argument list: the session's COLUMNS variable (GNU reads it through
+/// get_string_value in default_columns, general.c:1461 — a shell
+/// variable, not just the process environment) and whether the active
+/// locale is multibyte (help.def selects wdispcolumn over dispcolumn
+/// on MB_CUR_MAX > 1). The executor supplies both from its variable
+/// table; the process-level entry points derive them from the
+/// environment instead.
+#[derive(Debug, Clone)]
+pub(crate) struct HelpListingLayout {
+    pub columns_var: Option<String>,
+    pub multibyte: bool,
+}
+
 pub(crate) fn execute_with_io<W, E>(
     args: &[String],
     stdout: &mut W,
     stderr: &mut E,
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    let layout = HelpListingLayout {
+        columns_var: std::env::var("COLUMNS").ok(),
+        multibyte: crate::locale::is_multi_byte_active(),
+    };
+    execute_with_io_and_layout(args, stdout, stderr, &layout)
+}
+
+pub(crate) fn execute_with_io_and_layout<W, E>(
+    args: &[String],
+    stdout: &mut W,
+    stderr: &mut E,
+    layout: &HelpListingLayout,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -94,7 +125,7 @@ where
     }
 
     if patterns.is_empty() {
-        print_help_list(stdout)?;
+        print_help_list(stdout, layout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -335,7 +366,7 @@ where
     Ok(())
 }
 
-fn print_help_list<W>(stdout: &mut W) -> io::Result<()>
+fn print_help_list<W>(stdout: &mut W, layout: &HelpListingLayout) -> io::Result<()>
 where
     W: Write,
 {
@@ -374,56 +405,146 @@ where
         "A star (*) next to a name means that the command is disabled."
     )?;
     writeln!(stdout)?;
-    render_builtin_listing(stdout)?;
+    render_builtin_listing(stdout, layout)?;
     Ok(())
 }
 
-// GNU bash 5.3 help.def show_builtin_command_help / dispcolumn: the short
-// docs of the builtin table are shown in two columns at default_columns()/2
-// (40 under the 80-column default), pairing entry i with entry i + height,
-// height = (num + 1) / 2.  The last row carries only the left entry when
-// (i << 1) >= num.  The harness runs with a UTF-8 locale, so the multibyte
-// display path applies: a cell truncates when its display width (doc + 1
-// marker column) reaches width - 2, keeping min(len, 38) - 1 characters in
-// the left column and min(len, 38) - 2 in the right one, with a trailing >.
-fn render_builtin_listing<W>(stdout: &mut W) -> io::Result<()>
+// general.c:1461 default_columns: the COLUMNS variable when atoi parses
+// it to a positive value, else the window size, else 80. (The select
+// menu's select_default_columns is the executor's other port of this
+// function; this one keeps atoi semantics — a leading digit run wins,
+// trailing junk is ignored — because that is what general.c does.)
+fn default_columns(columns_var: Option<&str>) -> usize {
+    if let Some(value) = columns_var {
+        if let Some(columns) = atoi_positive(value) {
+            return columns;
+        }
+    }
+    if let Some((_, cols)) = crate::script_driver::process_console_size() {
+        if cols > 0 {
+            return cols as usize;
+        }
+    }
+    80
+}
+
+/// C atoi: skips leading whitespace and an optional sign, then reads a
+/// digit run; no digits (or a non-positive result) yields None here.
+fn atoi_positive(value: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    let mut negative = false;
+    if index < bytes.len() && (bytes[index] == b'-' || bytes[index] == b'+') {
+        negative = bytes[index] == b'-';
+        index += 1;
+    }
+    let mut parsed: i64 = 0;
+    let mut any_digit = false;
+    while index < bytes.len() && bytes[index].is_ascii_digit() {
+        any_digit = true;
+        parsed = parsed
+            .saturating_mul(10)
+            .saturating_add(i64::from(bytes[index] - b'0'));
+        index += 1;
+    }
+    if any_digit && !negative && parsed > 0 {
+        usize::try_from(parsed).ok()
+    } else {
+        None
+    }
+}
+
+// GNU bash 5.3 help.def show_builtin_command_help: the short docs of the
+// builtin table are shown in two columns at default_columns()/2, capped
+// at the 128-byte blurb size and floored back to 40 when that yields 3
+// or less; height = (num + 1) / 2 rows pair entry i (left column) with
+// entry i + height (right column) — a column-major fill.  The last row
+// carries only the left entry when (i << 1) >= num or i + height >= num
+// (dispcolumn's early newline).  The left cell is padded out to the
+// column width before the right cell is printed.
+fn render_builtin_listing<W>(stdout: &mut W, layout: &HelpListingLayout) -> io::Result<()>
 where
     W: Write,
 {
-    const WIDTH: usize = 40;
+    let columns = default_columns(layout.columns_var.as_deref());
+    let mut width = columns / 2;
+    if width > 128 {
+        width = 128;
+    }
+    if width <= 3 {
+        width = 40;
+    }
     let num = HELP_ENTRIES.len();
     let height = (num + 1) / 2;
     for i in 0..height {
-        let doc = HELP_ENTRIES[i];
-        let mut line = truncate_cell(doc, WIDTH - 2, 1);
-        while line.chars().count() < WIDTH {
-            line.push(' ');
-        }
+        let first = listing_cell(HELP_ENTRIES[i], width, true, layout.multibyte);
         if (i << 1) >= num || i + height >= num {
-            let rendered = line.trim_end().to_string();
-            writeln!(stdout, "{rendered}")?;
+            writeln!(stdout, "{first}")?;
             continue;
         }
-        line.push_str(&truncate_cell(HELP_ENTRIES[i + height], WIDTH - 2, 2));
-        let rendered = line.trim_end().to_string();
-        writeln!(stdout, "{rendered}")?;
+        // The table is pure ASCII, so a cell's character count is its
+        // display width — the quantity both GNU cells pad against
+        // (strlen in dispcolumn, dispcols in wdispcolumn).
+        let mut line = first;
+        while line.chars().count() < width {
+            line.push(' ');
+        }
+        line.push_str(&listing_cell(
+            HELP_ENTRIES[i + height],
+            width,
+            false,
+            layout.multibyte,
+        ));
+        writeln!(stdout, "{line}")?;
     }
     Ok(())
 }
 
 // One column cell: a space marker (a disabled builtin would print *; the
-// default table never has one) plus the short doc, truncated with a trailing
-// > when the doc plus marker reaches the column limit.  limit is the display
-// columns available for marker + doc + truncation marker; column selects the
-// GNU wdispcolumn keep count (dispchars - column).
-fn truncate_cell(doc: &str, limit: usize, column: usize) -> String {
-    let chars: Vec<char> = doc.chars().collect();
-    let dispchars = chars.len().min(limit);
-    if chars.len() + 1 >= limit {
-        let kept = dispchars - column;
-        let mut cell: String = chars[..kept].iter().collect();
-        cell.push('>');
-        return format!(" {cell}");
+// default table never has one) plus the short doc, truncated with a
+// trailing > at the column boundary.  The two GNU renderers differ by
+// one kept character at the boundary, and the multibyte one is selected
+// purely by the locale (MB_CUR_MAX > 1), so both are kept:
+// - wdispcolumn (multibyte): dispchars = min(len, width - 2) display
+//   characters fit the cell; truncation fires when dispchars + 1 >=
+//   width - 2 and keeps dispchars - 1 characters on the left,
+//   dispchars - 2 on the right (the right column's dispchars-1 index
+//   is the bash-4.3 terminal guard).
+// - dispcolumn (single-byte): the doc is copied into a width-1 buffer
+//   whose last two (left) / last-but-two (right) slots the '>' and the
+//   NUL overwrite, so truncation fires at len >= width - 3 (left) /
+//   len >= width - 4 (right) and keeps width - 3 / width - 4
+//   characters; a doc of exactly that length still gains the '>'.
+fn listing_cell(doc: &str, width: usize, first_column: bool, multibyte: bool) -> String {
+    let len = doc.chars().count();
+    if multibyte {
+        let mut slen = len;
+        if slen >= width {
+            slen = width.saturating_sub(2);
+        }
+        let dispchars = slen.min(width.saturating_sub(2));
+        if dispchars + 1 >= width.saturating_sub(2) {
+            let kept = if first_column {
+                dispchars.saturating_sub(1)
+            } else {
+                dispchars.saturating_sub(2)
+            };
+            let truncated: String = doc.chars().take(kept).collect();
+            return format!(" {truncated}>");
+        }
+        return format!(" {doc}");
+    }
+    let (threshold, keep) = if first_column {
+        (width.saturating_sub(3), width.saturating_sub(3))
+    } else {
+        (width.saturating_sub(4), width.saturating_sub(4))
+    };
+    if len >= threshold {
+        let truncated: String = doc.chars().take(keep).collect();
+        return format!(" {truncated}>");
     }
     format!(" {doc}")
 }
