@@ -2113,6 +2113,10 @@ impl Executor {
             signal_trap_running: false,
             error_trap_running: false,
             exit_trap_running: false,
+            // rubash#2824: a fork copy is a fresh GNU process image; the
+            // parent's SEVAL_NOHIST unit depth never propagates — the
+            // child's own units raise it as they run.
+            nohist_parse_depth: std::cell::Cell::new(0),
             subshell_element_root_depth: std::cell::Cell::new(None),
             subshell_fork_collapse: std::cell::Cell::new(false),
             trap_saved_exit_value: None,

@@ -54,6 +54,34 @@ fn write_timestamps_of(executor: &Executor) -> bool {
     executor.get_env("HISTTIMEFORMAT").is_some()
 }
 
+/// GNU's remember_on_history as the `history -s` / `-p` pop gate sees it
+/// (builtins/history.def:435-439 push_history, :462-463
+/// expand_and_print_history): the `set -o history` option, minus every
+/// parse unit GNU runs with history remembering disabled. Trap actions
+/// execute through parse_and_execute with SEVAL_NOHIST (trap.c:494
+/// signal traps, :1069 exit trap, :1195 _run_trap_internal), and
+/// evalstring.c:291-292 turns that flag into bash_history_disable()
+/// (bashhist.c:297-302) for the action's duration; the plain string
+/// units through execute_eval_source carry the same flag and are
+/// counted by nohist_parse_depth. Inside any such unit a `-s` only
+/// appends — it must not pop the line the enclosing reader recorded
+/// (rubash#2824: an EXIT trap's `history -s` ate the `trap ... EXIT`
+/// line itself).
+fn history_remembering(executor: &Executor) -> bool {
+    crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "history")
+        && executor.nohist_parse_depth.get() == 0
+        // PROMPT_COMMAND runs through execute_variable_command's own
+        // parse_and_execute (eval.c:305, SEVAL_NOHIST) rather than
+        // execute_eval_source; its runner raises this marker for the
+        // text's duration — the same disabled-remembering window.
+        && executor.get_env(Executor::PROMPT_COMMAND_NOHIST).is_none()
+        && !executor.debug_trap_running
+        && !executor.error_trap_running
+        && !executor.return_trap_running
+        && !executor.signal_trap_running
+        && !executor.exit_trap_running
+}
+
 /// Execute the history builtin against the session list.
 pub(in crate::executor) fn execute_history_session(
     executor: &Executor,
@@ -348,10 +376,7 @@ pub(in crate::executor) fn execute_history_session(
             // pops, and a second -s in one line never pops the first -s's
             // entry. The push goes through check_add_history (FORCE=1),
             // i.e. record() with HISTCONTROL/HISTIGNORE honored.
-            let remember = crate::builtins::set::shell_option_enabled(
-                &executor.shell_state.env_vars,
-                "history",
-            );
+            let remember = history_remembering(executor);
             if remember
                 && !shell.last_line_pushed
                 && shell.last_line_added
@@ -380,10 +405,7 @@ pub(in crate::executor) fn execute_history_session(
         HistoryMode::Print => {
             // history.def:462-463: `-p` pops the current-line entry under
             // the same conditions as -s; failure to delete is a hard error.
-            let remember = crate::builtins::set::shell_option_enabled(
-                &executor.shell_state.env_vars,
-                "history",
-            );
+            let remember = history_remembering(executor);
             if remember && !shell.last_line_pushed && shell.last_line_added {
                 if shell.entries.is_empty() {
                     return Ok(1);
