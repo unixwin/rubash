@@ -987,3 +987,96 @@ fn delimiter_metadata(delimiter: &str) -> Box<crate::parser::WordMetadata> {
         delimiter.to_string(),
     ))
 }
+
+#[cfg(test)]
+mod case_reclassification_tests {
+    use super::dollar_command_substitution;
+
+    /// The extracted body of the `$(...)` at the start of `word`,
+    /// when the extractor finds one.
+    fn extract(word: &str) -> Option<String> {
+        let chars: Vec<char> = word.chars().collect();
+        dollar_command_substitution(&chars, 0).map(|(node, _)| node.source)
+    }
+
+    // The three trigger predicates of the in-field unclosed-case
+    // reclassification (GNU parse.y:4519-4521: `)` is the
+    // substitution's shell_eof_token when it cannot be a case token).
+
+    /// (a) Armed-but-empty pattern region: a clause terminator
+    /// re-arms the region with no pattern content yet; the `)` there
+    /// closes the substitution, truncating the body for the body
+    /// parser's grammar verdict (GNU: syntax error, -c 127).
+    #[test]
+    fn reclassifies_armed_empty_region_after_clause_terminator() {
+        assert_eq!(
+            extract("$(case x in a) echo;; )").as_deref(),
+            Some("case x in a) echo;; ")
+        );
+    }
+
+    /// (b) The `)` glued to the `in` word itself.
+    #[test]
+    fn reclassifies_paren_glued_to_in() {
+        assert_eq!(extract("$(case x in)").as_deref(), Some("case x in"));
+    }
+
+    /// (c) The `)` glued to the case subject (no `in` seen yet).
+    #[test]
+    fn reclassifies_paren_glued_to_subject() {
+        assert_eq!(extract("$(case x)").as_deref(), Some("case x"));
+    }
+
+    // Four non-trigger controls: the `)` belongs to the case, and
+    // the extractor must not truncate the body at the preamble.
+
+    /// Pattern content seen: the `)` closes the pattern list and
+    /// the body scan completes over the whole body.
+    #[test]
+    fn keeps_pattern_content_close() {
+        assert_eq!(
+            extract("$(case x in a) echo hi;; esac)").as_deref(),
+            Some("case x in a) echo hi;; esac")
+        );
+    }
+
+    /// A subshell clause body: the pattern `)` still belongs to
+    /// the case even though a command-position `(` follows it.
+    #[test]
+    fn keeps_subshell_body_shape() {
+        assert_eq!(
+            extract("$(case x in a) (echo ok);; esac)").as_deref(),
+            Some("case x in a) (echo ok);; esac")
+        );
+    }
+
+    /// Empty case: `esac` is the case's own close; the extractor
+    /// must never truncate at `in` (this scan level finds no span
+    /// for the shape — the tokeniser owns it).
+    #[test]
+    fn keeps_empty_case_esac_shape() {
+        assert_eq!(extract("$(case x in esac)"), None);
+    }
+
+    /// A parenthesised pattern list: its `)` is the case's, and
+    /// the body scan completes normally.
+    #[test]
+    fn keeps_nested_pattern_parens() {
+        assert_eq!(
+            extract("$(case x in (a) echo;; esac)").as_deref(),
+            Some("case x in (a) echo;; esac")
+        );
+    }
+
+    /// Space variant: `in` completes at the separating space, whose
+    /// completion destroys the stage/region state the glued
+    /// predicates judge by; the completion latch in the arm's
+    /// bookkeeping carries the fact to the `)` (GNU: syntax error,
+    /// -c 127). Pattern content after a spaced `in` clears the
+    /// latch again: the `)` after `a` is the pattern closer.
+    #[test]
+    fn reclassifies_space_variant_via_completion_latch() {
+        assert_eq!(extract("$(case x in )").as_deref(), Some("case x in "));
+        assert_eq!(extract("$(case x in a)"), None);
+    }
+}
