@@ -1258,6 +1258,34 @@ pub struct CommandNode {
     /// without token provenance; the executor then falls back to
     /// counting literal newlines in the first word's text.
     pub first_word_end_line: Option<usize>,
+    /// rubash#3209: this node's first element was a redirection,
+    /// proven at the moment that redirection's target was consumed
+    /// while it was still the node's only element (see
+    /// `correct_first_word_end_for_redirect_target`). GNU plants
+    /// `simplecmd_lineno` with the function name's line when a bare
+    /// `name()` definition is read (parse.y:5849-5851), and the
+    /// redirection element captures the stamp only when it is still
+    /// unset (parse.y:810-811) — so a redirection-first first command
+    /// of a function body reports the DEFINITION line, which the
+    /// function parser restamps from this flag
+    /// (`restamp_function_body_first_command`). A plain bool, not a
+    /// line: the flag is a parse-order fact the node does not
+    /// otherwise record (element order is not stored).
+    pub first_element_redirect: bool,
+    /// rubash#3053: while a node's recorded elements are exactly a
+    /// foldable `time` prefix chain (one or more `time` heads plus
+    /// their operand windows), the end line of the first element
+    /// AFTER the chain — the timed command's first word, assignment
+    /// word, or redirection target — recorded at that element's
+    /// intake. The provisional stamp cannot be corrected in place
+    /// while the head word occupies the node (`push_command_word`
+    /// restamps only when no element has been recorded yet), so the
+    /// fold that strips the prefix applies this candidate as the
+    /// node's `first_word_end_line` (`time_prefix_from_command`).
+    /// Zero means unset (physical lines start at 1); a plain usize
+    /// because this struct is size-budgeted (see the budget tests
+    /// below) and an Option would cost a second word.
+    pub time_prefix_first_element_end_line: usize,
     /// The LOGICAL line this command starts on (the reader's command-list
     /// boundary — commands joined onto the previous line by a
     /// backslash-newline continuation share its logical line while their
@@ -1396,6 +1424,8 @@ impl CommandNode {
             coproc_command: None,
             line: None,
             first_word_end_line: None,
+            first_element_redirect: false,
+            time_prefix_first_element_end_line: 0,
             logical_line: None,
             end_line: None,
             heredoc_gather_line: None,
@@ -1440,6 +1470,16 @@ pub struct CommandLineSpan {
     pub line: Option<usize>,
     pub end_line: Option<usize>,
     pub logical_line: Option<usize>,
+    /// rubash#3054: the node's first-element end line (#3028's
+    /// `first_word_end_line`). The #2202 span originally carried only
+    /// the three reader lines, so a respawned child re-derived this
+    /// stamp from its own re-parse of the collapsed body text — where
+    /// a first element split across lines lands its end on the wrong
+    /// line and the `stamped >= start` guard in
+    /// `simple_command_first_word_end_line` degrades the report to
+    /// the element's START line. Transport it with the other three;
+    /// the parent's value is authoritative exactly like theirs.
+    pub first_word_end_line: Option<usize>,
 }
 
 /// Append the line span of every node in `commands` to `out`, in the
@@ -1453,6 +1493,7 @@ pub fn collect_command_line_spans(commands: &[CommandNode], out: &mut Vec<Comman
             line: node.line,
             end_line: node.end_line,
             logical_line: node.logical_line,
+            first_word_end_line: node.first_word_end_line,
         });
         let mut lists = Vec::new();
         command_child_lists(node, &mut lists);
@@ -1489,12 +1530,165 @@ fn apply_command_line_spans_inner(
         node.line = span.line;
         node.end_line = span.end_line;
         node.logical_line = span.logical_line;
+        node.first_word_end_line = span.first_word_end_line;
         let mut lists = Vec::new();
         command_child_lists_mut(node, &mut lists);
         for list in lists {
             apply_command_line_spans_inner(list, iter);
         }
     }
+}
+
+/// rubash#3209: GNU plants `simplecmd_lineno` with the function
+/// name's line when a bare `name()` definition is read — the name is
+/// a word at command position (parse.y:5849-5851) — and the plant
+/// survives until the first simple command of the body COMPLETES
+/// (the reset is `clean_simple_command`, parse.y:838). A
+/// redirection element captures the stamp only when it is still
+/// unset (parse.y:810-811), so when the body's first simple command
+/// is redirection-first its stamp IS the definition line, not the
+/// line its first element finished on. Wrapper commands in between
+/// (groups, subshells, pipelines, if/loop conditions, `time`, `!`,
+/// background) consume nothing; a completed `[[ ]]` or `(( ))`
+/// consumes nothing either, because those commands never capture or
+/// reset the stamp; a nested function definition consumes it (its
+/// own name plants a fresh stamp and its completion resets), and a
+/// case command's clause stamps come from the pattern tokens — a
+/// distinct mechanism this walk deliberately does not enter.
+///
+/// Walk `commands` in parse order to the first simple command; when
+/// it is redirection-first (`first_element_redirect`), restamp both
+/// its `line` and its `first_word_end_line` to `definition_line`
+/// (the executor's report reads the latter, guarded by the former —
+/// `simple_command_first_word_end_line`). Called by the function
+/// parser for bare-name definitions, and by the executor where a
+/// definition's body is re-parsed at definition time (the
+/// alias-aware retry), with the definition node's own line.
+pub fn restamp_function_body_first_command(commands: &mut [CommandNode], definition_line: usize) {
+    enum StampWalk {
+        /// The walk is over: a simple command consumed the plant, or
+        /// a nested definition / case command blocks it.
+        Stop,
+        /// No simple command in this subtree; keep looking.
+        Continue,
+    }
+
+    fn search(commands: &mut [CommandNode], definition_line: usize) -> bool {
+        for node in commands {
+            match descend(node, definition_line) {
+                StampWalk::Stop => return true,
+                StampWalk::Continue => {}
+            }
+        }
+        false
+    }
+
+    fn descend(node: &mut CommandNode, definition_line: usize) -> StampWalk {
+        if node.function_command.is_some() || node.case_command.is_some() {
+            return StampWalk::Stop;
+        }
+        if node.arithmetic_command.is_some() || node.conditional_command.is_some() {
+            return StampWalk::Continue;
+        }
+        if let Some(pipeline) = &mut node.pipeline_command {
+            return if search(&mut pipeline.stages, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(list) = &mut node.and_or_list {
+            return if search(&mut list.commands, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(background) = &mut node.background_command {
+            return descend(&mut background.command, definition_line);
+        }
+        if let Some(time) = &mut node.time_command {
+            return descend(&mut time.command, definition_line);
+        }
+        if let Some(inverted) = &mut node.inverted_command {
+            return descend(&mut inverted.command, definition_line);
+        }
+        if let Some(subshell) = &mut node.subshell_command {
+            return if search(&mut subshell.body, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(group) = &mut node.brace_group {
+            return if search(&mut group.body, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(if_command) = &mut node.if_command {
+            if search(&mut if_command.condition, definition_line)
+                || search(&mut if_command.then_body, definition_line)
+            {
+                return StampWalk::Stop;
+            }
+            for branch in &mut if_command.elif_branches {
+                if search(&mut branch.condition, definition_line)
+                    || search(&mut branch.body, definition_line)
+                {
+                    return StampWalk::Stop;
+                }
+            }
+            if let Some(else_body) = &mut if_command.else_body {
+                if search(else_body, definition_line) {
+                    return StampWalk::Stop;
+                }
+            }
+            return StampWalk::Continue;
+        }
+        if let Some(loop_command) = &mut node.loop_command {
+            return if search(&mut loop_command.condition, definition_line)
+                || search(&mut loop_command.body, definition_line)
+            {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(for_command) = &mut node.for_command {
+            return if search(&mut for_command.body, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(select_command) = &mut node.select_command {
+            return if search(&mut select_command.body, definition_line) {
+                StampWalk::Stop
+            } else {
+                StampWalk::Continue
+            };
+        }
+        if let Some(coproc) = &mut node.coproc_command {
+            if let Some(body) = &mut coproc.body {
+                return if search(body, definition_line) {
+                    StampWalk::Stop
+                } else {
+                    StampWalk::Continue
+                };
+            }
+            // A simple-form coproc carries its command on this node
+            // itself (CoprocCommand::words), so the node is the leaf.
+        }
+        if node.first_element_redirect {
+            node.line = Some(definition_line);
+            node.first_word_end_line = Some(definition_line);
+        }
+        StampWalk::Stop
+    }
+
+    search(commands, definition_line);
 }
 
 /// The sub-command lists of `node`, in the canonical traversal order
