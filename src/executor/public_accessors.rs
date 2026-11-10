@@ -1772,7 +1772,11 @@ impl Executor {
                 // BASH_SOURCE stays the set-but-empty array (rubash#1306),
                 // but the stack still takes the $0 seed (see the IS_C
                 // branch above for why the seed must survive).
+                // rubash#3125: record the seed so the BASH_SOURCE
+                // views only ever pop a bottom entry that really is
+                // this seed.
                 self.shell_state.bash_source_stack = vec![source_value.clone()];
+                self.shell_state.bash_source_seed = Some(source_value.clone());
                 store_indexed_array_state(
                     &mut self.shell_state,
                     "BASH_SOURCE",
@@ -1780,7 +1784,10 @@ impl Executor {
                 );
                 return;
             }
+            // rubash#3125: record the seed alongside the stack
+            // (see the field doc on `bash_source_seed`).
             self.shell_state.bash_source_stack = vec![source_value.clone()];
+            self.shell_state.bash_source_seed = Some(source_value.clone());
             store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
         }
     }

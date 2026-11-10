@@ -5555,7 +5555,11 @@ impl Executor {
                         // producer exits — forever for `tail -f`. Spawn
                         // the body as a child shell on a real pipe
                         // instead (same shape as the coproc spawn).
-                        if self.bind_input_process_substitution_child(fd, source, cmd.line) {
+                        if self.bind_input_process_substitution_child(
+                            fd,
+                            source,
+                            super::command_text::procsub_body_seed_line(cmd),
+                        ) {
                             continue;
                         }
                         if let Some(input) = self.process_substitution_output(source) {

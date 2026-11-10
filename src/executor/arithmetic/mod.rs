@@ -1264,24 +1264,30 @@ impl Executor {
     /// every producer (plain and compound binds, read and bind
     /// diagnostics) is covered (rubash#2341's `let` bind line leaked
     /// the raw encoding).
+    ///
+    /// The channel is the fd-2-bound dispatch (arith_diag), not a raw
+    /// eprintln!: GNU error.c writes a command's diagnostics to fd 2
+    /// as currently bound, so `(( ref=1 )) 2>file` and
+    /// `(( a[]=1 )) 2>file` capture the line (rubash#3246; the
+    /// Readonly arm took the same route in the #2968 resolution).
     fn print_arith_diag(&self, diag: &ArithEvalDiag, label: Option<&str>) {
         match (diag, label) {
-            (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => eprintln!(
-                "{}{}: `{}': not a valid identifier",
+            (ArithEvalDiag::InvalidIdentifier(display), Some(label)) => self.arith_diag(&format!(
+                "{}{}: `{}': not a valid identifier\n",
                 self.diagnostic_prefix(),
                 label,
                 parser::de_carrier_arith_text(display)
-            ),
-            (ArithEvalDiag::InvalidIdentifier(display), None) => eprintln!(
-                "{}`{}': not a valid identifier",
+            )),
+            (ArithEvalDiag::InvalidIdentifier(display), None) => self.arith_diag(&format!(
+                "{}`{}': not a valid identifier\n",
                 self.diagnostic_prefix(),
                 parser::de_carrier_arith_text(display)
-            ),
-            (ArithEvalDiag::BadSubscript(display), _) => eprintln!(
-                "{}{}: bad array subscript",
+            )),
+            (ArithEvalDiag::BadSubscript(display), _) => self.arith_diag(&format!(
+                "{}{}: bad array subscript\n",
                 self.error_prefix(),
                 parser::de_carrier_arith_text(display)
-            ),
+            )),
         }
     }
 
@@ -1706,10 +1712,9 @@ impl Executor {
         self.report_arithmetic_noassign_error();
         // Expansion context: this_command_name is NULL inside evalexp for
         // $(( )), so bind/subscript diagnostics carry no command label.
+        // A failed nameref bind is already in the event log (recorded
+        // at the bind point, rubash#3246) and drains above, in order.
         self.drain_arith_eval_events(None);
-        // GNU $((r=0)) with an empty nameref cell still yields the assigned
-        // value while reporting the failed bind without a command label.
-        self.report_arithmetic_nameref_error(None);
 
         // Sync any variable changes from env_vars to shell_state.variables
         // so that subsequent parameter expansions see arithmetic side effects
