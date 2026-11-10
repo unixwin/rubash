@@ -501,15 +501,34 @@ impl Executor {
         for name in imported_functions.keys() {
             mark_env_name(&mut env_vars, EXPORTED_FUNCTIONS, name);
         }
-        // GNU variables.c import refusal (the ShellShock guard) reports
-        // both lines under the shell's invocation name (rubash#1276).
-        if !failed_function_imports.is_empty() {
+        // GNU variables.c import refusals report under the shell's
+        // invocation name, split by failure class (rubash#2728): a
+        // parse failure prints the parser's own diagnostics first
+        // (evalstring.c parse_command failure arm), a parsed-but-not-
+        // a-definition attempt prints only the warning
+        // (evalstring.c:478); both end with variables.c:441's single
+        // error line and leave last_command_exit_value at
+        // EXECUTION_FAILURE (variables.c:440), seeded below.
+        let function_import_failed = !failed_function_imports.is_empty();
+        if function_import_failed {
             let shell_name = std::env::args()
                 .next()
                 .unwrap_or_else(|| "rubash".to_string());
-            for name in &failed_function_imports {
-                eprintln!("{shell_name}: warning: {name}: ignoring function definition attempt");
-                eprintln!("{shell_name}: error importing function definition for `{name}'");
+            for failure in &failed_function_imports {
+                match failure {
+                    ImportedFunctionFailure::Parse { name, diagnostics } => {
+                        for (line, message) in diagnostics {
+                            eprintln!("{shell_name}: {name}: line {line}: {message}");
+                        }
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                    ImportedFunctionFailure::IgnoredAttempt { name } => {
+                        eprintln!(
+                            "{shell_name}: warning: {name}: ignoring function definition attempt"
+                        );
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                }
             }
         }
         // GNU variables.c:397-446 (initialize_shell_variables,
@@ -1149,7 +1168,10 @@ impl Executor {
                 fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
-            exit_code: 0,
+            // variables.c:440: a refused function import leaves
+            // last_command_exit_value = EXECUTION_FAILURE, so the
+            // first command observes `$?` = 1 (rubash#2728).
+            exit_code: if function_import_failed { 1 } else { 0 },
             parse_error_occurred: false,
             signal_discard_pending: false,
             errexit_unwind_pending: false,
