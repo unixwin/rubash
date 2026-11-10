@@ -1810,8 +1810,7 @@ fn raw_rhs_has_unquoted_extglob_group(raw: &str) -> bool {
             index = end + 1;
             continue;
         }
-        if matches!(chars[index], '@' | '*' | '+' | '?' | '!')
-            && chars.get(index + 1) == Some(&'(')
+        if matches!(chars[index], '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(')
         {
             return true;
         }
