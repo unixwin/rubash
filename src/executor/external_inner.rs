@@ -2431,9 +2431,18 @@ impl Executor {
         // SAFETY: anchor_fd is the anchor's open directory handle;
         // the Arc<File> in ShellState keeps it alive for the whole
         // call, and openat with a relative path resolves against it
-        // without modifying any shared state.
-        let fd =
-            unsafe { libc::openat(anchor_fd, c_operand.as_ptr(), flags | libc::O_CLOEXEC, mode) };
+        // without modifying any shared state. The variadic mode goes
+        // as c_uint: darwin's mode_t is u16, which a variadic call
+        // cannot take (E0617); where mode_t is already u32 the cast
+        // is the identity.
+        let fd = unsafe {
+            libc::openat(
+                anchor_fd,
+                c_operand.as_ptr(),
+                flags | libc::O_CLOEXEC,
+                mode as libc::c_uint,
+            )
+        };
         if fd < 0 {
             return Some(Err(std::io::Error::last_os_error()));
         }
@@ -2486,7 +2495,13 @@ impl Executor {
         if !consume {
             match self.fstatat_via_cwd_anchor(operand) {
                 Some(Err(error)) => return Some(Err(error)),
-                Some(Ok(stat)) if (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO => {
+                // Widened through u32 like fd_is_anonymous_pipe:
+                // st_mode and the S_IF* constants disagree in width
+                // across libc targets (bionic/darwin).
+                Some(Ok(stat))
+                    if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFIFO) =>
+                {
                     let anchor_fd = self.anchor_fd_for_dead_cwd()?;
                     let operand = if operand.as_os_str().is_empty() {
                         std::path::Path::new(".")

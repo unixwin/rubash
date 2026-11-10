@@ -2707,12 +2707,15 @@ impl Executor {
             if fs_operand.is_relative() {
                 if let Some(stat_result) = self.fstatat_via_cwd_anchor(&fs_operand) {
                     let is_stream = stat_result.is_ok_and(|stat| {
-                        let kind = stat.st_mode & libc::S_IFMT;
-                        kind == libc::S_IFREG
-                            || kind == libc::S_IFDIR
-                            || kind == libc::S_IFIFO
-                            || kind == libc::S_IFCHR
-                            || kind == libc::S_IFBLK
+                        // Widened through u32: st_mode and the S_IF*
+                        // constants disagree in width across libc
+                        // targets (bionic/darwin).
+                        let kind = u32::from(stat.st_mode) & u32::from(libc::S_IFMT);
+                        kind == u32::from(libc::S_IFREG)
+                            || kind == u32::from(libc::S_IFDIR)
+                            || kind == u32::from(libc::S_IFIFO)
+                            || kind == u32::from(libc::S_IFCHR)
+                            || kind == u32::from(libc::S_IFBLK)
                     });
                     if !is_stream {
                         return None;

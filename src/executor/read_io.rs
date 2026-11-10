@@ -1207,7 +1207,8 @@ impl Executor {
             let anchored_is_file = anchored_operand.as_ref().is_some_and(|operand| {
                 matches!(
                     self.fstatat_via_cwd_anchor(operand),
-                    Some(Ok(stat)) if (stat.st_mode & libc::S_IFMT) == libc::S_IFREG
+                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFREG)
                 )
             });
             #[cfg(not(unix))]

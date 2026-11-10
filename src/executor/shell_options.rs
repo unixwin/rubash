@@ -2447,7 +2447,8 @@ impl Executor {
             if fs_operand.is_relative() {
                 let is_fifo = matches!(
                     self.fstatat_via_cwd_anchor(&fs_operand),
-                    Some(Ok(stat)) if (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFIFO)
                 );
                 if !is_fifo {
                     if let Some(result) = self.open_via_cwd_anchor(
@@ -2735,7 +2736,9 @@ impl Executor {
                     if fs_operand.is_relative() {
                         let is_fifo = matches!(
                             self.fstatat_via_cwd_anchor(&fs_operand),
-                            Some(Ok(stat)) if (stat.st_mode & libc::S_IFMT) == libc::S_IFIFO
+                            Some(Ok(stat))
+                                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                                    == u32::from(libc::S_IFIFO)
                         );
                         if !is_fifo {
                             if let Some(result) = self.open_via_cwd_anchor(
