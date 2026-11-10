@@ -1,0 +1,3 @@
+foo <<FOOBAR
+bar
+FOOBAR

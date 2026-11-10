@@ -1,5 +1,5 @@
 use crate::executor::markers::DATA_DOLLAR;
-pub(super) fn is_keyword(word: &str) -> bool {
+pub(crate) fn is_keyword(word: &str) -> bool {
     matches!(
         word,
         "if" | "then"

@@ -6,12 +6,30 @@
 //! - builtins/alias.def (`alias_builtin`, `unalias_builtin`)
 
 use std::collections::HashMap;
-use std::env;
 use std::io::{self, Write};
+
+use crate::executor::builtin_diag::{Diag, Prolog};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::builtin_table_row;
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
+
+/// The lib-level `Diag` prolog. `alias`/`unalias` take no variable
+/// table, so this reads the same process-env cells the deleted
+/// `diagnostic_prefix` read (`__RUBASH_SCRIPT_NAME`,
+/// `__RUBASH_CURRENT_LINE`).
+fn diag_prolog() -> Prolog {
+    Prolog {
+        interactive: std::env::var("__RUBASH_INTERACTIVE").is_ok(),
+        shell_basename: std::env::var("__RUBASH_SHELL_NAME")
+            .unwrap_or_else(|_| "rubash".to_string()),
+        error_name: "rubash".to_string(),
+        script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+        line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Alias {
@@ -40,48 +58,56 @@ pub fn alias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Resul
 }
 
 pub fn unalias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
+    let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    unalias_with_io(args, aliases, &mut stderr)
+    unalias_with_io(args, aliases, &mut stdout, &mut stderr)
 }
 
-pub(crate) fn alias_with_io<W, E>(
+pub(crate) fn alias_with_io<W>(
     args: &[String],
     aliases: &mut HashMap<String, Alias>,
     stdout: &mut W,
-    stderr: &mut E,
+    stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
     posix: bool,
 ) -> io::Result<i32>
 where
     W: Write,
-    E: Write,
 {
+    // The Diag is built here, over the caller's stderr (the same
+    // shape as setattr's with_io fns): the executor passes this
+    // command's own buffered stderr.
+    let row = builtin_table_row("alias").expect("alias row exists");
+    let mut diag = Diag::new(row, stderr);
+    // GNU alias.def scans with internal_getopt over "p" (the row's
+    // spec); the single BuiltinOpt machine replaces the hand scan
+    // here (Stage-2 ④ Phase 4).
     let mut pflag = false;
-    let mut index = 0;
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            break;
-        }
-        for option in arg[1..].chars() {
-            match option {
-                'p' => pflag = true,
-                other => {
-                    writeln!(
-                        stderr,
-                        "{}alias: -{other}: invalid option",
-                        diagnostic_prefix()
-                    )?;
-                    writeln!(stderr, "alias: usage: alias [-p] [name[=value] ... ]")?;
+    let args: Vec<&str> = {
+        let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    crate::builtins::help::print_builtin_help(row.name, stdout)?;
                     return Ok(EX_USAGE);
                 }
+                OptEvent::End => break,
+                OptEvent::Opt(c) => {
+                    if c == b'p' {
+                        pflag = true;
+                    }
+                }
+                OptEvent::OptArg(_, _) => {}
             }
         }
-        index += 1;
-    }
-    let args = &args[index..];
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        drop(opt);
+        if diag.status() != 0 {
+            diag.usage();
+            diag.flush_with(diag_prolog);
+            return Ok(diag.status());
+        }
+        operands
+    };
     // Bash posix-mode notes (item 47): the alias listing omits the leading
     // "alias" unless -p is given. `alias -p` keeps the full prefix in every
     // mode; the bare list and the name-query form drop it only in POSIX
@@ -106,11 +132,7 @@ where
     for arg in args {
         if let Some((name, value)) = arg.split_once('=') {
             if !valid_alias_name(name) {
-                writeln!(
-                    stderr,
-                    "{}alias: `{name}': invalid alias name",
-                    diagnostic_prefix()
-                )?;
+                diag.free(format_args!("`{name}': invalid alias name"));
                 status = EXECUTION_FAILURE;
                 continue;
             }
@@ -118,80 +140,94 @@ where
         } else if let Some(alias) = aliases.get(arg) {
             print_alias(arg, alias, stdout, include_prefix)?;
         } else {
-            writeln!(stderr, "{}alias: {}: not found", diagnostic_prefix(), arg)?;
+            diag.free(format_args!("{arg}: not found"));
             status = EXECUTION_FAILURE;
         }
     }
 
+    diag.flush_with(diag_prolog);
     Ok(status)
 }
 
-pub fn unalias_with_io<E>(
+pub fn unalias_with_io<W>(
     args: &[String],
     aliases: &mut HashMap<String, Alias>,
-    stderr: &mut E,
+    stdout: &mut W,
+    stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
 ) -> io::Result<i32>
 where
-    E: Write,
+    W: Write,
 {
+    // Same Diag-over-caller's-stderr shape as alias_with_io above.
+    // The no-arguments usage carries NO prolog (common.c:128
+    // builtin_usage), so it is `diag.usage()`, not a free line.
+    let row = builtin_table_row("unalias").expect("unalias row exists");
+    let mut diag = Diag::new(row, stderr);
     if args.is_empty() {
         // GNU builtins/alias.def unalias_builtin: no arguments is a
         // usage error — sh_usage + EX_USAGE (2), the same status the
         // invalid-option arm below returns (rubash#2975). Only a
-        // missing alias NAME is EXECUTION_FAILURE.
-        writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
+        // missing alias NAME is EXECUTION_FAILURE. The usage line
+        // itself is the Diag one above (no prolog, per the comment
+        // on this function); only the STATUS is #2975's.
+        diag.usage();
+        diag.flush_with(diag_prolog);
         return Ok(EX_USAGE);
     }
 
-    let mut index = 0;
     let mut clear_all = false;
-    while let Some(arg) = args.get(index) {
-        if arg == "--" {
-            index += 1;
-            break;
-        }
-        if !arg.starts_with('-') || arg == "-" {
-            break;
-        }
-        for option in arg[1..].chars() {
-            match option {
-                'a' => clear_all = true,
-                other => {
-                    writeln!(
-                        stderr,
-                        "{}unalias: -{other}: invalid option",
-                        diagnostic_prefix()
-                    )?;
-                    writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
+    let args: Vec<&str> = {
+        let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    // GNU unalias.def CASE_HELPOPT: the long help
+                    // goes to stdout with EX_USAGE.
+                    crate::builtins::help::print_builtin_help(row.name, stdout)?;
                     return Ok(EX_USAGE);
                 }
+                OptEvent::End => break,
+                OptEvent::Opt(c) => {
+                    if c == b'a' {
+                        clear_all = true;
+                    }
+                }
+                OptEvent::OptArg(_, _) => {}
             }
         }
-        index += 1;
-    }
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        drop(opt);
+        if diag.status() != 0 {
+            diag.usage();
+            diag.flush_with(diag_prolog);
+            return Ok(diag.status());
+        }
+        operands
+    };
 
     if clear_all {
         aliases.clear();
         return Ok(EXECUTION_SUCCESS);
     }
 
-    let args = &args[index..];
     if args.is_empty() {
         // Same usage status as the no-arguments entry above: an
         // option-only invocation (`unalias --`) names no alias
         // (rubash#2975).
-        writeln!(stderr, "unalias: usage: unalias [-a] name [name ...]")?;
+        diag.usage();
+        diag.flush_with(diag_prolog);
         return Ok(EX_USAGE);
     }
 
     let mut status = EXECUTION_SUCCESS;
     for arg in args {
         if aliases.remove(arg).is_none() {
-            writeln!(stderr, "{}unalias: {}: not found", diagnostic_prefix(), arg)?;
+            diag.free(format_args!("{arg}: not found"));
             status = EXECUTION_FAILURE;
         }
     }
 
+    diag.flush_with(diag_prolog);
     Ok(status)
 }
 
@@ -250,17 +286,6 @@ fn strip_quote_marker(value: &str) -> &str {
     value
         .strip_prefix(crate::executor::markers::IFS_GLUE)
         .unwrap_or(value)
-}
-
-fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        env::var("__RUBASH_SCRIPT_NAME"),
-        env::var("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
 }
 
 #[cfg(test)]

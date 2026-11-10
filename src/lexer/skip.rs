@@ -25,6 +25,12 @@ impl<'a> Lexer<'a> {
         // update_command_substitution_case_depth.
         let mut case_in_stage = 0u8;
         let mut case_pattern_region = false;
+        // rubash#2784: pattern-content witness — mirror of the skip.rs
+        // oracle's (see skip_parenthesized_unit_corrected): no pattern
+        // seen since the current list was armed means a `)` closes this
+        // substitution for the body parser instead of reading as case
+        // syntax (GNU parse_comsub, parse.y:4451).
+        let mut case_pattern_seen = false;
         // rubash#380: the last significant unquoted char fed to the case
         // word machine — the previous-token witness for the `esac`
         // pattern-text rule (parse.y:3181/3183).
@@ -82,6 +88,18 @@ impl<'a> Lexer<'a> {
             if esac_prev_token_char(c) {
                 prev_sig = Some(c);
             }
+            // rubash#2784 pattern-content witness advance (mirror of
+            // the oracle's advance in skip_parenthesized_unit_corrected).
+            if case_depth == 0 {
+                case_pattern_seen = false;
+            } else if c == ';' && matches!(next, Some(';') | Some('&')) && case_pattern_region {
+                case_pattern_seen = false;
+            } else if case_in_stage == 3
+                && case_pattern_region
+                && (!word.is_empty() || (!c.is_whitespace() && c != ')'))
+            {
+                case_pattern_seen = true;
+            }
             match c {
                 '`' => {
                     self.skip_backtick();
@@ -89,7 +107,13 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
                 '(' if case_depth == 0 => depth += 1,
-                ')' if case_depth == 0 => {
+                // rubash#2784: a `)` while a case preamble is
+                // unfinished closes this substitution (mirror of the
+                // skip.rs oracle arm).
+                ')' if case_depth == 0
+                    || matches!(case_in_stage, 1 | 2)
+                    || (case_in_stage == 3 && !case_pattern_seen) =>
+                {
                     depth -= 1;
                     if depth == 0 {
                         break;
@@ -1844,6 +1868,15 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
     // update_command_substitution_case_depth.
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#2784: has any pattern content been seen since the current
+    // pattern list was armed (`in`, or a `;;`-family re-arm)? GNU
+    // parse_comsub (parse.y:4451) PARSES the body, so a `)` that
+    // arrives while the case preamble is unfinished (no `in` yet, or
+    // `in` with no pattern read) is rejected BY THE BODY PARSER at
+    // that paren — the extractor must therefore treat it as the
+    // substitution's closer and hand the body over, not swallow it
+    // as case syntax and run to EOF.
+    let mut case_pattern_seen = false;
     // rubash#380: previous significant unquoted char fed to the case
     // word machine (the `esac` previous-token witness,
     // parse.y:3181/3183).
@@ -1948,6 +1981,20 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                 prev_sig = Some(ch);
             }
         }
+        // rubash#2784 pattern-content witness (see the declaration):
+        // a `;;`-family re-arm starts a fresh list; any other
+        // non-whitespace char (or an in-progress pattern word) while
+        // the region is armed is pattern content.
+        if case_depth == 0 {
+            case_pattern_seen = false;
+        } else if ch == ';' && matches!(next, Some(';') | Some('&')) && case_pattern_region {
+            case_pattern_seen = false;
+        } else if case_in_stage == 3
+            && case_pattern_region
+            && (!word.is_empty() || (!ch.is_whitespace() && ch != ')'))
+        {
+            case_pattern_seen = true;
+        }
         match ch {
             '\'' => single = true,
             '"' => double = true,
@@ -2021,7 +2068,15 @@ pub(crate) fn skip_parenthesized_unit_corrected(chars: &[char], open: usize) -> 
                 }
             }
             '(' if case_depth == 0 => depth += 1,
-            ')' if case_depth == 0 => {
+            // rubash#2784: a `)` while a case preamble is unfinished
+            // (subject/`in` still pending, or `in` read but no pattern
+            // seen) is NOT case syntax — it closes this substitution
+            // and the body parser rejects the body at it, exactly like
+            // GNU parse_comsub (parse.y:4451).
+            ')' if case_depth == 0
+                || matches!(case_in_stage, 1 | 2)
+                || (case_in_stage == 3 && !case_pattern_seen) =>
+            {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some(index + 1);
@@ -2247,7 +2302,7 @@ pub(crate) fn command_substitutions_balanced(input: &str) -> bool {
 /// not a command-position identifier; `x=a[b` has no identifier prefix
 /// (`a` after `=` fails token_is_ident) and stays an assignment value.
 pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
-    unclosed_array_subscript_walk(input, false, false)
+    unclosed_array_subscript_walk(input, false, super::parse_extended_glob())
         .map(|(line, _closer, _construct_line, compassign)| (line, compassign))
 }
 
@@ -2266,7 +2321,7 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
 /// `unclosed_array_subscript_line` with the quote-open bookkeeping
 /// surfaced.
 pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
-    unclosed_array_subscript_walk(input, true, false)
+    unclosed_array_subscript_walk(input, true, super::parse_extended_glob())
 }
 
 /// rubash#3229: the subscript-EOF router with the walk's
@@ -2756,6 +2811,22 @@ fn unclosed_array_subscript_walk(
     // consumption on the live `extended_glob`). Track those commands so
     // extglob pattern groups are consumed as word units, exactly like
     // read_token_word does.
+    // Seeding policy (rubash#2680 + rubash#3229, merged): the caller
+    // supplies the gate in effect when the walk's unit STARTED. The
+    // unseeded entry points pass the live parse gate
+    // (`super::parse_extended_glob()`): a `shopt` executed by an
+    // earlier reader unit is not textually present in this unit, and
+    // seeding `false` made the walk claim a `[` inside a live extglob
+    // group as a subscript, pre-empting the close-char route's `)'
+    // verdict for the unclosed group (rubash#2680; gathered groups pin
+    // the gate to their entry value for the unit's re-lex,
+    // rubash#3205, so the live gate IS the entry gate there). The
+    // seeded entry point passes the reader's EXECUTED gate state
+    // instead (rubash#3229): in a grouped run the executed `shopt`
+    // lives in an earlier, already-executed group, so neither this
+    // unit's text nor the parse-time gate can show it live. Textual
+    // `shopt` lines inside the unit keep flipping the mirror per line
+    // below.
     let mut extglob = extglob_seed;
     let mut line_start = 0usize;
 
@@ -3502,11 +3573,26 @@ pub fn unclosed_comsub_eof_shape(
     // `unexpected EOF while looking for matching `)'', issue #516
     // follow-up). `echo ((` has no command-position root and keeps the
     // token-error class.
-    if let Some(&(root_idx, _, root_kind)) = stack.first() {
+    if let Some(&(root_idx, root_line, root_kind)) = stack.first() {
         if root_kind == OpenerKind::Plain
             && (opens_in_command_position(&chars, root_idx) || arith_for_pair_at(&chars, root_idx))
             && chars.get(root_idx + 1) == Some(&'(')
         {
+            // rubash#2780: the arithmetic-`for' root is the one dparen
+            // root whose EOF report the generic close-char scan gets
+            // wrong: its word machine does not carry `for' as a
+            // command-position keyword, so no frame is pushed for the
+            // pair and the scan's verdict reports the EOF line. GNU's
+            // header read is parse_arith_cmd's parse_matched_pair
+            // (parse.y:4957), whose EOF report names the pair's
+            // start_lineno (parse.y:3908-3915) like every matched pair —
+            // classify it here, where the pair is recognized. The pair's
+            // interior is that one scan in GNU, so no token-error class
+            // below can preempt it. A command-position `((` root keeps
+            // the deferral: the generic scan reports it correctly.
+            if arith_for_pair_at(&chars, root_idx) {
+                return Some((UnclosedComsubShape::ArithEof { line: root_line }, root_line));
+            }
             return None;
         }
     }
@@ -3775,7 +3861,7 @@ fn main_level_paren_token_name(chars: &[char], idx: usize) -> String {
 /// body (GNU parse_matched_pair, parse.y:3877: quotes nest, backslash
 /// escapes, nested `(`/`)` count). `open` is the index of the `(`; returns
 /// the index past its matching `)` or `None` when EOF is reached first.
-fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
+pub(crate) fn skip_extglob_group_chars(chars: &[char], open: usize) -> Option<usize> {
     let mut depth = 1usize;
     let mut index = open + 1;
     let mut single = false;

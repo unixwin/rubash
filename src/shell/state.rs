@@ -105,6 +105,20 @@ pub struct DynamicCellState {
     pub(crate) groups_materialized: bool,
 }
 
+/// rubash#3198: the inode anchor for the session cwd (see the
+/// `cwd_anchor` field on ShellState). `path` records which cwd value
+/// the handle was opened for; the handle is only spent when the cwd
+/// field still equals it but no longer resolves by name. On non-Unix
+/// targets there is no fchdir, so the anchor carries the path only
+/// and the spawn stamp falls back to leaving the child unstamped
+/// (inherit) instead of failing the spawn on a deleted directory.
+#[derive(Debug, Clone)]
+pub(crate) struct CwdAnchor {
+    pub(crate) path: PathBuf,
+    #[cfg(unix)]
+    pub(crate) dir: std::sync::Arc<std::fs::File>,
+}
+
 #[derive(Debug)]
 pub struct ShellState {
     /// variables.c shell_variables — typed store carrying attributes,
@@ -126,6 +140,25 @@ pub struct ShellState {
     /// the logical display twin maintained by the cd family; this field
     /// is the physical truth the filesystem sees.
     pub(crate) cwd: std::path::PathBuf,
+    /// rubash#3198: an open directory handle anchoring `cwd`, kept so a
+    /// spawn can still land a child in the session cwd after the
+    /// directory has been UNLINKED. GNU's cwd lives in the process
+    /// (builtins/cd.def cd_builtin -> chdir), so a deleted cwd stays a
+    /// valid cwd for forked children (execute_cmd.c execute_disk_command
+    /// forks and the child inherits it; no path is ever re-resolved).
+    /// Under G-02 this port's process cwd never moves, so the path
+    /// string was the only carrier — and `Command::current_dir(path)`
+    /// re-resolves it at spawn time, failing ENOENT once the directory
+    /// is gone and refusing EVERY external spawn with 127. The anchor
+    /// is the inode-level twin of the field: refreshed whenever the
+    /// cwd is (re)entered while its path still resolves, and consumed
+    /// by the spawn stamp (executor::external_inner::stamp_spawn_cwd)
+    /// via fchdir when the path no longer resolves. A RefCell because
+    /// spawn faces include &self routes (the comsub shortcut spawner);
+    /// the anchor is a cache of an OS resource, not session semantics —
+    /// a stale anchor is only ever used when its recorded path still
+    /// equals the cwd field, and the field remains the truth.
+    pub(crate) cwd_anchor: RefCell<Option<CwdAnchor>>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
     /// duplicate segments until the next canonical render folds them. This is
@@ -238,6 +271,18 @@ pub struct ShellState {
     /// variables.c BASH_LINENO/BASH_SOURCE stacks.
     pub(crate) bash_lineno_stack: Vec<String>,
     pub(crate) bash_source_stack: Vec<String>,
+    /// rubash#3125: the `$0` seed value installed into
+    /// `bash_source_stack` by `set_env(__RUBASH_SCRIPT_NAME)`, if
+    /// any. The seed is a local device — GNU's `bash_source_a`
+    /// (variables.c:5721 `push_source`) holds only real frames, so
+    /// the BASH_SOURCE views must pop the bottom entry ONLY when it
+    /// really is the seed. An interactive session never installs one
+    /// (`None`), so its bottom entry is a real sourced-file frame
+    /// and must survive. The seed, when present, is always the
+    /// bottom entry: seeding replaces the whole stack with one
+    /// element, real frames only ever enter at index 0
+    /// (`push_bash_source`, function entry) and leave from index 0.
+    pub(crate) bash_source_seed: Option<String>,
     /// rubash#2482: frames an ExitCode/LastpipeExit unwind deliberately
     /// left on the three call stacks above. GNU's fatal unwinds
     /// (errexit via execute_cmd.c's exit_immediately_on_error, the
@@ -446,6 +491,20 @@ pub struct ShellState {
     /// clone_for_child_save, so the wholesale boundary restore
     /// reverts it to the parent's value like every other field here.
     pub(crate) subshell_source_text: Option<String>,
+    /// The reader unit currently executing: its verbatim source text
+    /// and the line offset the driver parsed it under (absolute line =
+    /// offset + string-relative line). GNU's parser holds the current
+    /// input in shell_input_line while it reads, so a syntax error
+    /// inside a command-substitution body — parsed by GNU inside the
+    /// enclosing reader — echoes the ENCLOSING line verbatim
+    /// (parse.y:6814 print_offending_line); rubash parses the body at
+    /// expansion time, when only the body fragment survives on the
+    /// error node, so the driver parks the unit text here for the
+    /// unit's extent (run_source_impl_inner's guard) and the comsub
+    /// body reporter reads the physical line back out of it
+    /// (rubash#2783). Fork copies inherit it through Clone exactly as
+    /// a forked child inherits the parent's input stream position.
+    pub(crate) reader_unit_source: std::cell::RefCell<Option<(std::rc::Rc<str>, usize)>>,
     /// execute_cmd.c subshell_environment & SUBSHELL_COMSUB — set while a
     /// `$( )`/backtick body runs (shared-executor and cloned-executor
     /// paths). jobs.c:3837-3843 start_job refuses fg/bg inside it.
@@ -555,8 +614,8 @@ pub struct ShellState {
     pub(crate) arithmetic_fatal_error: Cell<bool>,
     pub(crate) arithmetic_nounset_error: Cell<bool>,
     /// rubash#1238: the readonly diagnostic for a failed arithmetic bind
-    /// was already printed by report_arithmetic_readonly_error; the
-    /// command-layer reporters must not follow it with a synthesized
+    /// was already printed by the evaluation-order drain's Readonly arm;
+    /// the command-layer reporters must not follow it with a synthesized
     /// syntax error (GNU prints exactly one line for `((ro++))`).
     pub(crate) arithmetic_readonly_error: Cell<bool>,
     /// Latch for a nounset fatal raised while expanding a `[[ =~ ]]`
@@ -940,6 +999,7 @@ impl Clone for ShellState {
             variables: self.variables.clone(),
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
+            cwd_anchor: RefCell::new(self.cwd_anchor.borrow().clone()),
             array_compact_budget: self.array_compact_budget.clone(),
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,
@@ -960,6 +1020,7 @@ impl Clone for ShellState {
             dynamic_cells: self.dynamic_cells.clone(),
             bash_lineno_stack: self.bash_lineno_stack.clone(),
             bash_source_stack: self.bash_source_stack.clone(),
+            bash_source_seed: self.bash_source_seed.clone(),
             inherited_fork_frames: self.inherited_fork_frames.clone(),
             respawn_function_line_spans: self.respawn_function_line_spans.clone(),
             respawn_root_line_spans: self.respawn_root_line_spans.clone(),
@@ -988,6 +1049,7 @@ impl Clone for ShellState {
             subshell_login_cleared: Cell::new(self.subshell_login_cleared.get()),
             job_control: Cell::new(self.job_control.get()),
             subshell_source_text: self.subshell_source_text.clone(),
+            reader_unit_source: std::cell::RefCell::new(self.reader_unit_source.borrow().clone()),
             xtrace_indirection_level: Cell::new(self.xtrace_indirection_level.get()),
             xtrace_suspended: Cell::new(self.xtrace_suspended.get()),
             in_command_substitution: Cell::new(self.in_command_substitution.get()),

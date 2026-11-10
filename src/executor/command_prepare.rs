@@ -280,6 +280,7 @@ impl Executor {
             // `-c` top level; a `( ... )` subshell child contains the jump
             // at execute_cmd.c:1811 and exits 1 — niubash#163).
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -547,6 +548,7 @@ impl Executor {
                 // interactive session died on `echo ${X?}` — the theme-
                 // source session-killer (wt90).
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
@@ -606,24 +608,35 @@ impl Executor {
             // command-words hook applies; pure-assignment commands reach
             // this loop without passing expand_command_words.
             let value_owned;
-            let value = match raw.filter(|raw| crate::lexer::raw_has_ansi_u_escape(raw)) {
+            let value = match raw.filter(|raw| {
+                crate::lexer::raw_has_ansi_u_escape(raw)
+                    || crate::lexer::raw_has_dolbrace_ansi_c(raw)
+            }) {
                 Some(raw) => {
                     let unit_locale = self.unit_lex_locale.borrow().clone();
-                    match self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line) {
-                        Some(line_locale) => {
-                            // Re-derive the FULL `name=raw` word so the
-                            // assignment dispatch (quoted-RHS markers and
-                            // all) reproduces the lexed value exactly.
-                            let full = format!("{name}={raw}");
-                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
-                            let rhs = rederived
-                                .split_once('=')
-                                .map(|(_, rhs)| rhs.to_string())
-                                .unwrap_or_else(|| value.clone());
-                            value_owned = rhs;
-                            value_owned.as_str()
-                        }
-                        None => value.as_str(),
+                    let line_locale = self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line);
+                    // rubash#2772: same read-time extquote re-derivation
+                    // as the command-words hook.
+                    let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                        && self.line_extquote_was_off(cmd.line);
+                    if line_locale.is_some() || extquote_off {
+                        // Re-derive the FULL `name=raw` word so the
+                        // assignment dispatch (quoted-RHS markers and
+                        // all) reproduces the lexed value exactly.
+                        let full = format!("{name}={raw}");
+                        let rederived = self.rederive_word_for_line(
+                            &full,
+                            line_locale.as_deref(),
+                            extquote_off,
+                        );
+                        let rhs = rederived
+                            .split_once('=')
+                            .map(|(_, rhs)| rhs.to_string())
+                            .unwrap_or_else(|| value.clone());
+                        value_owned = rhs;
+                        value_owned.as_str()
+                    } else {
+                        value.as_str()
                     }
                 }
                 None => value.as_str(),
@@ -687,6 +700,7 @@ impl Executor {
                     // exits 1 (eval.c:104-109) and a `( ... )` subshell
                     // contains it to 1 (execute_cmd.c:1811 — niubash#163).
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -765,7 +779,7 @@ impl Executor {
             }
             self.pending_scalar_assignment =
                 expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
-            if !self.apply_shell_assignment(name, expanded_value) {
+            if !self.apply_shell_assignment(name, expanded_value, None) {
                 // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
                 // a failed standalone assignment (readonly violation, invalid
                 // nameref value, ...) prints its diagnostic and then
@@ -1019,6 +1033,7 @@ impl Executor {
                 // execute_empty_words_command above: interactive_shell
                 // selects the DISCARD-class error so the session survives.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
@@ -1118,6 +1133,35 @@ impl Executor {
         let line = line?;
         let line_locale = self.line_lex_locales.borrow().get(&line).cloned()?;
         (line_locale != lex_locale).then_some(line_locale)
+    }
+
+    /// rubash#2772: whether the recorded read-time extquote state for
+    /// `line` is OFF (see `line_lex_extquotes`). A line with no record
+    /// (a function body line, a word lexed inside eval's own run) keeps
+    /// the lexed form, exactly like the #353 locale record.
+    fn line_extquote_was_off(&self, line: Option<usize>) -> bool {
+        line.and_then(|line| self.line_lex_extquotes.borrow().get(&line).copied()) == Some(false)
+    }
+
+    /// Re-derive a raw word under its line's read-time state: the #353
+    /// locale pin (when the line's locale differs) and the #2772
+    /// extquote pin (when the line was read with extquote off), composed
+    /// — GNU applies both verdicts when the reader pulls the list.
+    fn rederive_word_for_line(
+        &self,
+        raw: &str,
+        line_locale: Option<&str>,
+        extquote_off: bool,
+    ) -> String {
+        let derive = || match line_locale {
+            Some(locale) => self.rederive_word_under_locale(raw, locale),
+            None => crate::lexer::word_value_from_raw(raw, self.posix_mode_enabled(), true).0,
+        };
+        if extquote_off {
+            crate::lexer::with_lex_extquote_pin(false, derive)
+        } else {
+            derive()
+        }
     }
 
     /// rubash#353: re-derive a raw word's value under `line_locale` through
@@ -1588,16 +1632,26 @@ impl Executor {
                 .iter()
                 .zip(cmd.assignment_raws.iter())
                 .map(|((name, value), raw)| {
-                    if crate::lexer::raw_has_ansi_u_escape(raw) {
+                    if crate::lexer::raw_has_ansi_u_escape(raw)
+                        || crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                    {
                         let unit_locale = self.unit_lex_locale.borrow().clone();
-                        if let Some(line_locale) =
-                            self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line)
-                        {
+                        let line_locale =
+                            self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line);
+                        // rubash#2772: same read-time extquote
+                        // re-derivation as the command-words hook.
+                        let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                            && self.line_extquote_was_off(cmd.line);
+                        if line_locale.is_some() || extquote_off {
                             // Re-derive the FULL `name=raw` word so the
                             // assignment dispatch (quoted-RHS markers and
                             // all) reproduces the lexed pair exactly.
                             let full = format!("{name}={raw}");
-                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
+                            let rederived = self.rederive_word_for_line(
+                                &full,
+                                line_locale.as_deref(),
+                                extquote_off,
+                            );
                             if let Some((_, rhs)) = rederived.split_once('=') {
                                 return (name.clone(), rhs.to_string());
                             }
@@ -1654,6 +1708,10 @@ impl Executor {
             // node's line identity (Simple->line) — carry it like `line`
             // or the rebuilt command loses the continuation-aware stamp.
             first_word_end_line: cmd.first_word_end_line,
+            // rubash#3209/#3053: the first-element facts ride with
+            // the stamp they belong to.
+            first_element_redirect: cmd.first_element_redirect,
+            time_prefix_first_element_end_line: cmd.time_prefix_first_element_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
@@ -1709,15 +1767,31 @@ impl Executor {
                 // line therefore applies). No-op unless the word carries
                 // such an escape AND the locales differ.
                 let word_owned;
-                let word = match metadata.and_then(|metadata| {
-                    self.ansi_word_line_locale(metadata.lex_locale.as_deref(), cmd.line)
-                        .map(|line_locale| (line_locale, metadata.raw.clone()))
-                }) {
-                    Some((line_locale, raw)) => {
-                        word_owned = self.rederive_word_under_locale(&raw, &line_locale);
-                        word_owned.as_str()
+                let word = match metadata {
+                    Some(metadata)
+                        if metadata.lex_locale.is_some()
+                            || crate::lexer::raw_has_dolbrace_ansi_c(&metadata.raw) =>
+                    {
+                        let line_locale =
+                            self.ansi_word_line_locale(metadata.lex_locale.as_deref(), cmd.line);
+                        // rubash#2772: a `$'...'` span inside a `${...}`
+                        // unit is re-derived under the line's read-time
+                        // extquote state (GNU parse.y:4053's verdict is
+                        // taken when the line is read, not at expansion).
+                        let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(&metadata.raw)
+                            && self.line_extquote_was_off(cmd.line);
+                        if line_locale.is_some() || extquote_off {
+                            word_owned = self.rederive_word_for_line(
+                                &metadata.raw,
+                                line_locale.as_deref(),
+                                extquote_off,
+                            );
+                            word_owned.as_str()
+                        } else {
+                            word.as_str()
+                        }
                     }
-                    None => word.as_str(),
+                    _ => word.as_str(),
                 };
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
@@ -3384,17 +3458,25 @@ impl Executor {
             // array6.sub:26). The unquoted path would treat `'` as an sq
             // opener instead.
             let expanded = if outer_double_quoted {
-                crate::executor::parameter_words::unescape_parameter_operator_result(
-                    &self.expand_embedded_parameters_mut_with_context(
-                        &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
-                            alternate,
-                            self.posix_mode_enabled(),
-                            false,
+                // rubash#3088: the walk must NOT restore expansion-result
+                // backslashes before the operator-result unescape below —
+                // it would fold them as source escapes (subst.c:4773
+                // quote_string CTLESC-protects expansion results; subst.c:4807
+                // dequote_string strips only CTLESC). The walk defers both
+                // carriers; restore them after the pass.
+                crate::executor::parameter_words::restore_deferred_operator_backslashes(
+                    &crate::executor::parameter_words::unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters_mut_with_context_no_restore(
+                            &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
+                                alternate,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
+                            SubstitutionQuoteContext::DoubleQuoted,
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     ),
-                    SubstitutionQuoteContext::DoubleQuoted,
-                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 )
             } else {
                 self.expand_alternate_parameter_word(alternate)
@@ -4024,10 +4106,6 @@ impl Executor {
             if self.exit_code != 0 {
                 self.raise_evalerror_abort();
             }
-            return true;
-        }
-        if cmd.words.first().is_some_and(|word| word.starts_with('#')) {
-            self.exit_code = 0;
             return true;
         }
         false

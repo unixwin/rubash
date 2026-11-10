@@ -103,6 +103,8 @@ impl Executor {
             true,
             false,
             false,
+            false,
+            false,
         )
     }
 
@@ -121,7 +123,31 @@ impl Executor {
         // heredoc expansion (redir.c:374), so it walks in order; every
         // other context keeps the pre-scan walk.
         self.expand_embedded_parameters_mut_inner(
-            word, context, heredoc, false, false, true, true, heredoc,
+            word, context, heredoc, false, false, true, true, heredoc, false, false,
+        )
+    }
+
+    /// Operator-word-half walk with deferred restores (rubash#3088):
+    /// like `expand_embedded_parameters_mut_with_context` but the
+    /// expansion-result backslash carrier (U+E30D) and the literal
+    /// DATA_BACKSLASH carrier are NOT restored here. The caller runs one
+    /// more unescape pass over the result
+    /// (`unescape_parameter_operator_result`) and restores afterwards:
+    /// restoring first would hand that pass raw `\` pairs assembled from
+    /// expansion data, which it would fold as source escapes — and a
+    /// restored literal `\` in front of a value starting with `$` would
+    /// fold the same way. GNU subst.c:4773 `quote_string` CTLESC-protects
+    /// expansion results; subst.c:4807 `dequote_string` strips only
+    /// CTLESC bytes, so assembled data is never re-scanned as escape
+    /// syntax.
+    pub(in crate::executor) fn expand_embedded_parameters_mut_with_context_no_restore(
+        &mut self,
+        word: &str,
+        context: SubstitutionQuoteContext,
+    ) -> String {
+        let heredoc = matches!(context, SubstitutionQuoteContext::HereDocument);
+        self.expand_embedded_parameters_mut_inner(
+            word, context, heredoc, false, false, true, false, heredoc, false, true,
         )
     }
 
@@ -145,6 +171,8 @@ impl Executor {
             false,
             false,
             true,
+            false,
+            false,
             false,
             false,
             false,
@@ -174,6 +202,8 @@ impl Executor {
             false,
             false,
             false,
+            false,
+            true,
             false,
         )
     }
@@ -248,6 +278,8 @@ impl Executor {
                 false,
                 false,
                 true,
+                false,
+                false,
             ));
         };
 
@@ -415,6 +447,8 @@ impl Executor {
         protect_rhs_data: bool,
         restore_rhs_data: bool,
         in_order: bool,
+        protect_expansion_results: bool,
+        defer_data_backslash_restore: bool,
     ) -> String {
         // rubash#2676: heredoc bodies (and here-string words) expand in
         // GNU's single left-to-right pass (redir.c:374 heredoc_expand ->
@@ -448,6 +482,7 @@ impl Executor {
             preserve_quotes,
             protect_rhs_data,
             in_order,
+            protect_expansion_results,
         );
         let expanded = if word.contains("$(") || word.contains('`') {
             if preserve_quotes || matches!(context, SubstitutionQuoteContext::HereDocument) {
@@ -508,11 +543,22 @@ impl Executor {
             crate::executor::markers::DATA_BACKTICK_STR,
             "`",
         );
-        let restored = crate::executor::markers::cow_replace(
-            &restored,
-            crate::executor::markers::DATA_BACKSLASH_STR,
-            "\\",
-        );
+        // rubash#3088: when the caller defers restores, the literal
+        // DATA_BACKSLASH carrier stays alive past this boundary — a
+        // restored `\` in front of a value starting with `$` would read
+        // as a source escape to the caller's next unescape pass (source
+        // `\\` + `$y` with y=`$b` folded to `$b`). The double-quote
+        // unescape converts the carrier itself, so it is safe to carry
+        // through; the caller restores it after its pass.
+        let restored = if defer_data_backslash_restore {
+            restored
+        } else {
+            crate::executor::markers::cow_replace(
+                &restored,
+                crate::executor::markers::DATA_BACKSLASH_STR,
+                "\\",
+            )
+        };
         let restored = crate::executor::markers::cow_replace(
             &restored,
             crate::executor::markers::PARAM_NAME_END_MARKER_STR,
@@ -545,6 +591,7 @@ impl Executor {
         preserve_quotes: bool,
         protect_rhs_data: bool,
         in_order: bool,
+        protect_expansion_results: bool,
     ) -> String {
         // GNU subst.c:11862 `add_quoted_string:` -> quote_string
         // (subst.c:4773): a parameter-expansion result merged into the word
@@ -556,6 +603,15 @@ impl Executor {
         // Command-substitution sites already carry the equivalent
         // PROTECTED_BACKSLASH protection, and $((...)) / $[...] results are
         // numeric text, so neither needs the rewrite.
+        //
+        // rubash#3088: `protect_expansion_results` is the same protection
+        // restricted to expansion-result splices — it does NOT carry the
+        // literal-text backslash arms (`protect_rhs_data` gates those too,
+        // and turning that flag on for the alternate walker would break
+        // its unquoted escape rules: source `\\` must still collapse to
+        // one `\`). The alternate walker sets only this flag, so its
+        // trailing unescape pass cannot fold a spliced `$y` result while
+        // source escapes still resolve exactly as before.
         fn protect_rhs_value(value: &str, protect: bool) -> std::borrow::Cow<'_, str> {
             if protect && value.contains('\\') {
                 std::borrow::Cow::Owned(value.replace(
@@ -1111,7 +1167,8 @@ impl Executor {
                 Some('@') => {
                     chars.next();
                     let value = self.shell_state.positional_window().join(" ");
-                    let value = protect_rhs_value(&value, protect_rhs_data);
+                    let value =
+                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -1122,7 +1179,8 @@ impl Executor {
                     chars.next();
                     // Bash joins `$*` with the first IFS character (not a space).
                     let value = self.positional_params_star_joined();
-                    let value = protect_rhs_value(&value, protect_rhs_data);
+                    let value =
+                        protect_rhs_value(&value, protect_rhs_data || protect_expansion_results);
                     if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                         output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                     } else {
@@ -1173,7 +1231,10 @@ impl Executor {
                         word.len() - suffix.len() - 1
                     });
                     if let Some(value) = self.expand_current_shell_braced_substitution(&mut chars) {
-                        let value = protect_rhs_value(&value, protect_rhs_data);
+                        let value = protect_rhs_value(
+                            &value,
+                            protect_rhs_data || protect_expansion_results,
+                        );
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1224,7 +1285,10 @@ impl Executor {
                                         context,
                                     )
                                 });
-                            let value = protect_rhs_value(&value, protect_rhs_data);
+                            let value = protect_rhs_value(
+                                &value,
+                                protect_rhs_data || protect_expansion_results,
+                            );
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                 output
                                     .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -1255,7 +1319,10 @@ impl Executor {
                                         context,
                                     )
                                 });
-                            let value = protect_rhs_value(&value, protect_rhs_data);
+                            let value = protect_rhs_value(
+                                &value,
+                                protect_rhs_data || protect_expansion_results,
+                            );
                             if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                 output
                                     .push_str(&mark_expansion_whitespace(&value, preserve_quotes));
@@ -1292,7 +1359,10 @@ impl Executor {
                                 // parameter_brace_expand inline).
                                 executor.expand_braced_parameter_fragment_in_word(&name, context)
                             });
-                        let value = protect_rhs_value(&value, protect_rhs_data);
+                        let value = protect_rhs_value(
+                            &value,
+                            protect_rhs_data || protect_expansion_results,
+                        );
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1325,12 +1395,24 @@ impl Executor {
                                     (format!("({temp2}"), true)
                                 };
                             if force_comsub {
-                                let value = protect_command_substitution_output(
-                                    &self.expand_command_substitution_mut_with_context(
-                                        &expression,
-                                        context,
-                                    ),
+                                // rubash#2677: GNU parses this fallback body
+                                // in the substituted child at execution time
+                                // (subst.c:10841-10866 LPAREN arm -> comsub;
+                                // subst.c:7143 parse_and_execute), never at
+                                // read time — the ambient arith-fallback
+                                // window lasts through the expansion so a
+                                // body parse error is contained (same
+                                // pattern as the backtick window, issue
+                                // #515), instead of latching a fatal
+                                // read-time failure of the enclosing command.
+                                let saved_arith_fallback =
+                                    self.arith_fallback_comsub_body.replace(true);
+                                let expanded = self.expand_command_substitution_mut_with_context(
+                                    &expression,
+                                    context,
                                 );
+                                self.arith_fallback_comsub_body.set(saved_arith_fallback);
+                                let value = protect_command_substitution_output(&expanded);
                                 if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                     output.push_str(&mark_expansion_whitespace(
                                         &value,
@@ -1558,7 +1640,10 @@ impl Executor {
                     let index = first.to_digit(10).unwrap_or(0) as usize;
                     if index == 0 {
                         let value = self.script_name_value();
-                        let value = protect_rhs_value(&value, protect_rhs_data);
+                        let value = protect_rhs_value(
+                            &value,
+                            protect_rhs_data || protect_expansion_results,
+                        );
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1571,7 +1656,8 @@ impl Executor {
                             .get(index - 1)
                             .map(String::as_str)
                             .unwrap_or("");
-                        let value = protect_rhs_value(value, protect_rhs_data);
+                        let value =
+                            protect_rhs_value(value, protect_rhs_data || protect_expansion_results);
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1598,7 +1684,10 @@ impl Executor {
                         })
                     {
                         let value = shell_safe_value(&value);
-                        let value = protect_rhs_value(&value, protect_rhs_data);
+                        let value = protect_rhs_value(
+                            &value,
+                            protect_rhs_data || protect_expansion_results,
+                        );
                         if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                             output.push_str(&mark_expansion_whitespace(&value, preserve_quotes));
                         } else {
@@ -1780,6 +1869,29 @@ impl Executor {
                             output.push('\'');
                             output.push_str(&quoted);
                         }
+                    }
+                }
+                Some('"')
+                    if !heredoc
+                        && !in_double
+                        && matches!(context, SubstitutionQuoteContext::Unquoted) =>
+                {
+                    chars.next();
+                    // rubash#3086: `$"..."` locale string — the mutable
+                    // walker's twin of the `&self` walker's arm in
+                    // embedded_parameters.rs (GNU subst.c:4133
+                    // expand_string_dollar_quote; subst.c:1639): consume
+                    // the dollar as quote syntax and open a double-quoted
+                    // span exactly like this walker's bare `"` arm,
+                    // including compound quote retention and the
+                    // alternate-mode quoted-null bookkeeping. Inside an
+                    // open span, in heredocs, and in quoted contexts the
+                    // `$` stays literal via the fall-through below.
+                    in_double = true;
+                    if preserve_quotes {
+                        output.push('"');
+                    } else if alternate {
+                        dquote_open_len = Some(output.len());
                     }
                 }
                 Some(other) => {
@@ -2408,7 +2520,20 @@ impl Executor {
             body_start_line,
             true,
         );
-        let mut commands = crate::parser::parse(&tokens);
+        // GNU parses the body as its own input (subst.c parse_and_execute)
+        // and echoes the offending line verbatim (parse.y print_offending_line
+        // over the body's shell_input_line) — thread the body text so the
+        // near guard slices it instead of joining tokens (`( 1 + 2)x', not
+        // `( 1 + 2 ) x', rubash#2677). Tokens are seeded at body_start_line,
+        // so the offset maps them back to lines of the body text.
+        let mut commands = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(source.into()),
+                source_line_offset: body_start_line - 1,
+                ..crate::parser::ParseLoopOptions::default()
+            },
+        );
         super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
         // rubash#2751: the same body screen the typed route runs —
         // a parse-errored body executes nothing and reports once, in

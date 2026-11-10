@@ -585,7 +585,6 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_ARGV0_AFTER_UNSET - state key (argv0 after unset) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_ARGV_DIALECT - argv dialect selection for respawned children (R2 frozen switch, see AGENTS.md)
 // EXACT __RUBASH_ARITH_EXP_EXPANDED - state key (arith exp expanded) - serialized across the respawn/subshell boundary; see the owning subsystem
-// EXACT __RUBASH_ARITH_NAMEREF_ERROR - state key (arith nameref error) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_ARITH_NOASSIGN_ERROR - state key (arith noassign error) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_ARITH_READONLY_ERROR - state key (arith readonly error) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_ARITH_SUBSCRIPT_EXPR - state key (arith subscript expr) - serialized across the respawn/subshell boundary; see the owning subsystem

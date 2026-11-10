@@ -501,15 +501,34 @@ impl Executor {
         for name in imported_functions.keys() {
             mark_env_name(&mut env_vars, EXPORTED_FUNCTIONS, name);
         }
-        // GNU variables.c import refusal (the ShellShock guard) reports
-        // both lines under the shell's invocation name (rubash#1276).
-        if !failed_function_imports.is_empty() {
+        // GNU variables.c import refusals report under the shell's
+        // invocation name, split by failure class (rubash#2728): a
+        // parse failure prints the parser's own diagnostics first
+        // (evalstring.c parse_command failure arm), a parsed-but-not-
+        // a-definition attempt prints only the warning
+        // (evalstring.c:478); both end with variables.c:441's single
+        // error line and leave last_command_exit_value at
+        // EXECUTION_FAILURE (variables.c:440), seeded below.
+        let function_import_failed = !failed_function_imports.is_empty();
+        if function_import_failed {
             let shell_name = std::env::args()
                 .next()
                 .unwrap_or_else(|| "rubash".to_string());
-            for name in &failed_function_imports {
-                eprintln!("{shell_name}: warning: {name}: ignoring function definition attempt");
-                eprintln!("{shell_name}: error importing function definition for `{name}'");
+            for failure in &failed_function_imports {
+                match failure {
+                    ImportedFunctionFailure::Parse { name, diagnostics } => {
+                        for (line, message) in diagnostics {
+                            eprintln!("{shell_name}: {name}: line {line}: {message}");
+                        }
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                    ImportedFunctionFailure::IgnoredAttempt { name } => {
+                        eprintln!(
+                            "{shell_name}: warning: {name}: ignoring function definition attempt"
+                        );
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                }
             }
         }
         // GNU variables.c:397-446 (initialize_shell_variables,
@@ -1013,6 +1032,10 @@ impl Executor {
                 // startup getcwd reports); from here on the field, not
                 // the process, carries the session's cwd.
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+                // rubash#3198: the cwd inode anchor is a lazy cache —
+                // it is opened by the first spawn stamp (or cd) that
+                // finds the path resolvable, never at construction.
+                cwd_anchor: std::cell::RefCell::new(None),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1064,6 +1087,7 @@ impl Executor {
                 ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
+                bash_source_seed: None,
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
                 inherited_fork_frames: respawn_inherited_frames,
                 respawn_function_line_spans,
@@ -1113,6 +1137,7 @@ impl Executor {
                 // process boundary (rubash#2487).
                 job_control: Cell::new(false),
                 subshell_source_text: None,
+                reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
@@ -1149,12 +1174,16 @@ impl Executor {
                 fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
-            exit_code: 0,
+            // variables.c:440: a refused function import leaves
+            // last_command_exit_value = EXECUTION_FAILURE, so the
+            // first command observes `$?` = 1 (rubash#2728).
+            exit_code: if function_import_failed { 1 } else { 0 },
             parse_error_occurred: false,
             signal_discard_pending: false,
             errexit_unwind_pending: false,
             errexit_unwind_armed: false,
             unit_signal_discard: false,
+            unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
             bash_logout_sourced: false,
@@ -1232,13 +1261,11 @@ impl Executor {
             arithmetic_last_error_expression: std::cell::RefCell::new(String::new()),
             arithmetic_last_eval_input: std::cell::RefCell::new(String::new()),
             assignment_command_name: None,
-            buffer_assignment_diagnostics: false,
             getopts_optind_arith_fatal: false,
             defer_stage_time_report: false,
             pending_stage_time_report: None,
             defer_list_time_report: false,
             pending_list_time_reports: Vec::new(),
-            pending_assignment_diagnostics: Vec::new(),
             parameter_assignment_failure: Cell::new(false),
             parameter_assignment_failure_prev_status: Cell::new(None),
             no_closing_brace_failure: Cell::new(false),
@@ -1282,6 +1309,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
@@ -1304,6 +1332,7 @@ impl Executor {
             comsub_error_reported_out: Cell::new(false),
             last_command_substitution_parse_error_backtick: Cell::new(false),
             backtick_body_diagnostic: Cell::new(false),
+            arith_fallback_comsub_body: Cell::new(false),
             parser_error_errexited: Cell::new(false),
             last_command_inverted: Cell::new(false),
             compound_redirect_failed: Cell::new(false),

@@ -904,13 +904,23 @@ impl Executor {
         // produced BY a parameter is likewise never re-expanded). Apply
         // the pass up front here and suppress the post-expansion pass at
         // the bottom of this function, which operated on expanded text.
+        //
+        // rubash#2651: GNU performs that pass INSIDE the one walk and
+        // joins the result as a quoted string (subst.c:11862
+        // add_quoted_string), so the resolved text is data for the rest
+        // of the walk. This port rewrites the string up front and walks
+        // the result, so the rewrite must carry the same protection:
+        // expand_assignment_tilde_protected carrier-encodes each
+        // resolved prefix, and only the raw tails stay live. Without it
+        // a `$x` inside $HOME was expanded a second time — in every
+        // mode, not only the POSIX/eval shape the report filed.
         let tilde_first = !quoted
             && !compound_assignment
             && !value.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true);
         let tilde_resolved;
         let value = if tilde_first {
-            tilde_resolved = self.expand_assignment_tilde(value);
+            tilde_resolved = self.expand_assignment_tilde_protected(value);
             &tilde_resolved
         } else {
             value
@@ -1559,7 +1569,7 @@ impl Executor {
             crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(value)
                 .filter(|expression| !expression.contains("${"))
         {
-            let Some(value) = self.eval_arithmetic_command_value(expression) else {
+            let Some(value) = self.eval_arithmetic_command_value_unlabeled(expression) else {
                 // GNU expr.c raises evalerror from the actual evaluation, so
                 // the recorded real-environment category decides fatality.
                 // A fresh-environment re-evaluation would lose state-dependent
