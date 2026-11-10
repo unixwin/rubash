@@ -78,17 +78,18 @@ where
                 'P' => mode = Mode::Physical,
                 other => {
                     // rubash#705 R7.4: GNU's get_name_for_error shape —
-                    // `<script>: line N:` in script mode, `bash: line N:`
-                    // under -c, bare `bash:` with neither. The old
-                    // hardcoded `rubash: pwd:` prefix was the
-                    // mixed-branding holdout on this path.
-                    let prefix = match (
-                        env_vars.get("__RUBASH_SCRIPT_NAME"),
-                        env_vars.get("__RUBASH_CURRENT_LINE"),
-                    ) {
-                        (Some(script), Some(line)) => format!("{script}: line {line}: "),
-                        _ => "bash: ".to_string(),
-                    };
+                    // `<script>: line N:` in script mode, the argv[0]
+                    // name with its line under -c, the bare argv[0]-
+                    // derived name with neither (error.c:90-120 via
+                    // builtins/common.c:83-96). The fallback derives
+                    // from the single argv[0] carrier chain
+                    // (builtins::prefix, rubash#2791); the old
+                    // hard-coded `"bash: "` arm discarded a present
+                    // script/line arm and named every renamed shell
+                    // "bash".
+                    let prefix = crate::builtins::prefix::diagnostic_prefix(&|key: &str| {
+                        env_vars.get(key).cloned()
+                    });
                     writeln!(stderr, "{prefix}pwd: -{other}: invalid option")?;
                     writeln!(stderr, "pwd: usage: pwd [-LP]")?;
                     return Ok(EX_USAGE);

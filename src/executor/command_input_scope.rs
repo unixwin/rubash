@@ -1260,6 +1260,57 @@ impl Executor {
             if self.redirect_failglob_aborted() {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
+            // rubash#2635: an explicit redirector at/above the
+            // RLIMIT_NOFILE soft limit fails at this list position —
+            // GNU's redir_open runs first, then the dup2 onto the
+            // redirector fails EBADF (redir.c r_input_direction /
+            // redir.c:1215). Close forms are exempt; a dup's
+            // diagnostic names the source fd. A target that cannot
+            // be opened at all keeps the arm's own errno below.
+            if !matches!(redirect.kind, crate::parser::RedirectKind::CloseInput)
+                && self.redirect_fd_over_limit(fd)
+            {
+                let gate_name = match redirect.kind {
+                    crate::parser::RedirectKind::DuplicateInput => {
+                        redirect_target_fd_and_move(&target)
+                            .and_then(|(source_fd, _)| (source_fd != fd).then_some(source_fd))
+                    }
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                        Some(fd)
+                    }
+                    _ => None,
+                };
+                if let Some(name_fd) = gate_name {
+                    let mut gate_fires = true;
+                    match redirect.kind {
+                        crate::parser::RedirectKind::Input => {
+                            let path = self.session_path(shell_path_to_windows(
+                                &target,
+                                &self.shell_state.env_vars,
+                            ));
+                            gate_fires = FileFd::open_read(path).is_ok();
+                        }
+                        crate::parser::RedirectKind::ReadWrite => {
+                            if !target.starts_with("/dev/")
+                                && !crate::special_paths::is_net_redirect_target(&target)
+                            {
+                                let path = self.session_path(shell_path_to_windows(
+                                    &target,
+                                    &self.shell_state.env_vars,
+                                ));
+                                let _ = FileFd::open_readwrite_pair(path);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if gate_fires {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{name_fd}: Bad file descriptor"),
+                        )));
+                    }
+                }
+            }
             self.save_compound_numbered_input_fd(saved, fd);
             match redirect.kind {
                 // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
@@ -1662,6 +1713,58 @@ impl Executor {
             // at the expansion; abort the compound before any fd binding.
             if self.redirect_failglob_aborted() {
                 return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // rubash#2635: an explicit redirector at/above the
+            // RLIMIT_NOFILE soft limit fails at this list position —
+            // GNU's redir_open runs first (mirrored below so the
+            // target file is created), then the dup2 onto the
+            // redirector fails EBADF (redir.c r_output_direction /
+            // redir.c:1215). Close forms are exempt; a dup's
+            // diagnostic names the source fd.
+            if !matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
+                && self.redirect_fd_over_limit(fd)
+            {
+                let gate_name = match redirect.kind {
+                    crate::parser::RedirectKind::DuplicateOutput => {
+                        redirect_target_fd_and_move(&target)
+                            .and_then(|(source_fd, _)| (source_fd != fd).then_some(source_fd))
+                    }
+                    crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend => Some(fd),
+                    _ => None,
+                };
+                if let Some(name_fd) = gate_name {
+                    match redirect.kind {
+                        crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::CombinedAppend => {
+                            if !is_null_device(&target) {
+                                let _ = open_redirect_append(&self.session_path(
+                                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                                ));
+                            }
+                        }
+                        crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend => {
+                            if !is_null_device(&target) {
+                                crate::executor::shell_options::probe_output_redirect(
+                                    self,
+                                    &target,
+                                    redirect.clobber,
+                                )?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{name_fd}: Bad file descriptor"),
+                    )));
+                }
             }
 
             // See injected_redirect_fd_is_bound (redirection.rs): a redirect
