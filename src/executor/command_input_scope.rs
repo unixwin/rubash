@@ -2690,6 +2690,40 @@ impl Executor {
             .ok()?;
             return Some(FileFd::from_file(file, path));
         }
+        // rubash#3268: from a deleted cwd the joined spelling's
+        // metadata and open both die at the dead component — when
+        // the cwd anchor applies for the relative operand, the
+        // classification comes from the anchor's fstatat and the
+        // bind's one open from openat, so a stream source keeps the
+        // live-descriptor bind (shared offset, FIFO rendezvous)
+        // instead of dropping to the text mirror. A target the
+        // anchor walk cannot stat keeps the plain decline — the
+        // validation probe (compound_stdin_open_failure) owns its
+        // diagnostic. The FileFd carries the joined path as its
+        // name, like the plain arm below.
+        #[cfg(unix)]
+        if !target.is_empty() {
+            let fs_operand = self.redirect_target_filesystem_path(&target);
+            if fs_operand.is_relative() {
+                if let Some(stat_result) = self.fstatat_via_cwd_anchor(&fs_operand) {
+                    let is_stream = stat_result.is_ok_and(|stat| {
+                        let kind = stat.st_mode & libc::S_IFMT;
+                        kind == libc::S_IFREG
+                            || kind == libc::S_IFDIR
+                            || kind == libc::S_IFIFO
+                            || kind == libc::S_IFCHR
+                            || kind == libc::S_IFBLK
+                    });
+                    if !is_stream {
+                        return None;
+                    }
+                    return self
+                        .open_via_cwd_anchor(&fs_operand, libc::O_RDONLY, 0)
+                        .and_then(|result| result.ok())
+                        .map(|file| FileFd::from_file(file, path));
+                }
+            }
+        }
         if !std::fs::metadata(&path)
             .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)
@@ -2860,7 +2894,18 @@ impl Executor {
         // bind) needs, and blocks until a writer appears in its own
         // right. An existing FIFO validates through access(2) instead
         // (probe_input_redirect_gate), with the same errno surface.
-        let probe_error = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+        // rubash#3268: from a deleted cwd the joined spelling is dead
+        // by construction — when the cwd anchor applies, its verdict
+        // replaces every joined-path probe below (see
+        // Executor::anchored_redirect_probe); the empty-target arm
+        // above already returned, so the anchor's empty-word guard is
+        // never what decides here.
+        let probe_error = if let Some(verdict) = self.anchored_redirect_probe(
+            &target,
+            redirect.kind == crate::parser::RedirectKind::ReadWrite,
+        ) {
+            verdict.err()
+        } else if redirect.kind == crate::parser::RedirectKind::ReadWrite {
             OpenOptions::new()
                 .read(true)
                 .write(true)
