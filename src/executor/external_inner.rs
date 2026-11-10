@@ -257,8 +257,9 @@ fn fd_is_pin_source_pipe_alias(
 /// the session's cwd anchor for the walk: openat the operand against
 /// the anchor handle with O_DIRECTORY and name the landed directory
 /// physically. The two-state gate is the anchor family's own: the
-/// session cwd's path must no longer resolve, and the anchor must
-/// name exactly that cwd. Answers Some(Ok(path)) with the landed
+/// session cwd's path must no longer resolve TO THE DIRECTORY THE
+/// SESSION SITS IN (the family's identity verdict, below), and the
+/// anchor must name exactly that cwd. Answers Some(Ok(path)) with the landed
 /// directory's physical path, Some(Err) with the kernel's verdict
 /// when the gate held but the walk failed (that verdict is the one
 /// GNU's verbatim chdir reports), and None when the gate does not
@@ -273,18 +274,42 @@ pub(in crate::executor) fn cd_target_via_cwd_anchor(
     cwd: &std::path::Path,
     operand: &std::path::Path,
 ) -> Option<std::io::Result<std::path::PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
-    if std::fs::metadata(cwd).is_ok_and(|meta| meta.is_dir()) {
-        return None;
-    }
-    let (anchor_fd, anchor_path) = {
+    let (anchor_fd, anchor_path, anchor_identity) = {
         let anchor = anchor.borrow();
         let anchor = anchor.as_ref()?;
         if anchor.path != cwd {
             return None;
         }
-        (anchor.dir.as_raw_fd(), anchor.path.clone())
+        // The identity the path must still name for the gate to stay
+        // closed: the anchor handle's own (dev, ino).
+        let identity = anchor
+            .dir
+            .metadata()
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()));
+        (anchor.dir.as_raw_fd(), anchor.path.clone(), identity)
     };
+    // The gate is the family's identity verdict — rubash#3275's
+    // session_cwd_path_resolves, applied to this free-standing form
+    // over the anchor cell (no &self to ask): the path must no
+    // longer resolve to the very directory the session sits in. A
+    // directory deleted and RECREATED at the same spelling is a
+    // ghost: its metadata succeeds but the identity differs, and
+    // the walk below must still run against the anchor's inode.
+    // When the anchor's own identity is unreadable there is nothing
+    // to compare against, so the verdict falls back to the plain
+    // resolvability check — the same fallback the identity verdict
+    // itself takes when no anchor names the cwd.
+    let path_resolves = match anchor_identity {
+        Some((dev, ino)) => std::fs::metadata(cwd)
+            .is_ok_and(|meta| meta.is_dir() && meta.dev() == dev && meta.ino() == ino),
+        None => std::fs::metadata(cwd).is_ok_and(|meta| meta.is_dir()),
+    };
+    if path_resolves {
+        return None;
+    }
     let operand = if operand.as_os_str().is_empty() {
         std::path::Path::new(".")
     } else {
@@ -2452,12 +2477,18 @@ impl Executor {
     /// in-process consumers beyond the read face: Some(anchor fd)
     /// when the session cwd's path no longer resolves AND the anchor
     /// names exactly that cwd — the same rule read_via_cwd_anchor
-    /// and stamp_spawn_cwd spend the anchor under.
+    /// and stamp_spawn_cwd spend the anchor under, asked of the
+    /// same verdict: rubash#3275's session_cwd_path_resolves, so a
+    /// path recreated around the stationary session counts as dead
+    /// here too. (This gate and cd_target_via_cwd_anchor's check
+    /// were the merge-order remainder of the #3268 (c) face: both
+    /// converged onto the identity verdict in the merge round after
+    /// #3281 landed first.)
     #[cfg(unix)]
     fn anchor_fd_for_dead_cwd(&self) -> Option<std::os::unix::io::RawFd> {
         use std::os::unix::io::AsRawFd;
         let cwd = self.shell_state.cwd.clone();
-        if self.refresh_cwd_anchor_for(&cwd) {
+        if self.session_cwd_path_resolves(&cwd) {
             return None;
         }
         let anchor = self.shell_state.cwd_anchor.borrow();
