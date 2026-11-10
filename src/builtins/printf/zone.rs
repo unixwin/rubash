@@ -1,3 +1,4 @@
+#[derive(Debug, Clone)]
 pub(super) struct TimeZoneRule {
     standard_name: String,
     daylight_name: Option<String>,
