@@ -345,15 +345,29 @@ fn run_command_loop_walk(tokens: &[Token], state: &mut ParseState, start: usize)
             // reserved_word_acceptable's set) is grammatical without a `;'
             // terminator: compound_list's `newline_list list1' production
             // (parse.y:1262) accepts a single pipeline_command with no
-            // terminator, and reserved_word_acceptable (parse.y:5899,
-            // COND_END in the set) recognizes `then'/`do` there —
-            // `if [[ $x == y ]] then' inside a function body (cond.tests:230,
+            // terminator, and reserved_word_acceptable (parse.y:5899-5940,
+            // ARITH_CMD and COND_END in the predecessor set) recognizes the
+            // reserved word there — `if [[ $x == y ]] then' inside a
+            // function body (cond.tests:230,
             // shell_function_n_shortcuts/.shortcut). After a plain WORD the
             // word is still an argument (`if true then' stays rejected), and
             // after `]]' any non-reserved word keeps the old error.
+            //
+            // rubash#2646: the exemption is not `then'/`do'-only. GNU's
+            // CHECK_FOR_RESERVED_WORD (parse.y:3168) treats EVERY reserved
+            // word alike at a command boundary — the grammar level that
+            // owns the current section then decides whether that word is
+            // legal there (an if-body's `fi'/`elif'/`else' closes or
+            // continues the clause; a stray one errors at that level).
+            // The #460 value set only covered the CONDITION position, so
+            // a body-level compound (`if ((1)) then ((2)) fi',
+            // arith.tests:351; `if true; then (echo s) fi') still died
+            // here before the section stop could accept its closer.
+            // `command_boundary_keyword_allowed' is the predecessor half
+            // of reserved_word_acceptable; this guard is the word half.
             let reserved_follows_compound = tokens.get(next_i).is_some_and(|next| {
                 next.kind == TokenKind::Keyword
-                    && matches!(next.value.as_str(), "then" | "do")
+                    && crate::lexer::is_keyword(&next.value)
                     && super::command_boundary_keyword_allowed(tokens, next_i)
             });
             if !separated
