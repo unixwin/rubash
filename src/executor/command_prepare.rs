@@ -4108,10 +4108,6 @@ impl Executor {
             }
             return true;
         }
-        if cmd.words.first().is_some_and(|word| word.starts_with('#')) {
-            self.exit_code = 0;
-            return true;
-        }
         false
     }
 
