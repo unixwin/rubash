@@ -29,11 +29,13 @@
 //! process-global, so every cell serializes on one mutex, each
 //! scenario builds its interactive executor on a runner thread,
 //! and the interrupt is a real kill(2) SIGINT to this process
-//! while the widget's external sleep is in its foreground wait —
-//! the engine's sliced wait forwards the recorded delivery to the
-//! child (rubash#1990), whose SIGINT death is the verdict
-//! (rubash#1639). Unix only: the mailbox faces are niu's console
-//! route and are pinned there.
+//! while the widget is in its foreground wait. The delivery is
+//! addressed to the shell's pid only: GNU remembers such an
+//! interrupt across the wait and discards the list when the
+//! child exits (rubash#1640; the process-group shape is pinned
+//! at the binary level by the issue1639 PTY cells). Unix only:
+//! the mailbox faces are niu's console route and are pinned
+//! there.
 
 #![cfg(unix)]
 
@@ -142,12 +144,20 @@ fn drive(tag: &str, setup: &str, widget_body: &str, deliver: bool) -> Driven {
 }
 
 /// The defect cell: untrapped SIGINT during the widget. The
-/// external sleep dies by SIGINT, the rest of the widget never
-/// runs, and the outcome must say so.
+/// delivery here is addressed to the shell's pid only, so the
+/// external child never receives it and the wait runs out —
+/// GNU remembers a shell-directed interrupt across the wait
+/// and discards the rest of the line when the child exits
+/// (rubash#1640 readjudication, pinned at the binary level by
+/// the issue1639 PTY cells; the instant-death shape belongs to
+/// terminal group delivery, which an in-process test cannot
+/// safely aim at its own process group). The contract under
+/// test is the discard itself: the rest of the widget never
+/// runs, the status is 130, and the outcome must say so.
 #[test]
 fn untrapped_sigint_during_widget_marks_interrupted() {
     let _guard = serial();
-    let run = drive("untrapped", "", "{SLEEP} 15; echo done >> \"{LOG}\"", true);
+    let run = drive("untrapped", "", "{SLEEP} 6; echo done >> \"{LOG}\"", true);
     assert!(
         run.interrupted,
         "an untrapped SIGINT unwind during the widget must set interrupted \
@@ -161,8 +171,9 @@ fn untrapped_sigint_during_widget_marks_interrupted() {
         run.log
     );
     assert!(
-        run.elapsed < Duration::from_secs(12),
-        "the 15s sleep must have been cut by the interrupt: {:?}",
+        run.elapsed >= Duration::from_millis(5500),
+        "a shell-directed delivery must not cut the child's 6s sleep; \
+         the discard lands when the wait ends: {:?}",
         run.elapsed
     );
 }
@@ -238,24 +249,32 @@ fn widget_without_signal_is_not_interrupted() {
     assert!(run.log.contains("done"), "log: {:?}", run.log);
 }
 
-/// The builtin-sleep spelling of the same cell: the widget's
-/// `sleep` is the in-process virtual child, whose interrupt
-/// arrives through the signal drains rather than a foreground
-/// wait. The verdict must be the same — interrupted, and the
-/// rest of the widget discarded.
+/// The builtin-sleep boundary: the widget's `sleep` is the
+/// in-process virtual child, and a delivery that lands
+/// mid-sleep is consumed by the mid-wait drain and FORGOTTEN
+/// with its classification — the virtual child cannot die, so
+/// a shell-directed delivery neither cuts the sleep nor
+/// discards the list (rubash#1640, pinned by
+/// issue698_forgotten_mid_sleep_sigint_leaves_no_discard_mark;
+/// re-adjudicating that fold is #1640's own question, not this
+/// flag's). No unwind occurs in this spelling, so the flag
+/// must stay false and the widget completes: this cell locks
+/// the boundary between the two mechanisms, so a change to
+/// either side has to move it consciously.
 #[test]
-fn untrapped_sigint_during_builtin_sleep_widget_marks_interrupted() {
+fn builtin_sleep_mid_wait_fold_leaves_no_unwind_to_report() {
     let _guard = serial();
     let run = drive("builtin-sleep", "", "sleep 4; echo done >> \"{LOG}\"", true);
     assert!(
-        run.interrupted,
-        "an untrapped SIGINT during the builtin sleep must set interrupted \
+        !run.interrupted,
+        "the mid-wait fold produces no unwind to report \
          (status {}, log {:?}, elapsed {:?})",
         run.status, run.log, run.elapsed
     );
+    assert_eq!(run.status, 0);
     assert!(
-        !run.log.contains("done"),
-        "the widget's post-sleep commands must not run: {:?}",
+        run.log.contains("done"),
+        "the widget must run to completion under the fold: {:?}",
         run.log
     );
 }
