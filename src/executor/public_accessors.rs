@@ -2287,9 +2287,18 @@ impl Executor {
         // snapshot whose region never touched the mask) re-apply the
         // same value.
         let fork_saved_process_umask = saved_state.fork_saved_process_umask;
+        // rubash#2636: the region also ran its `ulimit` sets against
+        // this same PROCESS (builtins/ulimit.rs drives the real
+        // setrlimit on unix); GNU's fork discards them with the
+        // child. Re-apply the save point's rlimit snapshot alongside
+        // the umask, at the same LAST position.
+        let fork_saved_process_rlimits = saved_state.fork_saved_process_rlimits.clone();
         self.shell_state = saved_state;
         if let Some(mask) = fork_saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        if let Some(rlimits) = &fork_saved_process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
         // Re-seat the stopped jobs into the restored table. The id
         // allocator takes highest-occupied-id + 1, so a re-inserted id

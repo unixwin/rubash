@@ -147,6 +147,13 @@ fn run_source_groups(
             // parse_and_execute (builtins/evalstring.c:348), which bumps
             // indirection_level: under `set -x` the file's commands trace
             // one PS4 level deeper than the `.` line (rubash#1341).
+            // rubash#3205: this fresh re-lex of a gathered group
+            // starts from the group-ENTRY gate, not the group-end
+            // global the gather left behind (see
+            // GroupGatherInfo::entry_extended_glob); restore the
+            // caller's value afterwards.
+            let saved_extended_glob = crate::lexer::parse_extended_glob();
+            crate::lexer::set_parse_extended_glob(gather_info.entry_extended_glob);
             let status = executor.with_xtrace_indirection(|executor| {
                 crate::script_driver::run_source_with_line_offset(
                     executor,
@@ -161,6 +168,7 @@ fn run_source_groups(
                     },
                 )
             });
+            crate::lexer::set_parse_extended_glob(saved_extended_glob);
             executor.leave_discard_boundary_list(saved_list_boundary);
             executor.absorb_failglob_discard();
             match old_streamed {
@@ -247,7 +255,18 @@ fn run_source_groups(
                 }
                 tokens
             }
-            _ => crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix),
+            _ => {
+                // rubash#3205: the fresh re-lex starts from the
+                // group-ENTRY gate (see
+                // GroupGatherInfo::entry_extended_glob), not the
+                // group-end global the gather left behind; restore
+                // the caller's value afterwards.
+                let saved_extended_glob = crate::lexer::parse_extended_glob();
+                crate::lexer::set_parse_extended_glob(gather_info.entry_extended_glob);
+                let tokens = crate::lexer::tokenize_with_initial_posix(&exec_text, parse_posix);
+                crate::lexer::set_parse_extended_glob(saved_extended_glob);
+                tokens
+            }
         };
         if let Some(line) = crate::lexer::heredoc_overflow_line() {
             executor.mark_parse_error();
