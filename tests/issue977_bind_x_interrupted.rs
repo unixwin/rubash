@@ -85,7 +85,7 @@ fn drive(tag: &str, setup: &str, widget_body: &str, deliver: bool) -> Driven {
     let log_text = log.display().to_string();
     let setup = setup.replace("{LOG}", &log_text);
     let widget_def = format!(
-        "w977() {{ : > \"{started_text}\"; {} }}",
+        "w977() {{ : > \"{started_text}\"; {} ; }}",
         widget_body
             .replace("{SLEEP}", external_sleep())
             .replace("{LOG}", &log_text)
