@@ -25,6 +25,22 @@ thread_local! {
     static ARITH_WRITES: std::cell::RefCell<Vec<(String, Option<String>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 
+    /// Locale-family scalar binds performed by the arithmetic evaluator
+    /// in the current evaluation window: (written name, stored value,
+    /// LC_ALL value at bind time, LC_ALL array mark at bind time,
+    /// LC_ALL assoc mark at bind time). GNU expr.c:331
+    /// expr_bind_variable runs stupidly_hack_special_variables on the
+    /// written lhs after every bind (expr.c:352), so sv_locale
+    /// (variables.c:6272) fires per bind with the value bound at that
+    /// moment; the journal captures both at bind time and the
+    /// evaluation boundary drains it (rubash#3059). The LC_ALL marks
+    /// ride along so the probe table can project a compound LC_ALL
+    /// binding to its scalar value exactly as get_string_value does
+    /// (rubash#3065).
+    static ARITH_LOCALE_BINDS: std::cell::RefCell<
+        Vec<(String, String, String, bool, bool)>,
+    > = const { std::cell::RefCell::new(Vec::new()) };
+
     /// The evalerror record left by the most recent evaluation — GNU's
     /// `expression`/`lasttp` globals at the moment evalerror ran
     /// (expr.c:1524-1535). The record belongs to the frame that failed,
@@ -89,6 +105,50 @@ pub(super) fn record_arith_write(name: &str, old_value: Option<String>) {
     ARITH_WRITES.with(|log| {
         log.borrow_mut().push((name.to_string(), old_value));
     });
+}
+
+/// Record one completed arithmetic scalar bind of a locale-family
+/// name (rubash#3059): GNU expr_bind_variable's post-bind hook
+/// (expr.c:352) runs sv_locale keyed on the WRITTEN name with the
+/// value just stored, so the record carries both, plus the LC_ALL
+/// value the category precedence gate reads at that same moment.
+/// Element binds never reach here (their GNU lhs is the literal text
+/// `name[sub]`, which matches no special_vars entry), and neither do
+/// binds the evaluator skipped (noeval, readonly, noassign).
+pub(super) fn record_arith_locale_bind(
+    name: &str,
+    value: &str,
+    lc_all: &str,
+    lc_all_array: bool,
+    lc_all_assoc: bool,
+) {
+    if !crate::locale::is_locale_family_name(name) {
+        return;
+    }
+    ARITH_LOCALE_BINDS.with(|log| {
+        log.borrow_mut().push((
+            name.to_string(),
+            value.to_string(),
+            lc_all.to_string(),
+            lc_all_array,
+            lc_all_assoc,
+        ));
+    });
+}
+
+fn take_arith_locale_binds() -> Vec<(String, String, String, bool, bool)> {
+    ARITH_LOCALE_BINDS.with(|log| std::mem::take(&mut *log.borrow_mut()))
+}
+
+/// Whether the current evaluation window has recorded a locale bind.
+/// Admission gates that skip or defer the boundary sync must see an
+/// empty log, exactly as for ARITH_WRITES.
+pub(super) fn arith_locale_bind_log_is_empty() -> bool {
+    ARITH_LOCALE_BINDS.with(|log| log.borrow().is_empty())
+}
+
+fn clear_arith_locale_binds() {
+    ARITH_LOCALE_BINDS.with(|log| log.borrow_mut().clear());
 }
 
 /// Whether the current evaluation window has recorded an arithmetic
@@ -214,6 +274,51 @@ fn sync_arith_writes_to_shell_state(executor: &mut Executor) {
                     crate::shell::state::PipestatusShape::Scalar;
             }
         }
+    }
+    // rubash#3059: GNU expr_bind_variable runs the sv_locale hook
+    // after EVERY arithmetic bind (expr.c:352); the evaluator records
+    // the binds as they complete and the shared locale funnel runs
+    // here, at the same boundary that syncs the writes, in bind order.
+    for (name, value, lc_all, lc_all_array, lc_all_assoc) in take_arith_locale_binds() {
+        emit_arith_locale_bind(executor, &name, &value, &lc_all, lc_all_array, lc_all_assoc);
+    }
+}
+
+/// Run the locale funnel for one recorded arithmetic bind
+/// (rubash#3059). The funnel is fed the bind-time values — the stored
+/// value and the LC_ALL in force at that bind — because a later bind
+/// in the same expression may already have overwritten both, while
+/// GNU's hook reads the binding at bind time (expr.c:352 ->
+/// variables.c:6272 sv_locale -> locale.c:185 set_locale_var). LANG
+/// never warns (its funnel arm only mirrors the process locale from
+/// the live store), so it goes through the ordinary note path.
+fn emit_arith_locale_bind(
+    executor: &mut Executor,
+    name: &str,
+    value: &str,
+    lc_all: &str,
+    lc_all_array: bool,
+    lc_all_assoc: bool,
+) {
+    if name == "LANG" {
+        executor.note_locale_assignment(name);
+        return;
+    }
+    // The probe table carries the bind-time LC_ALL marks so the
+    // funnel's scalar projection sees a compound LC_ALL binding the
+    // way get_string_value does (rubash#3065). The bound name itself
+    // is always a fresh scalar write, so it needs no mark.
+    let mut probe_env = crate::shell::var_table::VarTable::default();
+    probe_env.insert("LC_ALL".to_string(), lc_all.to_string());
+    if lc_all_assoc {
+        probe_env.mark_name(crate::executor::types::ASSOC_VARS, "LC_ALL");
+    } else if lc_all_array {
+        probe_env.mark_name(crate::executor::types::ARRAY_VARS, "LC_ALL");
+    }
+    probe_env.insert(name.to_string(), value.to_string());
+    if let Some(warning) = crate::locale::locale_assignment_warning(name, &probe_env) {
+        let line = format!("{}warning: {}\n", executor.diagnostic_prefix(), warning);
+        let _ = executor.write_default_stderr(line.as_bytes());
     }
 }
 
@@ -581,6 +686,9 @@ impl Executor {
         if !ARITH_WRITES.with(|log| log.borrow().is_empty()) {
             return false;
         }
+        if !arith_locale_bind_log_is_empty() {
+            return false;
+        }
         let bytes = expression.as_bytes();
         let mut index = 0usize;
         while index < bytes.len() {
@@ -705,7 +813,22 @@ impl Executor {
                 },
             );
             let expanded = if expand {
-                self.expand_arithmetic_expression_mut(&with_assoc_keys)
+                // GNU subst.c:11107 expand_array_subscript (reached from
+                // expand_word_internal's `[` arm, subst.c:11395-11405):
+                // during expand_arith_string every `name[...]` span —
+                // indexed as well as associative — has its subscript
+                // expanded as a unit and protected before splicing, so
+                // brackets a value carries cannot re-lex as expression
+                // syntax. The EXP_EXPANDED entries (let/`[[`) already
+                // run that pass via expand_arith_eval_subscripts; the
+                // expand entries must run it too — without it the
+                // whole-string expansion below splices a subscript value
+                // like `0],b[1` raw, the parser reads a truncated
+                // subscript plus a well-formed comma expression, and
+                // the subscript's own evalexp error is silently
+                // swallowed (rubash#2654).
+                let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+                self.expand_arithmetic_expression_mut(&with_indexed_keys)
             } else {
                 self.expand_arith_eval_subscripts(&with_assoc_keys)
             };
@@ -811,6 +934,7 @@ impl Executor {
             // before the clear: a recorded write means a nested entry).
             self.reconcile_pipestatus_mirror();
             ARITH_WRITES.with(|log| log.borrow_mut().clear());
+            clear_arith_locale_binds();
         }
         // Fast ticket: the state gate proved no operand can observe the
         // dynamic context (no dynamic-context name is spelled, and every
@@ -1036,6 +1160,7 @@ impl Executor {
         // reconcile_pipestatus_mirror; checked before the clear).
         self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        clear_arith_locale_binds();
         let dynamic_values = self.arith_dynamic_context();
         let (value, category) = eval_mutable_arith_value_with_random_flags(
             &expression,
@@ -1272,7 +1397,12 @@ impl Executor {
         // or an expansion carrier, so a removal-route string has
         // nothing for it to do.
         let expanded = if arith_expansion_char_present(&with_assoc_keys) {
-            self.expand_arithmetic_expression_mut(&with_assoc_keys)
+            // Same expand_array_subscript unit law as the command entry
+            // (subst.c:11107 via subst.c:11395-11405): indexed
+            // subscripts are expanded and protected as units before the
+            // whole-string pass splices anything (rubash#2654).
+            let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+            self.expand_arithmetic_expression_mut(&with_indexed_keys)
         } else {
             arith_string_quote_removal(&with_assoc_keys).into_owned()
         };
@@ -1298,6 +1428,7 @@ impl Executor {
         // reconcile_pipestatus_mirror; checked before the clear).
         self.reconcile_pipestatus_mirror();
         ARITH_WRITES.with(|log| log.borrow_mut().clear());
+        clear_arith_locale_binds();
         // GNU expr.c: the expansion pass above already ran, so the parser
         // evaluates under evalexp's already-expanded rules — a surviving
         // `$name`/`$(...)` is "operand expected" data, not a re-expansion.
@@ -2153,6 +2284,31 @@ pub(super) fn arithmetic_unbound_variable(
     let mut chars = expression.chars().peekable();
     let mut previous = None;
     while let Some(ch) = chars.next() {
+        if ch == ARITH_ASSOC_KEY_MARKER {
+            // A pre-expanded subscript (expand_arithmetic_assoc_subscripts /
+            // expand_arith_indexed_subscripts) reaches this scan hex-encoded
+            // behind the carrier marker, so its identifiers are invisible to
+            // the char walk below. GNU evaluates an indexed subscript in its
+            // own evalexp frame (arrayfunc.c:1368-1378 array_expand_index),
+            // where expr_streval (expr.c:1190-1216) traps an unset read the
+            // same as at the top level — decode the payload and scan it with
+            // the same rules. Associative keys never reach this arm: the
+            // scan skips an associative subscript whole at its `name[`
+            // branch above, so key text stays data here as it is in GNU.
+            let mut hex = String::new();
+            while chars.peek().is_some_and(|next| next.is_ascii_hexdigit()) {
+                hex.push(chars.next().expect("peeked hex digit"));
+            }
+            if let Some(decoded) =
+                decode_arithmetic_assoc_key(&format!("{ARITH_ASSOC_KEY_MARKER}{hex}"))
+            {
+                if let Some(name) = arithmetic_unbound_variable(&decoded, env_vars) {
+                    return Some(name);
+                }
+            }
+            previous = Some(ch);
+            continue;
+        }
         if !(ch == '_' || ch.is_ascii_alphabetic()) {
             previous = Some(ch);
             continue;
@@ -2373,6 +2529,106 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
     output
 }
 
+/// GNU `$"..."` locale strings in raw subscript text (rubash#3023):
+/// the dollar is part of the quote syntax, not an expansion introducer —
+/// in the C locale the span expands exactly like `"..."` (subst.c
+/// `expand_subscript_string` / `expand_arith_string`; the lexer cooks it
+/// the same way, `lexer/quotes.rs` `$"` arm). Raw subscript text bypasses
+/// the lexer, so the `$` survived into the arith-context rebuild
+/// (`arith_subscript_text`) and the subscript walker
+/// (`expand_subscript_string`), where it glued onto the content:
+/// `$"x y"` became `$x y` (silent index 0), `$"1+2"` became `$1+2`
+/// (index 2), `$"$(...)"` became `$$(...)` (PID + literal), and assoc
+/// keys stored the literal `$"..."` spelling. Rewrite each `$"..."` span
+/// to `"..."`, dropping only the dollar; the quotes stay for the caller's
+/// own double-quote handling. A `$"` inside a single-quoted span is
+/// literal data and is copied verbatim; the close-quote scan honors
+/// `\"` escapes and skips nested `$(...)` / `${...}` / backquotes as
+/// units, so an inner `"` never closes the span early. An unterminated
+/// span keeps its quotes (the caller treats it like an unterminated
+/// `"..."`, exactly as GNU's own word scan does).
+pub(super) fn decode_locale_quote_spans(raw: &str) -> String {
+    if !raw.contains("$\"") {
+        return raw.to_string();
+    }
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len());
+    let mut i = 0usize;
+    let mut in_single = false;
+    // Copy the whole UTF-8 character at `i` (ASCII delimiters are
+    // single-byte; every other byte belongs to a multibyte sequence).
+    let mut push_char = |out: &mut String, i: &mut usize| {
+        let ch = raw[*i..].chars().next().unwrap_or('\0');
+        out.push(ch);
+        *i += ch.len_utf8();
+    };
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b >= 0x80 {
+            push_char(&mut out, &mut i);
+            continue;
+        }
+        let ch = b as char;
+        if in_single {
+            out.push(ch);
+            if ch == '\'' {
+                in_single = false;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\'' => {
+                in_single = true;
+                out.push(ch);
+                i += 1;
+            }
+            '$' if bytes.get(i + 1) == Some(&b'"') => {
+                // Locale-quote span: drop the dollar, keep the quotes.
+                out.push('"');
+                i += 2;
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        out.push('\\');
+                        i += 1;
+                        push_char(&mut out, &mut i);
+                        continue;
+                    }
+                    if c == b'$' && matches!(bytes.get(i + 1), Some(&b'(') | Some(&b'{')) {
+                        let end = assoc_skip_substitution(bytes, i);
+                        out.push_str(&raw[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    if c == b'`' {
+                        let end = assoc_skip_substitution(bytes, i);
+                        out.push_str(&raw[i..end]);
+                        i = end;
+                        continue;
+                    }
+                    if c == b'"' {
+                        out.push('"');
+                        i += 1;
+                        break;
+                    }
+                    if c >= 0x80 {
+                        push_char(&mut out, &mut i);
+                        continue;
+                    }
+                    out.push(c as char);
+                    i += 1;
+                }
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// GNU expand_arith_string output form for an indexed-array subscript that
 /// carried no expansion of its own: single quotes stay literal (evalexp
 /// reports `'x'` as "operand expected"), while double quotes and backslash
@@ -2381,6 +2637,17 @@ pub(super) fn strip_arith_double_quotes(input: &str) -> String {
 /// to itself — so rebuilding the arith-context text from the raw spelling
 /// cannot re-run substitutions (`a[$(echo INJ)]=v` still executes once).
 pub(super) fn arith_subscript_text(raw: &str) -> String {
+    // A `$"..."` span is a double-quoted span with quote-syntax markup
+    // (decode_locale_quote_spans): the `"` arm below then decodes its
+    // content exactly like `"..."`, so `$"x y"` reaches evalexp as `x y`
+    // (rubash#3023) instead of `$x y` (a silent index-0 read of `$x`).
+    let decoded;
+    let raw = if raw.contains("$\"") {
+        decoded = decode_locale_quote_spans(raw);
+        decoded.as_str()
+    } else {
+        raw
+    };
     let mut out = String::with_capacity(raw.len());
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -4509,6 +4776,13 @@ fn arith_parse_cache_exec_post_inc(
     let new_value = updated.to_string();
     env_vars.insert(var.to_string(), new_value.clone());
     record_arith_write(var, old_value);
+    record_arith_locale_bind(
+        var,
+        &new_value,
+        env_vars.get("LC_ALL").map(String::as_str).unwrap_or(""),
+        env_vars.attr_of("LC_ALL").array,
+        env_vars.attr_of("LC_ALL").assoc,
+    );
     sync_shell_assignment_process_env(env_vars, var, &new_value);
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551).
     if var == "PATH" {
@@ -4569,6 +4843,13 @@ fn arith_parse_cache_exec_add_assign(
     let new_value = updated.to_string();
     env_vars.insert(dst.to_string(), new_value.clone());
     record_arith_write(dst, old_value);
+    record_arith_locale_bind(
+        dst,
+        &new_value,
+        env_vars.get("LC_ALL").map(String::as_str).unwrap_or(""),
+        env_vars.attr_of("LC_ALL").array,
+        env_vars.attr_of("LC_ALL").assoc,
+    );
     sync_shell_assignment_process_env(env_vars, dst, &new_value);
     // GNU variables.c:5819/5919 sv_path -> phash_flush (rubash#1551).
     if dst == "PATH" {

@@ -19,11 +19,13 @@ pub(super) fn array_attribute_assignment_value(
     env_vars: &crate::shell::var_table::VarTable,
     name: &str,
     oob_word: &mut Option<String>,
-) -> (String, bool) {
-    // The bool reports whether the bind produced array storage (a compound
-    // assignment or a scalar bound to an existing array's element 0) so the
-    // caller marks att_array only for real array binds — a quoted literal
-    // `(...)` scalar must stay scalar (setattr.def:269-274).
+) -> (String, Option<bool>) {
+    // The Option reports the storage the bind produced: Some(true) for
+    // associative storage, Some(false) for indexed storage, None for a
+    // plain scalar — so the caller marks exactly the attribute the
+    // bind created (a compound assignment or a scalar bound to an
+    // existing array's element 0 is a real array bind; a quoted
+    // literal `(...)` scalar stays scalar, setattr.def:269-274).
     // GNU setattr.def:240-258 (export -a/-A) and :292 (readonly -a/-A)
     // rewrite the builtin as `declare -gx{a,A}` / `declare -gr{a,A}`, so a
     // compound `(...)` operand is tokenized by
@@ -60,7 +62,7 @@ pub(super) fn array_attribute_assignment_value(
                 append_array_value(&current, compound, integer, env_vars, oob_word)
                     .unwrap_or_else(|_| compound.to_string())
             },
-            true,
+            Some(assoc_target),
         );
     }
     // Scalar bind: the flagless operand went through GNU's
@@ -75,7 +77,14 @@ pub(super) fn array_attribute_assignment_value(
     } else {
         compound.to_string()
     };
-    let assoc_target = assoc
+    // rubash#2971: for a SCALAR operand the -a/-A pair collapses to
+    // ONE letter before the bind — GNU setattr.def:253-256 delegates
+    // with 'a' when arrays_only, else 'A' — so an explicit assoc
+    // request yields to an explicit array request here. (Compound
+    // operands above keep the assoc reading: their expansion already
+    // interpreted the elements as key/value pairs when -A was given.)
+    // An assoc MARK already on the variable still owns it.
+    let assoc_target = (assoc && !array)
         || env_vars.is_marked(ASSOC_VARS, name)
         || env_vars.is_marked(crate::executor::types::ASSOC_128_VARS, name);
     let array_target = array
@@ -95,7 +104,7 @@ pub(super) fn array_attribute_assignment_value(
             Some(entry) => entry.1 = literal,
             None => entries.push(("0".to_string(), literal)),
         }
-        return (format_assoc_storage(entries), true);
+        return (format_assoc_storage(entries), Some(true));
     }
     if array_target {
         let current = env_vars.get(name).cloned().unwrap_or_default();
@@ -110,10 +119,10 @@ pub(super) fn array_attribute_assignment_value(
             literal
         };
         entries.insert(0, stored);
-        return (format_indexed_array_storage(entries), true);
+        return (format_indexed_array_storage(entries), Some(false));
     }
     if !append {
-        return (literal, false);
+        return (literal, None);
     }
     let mut current = env_vars.get(name).cloned().unwrap_or_default();
     (
@@ -123,7 +132,7 @@ pub(super) fn array_attribute_assignment_value(
             current.push_str(&literal);
             current
         },
-        false,
+        None,
     )
 }
 

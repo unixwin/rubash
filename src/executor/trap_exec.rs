@@ -142,6 +142,24 @@ fn with_exec_diag_stderr<R>(
     result
 }
 
+/// One std fd's binding for the exec spawn's ordered redirect walk
+/// (rubash#2821): the composition the walk — or, for slots the walk
+/// never touched, the ambient fd table — leaves for shell_execve.
+#[derive(Debug, Clone)]
+enum ExecSpawnBinding {
+    /// The object the fd held before the walk (process stdio, an
+    /// active capture, or a symbolic fd-table endpoint), resolved
+    /// at spawn time through the fd table.
+    Ambient(u32),
+    /// A file opened for this spawn (by the walk, or a dup of an
+    /// fd-table File endpoint's handle); clones share one open
+    /// file description. The path is the shell-level target
+    /// spelling for the /dev/stdout operand materializer.
+    File(std::rc::Rc<std::fs::File>, Option<String>),
+    /// Closed at this walk position (`>&-` / `N>&-`).
+    Closed,
+}
+
 /// rubash#2612: one slot of the descriptor space a redirect list's
 /// ordered walk has evolved to at the current walk position — the
 /// space GNU's do_redirections (redir.c:237) resolves every entry
@@ -188,6 +206,57 @@ pub(in crate::executor) enum FdWalkBinding {
 /// (see FdWalkBinding). Slots the list has not touched are absent:
 /// they resolve against the ambient fd table, as before.
 pub(in crate::executor) type FdWalkSpace = std::collections::HashMap<u32, FdWalkBinding>;
+
+/// rubash#2629: one recorded apply_dynamic_fd_var_redirects result
+/// (see the fd_var_apply_snapshot field): the fingerprint of the
+/// redirect list it belongs to — per entry, the same tuple the
+/// redirect-target memo keys on, plus the entry's `{var}` name and
+/// the heredoc entries' names — and the binds it produced, in apply
+/// order: (variable, descriptor, fd-table entry the apply left
+/// standing). A helper walk over the same list replays these binds
+/// verbatim (replay_dynamic_fd_var_snapshot) instead of running the
+/// applier again, so the list's target words evaluate exactly once
+/// per command — GNU's single do_redirections pass (redir.c:237).
+#[derive(Debug, Clone)]
+pub(in crate::executor) struct FdVarApplySnapshot {
+    fingerprint: Vec<String>,
+    binds: Vec<(String, u32, super::fd_table::FdEntry)>,
+}
+
+impl FdVarApplySnapshot {
+    /// The list identity a snapshot (or a replay request) is keyed
+    /// on: every entry of the plain list and of the heredoc split,
+    /// in order. Two executions of the same list in different shell
+    /// states share a fingerprint, which is safe because every real
+    /// apply replaces the record — a replay is only ever offered
+    /// the binds of the most recent apply of that exact list on
+    /// this executor, and any intervening apply of any other list
+    /// (a loop body's own commands included) replaces it first.
+    fn fingerprint_of(cmd: &CommandNode) -> Vec<String> {
+        let mut fingerprint: Vec<String> = cmd
+            .redirects
+            .iter()
+            .map(|redirect| {
+                format!(
+                    "{:?}\x1f{}\x1f{:?}\x1f{}\x1f{}",
+                    redirect.kind,
+                    redirect.operator,
+                    redirect.fd,
+                    redirect.target,
+                    redirect.fd_var.as_deref().unwrap_or_default()
+                )
+            })
+            .collect();
+        for redirect in &cmd.heredoc_redirects {
+            fingerprint.push(format!(
+                "heredoc\x1f{}\x1f{}",
+                redirect.fd_var.as_deref().unwrap_or_default(),
+                redirect.delimiter
+            ));
+        }
+        fingerprint
+    }
+}
 
 /// rubash#2612: a `{var}` dup entry's source resolution against
 /// the walk space (see Executor::fd_walk_dup_action).
@@ -561,7 +630,7 @@ impl Executor {
             return Ok(());
         }
         // G-02 session-cwd anchor (rubash#1887): see set_fd_readwrite_file.
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         let file = FileFd::open_write(path, append, false)
             .map_err(|e| crate::posix_errors::path_error(&target, e))?;
         self.fd_table
@@ -1662,7 +1731,14 @@ impl Executor {
             None => ast_base,
         };
         let saved_alias_streamed = self.mark_alias_streamed();
+        // rubash#2969: mark the action's own execution — break/continue
+        // defer to the pending loop-control flags only inside this
+        // window (debugger consults and their evaluations run under
+        // debug_trap_running but outside this flag, and keep the
+        // unwind channel).
+        let saved_debug_action = std::mem::replace(&mut self.debug_action_running, true);
         let result = self.with_xtrace_indirection(|executor| executor.execute_ast(&ast));
+        self.debug_action_running = saved_debug_action;
         // Cache the (re-based) AST under its spliced text for the next
         // firing; the recorded base makes the next rebase exact.
         *self.debug_trap_action_cache.borrow_mut() = Some((action, ast, ast_base));
@@ -3539,7 +3615,7 @@ impl Executor {
         // before running the operand. The stdio-only paths above already
         // covered the no-operand forms; apply the fd_var redirects here so
         // a real operand sees them (and they persist after it exits).
-        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, false, true)? {
             // rubash#2125: a `{var}` apply failure is a do_redirections
             // failure (redir_varassign), reached BEFORE exec_builtin's
             // search/execve — so in POSIX mode it takes the
@@ -3738,299 +3814,460 @@ impl Executor {
     /// passes the child stdin resolved by exec_inherited_stdin explicitly —
     /// none of the spawn helpers may rely on std's defaults.
     fn execute_exec_spawn(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
-        if let Some(redirect) = &cmd.redirect_out {
-            let target = self.expand_redirect_target(redirect);
-            // GNU redir.c:832-838: `exec cmd >&WORD` with a non-numeric
-            // WORD translates to r_err_and_out - the child's stdout AND
-            // stderr go to WORD. The raw target keeps the `&` dup marker,
-            // so strip it before opening (redir4.sub: exec >&$fd).
-            if redirect.fd.unwrap_or(1) == 1 && redirect.fd_var.is_none() && target.starts_with('&')
+        // GNU redir.c do_redirection_internal (redir.c:767+) walks the
+        // command's WHOLE redirect list in parse order before
+        // exec_builtin (builtins/exec.def:231) hands the bound
+        // descriptors to shell_execve (execute_cmd.c:6126): every
+        // output target opens at its own list position, and each fd's
+        // binding is whatever the walk last assigned it — a dup
+        // resolves against the bindings the walk has already made,
+        // and an fd >= 3 target is created even though no stdio slot
+        // consumes it. The pre-#2821 spawn consulted only the scalar
+        // mirror fields (redirect_out / append / redirect_err /
+        // redirect_err_append) and returned from the first matching
+        // arm, so at most one redirection ever applied (rubash#2821),
+        // and a `>&fd` / `>&-` mirror target was opened as a literal
+        // file name (rubash#2803: TRANSLATE_REDIRECT at redir.c:803-870
+        // classifies the word — digits are r_duplicating_output, `-`
+        // is r_close_this, a non-numeric word at redirector 1 is
+        // r_err_and_out). Input-side entries were bound by
+        // execute_exec's guards before this walk.
+        let mut bindings: std::collections::HashMap<u32, ExecSpawnBinding> =
+            std::collections::HashMap::new();
+        bindings.insert(1, self.exec_spawn_table_binding(1));
+        bindings.insert(2, self.exec_spawn_table_binding(2));
+        for redirect in &cmd.redirects {
+            if redirect.fd_var.is_some()
+                || crate::executor::support_names::is_injected_group_redirect(redirect)
             {
-                let path = target.strip_prefix('&').unwrap_or(&target).to_string();
-                let mut file = self.create_redirect_output(&path, redirect.clobber)?;
-                // r_err_and_out: the child's stdout and stderr both go to
-                // WORD, so the builtin's own diagnostics follow the file too.
-                let child_stdout = Stdio::from(file.try_clone()?);
-                let child_stderr = Stdio::from(file.try_clone()?);
-                let mut child_diag = file.try_clone()?;
-                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                    cmd,
-                    &cmd.words[1..],
-                    crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                    crate::executor::dev_fd_operands::DevOperandStdout::Path(
-                        shell_path_to_windows(&path, &self.shell_state.env_vars),
+                continue;
+            }
+            let target = self.expand_redirect_target(redirect);
+            match redirect.kind {
+                crate::parser::RedirectKind::Output
+                | crate::parser::RedirectKind::Append
+                | crate::parser::RedirectKind::ClobberOutput => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    if is_closed_redirect_target(&target) {
+                        bindings.insert(fd, ExecSpawnBinding::Closed);
+                        continue;
+                    }
+                    let file = if matches!(redirect.kind, crate::parser::RedirectKind::Append) {
+                        // rubash#3104: the append open is a name-
+                        // consumption boundary — master's scalar
+                        // append arms folded raw-byte pairs via
+                        // redirect_target_filesystem_path; the walk
+                        // keeps that conversion.
+                        open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(&target)),
+                        )?
+                    } else {
+                        self.create_redirect_output(&target, redirect.clobber)?
+                    };
+                    // rubash#2635: the open above is GNU's redir_open
+                    // (the target now exists); the dup2 onto a
+                    // redirector at/above the soft limit fails EBADF.
+                    if self.redirect_fd_over_limit(fd) {
+                        return self.exec_spawn_limit_failure(fd);
+                    }
+                    bindings.insert(
+                        fd,
+                        ExecSpawnBinding::File(std::rc::Rc::new(file), Some(target)),
+                    );
+                }
+                crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend => {
+                    if is_closed_redirect_target(&target) {
+                        continue;
+                    }
+                    let file =
+                        if matches!(redirect.kind, crate::parser::RedirectKind::CombinedAppend) {
+                            open_redirect_append(
+                                &self.session_path(self.redirect_target_filesystem_path(&target)),
+                            )?
+                        } else {
+                            self.create_redirect_output(&target, redirect.clobber)?
+                        };
+                    let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(target));
+                    bindings.insert(1, binding.clone());
+                    bindings.insert(2, binding);
+                }
+                crate::parser::RedirectKind::DuplicateOutput => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    if is_closed_redirect_target(&target) {
+                        bindings.insert(fd, ExecSpawnBinding::Closed);
+                        continue;
+                    }
+                    if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                        if source_fd == fd {
+                            continue;
+                        }
+                        if self.redirect_fd_over_limit(fd) {
+                            return self.exec_spawn_limit_failure(source_fd);
+                        }
+                        let binding = match bindings.get(&source_fd) {
+                            Some(binding) => binding.clone(),
+                            None => self.exec_spawn_table_binding(source_fd),
+                        };
+                        bindings.insert(fd, binding);
+                        if move_source {
+                            bindings.insert(source_fd, ExecSpawnBinding::Closed);
+                        }
+                        continue;
+                    }
+                    // TRANSLATE_REDIRECT (redir.c:832-838): a
+                    // non-numeric WORD at redirector 1 is
+                    // r_err_and_out — one open, both std fds share it.
+                    if fd == 1 {
+                        let path = target.strip_prefix('&').unwrap_or(&target).to_string();
+                        let file = if redirect.append {
+                            open_redirect_append(
+                                &self.session_path(self.redirect_target_filesystem_path(&path)),
+                            )?
+                        } else {
+                            self.create_redirect_output(&path, redirect.clobber)?
+                        };
+                        let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(path));
+                        bindings.insert(1, binding.clone());
+                        bindings.insert(2, binding);
+                    }
+                    // Other non-numeric dup targets are
+                    // AMBIGUOUS_REDIRECT, reported by the prechecks.
+                }
+                crate::parser::RedirectKind::CloseOutput => {
+                    let fd = redirect.fd.unwrap_or(1);
+                    bindings.insert(fd, ExecSpawnBinding::Closed);
+                }
+                _ => {}
+            }
+        }
+        let fd1 = bindings
+            .get(&1)
+            .cloned()
+            .unwrap_or(ExecSpawnBinding::Ambient(1));
+        let fd2 = bindings
+            .get(&2)
+            .cloned()
+            .unwrap_or(ExecSpawnBinding::Ambient(2));
+        // Pure-ambient: neither std fd was rebound by the walk or
+        // resolved to a file/closed fd-table endpoint — the
+        // historical tail (image replacement, capture routing)
+        // applies verbatim.
+        if matches!(fd1, ExecSpawnBinding::Ambient(1))
+            && matches!(fd2, ExecSpawnBinding::Ambient(2))
+        {
+            return self.execute_exec_spawn_tail(cmd);
+        }
+        self.execute_exec_spawn_bound(cmd, fd1, fd2)
+    }
+
+    /// One fd's spawn binding resolved from the fd table (see
+    /// ExecSpawnBinding): a File endpoint materializes as a dup of
+    /// its handle, a closed entry as Closed, anything else stays
+    /// Ambient.
+    fn exec_spawn_table_binding(&self, fd: u32) -> ExecSpawnBinding {
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => {
+                match crate::fd::duplicate_handle_inheritable(file_fd.handle) {
+                    Ok(dup) => ExecSpawnBinding::File(
+                        std::rc::Rc::new(crate::fd::handle_to_file(dup)),
+                        Some(file_fd.path.to_string_lossy().into_owned()),
                     ),
-                );
-                let status = crate::builtins::exec::execute_with_child_stdio(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut file,
-                    &mut child_diag,
-                    child_stdout,
-                    child_stderr,
-                    self.exec_inherited_stdin()?,
-                )?;
-                self.finish_dev_fd_operands(dev_ops);
-                return Ok(status);
+                    Err(_) => ExecSpawnBinding::Ambient(fd),
+                }
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            let child_stdout = Stdio::from(file.try_clone()?);
-            // rubash#1175: `exec cmd >file` — GNU replaces the image with
-            // fd 1 bound to the file; try that before the simulation.
-            #[cfg(unix)]
-            if let Some(result) = self.try_exec_image_replacement_with_stdio(
-                cmd,
-                Some(Stdio::from(file.try_clone()?)),
-                None,
-            ) {
-                return result;
+            _ if self.fd_table.has_entry(fd) && !self.fd_table.is_open_for_write(fd) => {
+                ExecSpawnBinding::Closed
             }
-            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                cmd,
-                &cmd.words[1..],
-                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
-                    &target,
-                    &self.shell_state.env_vars,
-                )),
-            );
-            let child_stdin = self.exec_inherited_stdin()?;
-            let status = with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                crate::builtins::exec::execute_with_child_stdio(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut file,
-                    diag,
-                    child_stdout,
-                    Stdio::inherit(),
-                    child_stdin,
-                )
-                .map_err(ExecuteError::from)
-            })?;
-            self.finish_dev_fd_operands(dev_ops);
-            return Ok(status);
+            _ => ExecSpawnBinding::Ambient(fd),
         }
+    }
 
-        if let Some(redirect) = &cmd.append {
-            let target = self.expand_redirect_target(redirect);
-            let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-            )?;
-            let child_stdout = Stdio::from(file.try_clone()?);
-            // rubash#1175: `exec cmd >>file` — same replacement attempt
-            // as the `>file` arm above.
-            #[cfg(unix)]
-            if let Some(result) = self.try_exec_image_replacement_with_stdio(
-                cmd,
-                Some(Stdio::from(file.try_clone()?)),
-                None,
-            ) {
-                return result;
+    /// rubash#2635: a redirector-limit failure in the spawn walk —
+    /// the exec does not spawn and the shell continues at status 1,
+    /// so the failure joins the ExecuteError::IoError channel (the
+    /// same channel a failed redir_open takes from this walk): the
+    /// top-level handler renders `{name_fd}: Bad file descriptor`
+    /// (redirection_error, redir.c:149-176; file arms name the
+    /// redirector, dup arms the source) and routes it through the
+    /// fd-2 binding the entries BEFORE the failing one established
+    /// (write_redirect_diagnostic_routed locates this failure by its
+    /// fd number). Returning a plain status instead would read as
+    /// "the exec'd program ran and exited 1" and end the shell.
+    fn exec_spawn_limit_failure(&mut self, name_fd: u32) -> Result<i32, ExecuteError> {
+        self.exit_code = 1;
+        Err(ExecuteError::IoError(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name_fd}: Bad file descriptor"),
+        )))
+    }
+
+    /// Resolve one spawn binding to a concrete child Stdio for
+    /// `slot`. An Ambient binding naming a DIFFERENT fd is a dup of
+    /// that fd's object (GNU's dup2 snapshot): Stdio::inherit() is
+    /// slot-relative and would hand the child this slot's own
+    /// process descriptor instead, so cross-slot ambients resolve
+    /// through the source's endpoint — a real dup of the process
+    /// descriptor for the standard markers (the external spawn's
+    /// dup_process_handle mechanism, rubash#279).
+    fn exec_spawn_stdio(
+        &self,
+        slot: u32,
+        binding: &ExecSpawnBinding,
+    ) -> Result<Stdio, ExecuteError> {
+        match binding {
+            ExecSpawnBinding::File(file, _) => Ok(Stdio::from(file.as_ref().try_clone()?)),
+            ExecSpawnBinding::Closed => Ok(Stdio::null()),
+            ExecSpawnBinding::Ambient(fd) if *fd == slot => self.exec_inherited_stdio(*fd),
+            ExecSpawnBinding::Ambient(fd) => {
+                let fd = *fd;
+                match self.fd_table.write_endpoint(fd) {
+                    Some(FdWriteEndpoint::File(file_fd)) => {
+                        let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
+                        Ok(Stdio::from(crate::fd::handle_to_file(dup)))
+                    }
+                    Some(FdWriteEndpoint::Stderr) => Ok(Stdio::from(
+                        crate::executor::external_redirects::dup_process_handle(2)?,
+                    )),
+                    Some(FdWriteEndpoint::Stdout) if slot == 1 => self.exec_inherited_stdio(1),
+                    Some(FdWriteEndpoint::Stdout) => Ok(Stdio::from(
+                        crate::executor::external_redirects::dup_process_handle(1)?,
+                    )),
+                    _ => Ok(Stdio::from(
+                        crate::executor::external_redirects::dup_process_handle(fd)?,
+                    )),
+                }
             }
-            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                cmd,
-                &cmd.words[1..],
-                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                crate::executor::dev_fd_operands::DevOperandStdout::Path(shell_path_to_windows(
-                    &target,
-                    &self.shell_state.env_vars,
-                )),
-            );
-            let child_stdin = self.exec_inherited_stdin()?;
-            let status = with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                crate::builtins::exec::execute_with_child_stdio(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut file,
-                    diag,
-                    child_stdout,
-                    Stdio::inherit(),
-                    child_stdin,
-                )
-                .map_err(ExecuteError::from)
-            })?;
-            self.finish_dev_fd_operands(dev_ops);
-            return Ok(status);
         }
+    }
 
-        if let Some(redirect) = &cmd.redirect_err {
-            let target = self.expand_redirect_target(redirect);
-            // GNU redir.c r_duplicating_output: a `2>&N` / `2>&-` target is
-            // a descriptor dup, never a file name — opening it literally
-            // wrote the exec-failure diagnostic into a file named "&1"
-            // and the message vanished (rubash#1144).
-            if let Some(dup) = target.strip_prefix('&') {
-                // The close form `2>&-` is exactly "-"; the move form
-                // `2>&1-` strips one trailing '-'.
-                let dup_fd = if dup == "-" {
-                    dup
-                } else {
-                    dup.strip_suffix('-').unwrap_or(dup)
-                };
-                let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                    cmd,
-                    &cmd.words[1..],
-                    crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                    crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
-                );
-                let status = match dup_fd {
-                    "-" => crate::builtins::exec::execute_with_child_stdio(
+    /// The exec spawn for a command whose walk (or the ambient fd
+    /// table) bound at least one std fd to a file or a closed
+    /// descriptor: compose the child's stdio from the bindings —
+    /// GNU's image inherits exactly the descriptors do_redirections
+    /// left bound (execute_cmd.c:6126 shell_execve).
+    fn execute_exec_spawn_bound(
+        &mut self,
+        cmd: &CommandNode,
+        fd1: ExecSpawnBinding,
+        fd2: ExecSpawnBinding,
+    ) -> Result<i32, ExecuteError> {
+        // rubash#1175: with both std fds resolving to real
+        // descriptors, attempt the true image replacement first (the
+        // helper's gates decline captured or otherwise unfit
+        // contexts, keeping the simulation below).
+        #[cfg(unix)]
+        if !matches!(fd1, ExecSpawnBinding::Closed) && !matches!(fd2, ExecSpawnBinding::Closed) {
+            if let (Ok(stdout), Ok(stderr)) = (
+                self.exec_spawn_stdio(1, &fd1),
+                self.exec_spawn_stdio(2, &fd2),
+            ) {
+                if let Some(result) =
+                    self.try_exec_image_replacement_with_stdio(cmd, Some(stdout), Some(stderr))
+                {
+                    return result;
+                }
+            }
+        }
+        let fd1_path = match &fd1 {
+            ExecSpawnBinding::File(_, path) => path.clone(),
+            _ => None,
+        };
+        let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
+            cmd,
+            &cmd.words[1..],
+            crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
+            match &fd1_path {
+                Some(path) => crate::executor::dev_fd_operands::DevOperandStdout::Path(
+                    shell_path_to_windows(path, &self.shell_state.env_vars),
+                ),
+                None => crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
+            },
+        );
+        let child_stdin = self.exec_inherited_stdin()?;
+        let status = if matches!(fd1, ExecSpawnBinding::Ambient(1))
+            && self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
+            && (self.stdout_capture.is_some()
+                || crate::executor::shell_options::stdout_capture_active())
+        {
+            // fd 1 is the surrounding capture pipe (a pipeline stage
+            // or command substitution): the child runs piped, its
+            // stdout folds into the capture, and fd 2 keeps its own
+            // binding — rubash#2395: a stage that pre-bound fd 2 to a
+            // file (its own `2>file`, claimed pre-wired so the driver
+            // never routes captured bytes there) must see the bytes
+            // land in that file, not in the stage's stderr capture.
+            match &fd2 {
+                ExecSpawnBinding::File(file, _) => {
+                    let mut diag = file.as_ref().try_clone()?;
+                    crate::builtins::exec::execute_with_io(
                         &exec_args,
                         &self.shell_state.env_vars,
                         &self.shell_state.cwd,
                         &mut crate::executor::GlobalStdout,
+                        &mut diag,
+                        child_stdin,
+                    )?
+                }
+                ExecSpawnBinding::Ambient(1) => crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    &mut crate::executor::GlobalStdout,
+                    &mut crate::executor::GlobalStdout,
+                    child_stdin,
+                )?,
+                ExecSpawnBinding::Closed => crate::builtins::exec::execute_with_io(
+                    &exec_args,
+                    &self.shell_state.env_vars,
+                    &self.shell_state.cwd,
+                    &mut crate::executor::GlobalStdout,
+                    &mut std::io::sink(),
+                    child_stdin,
+                )?,
+                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                    crate::builtins::exec::execute_with_io(
+                        &exec_args,
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        &mut crate::executor::GlobalStdout,
+                        diag,
+                        child_stdin,
+                    )
+                    .map_err(ExecuteError::from)
+                })?,
+            }
+        } else {
+            // Direct composition: both std fds resolve to concrete
+            // descriptors (files, ambient objects, or genuinely
+            // closed slots via the spawner's pre_exec close).
+            let child_stdout = self.exec_spawn_stdio(1, &fd1)?;
+            let child_stderr = self.exec_spawn_stdio(2, &fd2)?;
+            let mut close_fds: Vec<u32> = Vec::new();
+            if matches!(fd1, ExecSpawnBinding::Closed) {
+                close_fds.push(1);
+            }
+            if matches!(fd2, ExecSpawnBinding::Closed) {
+                close_fds.push(2);
+            }
+            // The builtin's own stdout writer (printenv / help
+            // faces) follows fd 1's binding.
+            let mut stdout_file;
+            let mut stdout_sink;
+            let mut stdout_err;
+            let mut stdout_writer: &mut dyn std::io::Write = match &fd1 {
+                ExecSpawnBinding::File(file, _) => {
+                    stdout_file = file.as_ref().try_clone()?;
+                    &mut stdout_file
+                }
+                ExecSpawnBinding::Closed => {
+                    stdout_sink = std::io::sink();
+                    &mut stdout_sink
+                }
+                // fd 1 dup'd the process stderr object (`exec ... 1>&2`
+                // running a builtin operand): the builtin's own writes
+                // follow it there, not to the stdout channel.
+                ExecSpawnBinding::Ambient(src)
+                    if matches!(
+                        self.fd_table.write_endpoint(*src),
+                        Some(FdWriteEndpoint::Stderr)
+                    ) || (self.fd_table.write_endpoint(*src).is_none() && *src == 2) =>
+                {
+                    stdout_err = std::io::stderr();
+                    &mut stdout_err
+                }
+                _ => &mut crate::executor::GlobalStdout,
+            };
+            // The diagnostic writer follows fd 2's binding.
+            match &fd2 {
+                ExecSpawnBinding::File(file, _) => {
+                    let mut diag = file.as_ref().try_clone()?;
+                    crate::builtins::exec::execute_with_child_stdio_closing(
+                        &exec_args,
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        &mut stdout_writer,
+                        &mut diag,
+                        child_stdout,
+                        child_stderr,
+                        child_stdin,
+                        &close_fds,
+                    )?
+                }
+                ExecSpawnBinding::Closed => {
+                    crate::builtins::exec::execute_with_child_stdio_closing(
+                        &exec_args,
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        &mut stdout_writer,
                         &mut std::io::sink(),
-                        Stdio::inherit(),
-                        Stdio::null(),
-                        self.exec_inherited_stdin()?,
-                    )?,
-                    "1" => crate::builtins::exec::execute_with_io(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut crate::executor::GlobalStdout,
-                        &mut crate::executor::GlobalStdout,
-                        self.exec_inherited_stdin()?,
-                    )?,
-                    _ => {
-                        let child_stdout = self.exec_inherited_stdio(1)?;
-                        let dup_stdio = dup_fd
-                            .parse::<u32>()
-                            .ok()
-                            .and_then(|fd| self.exec_inherited_stdio(fd).ok())
-                            .unwrap_or_else(Stdio::inherit);
-                        let child_stdin = self.exec_inherited_stdin()?;
-                        with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                            crate::builtins::exec::execute_with_child_stdio(
+                        child_stdout,
+                        child_stderr,
+                        child_stdin,
+                        &close_fds,
+                    )?
+                }
+                ExecSpawnBinding::Ambient(1) => {
+                    // fd 2 dup'd fd 1's ambient object: the
+                    // diagnostic writer is that object (a bound
+                    // file's clone, or the process stdout channel).
+                    match self.fd_table.write_endpoint(1) {
+                        Some(FdWriteEndpoint::File(file_fd)) => {
+                            let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
+                            let mut diag = crate::fd::handle_to_file(dup);
+                            crate::builtins::exec::execute_with_child_stdio_closing(
                                 &exec_args,
                                 &self.shell_state.env_vars,
                                 &self.shell_state.cwd,
-                                &mut crate::executor::GlobalStdout,
-                                diag,
+                                &mut stdout_writer,
+                                &mut diag,
                                 child_stdout,
-                                dup_stdio,
+                                child_stderr,
                                 child_stdin,
-                            )
-                            .map_err(ExecuteError::from)
-                        })?
+                                &close_fds,
+                            )?
+                        }
+                        _ => crate::builtins::exec::execute_with_child_stdio_closing(
+                            &exec_args,
+                            &self.shell_state.env_vars,
+                            &self.shell_state.cwd,
+                            &mut stdout_writer,
+                            &mut crate::executor::GlobalStdout,
+                            child_stdout,
+                            child_stderr,
+                            child_stdin,
+                            &close_fds,
+                        )?,
                     }
-                };
-                self.finish_dev_fd_operands(dev_ops);
-                return Ok(status);
+                }
+                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                    crate::builtins::exec::execute_with_child_stdio_closing(
+                        &exec_args,
+                        &self.shell_state.env_vars,
+                        &self.shell_state.cwd,
+                        &mut stdout_writer,
+                        diag,
+                        child_stdout,
+                        child_stderr,
+                        child_stdin,
+                        &close_fds,
+                    )
+                    .map_err(ExecuteError::from)
+                })?,
             }
-            let mut file = self.create_redirect_output(&target, redirect.clobber)?;
-            let child_stderr = Stdio::from(file.try_clone()?);
-            // rubash#1175: `exec cmd 2>file` — replacement attempt with
-            // fd 2 bound to the file (the capture case declines via the
-            // gates inside the helper).
-            #[cfg(unix)]
-            if let Some(result) = self.try_exec_image_replacement_with_stdio(
-                cmd,
-                None,
-                Some(Stdio::from(file.try_clone()?)),
-            ) {
-                return result;
-            }
-            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                cmd,
-                &cmd.words[1..],
-                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
-            );
-            // GNU redir.c do_redirections: `exec cmd 2>/dev/null` rebinds
-            // ONLY fd 2 — the child's fd 1 keeps whatever the shell carried,
-            // which inside a command substitution is the capture pipe
-            // (subst.c:7143). Stdio::inherit() here instead gave the child
-            // the CONSOLE stdout, leaking its output past the capture
-            // (modernish goodsh.sh `_Msh_Gsh_doTestShell`, rubash#252).
-            // Route through the capture-aware sink under the same
-            // fd1_lands_in_capture condition as the no-redirect arm below.
-            let fd1_lands_in_capture = self.fd_table.write_endpoint(1)
-                == Some(FdWriteEndpoint::Stdout)
-                && (self.stdout_capture.is_some()
-                    || crate::executor::shell_options::stdout_capture_active());
-            let status = if fd1_lands_in_capture {
-                crate::builtins::exec::execute_with_io(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut crate::executor::GlobalStdout,
-                    &mut file,
-                    self.exec_inherited_stdin()?,
-                )?
-            } else {
-                crate::builtins::exec::execute_with_child_stdio(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut crate::executor::GlobalStdout,
-                    &mut file,
-                    Stdio::inherit(),
-                    child_stderr,
-                    self.exec_inherited_stdin()?,
-                )?
-            };
-            self.finish_dev_fd_operands(dev_ops);
-            return Ok(status);
-        }
+        };
+        self.finish_dev_fd_operands(dev_ops);
+        Ok(status)
+    }
 
-        if let Some(redirect) = &cmd.redirect_err_append {
-            let target = self.expand_redirect_target(redirect);
-            let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
-            )?;
-            let child_stderr = Stdio::from(file.try_clone()?);
-            // rubash#1175: `exec cmd 2>>file` — same replacement attempt
-            // as the `2>file` arm above.
-            #[cfg(unix)]
-            if let Some(result) = self.try_exec_image_replacement_with_stdio(
-                cmd,
-                None,
-                Some(Stdio::from(file.try_clone()?)),
-            ) {
-                return result;
-            }
-            let (exec_args, dev_ops, _proc_ops) = self.materialize_exec_operands(
-                cmd,
-                &cmd.words[1..],
-                crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
-                crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
-            );
-            // Same capture-aware fd-1 routing as the redirect_err arm above
-            // (GNU redir.c: the append redirect on fd 2 never rebinds fd 1).
-            let fd1_lands_in_capture = self.fd_table.write_endpoint(1)
-                == Some(FdWriteEndpoint::Stdout)
-                && (self.stdout_capture.is_some()
-                    || crate::executor::shell_options::stdout_capture_active());
-            let status = if fd1_lands_in_capture {
-                crate::builtins::exec::execute_with_io(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut crate::executor::GlobalStdout,
-                    &mut file,
-                    self.exec_inherited_stdin()?,
-                )?
-            } else {
-                crate::builtins::exec::execute_with_child_stdio(
-                    &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
-                    &mut crate::executor::GlobalStdout,
-                    &mut file,
-                    Stdio::inherit(),
-                    child_stderr,
-                    self.exec_inherited_stdin()?,
-                )?
-            };
-            self.finish_dev_fd_operands(dev_ops);
-            return Ok(status);
-        }
-
-        self.apply_no_output_builtin_redirects(cmd)?;
+    /// The historical tail of the exec spawn, kept for the
+    /// pure-ambient case (the walk rebound neither std fd and the fd
+    /// table holds no file/closed endpoint for them): image
+    /// replacement plus the capture-aware spawn, unchanged. The
+    /// ordered walk in execute_exec_spawn has already opened every
+    /// numbered output entry, so the apply_no_output pass the tail
+    /// used to need no longer runs here.
+    fn execute_exec_spawn_tail(&mut self, cmd: &CommandNode) -> Result<i32, ExecuteError> {
         // rubash#1175: with every gate in exec_image_replacement_applies
         // satisfied, replace this process's image for real (GNU
         // shell_execve) instead of simulating it with a child whose PID
@@ -4300,6 +4537,7 @@ impl Executor {
         use std::process::{Command, Stdio};
         let exe = std::env::var_os("CARGO_BIN_EXE_rubash")
             .map(std::path::PathBuf::from)
+            .or_else(test_rubash_binary_from_current_exe)
             .or_else(|| std::env::current_exe().ok())
             .unwrap_or_else(|| "rubash".into());
         let Ok((reader, writer)) = std::io::pipe() else {
@@ -4511,6 +4749,22 @@ impl Executor {
                         #[cfg(unix)]
                         ambient_pins.push((dup, *fd));
                         used_capture_write_end = true;
+                    }
+                }
+                // rubash#3149: the stage pipe's write end forwards
+                // like a file write handle; NOT a BackgroundCapture
+                // writer, so used_capture_write_end stays clear.
+                super::external_setup::ProcsubSpawnFd::StreamWrite(file) => {
+                    if let Ok(dup) = crate::fd::duplicate_handle_inheritable(file.handle) {
+                        env_entries
+                            .push((format!("__RUBASH_FD_WHANDLE_{fd}"), format!("{dup:#x}")));
+                        env_entries.push((
+                            format!("__RUBASH_FD_WPATH_{fd}"),
+                            file.path.to_string_lossy().into_owned(),
+                        ));
+                        ambient_fd_dups.push(dup);
+                        #[cfg(unix)]
+                        ambient_pins.push((dup, *fd));
                     }
                 }
                 _ => {}
@@ -4764,6 +5018,122 @@ impl Executor {
                     Err(error) => return Err(error),
                 }
                 continue;
+            }
+            // rubash#2615: GNU registers this fixed entry's undo save
+            // before performing it even for `exec` — exec_builtin's
+            // list carries a redirection_undo_list (execute_cmd.c:5619)
+            // whose saves are live for the walk's duration and only
+            // disposed once the whole list stands, so a later `{var}`
+            // allocation in THIS list counts them (see
+            // fd_walk_undo_save_slots). This walk's table IS the
+            // evolved descriptor space, so the walk overlay is empty;
+            // occupied_slots is walk-local, so the saves leave no
+            // trace for later commands, matching the dispose.
+            for (slot, _source) in
+                self.fd_walk_undo_save_slots(&FdWalkSpace::new(), redirect, &occupied_slots)
+            {
+                occupied_slots.insert(slot);
+            }
+            // rubash#2635: an explicit redirector at/above the
+            // RLIMIT_NOFILE soft limit fails at THIS list position —
+            // GNU's redir_open runs first (the target file is
+            // created), then the dup2 onto the redirector fails
+            // EBADF (redir.c r_output_direction / redir.c:1215) and
+            // redirection_error stops the walk. Close forms are
+            // exempt (r_close_this ignores the result) and a
+            // self-dup is a no-op; a dup's diagnostic names the
+            // source fd. The pre-open below mirrors each arm's own
+            // validation open so the creation side effect stands
+            // exactly as if the arm had run.
+            {
+                let gate_fd = redirect.fd.unwrap_or(match redirect.kind {
+                    crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite
+                    | crate::parser::RedirectKind::DuplicateInput
+                    | crate::parser::RedirectKind::CloseInput => 0,
+                    _ => 1,
+                });
+                let gate_name = match redirect.kind {
+                    crate::parser::RedirectKind::CloseOutput
+                    | crate::parser::RedirectKind::CloseInput => None,
+                    crate::parser::RedirectKind::DuplicateOutput
+                    | crate::parser::RedirectKind::DuplicateInput => {
+                        redirect_target_fd_and_move(&target).and_then(|(source_fd, _)| {
+                            (source_fd != gate_fd && self.redirect_fd_over_limit(gate_fd))
+                                .then_some(source_fd)
+                        })
+                    }
+                    crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend
+                    | crate::parser::RedirectKind::Input
+                    | crate::parser::RedirectKind::ReadWrite => {
+                        self.redirect_fd_over_limit(gate_fd).then_some(gate_fd)
+                    }
+                    _ => None,
+                };
+                if let Some(name_fd) = gate_name {
+                    let mut gate_fires = true;
+                    match redirect.kind {
+                        crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::CombinedAppend => {
+                            if !is_null_device(&target) {
+                                let _ = open_redirect_append(&self.session_path(
+                                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                                ));
+                            }
+                        }
+                        crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput => {
+                            if !is_null_device(&target) {
+                                crate::executor::shell_options::probe_output_redirect(
+                                    self,
+                                    &target,
+                                    redirect.clobber,
+                                )?;
+                            }
+                        }
+                        crate::parser::RedirectKind::ReadWrite => {
+                            if !target.starts_with("/dev/")
+                                && !crate::special_paths::is_net_redirect_target(&target)
+                            {
+                                let path = self.session_path(shell_path_to_windows(
+                                    &target,
+                                    &self.shell_state.env_vars,
+                                ));
+                                let _ = FileFd::open_readwrite_pair(path);
+                            }
+                        }
+                        crate::parser::RedirectKind::Input => {
+                            // GNU's open runs first: a target that
+                            // cannot be opened reports its own errno
+                            // from the arm below, never the limit's.
+                            let path = self.session_path(shell_path_to_windows(
+                                &target,
+                                &self.shell_state.env_vars,
+                            ));
+                            gate_fires = FileFd::open_read(path).is_ok();
+                        }
+                        _ => {}
+                    }
+                    if gate_fires {
+                        let mut stderr = Vec::new();
+                        writeln!(
+                            &mut stderr,
+                            "{}{name_fd}: Bad file descriptor",
+                            self.error_prefix()
+                        )?;
+                        self.write_default_stderr(&stderr)?;
+                        self.exit_code = 1;
+                        if self.posix_special_redirect_failure_exits(cmd) {
+                            return Err(ExecuteError::ExitCode(1));
+                        }
+                        return Ok(Some(1));
+                    }
+                }
             }
             match redirect.kind {
                 crate::parser::RedirectKind::Output
@@ -5368,7 +5738,12 @@ impl Executor {
             // rubash#2282: heredoc entries apply after the plain list
             // here too, so every numbered slot counts as occupied.
             occupied_slots.extend(command_own_numbered_slots(cmd));
-            match self.execute_dynamic_fd_var_heredoc(redirect, false, &occupied_slots) {
+            match self.execute_dynamic_fd_var_heredoc(
+                redirect,
+                false,
+                &occupied_slots,
+                &FdWalkSpace::new(),
+            ) {
                 Ok(_) => {}
                 Err(ExecuteError::IoError(error)) => {
                     let mut stderr = Vec::new();
@@ -6336,6 +6711,154 @@ impl Executor {
         }
     }
 
+    /// rubash#2615: the descriptor space the owning walk has evolved
+    /// at its current position, as an occupied-slot set for F_DUPFD
+    /// searches: the ambient table's occupied slots plus the slots
+    /// the walk itself has bound or saved so far (`occupied_slots`),
+    /// minus the slots the walk has CLOSED at this position — a
+    /// close frees its descriptor for the walk's later allocations
+    /// in GNU's single space (`exec 10>f` then `cmd 10>&- {v}>g`
+    /// allocates v=10), even though the ambient table — which the
+    /// funnel path never applies the fixed entries to — still holds
+    /// it open.
+    pub(in crate::executor) fn fd_walk_occupied_set(
+        &self,
+        occupied_slots: &std::collections::HashSet<u32>,
+        walk: &FdWalkSpace,
+    ) -> std::collections::HashSet<u32> {
+        let mut occupied: std::collections::HashSet<u32> = self
+            .fd_table
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.closed && (entry.read.is_some() || entry.write.is_some()))
+            .map(|(fd, _)| *fd)
+            .collect();
+        occupied.extend(occupied_slots.iter().copied());
+        for (fd, binding) in walk.iter() {
+            if matches!(binding, FdWalkBinding::Closed) {
+                occupied.remove(fd);
+            }
+        }
+        occupied
+    }
+
+    /// The lowest descriptor >= `base` outside `occupied`, under the
+    /// same soft-limit ceiling the fd table's own allocator applies
+    /// (see FdTable::allocate_dynamic_with_limit).
+    pub(in crate::executor) fn fd_walk_lowest_free(
+        &self,
+        base: u32,
+        occupied: &std::collections::HashSet<u32>,
+    ) -> Option<u32> {
+        let limit = self.open_files_limit();
+        let mut candidate = base;
+        loop {
+            if let Some(limit) = limit {
+                if candidate >= limit {
+                    return None;
+                }
+            }
+            if !occupied.contains(&candidate) {
+                return Some(candidate);
+            }
+            candidate += 1;
+        }
+    }
+
+    /// rubash#2615: allocate a dynamic fd against the descriptor
+    /// space the owning walk has evolved (see fd_walk_occupied_set):
+    /// like allocate_dynamic_fd_avoiding, except a descriptor the
+    /// walk has closed at this position is free even when the
+    /// ambient table still holds it open.
+    pub(in crate::executor) fn allocate_dynamic_fd_in_walk(
+        &mut self,
+        occupied_slots: &std::collections::HashSet<u32>,
+        walk: &FdWalkSpace,
+    ) -> Option<u32> {
+        let occupied = self.fd_walk_occupied_set(occupied_slots, walk);
+        self.fd_walk_lowest_free(10, &occupied)
+    }
+
+    /// rubash#2615: the undo-save slots GNU's do_redirections walk
+    /// registers for ONE fixed (non-`{var}`) entry at its walk
+    /// position, in registration order, each paired with the
+    /// descriptor whose binding the save copies. When a command's
+    /// redirections rebind a descriptor that is open at the entry's
+    /// position, bash first dups it out of the way — add_undo_redirect
+    /// (redir.c:1296) with F_DUPFD to the lowest free slot >=
+    /// SHELL_FD_BASE (redir.c:86); for the dup arms the search starts
+    /// above the dup source when the source is itself >= SHELL_FD_BASE
+    /// (fdbase = redir_fd, passed at redir.c:1163, applied at
+    /// redir.c:1303) — and the save stays open for the rest of the
+    /// walk and for the command's whole duration, so every later
+    /// REDIR_VARASSIGN allocation must count it. The gates, per arm:
+    /// file/heredoc opens save an open redirector from SHELL_FD_BASE
+    /// (redir.c:972/1091); a dup entry saves its open redirector from
+    /// the fdbase above, unless source == redirector (a self-dup
+    /// registers nothing, redir.c:1153's `redir_fd != redirector`);
+    /// a move entry whose redirector is open earns a SECOND save, of
+    /// its source, from SHELL_FD_BASE (redir.c:1175); a close entry
+    /// saves its open redirector from SHELL_FD_BASE (redir.c:1253).
+    /// An entry whose redirector is closed at its position registers
+    /// only a close-undo (add_undo_close_redirect) and occupies
+    /// nothing. `{var}` entries never reach here — a varassign's own
+    /// undo is the varredir_close close record, never a save.
+    pub(in crate::executor) fn fd_walk_undo_save_slots(
+        &self,
+        walk: &FdWalkSpace,
+        redirect: &Redirect,
+        occupied_slots: &std::collections::HashSet<u32>,
+    ) -> Vec<(u32, u32)> {
+        let effective_fd = redirect
+            .fd
+            .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+        if !matches!(
+            self.fd_walk_resolve(walk, effective_fd),
+            FdWalkBinding::TableSlot(_) | FdWalkBinding::File(_)
+        ) {
+            return Vec::new();
+        }
+        let mut occupied = self.fd_walk_occupied_set(occupied_slots, walk);
+        let mut saves: Vec<(u32, u32)> = Vec::new();
+        let mut claim = |base: u32, source: u32, occupied: &mut std::collections::HashSet<u32>| {
+            if let Some(slot) = self.fd_walk_lowest_free(base, occupied) {
+                occupied.insert(slot);
+                saves.push((slot, source));
+            }
+        };
+        match redirect.kind {
+            crate::parser::RedirectKind::CloseInput | crate::parser::RedirectKind::CloseOutput => {
+                claim(10, effective_fd, &mut occupied);
+            }
+            crate::parser::RedirectKind::DuplicateInput
+            | crate::parser::RedirectKind::DuplicateOutput => {
+                let target = self.expand_redirect_target(redirect);
+                if let Some((source_fd, move_source)) = redirect_target_fd_and_move(&target) {
+                    if source_fd != effective_fd {
+                        let base = if source_fd >= 10 { source_fd + 1 } else { 10 };
+                        claim(base, effective_fd, &mut occupied);
+                    }
+                    if move_source {
+                        claim(10, source_fd, &mut occupied);
+                    }
+                }
+            }
+            crate::parser::RedirectKind::Input
+            | crate::parser::RedirectKind::Output
+            | crate::parser::RedirectKind::Append
+            | crate::parser::RedirectKind::ClobberOutput
+            | crate::parser::RedirectKind::ReadWrite
+            | crate::parser::RedirectKind::HereDoc
+            | crate::parser::RedirectKind::HereString
+            | crate::parser::RedirectKind::CombinedOutput
+            | crate::parser::RedirectKind::CombinedAppend => {
+                claim(10, effective_fd, &mut occupied);
+            }
+            crate::parser::RedirectKind::Unknown => {}
+        }
+        saves
+    }
+
     /// GNU redir.c do_redirections → redir_varassign (redir.c:1133-1166):
     /// every `{var}` redirection allocates a fresh descriptor and assigns
     /// the number to the variable — for builtins, functions and external
@@ -6348,6 +6871,7 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
         auto_close: bool,
+        undoable_walk: bool,
     ) -> Result<bool, ExecuteError> {
         // RESTRICTED_SHELL (#804 F1/N2): the refusal must precede
         // redir_varassign — GNU checks restricted before the varassign arm
@@ -6358,6 +6882,9 @@ impl Executor {
         // every applier path (simple-command preflight and the
         // exec-with-operand site alike).
         if self.reject_restricted_write_redirect_entry(cmd)? {
+            // rubash#2629: a refused apply produced no binds; a stale
+            // snapshot must not outlive it.
+            self.fd_var_apply_snapshot = None;
             return Ok(true);
         }
         let mut redirect_failed = false;
@@ -6370,6 +6897,11 @@ impl Executor {
         self.fd_var_external_undo.clear();
         self.fd_var_pending_closes.clear();
         self.fd_var_close_restore.clear();
+        // rubash#2629: this run replaces the recorded apply result;
+        // it is re-recorded at the end only if the whole list
+        // applied (a failed apply's partial binds are not a replay
+        // candidate — the command they belonged to never ran).
+        self.fd_var_apply_snapshot = None;
         // rubash#2282: GNU's do_redirections is one ordered walk over
         // one descriptor space (redir.c:237): when a REDIR_VARASSIGN
         // allocation (redir.c:940 F_DUPFD) runs, the numbered entries
@@ -6412,6 +6944,25 @@ impl Executor {
                 occupied_slots.insert(fd);
             }
             let Some(name) = redirect.fd_var.as_deref() else {
+                // rubash#2615: GNU registers this entry's undo save
+                // before performing the entry (see
+                // fd_walk_undo_save_slots); the save occupies its
+                // slot for the rest of the walk, so fold it into the
+                // running occupied set before recording the entry.
+                // The saves exist only in an UNDOABLE walk: redir.c's
+                // undo machinery is gated on RX_UNDOABLE (redir.c:243),
+                // and the fork-child walks (execute_disk_command,
+                // execute_cmd.c:5522; the subshell list,
+                // execute_cmd.c:1761) run RX_ACTIVE only, so a `{var}`
+                // allocation there counts no saves — the caller
+                // passes the walk's mode in `undoable_walk`.
+                if undoable_walk {
+                    for (slot, _source) in
+                        self.fd_walk_undo_save_slots(&walk_space, redirect, &occupied_slots)
+                    {
+                        occupied_slots.insert(slot);
+                    }
+                }
                 // rubash#2612: a fixed entry moves the walk space
                 // like any other entry of GNU's single pass — its
                 // binding is what later entries resolve against.
@@ -6560,8 +7111,12 @@ impl Executor {
                 .unwrap_or_else(|| name.to_string());
             let prior = self.shell_state.env_vars.get(&resolved).cloned();
             let prior_typed = self.shell_state.variables.get(&resolved).cloned();
-            let outcome =
-                self.execute_dynamic_fd_var_heredoc(redirect, auto_close, &occupied_slots);
+            let outcome = self.execute_dynamic_fd_var_heredoc(
+                redirect,
+                auto_close,
+                &occupied_slots,
+                &walk_space,
+            );
             // rubash#2281: the applier-bound descriptor, as at the
             // plain-list site above (a heredoc entry always binds).
             let bound_fd = match &outcome {
@@ -6587,7 +7142,104 @@ impl Executor {
                 Err(error) => return Err(error),
             }
         }
+        // rubash#2629: record this run's binds for a later helper
+        // walk over the same list (see FdVarApplySnapshot). The
+        // binds are read back from the undo records the run just
+        // produced — exactly the descriptors it bound, in order —
+        // with the fd-table entries still standing for them.
+        if !redirect_failed {
+            let binds: Vec<(String, u32, super::fd_table::FdEntry)> = self
+                .fd_var_external_undo
+                .iter()
+                .filter_map(|(name, _prior, _prior_typed, bound_fd)| {
+                    let fd = (*bound_fd)?;
+                    let entry = self.fd_table.entries.get(&fd)?.clone();
+                    Some((name.clone(), fd, entry))
+                })
+                .collect();
+            self.fd_var_apply_snapshot = Some(FdVarApplySnapshot {
+                fingerprint: FdVarApplySnapshot::fingerprint_of(cmd),
+                binds,
+            });
+        }
         Ok(redirect_failed)
+    }
+
+    /// rubash#2629: rebind the recorded result of the most recent
+    /// successful apply_dynamic_fd_var_redirects run for THIS
+    /// redirect list, without re-running the applier — no target
+    /// word is expanded, no file is opened, no side effect of the
+    /// list's words evaluates a second time. The replay performs
+    /// the same bookkeeping a real apply leaves behind for its
+    /// consumers: fresh undo records (priors read at replay time,
+    /// so the caller's undo restores the state the replay found),
+    /// the close-generation stamp, and the varredir_close deferred
+    /// closes under the same gate the applier uses. Returns false
+    /// when no usable record exists (no apply yet, a failed apply,
+    /// or an intervening apply of a different list replaced it) —
+    /// the caller then runs the real applier, exactly as before.
+    pub(in crate::executor) fn replay_dynamic_fd_var_snapshot(
+        &mut self,
+        cmd: &CommandNode,
+        auto_close: bool,
+    ) -> bool {
+        let Some(snapshot) = self.fd_var_apply_snapshot.clone() else {
+            return false;
+        };
+        if snapshot.fingerprint != FdVarApplySnapshot::fingerprint_of(cmd) {
+            return false;
+        }
+        self.fd_var_close_generation += 1;
+        self.fd_var_pending_close_generation = self.fd_var_close_generation;
+        self.fd_var_external_undo.clear();
+        self.fd_var_pending_closes.clear();
+        self.fd_var_close_restore.clear();
+        let close_after_command = auto_close
+            && crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "varredir_close");
+        // One undo record per `{var}` entry of the list, in list
+        // order, mirroring the applier's records: entries the
+        // recorded apply bound carry their descriptor, the rest
+        // (close forms, failed dups) carry None. A variable bound
+        // by several entries (`{v}>a {v}>b`) consumes the recorded
+        // binds in order, one per entry.
+        let mut bound_queues: std::collections::HashMap<&str, std::collections::VecDeque<u32>> =
+            std::collections::HashMap::new();
+        for (name, fd, _entry) in &snapshot.binds {
+            bound_queues
+                .entry(name.as_str())
+                .or_default()
+                .push_back(*fd);
+        }
+        let entry_names: Vec<String> = cmd
+            .redirects
+            .iter()
+            .filter_map(|redirect| redirect.fd_var.clone())
+            .chain(
+                cmd.heredoc_redirects
+                    .iter()
+                    .filter_map(|redirect| redirect.fd_var.clone()),
+            )
+            .collect();
+        for name in &entry_names {
+            let resolved = self
+                .resolved_variable_name(name)
+                .unwrap_or_else(|| name.clone());
+            let prior = self.shell_state.env_vars.get(&resolved).cloned();
+            let prior_typed = self.shell_state.variables.get(&resolved).cloned();
+            let bound_fd = bound_queues
+                .get_mut(resolved.as_str())
+                .and_then(|queue| queue.pop_front());
+            self.fd_var_external_undo
+                .push((resolved, prior, prior_typed, bound_fd));
+        }
+        for (name, fd, entry) in &snapshot.binds {
+            self.fd_table.entries.insert(*fd, entry.clone());
+            let _ = self.set_dynamic_fd_variable(name, *fd);
+            if close_after_command {
+                self.deferred_varredir_closes.push(*fd);
+            }
+        }
+        true
     }
 
     /// `{var}<<[-]EOF` / `{var}<<<word` — allocate a dynamic fd holding the
@@ -6601,6 +7253,10 @@ impl Executor {
         // already bound, counted as occupied by the allocation (see
         // apply_dynamic_fd_var_redirects).
         occupied_slots: &std::collections::HashSet<u32>,
+        // rubash#2615: the owning walk's evolved descriptor space
+        // (see execute_dynamic_fd_var_redirect's `walk` parameter);
+        // faces whose table IS the evolved space pass an empty one.
+        walk: &FdWalkSpace,
     ) -> Result<bool, ExecuteError> {
         let Some(name) = redirect.fd_var.as_deref() else {
             return Ok(false);
@@ -6621,7 +7277,7 @@ impl Executor {
         // here_document_to_fd produces — storage prefix decoded and
         // the here-string newline present (rubash#1867).
         let body = self.expand_heredoc_redirect_text(redirect);
-        let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+        let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
             // GNU exhausts {var} heredocs through the same REDIR_VARASSIGN
             // fcntl F_DUPFD path (probe: ulimit -Sn 6 then exec {v}<<E
             // prints "redirection error: cannot duplicate fd: ..." too), so
@@ -7288,7 +7944,7 @@ impl Executor {
                     {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                    let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -7346,7 +8002,7 @@ impl Executor {
                     {
                         return Ok(true);
                     }
-                    let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                    let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                         return Err(ExecuteError::IoError(std::io::Error::new(
                             std::io::ErrorKind::Other,
                             self.fd_dup_error_payload(&target),
@@ -7393,14 +8049,15 @@ impl Executor {
                     // plumbed into this entry, so the child's diagnostic
                     // frame starts from the body's own text.)
                     let mut bound_fd = None;
-                    if let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) {
+                    if let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) {
                         if self.bind_input_process_substitution_child(fd, source, None) {
                             bound_fd = Some(fd);
                         }
                     }
                     if bound_fd.is_none() {
                         if let Some(input) = self.process_substitution_output(source) {
-                            let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                            let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
+                            else {
                                 return Err(ExecuteError::IoError(std::io::Error::new(
                                     std::io::ErrorKind::Other,
                                     self.fd_dup_error_payload(&target),
@@ -7470,7 +8127,7 @@ impl Executor {
                             FdWalkDupAction::CopyFrom(slot) => {
                                 if self.fd_table.is_open_for_read(slot) {
                                     let Some(fd) =
-                                        self.allocate_dynamic_fd_avoiding(occupied_slots)
+                                        self.allocate_dynamic_fd_in_walk(occupied_slots, walk)
                                     else {
                                         return Err(ExecuteError::IoError(std::io::Error::new(
                                             std::io::ErrorKind::Other,
@@ -7495,8 +8152,7 @@ impl Executor {
 
                 // G-02 session-cwd anchor (rubash#1887): see
                 // set_fd_readwrite_file.
-                let path =
-                    self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                let path = self.session_path(self.redirect_target_filesystem_path(&target));
                 let (read_file, write_file) =
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         FileFd::open_readwrite_pair(path)
@@ -7507,7 +8163,7 @@ impl Executor {
                         (file.clone(), file)
                     };
                 let file = read_file;
-                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
@@ -7535,7 +8191,7 @@ impl Executor {
             crate::parser::RedirectKind::Output
             | crate::parser::RedirectKind::Append
             | crate::parser::RedirectKind::ClobberOutput => {
-                let Some(fd) = self.allocate_dynamic_fd_avoiding(occupied_slots) else {
+                let Some(fd) = self.allocate_dynamic_fd_in_walk(occupied_slots, walk) else {
                     return Err(ExecuteError::IoError(std::io::Error::new(
                         std::io::ErrorKind::Other,
                         self.fd_dup_error_payload(&target),
@@ -7770,6 +8426,19 @@ impl Executor {
             Ok(soft) => Some(u32::try_from(soft).unwrap_or(u32::MAX)),
             Err(_) => Some(FdTable::DEFAULT_OPEN_FILES_SOFT_LIMIT),
         }
+    }
+
+    /// rubash#2635: whether an explicit redirector fd sits at/above
+    /// the RLIMIT_NOFILE soft limit. GNU's do_redirection_internal
+    /// opens the target and then fails the dup2 onto such a
+    /// redirector with EBADF (redir.c r_output_direction: "dup2
+    /// failed? must be fd limit issue"; the r_duplicating cases at
+    /// redir.c:1215 share the call), so every walk that binds an
+    /// explicit numbered fd consults this one predicate at the
+    /// entry's own list position. `{var}` allocations never reach
+    /// it — the allocator already stays below the limit.
+    pub(in crate::executor) fn redirect_fd_over_limit(&self, fd: u32) -> bool {
+        self.open_files_limit().is_some_and(|limit| fd >= limit)
     }
 
     pub(in crate::executor) fn allocate_dynamic_fd(&mut self) -> Option<u32> {

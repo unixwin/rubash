@@ -760,6 +760,12 @@ impl Executor {
         // full parsing/execution. This handles the alias4.sub form
         // `$(eval echo b)` so alias-expanded command substitutions participate
         // in word expansion.
+        // rubash#2785: the untrimmed body text is threaded to the
+        // body-error report separately — its trailing blank is the
+        // only evidence that a `)` closing the substitution was NOT
+        // glued to the body's last token, and the conditional
+        // near-token walk in the report reads exactly that.
+        let raw_source = source;
         let source = source.trim();
         if source.is_empty() {
             self.last_command_substitution_status.set(Some(0));
@@ -852,10 +858,41 @@ impl Executor {
             && crate::builtins::trap::active_trap_action_ref(&self.shell_state.env_vars, "DEBUG")
                 .is_some()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
+        }
+        // GNU dispatches a simple command function-first: execute_cmd.c
+        // execute_simple_command finds a function before any builtin or
+        // PATH search, and subst.c:7143 command_substitute runs the body
+        // through parse_and_execute, so the same order applies inside
+        // $(...). None of the shortcut arms below consults the function
+        // table — the hardcoded true/false/:/pwd/cd arms, the
+        // echo/printf/cat faces, and the external spawner would all run
+        // the builtin/external instead of a function of the same name
+        // (rubash#2984: `$(host)` in bats-format-junit ran /usr/bin/host
+        // and its usage text polluted the junit stderr assertions).
+        // Decline the whole family to the real parser/executor when the
+        // body's first word names a defined function — the same
+        // function-first ordering the typed evaluator's
+        // run_function_command_substitution provides. A false positive is
+        // impossible (the check is an exact table lookup) and routing to
+        // the real executor is always correct, only slower. Aliases are
+        // not spliced here, so an alias for a function whose name also
+        // resolves externally stays on the shortcut path; the typed
+        // evaluator, which splices before its function check, owns that
+        // edge.
+        if let Some(name) = comsub_first_word(source) {
+            if self.shell_state.functions.contains_key(name) {
+                if let Some(output) =
+                    self.command_list_substitution_output(source, context, raw_source)
+                {
+                    return output;
+                }
+                return String::new();
+            }
         }
         // GNU execute_cmd.c:4648-4649: every simple command — `true`,
         // `false`, `:` included — prints its xtrace head line AND fires an
@@ -929,7 +966,8 @@ impl Executor {
             || self.xtrace_enabled()
             || self.err_trap_inherited_into_comsub()
         {
-            if let Some(output) = self.command_list_substitution_output(source, context) {
+            if let Some(output) = self.command_list_substitution_output(source, context, raw_source)
+            {
                 return output;
             }
             return String::new();
@@ -1283,7 +1321,7 @@ impl Executor {
         // Fallback: run the source through the real parser/executor in a
         // subshell and capture stdout (function calls, pipelines, compound
         // commands that the special-case dispatch above does not cover).
-        if let Some(output) = self.command_list_substitution_output(source, context) {
+        if let Some(output) = self.command_list_substitution_output(source, context, raw_source) {
             return output;
         }
 
@@ -1394,6 +1432,12 @@ impl Executor {
                 }
             }
         };
+        // The target (operand expansion or the $HOME value) is a
+        // pathname from here on: fold a stored E400 pair to the raw
+        // char so the existence probe and the failure diagnostics
+        // name the real directory, exactly like the cd builtin's
+        // resolve_target (rubash#3076).
+        let target = crate::executor::substitution_metadata::fold_literal_char_escapes(&target);
         let target_display = target.clone();
         let target = shell_path_to_windows(&target, &self.shell_state.env_vars);
         // rubash#2211: a relative target anchors at the SESSION cwd —
@@ -1506,6 +1550,7 @@ impl Executor {
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<SubstitutionOutput> {
         // The body was extracted from the current word; keep GNU's in-place
         // line counter so body diagnostics report the original script line
@@ -1611,7 +1656,7 @@ impl Executor {
         // though the enclosing command is what dies — emit the stored
         // diagnostic instead of silently swallowing it (case-pattern
         // `$(esac;x)` in comsub-posix6.sub).
-        if self.report_comsub_body_error_if_any(&ast.commands, Some(source)) {
+        if self.report_comsub_body_error_if_any(&ast.commands, Some(body_text)) {
             return Some(SubstitutionOutput::readback(Vec::new(), 2, context));
         }
 
@@ -1826,12 +1871,15 @@ impl Executor {
     }
 
     /// Legacy String boundary for callers that still build AST words as text.
+    /// `body_text` is the untrimmed extracted body, carried only for
+    /// the body-error report (rubash#2785).
     fn command_list_substitution_output(
         &self,
         source: &str,
         context: SubstitutionQuoteContext,
+        body_text: &str,
     ) -> Option<String> {
-        self.command_list_substitution_output_typed(source, context)
+        self.command_list_substitution_output_typed(source, context, body_text)
             .map(|output| output.text_lossy())
     }
 
@@ -1937,6 +1985,7 @@ impl Executor {
             no_closing_brace_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_bound_frames: Vec::new(),
             applying_temporary_assignments: false,
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),
@@ -1977,6 +2026,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             conditional_invert_pending: Cell::new(false),
             inside_compound_condition: Cell::new(false),
@@ -2026,7 +2076,25 @@ impl Executor {
             command_builtin_depth: self.command_builtin_depth,
             builtin_wrapper_depth: self.builtin_wrapper_depth,
             standard_path_scope: self.standard_path_scope.clone(),
-            debug_trap_running: false,
+            // rubash#2991: the fork copy inherits the DEBUG trap's
+            // in-progress state verbatim, the way GNU's fork image
+            // carries SIG_INPROGRESS — run_debug_trap fires only
+            // while that bit is clear (trap.c:1272), reset_signal
+            // clears only SIG_TRAPPED (`/* XXX - SIG_INPROGRESS? */`,
+            // trap.c:1410), and the nofork path threads
+            // `was_trap = running_trap` into parse_and_execute
+            // (subst.c:7090). Resetting it here let the body's first
+            // command re-fire the handler whenever functrace kept the
+            // DEBUG action live in the child (reset_for_subshell_inner),
+            // and the handler's own substitution forked another
+            // cleared copy — unbounded re-entry (the filed hang).
+            debug_trap_running: self.debug_trap_running,
+            // debug_action_running stays false: it is this executor's
+            // call-frame mark (the DEBUG action's own AST executing,
+            // rubash#2969), and the child has no action frame — a
+            // break/continue in the child's own loops is a plain loop
+            // exit there (GNU prints the post-loop body verbatim).
+            debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
             // WP-3: a command-substitution child never inherits the
             // debug session (DE-12: its frames are synthesized in a
@@ -2036,6 +2104,7 @@ impl Executor {
             // units are its own text, never the parent's file.
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            file_env_os_value: std::cell::RefCell::new(None),
             pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::rc::Rc::new(std::cell::Cell::new(false)),
             return_trap_running: false,
@@ -2104,12 +2173,14 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: self.fd_var_apply_snapshot.clone(),
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -2448,12 +2519,35 @@ impl Executor {
         let [file_word] = words.as_slice() else {
             return ambiguity(strip_matching_quotes(target));
         };
+        // The finalized word is a FILENAME from here on: GNU
+        // open_redir_file (builtins/evalstring.c:759) opens the
+        // expanded word verbatim, so fold any carrier pair it
+        // carries through the shared name-boundary gate + decoder
+        // (rubash#3104). This face finalizes its own word and never
+        // passes redirect_operand_literal, so a stored raw-byte
+        // pair otherwise reached the open — and its diagnostic —
+        // verbatim.
+        // Whether the word carried transport is recorded before the
+        // fold (rubash#3104 p23): the folded string cannot tell a
+        // byte char from a genuine char of the same code point, so a
+        // high-byte name must probe as raw bytes here.
+        let file_word_had_transport =
+            crate::executor::markers::contains_decodable_transport(file_word);
+        let folded_file_word =
+            crate::executor::substitution_metadata::fold_literal_char_escapes(file_word);
+        let file_word: &str = &folded_file_word;
         // Model the Linux open(dir, O_RDONLY)+read dance: open succeeds and
         // the first zread fails EISDIR, so read_comsub (subst.c:6700-6712)
         // returns NULL with EXECUTION_SUCCESS — a directory operand is
         // silent, empty, rc 0. Windows CreateFile on a directory would
         // surface "Permission denied" instead.
-        let read_path = shell_path_to_windows(file_word, &self.shell_state.env_vars);
+        let read_path = if file_word_had_transport {
+            crate::executor::path::path_buf_from_folded_name(
+                &shell_path_to_windows(file_word, &self.shell_state.env_vars).to_string_lossy(),
+            )
+        } else {
+            shell_path_to_windows(file_word, &self.shell_state.env_vars)
+        };
         // A materialized input process substitution resolves to /dev/fd/N
         // (subst.c process_substitute + move_to_high_fd): the bytes live in
         // the fd table's ProcessSubstitution endpoint, not on disk. Reading
@@ -3001,6 +3095,25 @@ fn command_substitution_body_is_trivial(source: &str) -> bool {
                 | b'_' | b'-' | b'+' | b'=' | b'.' | b',' | b'/' | b':' | b'@'
                 | b'%' | b'^')
         })
+}
+
+/// First word of a command-substitution body for the function-first
+/// disqualification above: the leading whitespace-delimited token with one
+/// layer of matching quotes stripped (`"host"` and `'host'` still name the
+/// function `host`). Only the exact name is looked up, so a token that is
+/// not a plain name can never false-positive into the decline.
+fn comsub_first_word(source: &str) -> Option<&str> {
+    let first = source.trim_start().split_whitespace().next()?;
+    let first = first
+        .strip_prefix('\'')
+        .and_then(|rest| rest.strip_suffix('\''))
+        .or_else(|| {
+            first
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+        })
+        .unwrap_or(first);
+    (!first.is_empty()).then_some(first)
 }
 
 fn strip_command_substitution_comments(source: &str) -> String {

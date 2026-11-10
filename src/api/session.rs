@@ -22,7 +22,7 @@ use super::bind::{BindKindView, BindView};
 use super::capabilities::ElevationHandler;
 use super::capabilities::{
     Candidate, CompletionOutcome, CompletionProvider, DiagnosticSink, ExternalCommandHandler,
-    RcPolicy, StartupClass, StartupContext,
+    RcPolicy, SpecialCompspecKind, StartupClass, StartupContext,
 };
 use super::completion_attempt::CompletionAttempt;
 use super::completion_view::{full_env_sorted, CompletionView};
@@ -920,6 +920,19 @@ impl Session {
         self.executor.has_compspec(command)
     }
 
+    /// Whether the special compspec of one class is registered —
+    /// the selective form of [`Session::has_compspec`]
+    /// (rubash#2738): the name form ORs the command's own
+    /// registration and all three special slots (`-D` / `-E` /
+    /// `-I`) together, so a host routing gate cannot open for
+    /// exactly the class that governs a position. This answers for
+    /// a single slot ([`SpecialCompspecKind`]), a pure registration
+    /// query like the name form; whether a spec governs a concrete
+    /// `(line, cursor)` is [`Session::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: SpecialCompspecKind) -> bool {
+        self.executor.has_special_compspec(kind)
+    }
+
     /// Whether a compspec governs completion at `(line, cursor)` —
     /// the position-aware form of [`Session::has_compspec`]
     /// (rubash#2856, B5-11): the engine answers with the same split
@@ -1394,9 +1407,17 @@ impl Session {
         self.executor.positional_params()
     }
 
-    /// Replace the positional parameters (the `set --` path).
+    /// Replace the positional parameters. Hosts pass RAW data:
+    /// the engine entry-encodes each value into the storage domain
+    /// at this boundary (rubash#3105), so callers must not
+    /// pre-encode. (The shell's own `set --` path hands the shared
+    /// setter cooked words and does not pass through here.)
     pub fn set_positional(&mut self, args: Vec<String>) {
-        self.executor.set_positional_params(args);
+        self.executor.set_positional_params(
+            args.iter()
+                .map(|value| crate::executor::substitution_metadata::entry_encode_value_text(value))
+                .collect(),
+        );
     }
 
     /// Alias snapshot: (name, value) pairs, sorted by name.
@@ -2135,7 +2156,15 @@ impl SessionBuilder {
             executor.set_env("__RUBASH_SCRIPT_NAME", argv0);
         }
         for (name, value) in &self.environment {
-            executor.set_env(name, value);
+            // rubash#3207: host seeds are RAW data — entry-encode each
+            // value at this boundary (the #3105 contract), so carrier
+            // bytes ride the storage domain instead of being stripped
+            // as live protocol at finalization. `__RUBASH_SCRIPT_NAME`
+            // above stays verbatim (argv0 is internal transport, and
+            // the per-name rule passes `__RUBASH_*` through anyway).
+            let encoded =
+                crate::executor::env_helpers::entry_encode_imported_env_value(name, value);
+            executor.set_env(name, &encoded);
         }
         if let Some(root) = &self.shell_root {
             executor.set_shell_root(root);

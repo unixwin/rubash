@@ -164,9 +164,15 @@ where
     let row = builtin_table_row("unalias").expect("unalias row exists");
     let mut diag = Diag::new(row, stderr);
     if args.is_empty() {
+        // GNU builtins/alias.def unalias_builtin: no arguments is a
+        // usage error — sh_usage + EX_USAGE (2), the same status the
+        // invalid-option arm below returns (rubash#2975). Only a
+        // missing alias NAME is EXECUTION_FAILURE. The usage line
+        // itself is the Diag one above (no prolog, per the comment
+        // on this function); only the STATUS is #2975's.
         diag.usage();
         diag.flush_with(diag_prolog);
-        return Ok(EXECUTION_FAILURE);
+        return Ok(EX_USAGE);
     }
 
     let mut clear_all = false;
@@ -205,9 +211,12 @@ where
     }
 
     if args.is_empty() {
+        // Same usage status as the no-arguments entry above: an
+        // option-only invocation (`unalias --`) names no alias
+        // (rubash#2975).
         diag.usage();
         diag.flush_with(diag_prolog);
-        return Ok(EXECUTION_FAILURE);
+        return Ok(EX_USAGE);
     }
 
     let mut status = EXECUTION_SUCCESS;

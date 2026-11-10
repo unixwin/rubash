@@ -35,8 +35,18 @@ impl Executor {
                 return Some(path);
             }
         }
-        if name.starts_with('/') {
-            return Some(name.to_string());
+        // rubash#2717: a slash-bearing name is never PATH-walked at
+        // the describe faces — GNU describe_command qualifies it by
+        // file_status alone (FS_EXECABLE) and reports it verbatim.
+        // The unconditional absolute-name shortcut and the lose-on
+        // find_user_command fallthrough below both reported
+        // non-executable files and missing paths as found.
+        if crate::executor::path::has_path_separator(name) {
+            return crate::executor::path::slash_name_is_describable(
+                name,
+                &self.shell_state.env_vars,
+            )
+            .then(|| name.to_string());
         }
         // Windows suite bridge: GNU test replays expect mv/cat/ls to
         // describe even on hosts whose PATH never holds them (type.tests:39
@@ -229,8 +239,14 @@ impl Executor {
             }
         }
 
-        if name.starts_with('/') {
-            paths.push(name.to_string());
+        // rubash#2717: same file_status qualification as
+        // command_path — a slash-bearing name is reported (verbatim,
+        // once) only when executable; the PATH enumeration below
+        // never applies to it (GNU absolute_program).
+        if crate::executor::path::has_path_separator(name) {
+            if crate::executor::path::slash_name_is_describable(name, &self.shell_state.env_vars) {
+                paths.push(name.to_string());
+            }
             return paths;
         }
         // Same Windows/unix split as command_path above: the /bin-namespace
@@ -248,40 +264,34 @@ impl Executor {
                 paths.push(format!("/bin/{name}"));
             }
         }
-        // GNU findcmd.c:437 user_command_matches iterates path_value("PATH"):
-        // an empty PATH normalizes to "." and contributes "./name", while an
-        // unset PATH yields no list and no match at all.
-        if self
-            .shell_state
-            .env_vars
-            .get("PATH")
-            .is_some_and(|path| path.is_empty())
-        {
-            if let Some(dot_path) = self.command_path_in_dot(name) {
-                paths.push(dot_path);
-            }
-        }
-
-        for dir in split_shell_path(
-            self.shell_state
-                .env_vars
-                .get("PATH")
-                .map(String::as_str)
-                .unwrap_or_default(),
-        ) {
-            let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
-            if candidate.is_file() {
-                paths.push(shell_display_path(
-                    &candidate.to_string_lossy().replace('\\', "/"),
-                ));
-            }
-            if cfg!(windows) {
-                for ext in executable_extensions() {
-                    let candidate = candidate.with_extension(ext);
-                    if candidate.is_file() {
-                        paths.push(shell_display_path(
-                            &candidate.to_string_lossy().replace('\\', "/"),
-                        ));
+        // GNU findcmd.c:477-481 user_command_matches iterates
+        // path_value("PATH"): an unset PATH yields no list and no match
+        // at all, while a set PATH (an empty one normalizes to "." in
+        // path_value, findcmd.c:266-281) is walked element by element
+        // by split_shell_path's extract_colon_unit walk. rubash#2943:
+        // this enumeration previously ALSO pushed command_path_in_dot
+        // for an empty PATH — the walk's own "." element already
+        // contributes that "./name" — and ran the walk on "" for an
+        // unset PATH, so both shapes reported a phantom cwd match.
+        // (command_path_in_dot still serves the single-match describe
+        // in command_path, where GNU's find_user_command faces for
+        // unset/empty PATH are exactly its arms.)
+        if let Some(path_value) = self.shell_state.env_vars.get("PATH") {
+            for dir in split_shell_path(path_value) {
+                let candidate = shell_path_to_windows(&dir, &self.shell_state.env_vars).join(name);
+                if candidate.is_file() {
+                    paths.push(shell_display_path(
+                        &candidate.to_string_lossy().replace('\\', "/"),
+                    ));
+                }
+                if cfg!(windows) {
+                    for ext in executable_extensions() {
+                        let candidate = candidate.with_extension(ext);
+                        if candidate.is_file() {
+                            paths.push(shell_display_path(
+                                &candidate.to_string_lossy().replace('\\', "/"),
+                            ));
+                        }
                     }
                 }
             }

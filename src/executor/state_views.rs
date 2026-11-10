@@ -276,6 +276,43 @@ impl Executor {
             VariableValue::Unset
         } else {
             match (typed, &mirror) {
+                // An array/assoc-marked name whose typed cell is a
+                // plain Scalar holds no typed truth: the only Scalar
+                // cells such names ever carry are the environment
+                // import's verbatim copies of the mirror storage
+                // string (init.rs seeds BASH_VERSINFO / DIRSTACK /
+                // BASH_ALIASES / BASH_CMDS into the table as storage
+                // forms, then VariableStore::from_environment binds
+                // the whole seeded table as exported scalars —
+                // rubash#3083). GNU's import binds only the process
+                // environment's plain scalars (variables.c:368
+                // initialize_shell_variables); its own array cells
+                // are born as ARRAY objects (variables.c:1018
+                // make_vers_array; variables.c:1882
+                // init_dynamic_array_var for DIRSTACK). And the
+                // seeded mirror is itself only a birth snapshot for
+                // the materialized pair: DIRSTACK / BASH_ALIASES /
+                // BASH_CMDS are rebuilt on each named access by
+                // their storage arms (variables.c:1619 get_dirstack
+                // is the GNU shape), which is why the mirror-absent
+                // arm of the capture above already consults
+                // parameter_array_storage for exactly these names.
+                // So a named capture of this class reads through
+                // that same materializing storage arm, falling back
+                // to the mirror it would otherwise have parsed. A
+                // structured typed cell (the write paths' synced
+                // form) still wins, so user arrays are captured
+                // exactly as before.
+                (Some(variable), Some(text))
+                    if (attrs.array || attrs.assoc)
+                        && matches!(variable.value, crate::shell::ShellValue::Scalar(_)) =>
+                {
+                    let storage = self
+                        .parameter_array_storage(name)
+                        .filter(|storage| !storage.is_empty())
+                        .unwrap_or_else(|| text.clone());
+                    value_from_mirror(env_vars, name, &storage, &attrs)
+                }
                 (Some(variable), _) => value_from_typed(&variable.value),
                 (None, Some(text)) => value_from_mirror(env_vars, name, text, &attrs),
                 (None, None) => VariableValue::Unset,
@@ -301,8 +338,8 @@ impl Executor {
         let env_vars = &self.shell_state.env_vars;
         let empty = std::collections::HashSet::new();
         let mut names = crate::builtins::declare::declaration_names_to_print(
-            env_vars, false, false, false, false, false, false, false, false, &empty, &empty,
-            &empty,
+            env_vars, false, false, false, false, false, false, false, false, false, false, &empty,
+            &empty, &empty,
         );
         // The listing merges the dynamic views whose cells live
         // outside the table (declare_local.rs's listing rule).
@@ -313,15 +350,13 @@ impl Executor {
                 names.push(name.to_string());
             }
         }
-        // Declared-but-unset globals have no table cell, and the
-        // builtin's bare listing (whose name set this is) currently
-        // omits them — GNU's listing includes them (variables.c
-        // print_var_list walks every shell_variable). The inspection
-        // set is the visible set (§7.2), so the declared-unset marks
-        // merge in here; each name still renders through the shared
-        // printer. The builtin's own listing is unchanged (recorded
-        // as a divergence in the cluster REPORT, not silently
-        // "fixed" from the view side).
+        // Declared-but-unset globals have no table cell. The
+        // builtin's bare listing includes them since rubash#2972
+        // (declaration_names_to_print chains the declared-unset
+        // marks, matching variables.c print_var_list walking every
+        // shell_variable); this merge stays as a belt-and-braces
+        // union so the inspection set (§7.2) can never be narrower
+        // than the builtin's own listing.
         for name in env_vars.marked_names(DECLARED_UNSET_VARS) {
             if !name.starts_with("__RUBASH_") && !names.iter().any(|listed| listed == &name) {
                 names.push(name);

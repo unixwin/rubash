@@ -86,6 +86,13 @@ pub enum Encoding {
 // inside echo even though LC_ALL was never exported).
 thread_local! {
     static SHELL_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// The LC_NUMERIC category's name from the same variable table.
+    /// GNU resolves each category on its own chain (locale.c:345
+    /// get_locale_var: LC_ALL > LC_<category> > LANG), so the numeric
+    /// face (printf's decimal point) cannot ride the LC_CTYPE-flavoured
+    /// resolution above: LC_ALL > LC_NUMERIC > LANG gets its own slot
+    /// (rubash#2979).
+    static SHELL_NUMERIC_LOCALE_OVERRIDE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// RAII guard installing [`SHELL_LOCALE_OVERRIDE`] from a variable table.
@@ -96,13 +103,21 @@ thread_local! {
 /// when the inner builtin returns.
 pub struct ShellLocaleGuard {
     previous: Option<String>,
+    previous_numeric: Option<String>,
 }
 
 impl ShellLocaleGuard {
     pub fn new(env_vars: &std::collections::HashMap<String, String>) -> Self {
         let previous = SHELL_LOCALE_OVERRIDE
             .with(|cell| cell.borrow_mut().replace(locale_name_from_vars(env_vars)));
-        ShellLocaleGuard { previous }
+        let previous_numeric = SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
+            cell.borrow_mut()
+                .replace(locale_numeric_name_from_vars(env_vars))
+        });
+        ShellLocaleGuard {
+            previous,
+            previous_numeric,
+        }
     }
 }
 
@@ -112,7 +127,54 @@ impl Drop for ShellLocaleGuard {
         SHELL_LOCALE_OVERRIDE.with(|cell| {
             *cell.borrow_mut() = previous;
         });
+        let previous_numeric = std::mem::replace(&mut self.previous_numeric, None);
+        SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| {
+            *cell.borrow_mut() = previous_numeric;
+        });
     }
+}
+
+/// The LC_NUMERIC category name from a variable table: LC_ALL >
+/// LC_NUMERIC > LANG, empty values skipped (GNU locale.c:345
+/// get_locale_var's chain for the numeric category).
+fn locale_numeric_name_from_vars(env_vars: &std::collections::HashMap<String, String>) -> String {
+    for name in ["LC_ALL", "LC_NUMERIC", "LANG"] {
+        if let Some(value) = env_vars.get(name) {
+            if !value.is_empty() {
+                return value.clone();
+            }
+        }
+    }
+    String::new()
+}
+
+/// The LC_NUMERIC category name a running builtin should observe: the
+/// executing shell's variable-table resolution when a guard is
+/// installed, the process environment (same chain) otherwise.
+pub(crate) fn active_numeric_locale_name() -> String {
+    match SHELL_NUMERIC_LOCALE_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        Some(name) => name,
+        None => {
+            let locale_all = std::env::var("LC_ALL").unwrap_or_default();
+            let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
+            if !locale_all.is_empty() {
+                locale_all
+            } else if !numeric.is_empty() {
+                numeric
+            } else {
+                std::env::var("LANG").unwrap_or_default()
+            }
+        }
+    }
+}
+
+/// The multibyte decision against the ACTIVE locale name — the
+/// guard-aware counterpart of [`is_multi_byte`]: a builtin executing
+/// under a [`ShellLocaleGuard`] observes the shell's variable-table
+/// locale, exactly as the printf character-constant face does
+/// (rubash#2965/#2979). Outside a guard this is [`is_multi_byte`].
+pub(crate) fn is_multi_byte_active() -> bool {
+    locale_name_selects_utf8(&active_locale_name())
 }
 
 /// Locale name from a variable table: LC_ALL > LC_CTYPE > LC_MESSAGES >
@@ -557,16 +619,14 @@ pub fn effective_length(s: &str) -> usize {
 /// must yield `1,0000` even when the host exports `LC_CTYPE=C.UTF-8` —
 /// LC_CTYPE belongs to the character-type category, not numeric). An unset
 /// or `C`/`POSIX` locale returns `.`.
+///
+/// The name is read through [`active_numeric_locale_name`], so under a
+/// [`ShellLocaleGuard`] the executing shell's variable table decides —
+/// a store-side assignment (e.g. `printf -v LC_ALL ...`) that never
+/// reached the process environment still flips the point, exactly as
+/// GNU's sv_locale watcher makes it (rubash#2979).
 pub fn decimal_point() -> char {
-    let locale_all = std::env::var("LC_ALL").unwrap_or_default();
-    let numeric = std::env::var("LC_NUMERIC").unwrap_or_default();
-    let locale = if !locale_all.is_empty() {
-        locale_all
-    } else if !numeric.is_empty() {
-        numeric
-    } else {
-        std::env::var("LANG").unwrap_or_default()
-    };
+    let locale = active_numeric_locale_name();
     let lower = locale.to_lowercase();
     if lower.starts_with("de_de")
         || lower.starts_with("fr_fr")
@@ -657,21 +717,40 @@ pub fn is_locale_family_name(name: &str) -> bool {
     )
 }
 
+/// The scalar projection of a stored binding, exactly what GNU
+/// get_string_value (variables.c:2495) hands sv_locale: it reads
+/// through get_variable_value (variables.c:2473), where an indexed
+/// array projects to element 0, an assoc to its "0" key, and anything
+/// else to the stored value itself. The store map holds arrays in
+/// compound storage form (`\x1d([0]="C")`), so every value the
+/// sv_locale mirror reads must pass through here — feeding the raw
+/// storage string to setlocale and into the warning text was
+/// rubash#3065. The projection primitives are the scalar read path's
+/// own (Executor::scalar_parameter_value uses the same pair).
+fn stored_scalar_value(env_vars: &crate::shell::var_table::VarTable, name: &str) -> Option<String> {
+    let value = env_vars.get(name)?;
+    let attrs = env_vars.attr_of(name);
+    if attrs.assoc {
+        crate::executor::assoc_value_at(value, "0")
+    } else if attrs.array {
+        crate::executor::array_value_at(value, 0)
+    } else {
+        Some(value.clone())
+    }
+}
+
 /// POSIX category precedence (locale.c:343 get_locale_var): LC_ALL wins,
 /// then the category's own variable, then LANG, then "" (the
-/// environment-default locale).
-fn get_locale_var(var: &str, env_vars: &std::collections::HashMap<String, String>) -> String {
-    let nonempty = |name: &str| {
-        env_vars
-            .get(name)
-            .map(String::as_str)
-            .filter(|value| !value.is_empty())
-    };
+/// environment-default locale). Each candidate is read through the
+/// scalar projection (GNU get_locale_var reads stored bindings the
+/// same get_string_value way sv_locale does).
+fn get_locale_var(var: &str, env_vars: &crate::shell::var_table::VarTable) -> String {
+    let nonempty =
+        |name: &str| stored_scalar_value(env_vars, name).filter(|value| !value.is_empty());
     nonempty("LC_ALL")
         .or_else(|| nonempty(var))
         .or_else(|| nonempty("LANG"))
-        .unwrap_or("")
-        .to_string()
+        .unwrap_or_default()
 }
 
 #[cfg(unix)]
@@ -772,8 +851,8 @@ fn attempt_setlocale(_category: std::ffi::c_int, _name: &str) -> Result<(), Opti
 /// empty — setlocale(LC_ALL, lang) then each category from its
 /// precedence value. Never warns (the function has no diagnostic).
 #[cfg(unix)]
-fn reset_locale_vars_mirror(env_vars: &std::collections::HashMap<String, String>) {
-    let lang = env_vars.get("LANG").cloned().unwrap_or_default();
+fn reset_locale_vars_mirror(env_vars: &crate::shell::var_table::VarTable) {
+    let lang = stored_scalar_value(env_vars, "LANG").unwrap_or_default();
     // locale.c reset_locale_vars returns at once when the composite
     // apply fails; the per-category applies never run.
     if attempt_setlocale(libc::LC_ALL, &lang).is_err() {
@@ -810,10 +889,12 @@ fn reset_locale_vars_mirror(env_vars: &std::collections::HashMap<String, String>
 ///   so the process locale follows, like GNU.
 ///
 /// `env_vars` must already hold the just-committed values (sv_locale
-/// reads the stored binding via get_string_value).
+/// reads the stored binding via get_string_value — the scalar
+/// projection of stored_scalar_value, never the raw compound storage
+/// string of an array binding; rubash#3065).
 pub fn locale_assignment_warning(
     var: &str,
-    env_vars: &std::collections::HashMap<String, String>,
+    env_vars: &crate::shell::var_table::VarTable,
 ) -> Option<String> {
     if !is_locale_family_name(var) {
         return None;
@@ -826,7 +907,7 @@ pub fn locale_assignment_warning(
     }
     #[cfg(unix)]
     {
-        let lc_all = env_vars.get("LC_ALL").cloned().unwrap_or_default();
+        let lc_all = stored_scalar_value(env_vars, "LC_ALL").unwrap_or_default();
         if var == "LC_ALL" {
             if lc_all.is_empty() {
                 reset_locale_vars_mirror(env_vars);
@@ -910,10 +991,14 @@ pub fn init_locale() {
     #[cfg(unix)]
     {
         let _ = attempt_setlocale(libc::LC_ALL, "");
-        let env: std::collections::HashMap<String, String> =
+        // Process-environment values are never compound storage, so a
+        // plain from_values table (no array marks) reads them raw —
+        // the same values the previous HashMap form produced.
+        let env = crate::shell::var_table::VarTable::from_values(
             crate::executor::env_helpers::process_env_pairs()
                 .into_iter()
-                .collect();
+                .collect(),
+        );
         if let Some(warning) = locale_assignment_warning("LC_ALL", &env) {
             let shell_name = std::env::args()
                 .next()

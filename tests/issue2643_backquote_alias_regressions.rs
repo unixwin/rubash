@@ -33,10 +33,8 @@ impl Scratch {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "rubash-i2643-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rubash-i2643-{tag}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         Scratch { dir }
     }
@@ -69,9 +67,8 @@ impl Drop for Scratch {
 #[test]
 fn pr2643_backquote_body_expands_alias() {
     let s = Scratch::new("core");
-    let (stdout, _stderr, rc) = s.run(
-        "shopt -s expand_aliases\nalias ll='echo ALIAS-USED'\necho \"backquote: `ll`\"\n",
-    );
+    let (stdout, _stderr, rc) =
+        s.run("shopt -s expand_aliases\nalias ll='echo ALIAS-USED'\necho \"backquote: `ll`\"\n");
     assert_eq!(rc, 0);
     assert_eq!(stdout, "backquote: ALIAS-USED\n");
 }
@@ -92,9 +89,8 @@ fn pr2643_alias_with_args_in_argument_position() {
     // inside backquotes in argument position — the alias's words must
     // survive (they were silently dropped before the fix).
     let s = Scratch::new("args");
-    let (stdout, _stderr, rc) = s.run(
-        "shopt -s expand_aliases\nalias greet='echo GREET'\necho \"arg: `greet hi`\"\n",
-    );
+    let (stdout, _stderr, rc) =
+        s.run("shopt -s expand_aliases\nalias greet='echo GREET'\necho \"arg: `greet hi`\"\n");
     assert_eq!(rc, 0);
     assert_eq!(stdout, "arg: GREET hi\n");
 }

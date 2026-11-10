@@ -39,6 +39,13 @@ jobs:
       - name: Verify formatting
         run: cargo fmt --check
 
+      # rubash#2875: lib tests spawn the built shell (consumer_tests resolve
+      # target/debug/rubash via the test-binary fallback); a bare
+      # `cargo test --lib` never builds the bin target, so a pin that needs
+      # the binary fails in CI while passing locally after a build.
+      - name: Build the rubash binary for lib tests
+        run: cargo build --locked
+
       - name: Run Rust library tests
         run: cargo test --lib
 

@@ -94,23 +94,25 @@ impl Executor {
         self.set_exit_code(exit_code);
     }
 
-    pub fn expand_prompt_string(&self, value: &str) -> String {
-        // rubash#431: the ignore markers that `\[`/`\]` decode to are
-        // width-accounting delimiters, never terminal payload (see
-        // strip_prompt_ignore_markers) — every render channel gets the
-        // stripped form, not just the piped `-i` driver.
-        let decoded = self.decode_prompt_string(value);
-        // parse.y:6683-6698: the expansion pass is promptvars/posix-gated.
-        let decoded = if self.prompt_expansion_enabled() {
-            self.expand_embedded_parameters_double_quoted(&decoded)
-        } else {
-            decoded
-        };
-        // Strip the width markers first: a raw-byte pair decoding to
-        // 0x01/0x02 is command-output DATA and must survive (GNU emits it);
-        // only the template's own \[ \] markers are stripped.
-        let decoded = super::prompt_expansion::strip_prompt_ignore_markers(&decoded);
-        super::prompt_expansion::decode_prompt_transport(&decoded)
+    pub fn expand_prompt_string(&mut self, value: &str) -> String {
+        // rubash#3092: GNU subst.c:4401 — prompt expansion is the SAME word
+        // expansion as every other channel (expand_word_internal), so a
+        // `${ cmd; }` inside a prompt reaches subst.c:6917
+        // function_substitute and runs subst.c:7101 parse_and_execute
+        // ("nofork comsub") in the CURRENT shell — no fork, no subshell
+        // level, assignments survive. The old `&self` channel ran the
+        // embedded walker, whose funsub arm executes in a CLONED executor
+        // (command_substitution_executor, subshell_depth + 1): BASH_SUBSHELL
+        // read 1 inside PS0/PS1 and the clone's assignments died with it,
+        // while the command-word channel and the Session host channel
+        // (expand_prompt_string_mut) already ran funsub in the current
+        // shell (execute_current_shell_body). Prompt rendering is therefore
+        // a mutating operation by GNU contract — route through the mut
+        // channel, which additionally snapshots and restores the reader's
+        // status words (parse.y:6684-6697, rubash#604). Call sites need no
+        // change: they already hold `&mut Executor` (run_interactive_stdin)
+        // or `let mut` bindings.
+        self.expand_prompt_string_mut(value)
     }
 
     pub fn expand_prompt_string_mut(&mut self, value: &str) -> String {
@@ -534,6 +536,27 @@ impl Executor {
         }
     }
 
+    /// rubash#2783: the offending-line echo for a command-substitution
+    /// body error — the physical line of the ENCLOSING input at the
+    /// error's line (GNU print_offending_line, parse.y:6814, over
+    /// shell_input_line), read out of the reader unit text the driver
+    /// parked on the shell state for the executing unit's extent.
+    /// Falls back to the body fragment stored on the error node when
+    /// no unit text is parked (eval strings run through their own
+    /// parse_and_execute route, not the reader-unit driver) or when
+    /// the line sits outside the parked unit.
+    pub(in crate::executor) fn comsub_body_echo_source(&self, line: usize, stored: &str) -> String {
+        let unit = self.shell_state.reader_unit_source.borrow();
+        if let Some((text, offset)) = unit.as_ref() {
+            if line > *offset {
+                if let Some(found) = text.lines().nth(line - offset - 1) {
+                    return found.to_string();
+                }
+            }
+        }
+        stored.to_string()
+    }
+
     /// rubash#2751: report a `$(`-body parse error in GNU's read-time
     /// shape. GNU parses the body inside the enclosing reader with
     /// shell_eof_token = `)' (parse.y:4519-4521), so the report is the
@@ -554,9 +577,10 @@ impl Executor {
     ///   conditional that does not end the body keeps its body-level
     ///   near. `body_text` is the extracted body, whose end is where
     ///   the enclosing paren sat.
-    /// The stored `__RUBASH_PARSE_SOURCE__` echo is the body fragment;
-    /// GNU echoes the enclosing line, which no driver→executor channel
-    /// carries today — the fragment is what the node has.
+    /// The echo line is the physical line of the enclosing input at
+    /// the error's line, read from the reader unit text the driver
+    /// parks on the shell state (see [`Self::comsub_body_echo_source`]);
+    /// routes with no parked unit text keep the stored body fragment.
     pub(in crate::executor) fn report_comsub_body_parse_error(
         &self,
         cmd: &crate::parser::CommandNode,
@@ -633,11 +657,12 @@ impl Executor {
                     }
                     if self.offending_line_echo_enabled() {
                         if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                            let source = self.comsub_body_echo_source(aux_b, source);
                             self.write_diagnostic_fd2(
                                 format!(
                                     "{}`{}'\n",
                                     self.parser_error_prefix_for_line(aux_b),
-                                    super::command_execute::parse_error_source_display(source)
+                                    super::command_execute::parse_error_source_display(&source)
                                 )
                                 .as_bytes(),
                             );
@@ -672,6 +697,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(line, source);
                     self.write_diagnostic_fd2(
                         format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                             .as_bytes(),
@@ -705,6 +731,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -735,6 +762,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -771,6 +799,7 @@ impl Executor {
                 }
                 if self.offending_line_echo_enabled() {
                     if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                        let source = self.comsub_body_echo_source(line, source);
                         self.write_diagnostic_fd2(
                             format!("{}`{}'\n", self.parser_error_prefix_for_line(line), source)
                                 .as_bytes(),
@@ -804,6 +833,7 @@ impl Executor {
             }
             if self.offending_line_echo_enabled() {
                 if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
+                    let source = self.comsub_body_echo_source(paren_line, source);
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -1360,6 +1390,28 @@ impl Executor {
             || self.shell_state.completion_specs.get("-I").is_some()
     }
 
+    /// Whether the special compspec of one class is registered
+    /// (rubash#2738): the selective form of
+    /// [`Executor::has_compspec`], which ORs the command's own
+    /// registration and all three special slots together. A host
+    /// gate for the positions the command name cannot name — the
+    /// `-E` empty line and the `-I` initial word — needs to open
+    /// for exactly the governing class without also paying for the
+    /// others, so this answers for a single slot: `-D`
+    /// ([`SpecialCompspecKind::Default`]), `-E`
+    /// ([`SpecialCompspecKind::Empty`]) or `-I`
+    /// ([`SpecialCompspecKind::Initial`]). Like the name form this
+    /// is a pure registration query; whether a spec *governs* a
+    /// concrete position is [`Executor::has_compspec_at`]'s answer.
+    pub fn has_special_compspec(&self, kind: crate::api::SpecialCompspecKind) -> bool {
+        let key = match kind {
+            crate::api::SpecialCompspecKind::Default => "-D",
+            crate::api::SpecialCompspecKind::Empty => "-E",
+            crate::api::SpecialCompspecKind::Initial => "-I",
+        };
+        self.shell_state.completion_specs.get(key).is_some()
+    }
+
     /// Whether a compspec governs completion at `(line, cursor)` — the
     /// position-aware form of [`Executor::has_compspec`] (rubash#2856,
     /// B5-11). The host's routing gate for [`Executor::complete_line`]
@@ -1407,6 +1459,27 @@ impl Executor {
     /// flicker on unreaped corpses. `&mut self` because the read runs
     /// the cleanup pass, mirroring the listing path — it does NOT run
     /// a reap/refresh; the per-command refresh owns that.
+    /// rubash#2849: the interactive reader boundary is GNU's
+    /// death-recording point — jobs.c:4036 `sigchld_handler` calls
+    /// `waitchld (-1, 0)` the moment a child dies, while the shell
+    /// blocks in the reader, and parse.y:2533 `read_command` runs
+    /// `notify_and_cleanup` before the freshly read command
+    /// executes, so every consumer on the new line (the exit scan
+    /// included) reads a current table. Rubash has no async
+    /// handler: the boundary sweep's observation gates emulate the
+    /// waitchld lag for script streams, and a completion the
+    /// shell's own `kill` dealt is additionally held one reader
+    /// command by the fresh-fatal window (rubash#1604) so a
+    /// following `wait` can claim the job itself. At the reader
+    /// boundary that hold has served its purpose — the death is
+    /// already recorded, only its application is stashed — so the
+    /// interactive readers call this before a freshly read group
+    /// executes: the observed refresh applies the recorded death
+    /// exactly where the handler's recording would have landed.
+    pub(crate) fn observe_jobs_at_reader_boundary(&mut self) {
+        let _ = self.refresh_background_jobs_observed();
+    }
+
     pub fn background_job_count(&mut self) -> usize {
         // GNU jobs.c:2254 list_all_jobs calls cleanup_dead_jobs first,
         // so dead jobs already notified are gone before a line is
@@ -1572,6 +1645,10 @@ impl Executor {
         match name {
             "__RUBASH_INTERACTIVE" => {
                 self.shell_state.invocation_interactive = value == "1";
+                // rubash#2961: startup seeds forced_interactive from
+                // the invocation shape (shell.c) — the same fact,
+                // before any change_flag write can move it.
+                self.shell_state.forced_interactive = value == "1";
             }
             "__RUBASH_LOGIN_SHELL" => {
                 self.shell_state.invocation_login = value == "1";
@@ -1690,7 +1767,12 @@ impl Executor {
         // rubash#2130: write-through counterpart of set_env's —
         // removing a shape carrier clears the typed state.
         match name {
-            "__RUBASH_INTERACTIVE" => self.shell_state.invocation_interactive = false,
+            "__RUBASH_INTERACTIVE" => {
+                self.shell_state.invocation_interactive = false;
+                // rubash#2961: removal counterpart of the set_env
+                // seed above.
+                self.shell_state.forced_interactive = false;
+            }
             "__RUBASH_LOGIN_SHELL" => self.shell_state.invocation_login = false,
             _ => {}
         }
@@ -2103,6 +2185,11 @@ impl Executor {
             .get("__RUBASH_INTERACTIVE")
             .map(String::as_str)
             == Some("1");
+        // rubash#2961: a whole-table restore re-seeds the invocation
+        // shape, so forced_interactive re-seeds with it (any
+        // change_flag state the old table carried is gone with the
+        // table, exactly like the invocation bit itself).
+        self.shell_state.forced_interactive = self.shell_state.invocation_interactive;
         self.shell_state.invocation_login = self
             .shell_state
             .env_vars
@@ -2250,9 +2337,18 @@ impl Executor {
         // snapshot whose region never touched the mask) re-apply the
         // same value.
         let fork_saved_process_umask = saved_state.fork_saved_process_umask;
+        // rubash#2636: the region also ran its `ulimit` sets against
+        // this same PROCESS (builtins/ulimit.rs drives the real
+        // setrlimit on unix); GNU's fork discards them with the
+        // child. Re-apply the save point's rlimit snapshot alongside
+        // the umask, at the same LAST position.
+        let fork_saved_process_rlimits = saved_state.fork_saved_process_rlimits.clone();
         self.shell_state = saved_state;
         if let Some(mask) = fork_saved_process_umask {
             crate::builtins::umask::apply_process_umask(mask);
+        }
+        if let Some(rlimits) = &fork_saved_process_rlimits {
+            crate::builtins::ulimit::apply_process_rlimits(rlimits);
         }
         // Re-seat the stopped jobs into the restored table. The id
         // allocator takes highest-occupied-id + 1, so a re-inserted id
@@ -2612,6 +2708,67 @@ impl Executor {
                 if self.line_env_os_value.borrow().as_deref() != Some(rendered.as_str()) {
                     set_process_env("__RUBASH_CURRENT_LINE", &rendered);
                     *self.line_env_os_value.borrow_mut() = Some(rendered);
+                }
+            }
+            // The FILE half of the same frame stamp (rubash#3035):
+            // wherever the line is current, the frame's file must be
+            // current too — see stamp_current_file.
+            self.stamp_current_file();
+        }
+    }
+
+    /// rubash#3035: stamp the diagnostic frame's FILE into the
+    /// `__RUBASH_CURRENT_FILE` carrier, in the same two storages and
+    /// under the same equality gates as `__RUBASH_CURRENT_LINE`.
+    ///
+    /// GNU's diagnostic prolog name is `get_name_for_error`
+    /// (error.c:90-120) = BASH_SOURCE[0]; at a function call the
+    /// innermost frame's source is the function's DEFINITION file
+    /// (execute_cmd.c:5310-5313 execute_function pushes the recorded
+    /// `source_file`). `current_error_file_name` is that composed
+    /// view — the same source `diagnostic_prolog` reads — but the
+    /// builtins-layer diagnostics (the private `diagnostic_prefix`
+    /// copies in test/ulimit/trap/cd/exec/...) only receive an env
+    /// map or the process env, and the stored BASH_SOURCE mirror
+    /// refreshes only at source-frame push/pop, never at function
+    /// entry, so they cannot derive the frame file themselves. They
+    /// used to pair the per-frame line with the top-level-only
+    /// `__RUBASH_SCRIPT_NAME`, reporting the right line under the
+    /// wrong file inside any sourced-file function.
+    ///
+    /// Stamping here — the per-command stamp every dispatch path
+    /// already crosses — keeps the carrier equal to the composed
+    /// view across function entry/exit, source, eval and trap frames
+    /// with no paired push/pop bookkeeping. When the composed view
+    /// names nothing, the carrier is removed and readers fall back
+    /// to `__RUBASH_SCRIPT_NAME`, the pre-carrier behavior.
+    fn stamp_current_file(&mut self) {
+        match self
+            .current_error_file_name()
+            .filter(|name| !name.is_empty())
+        {
+            Some(name) => {
+                if self
+                    .shell_state
+                    .env_vars
+                    .get("__RUBASH_CURRENT_FILE")
+                    .map(String::as_str)
+                    != Some(name.as_str())
+                {
+                    self.shell_state
+                        .env_vars
+                        .insert("__RUBASH_CURRENT_FILE".to_string(), name.clone());
+                }
+                if self.file_env_os_value.borrow().as_deref() != Some(name.as_str()) {
+                    set_process_env("__RUBASH_CURRENT_FILE", &name);
+                    *self.file_env_os_value.borrow_mut() = Some(name);
+                }
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_FILE");
+                if self.file_env_os_value.borrow().is_some() {
+                    unset_process_env("__RUBASH_CURRENT_FILE");
+                    *self.file_env_os_value.borrow_mut() = None;
                 }
             }
         }
@@ -3422,6 +3579,24 @@ impl Executor {
         }
     }
 
+    /// GNU error.c error_prolog with the line suppressed — the
+    /// sys_error family. sys_error (error.c) is the one reporter
+    /// built on error_prolog(0): its prolog is the error name alone,
+    /// never a line segment, in script or interactive context alike.
+    /// The shell_execve bad-interpreter refusal reports through it
+    /// (execute_cmd.c:6184), while its sibling classifications use
+    /// internal_error / file_error (error_prolog(1)) and keep the
+    /// line (rubash#2755).
+    pub fn sys_error_prefix(&self) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        format!("{}: ", self.error_report_name())
+    }
+
     /// Parser/syntax-error diagnostic prefix. GNU parser_error (error.c:300-316)
     /// appends yy_input_name() — the input stream name — when it differs from
     /// get_name_for_error(). For `bash -c` the stream name is "-c", producing
@@ -3546,13 +3721,13 @@ impl Executor {
                 Self::interactive_shell_basename(&self.shell_state.env_vars)
             );
         }
-        let name = self
-            .shell_state
-            .env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .unwrap_or_else(|| self.error_report_name());
-        format!("{name}: ")
+        // rubash#3035: the name is the diagnostic frame's file
+        // (error_report_name starts from the composed BASH_SOURCE[0]),
+        // not the top-level __RUBASH_SCRIPT_NAME — inside a function
+        // defined in a sourced file these execution-time diagnostics
+        // name the definition file, exactly like the builtin_error
+        // family. At top level and during source the two agree.
+        format!("{}: ", self.error_report_name())
     }
 
     pub(in crate::executor) fn comsub_eof_diagnostic(&self, line: usize) -> String {

@@ -1,6 +1,6 @@
 use super::storage::quote_assoc_display_key;
 use super::*;
-use crate::executor::markers::STORAGE_WORD_PREFIX;
+use crate::executor::markers::{PARAM_NAME_END_MARKER, STORAGE_WORD_PREFIX};
 use crate::executor::NamerefResolution;
 use crate::executor::{
     assoc_hash_ordered_entries, assoc_hash_ordered_values, assoc_keys, assoc_nbuckets,
@@ -658,6 +658,43 @@ impl Executor {
             // while `'x'` survives as literal text (sq is data in dq context)
             // and evalexp then rejects it as a string operand — `a[' ']`
             // fails "' ': operand expected" where `a[" "]` resolves to 0.
+            // rubash#3085: a `$'...'` span in the raw subscript is ANSI-C
+            // decoded to BARE content before the arith-context pass — GNU
+            // expand_subscript_string -> expand_word_internal's `$'` arm
+            // (ansicstr) — so `${a[$'1+2']}` evaluates `1+2` and
+            // `${a[$'x y']}` errors on the trailing `y`, exactly like the
+            // decoded text was written bare. Without this the span reached
+            // the pass raw and its `$` plus the lexer's \x17 carrier
+            // leaked into the error token. The decoded bytes ride the
+            // span-data carriers (transform_arith_ansi_c_spans, Decode)
+            // so the arith pass cannot re-read them as syntax; runs
+            // before the `$"` decode below, the same order
+            // expand_subscript_string_inner uses (a `$"` produced inside
+            // a `$'...'` span is single-quoted data, and the locale
+            // decoder's sq tracking leaves it alone).
+            let decoded_ansi;
+            let key = if key.contains("$'") {
+                decoded_ansi = crate::executor::subscript_expansion::transform_arith_ansi_c_spans(
+                    key,
+                    crate::executor::subscript_expansion::ArithAnsiSpanMode::Decode,
+                );
+                decoded_ansi.as_str()
+            } else {
+                key
+            };
+            // rubash#3023: a `$"..."` span in the raw subscript is a
+            // double-quoted span with quote-syntax markup (the lexer cooks
+            // it that way, but raw subscript text bypasses the lexer).
+            // Drop the dollar before the arith-context pass — otherwise
+            // the `$` glues onto the content and `${a[$"1+2"]}` fails
+            // "operand expected" on the token `$"1+2`.
+            let decoded_locale;
+            let key = if key.contains("$\"") {
+                decoded_locale = crate::executor::arithmetic::decode_locale_quote_spans(key);
+                decoded_locale.as_str()
+            } else {
+                key
+            };
             let expanded = self.expand_arithmetic_special_parameters(key);
             if expanded.len() >= 2 && expanded.starts_with('"') && expanded.ends_with('"') {
                 expanded[1..expanded.len() - 1].to_string()
@@ -1214,11 +1251,11 @@ impl Executor {
         // trailing PARAM_NAME_END_MARKER is the quote-boundary marker the
         // lexer leaves on a quoted unbraced `$name` (`"$ref"` arrives as
         // `$ref\x13`), and it counts as quoting for the [*] join.
-        let quoted_array_word = quoted_array_word || word.ends_with('\u{13}');
+        let quoted_array_word = quoted_array_word || word.ends_with(PARAM_NAME_END_MARKER);
         let bare_name = word
             .strip_prefix('$')
             .filter(|name| !name.starts_with('{'))
-            .map(|name| name.trim_end_matches('\u{13}'))
+            .map(|name| name.trim_end_matches(PARAM_NAME_END_MARKER))
             .filter(|name| is_shell_name(name));
         if let Some(name) = bare_name {
             if let NamerefResolution::Target(target) = self.nameref_resolution(name) {

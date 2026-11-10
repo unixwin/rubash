@@ -218,7 +218,7 @@ mod pipeline_exec;
 mod pipeline_stages;
 mod print_comsub;
 
-mod read_helpers;
+pub(crate) mod read_helpers;
 mod read_split;
 mod redirect_inherit;
 mod redirection;
@@ -229,7 +229,9 @@ use crate::shell::state::ShellState;
 use alias_helpers::*;
 use assignment_helpers::*;
 // Shared with builtins::declare for `declare -p` assoc rendering.
-pub(crate) use assignment_helpers::{assoc_nbuckets, bash_assoc_order};
+// assoc_value_at is also shared with the locale funnel's scalar
+// projection of a stored binding (rubash#3065).
+pub(crate) use assignment_helpers::{assoc_nbuckets, assoc_value_at, bash_assoc_order};
 // Shared with builtins::declare for `declare -p` $'...' value rendering
 // (strtrans.c ansic_shouldquote/ansic_quote over the raw byte stream).
 pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
@@ -237,7 +239,8 @@ pub(crate) use arrays::{ansic_quote, ansic_shouldquote};
 // builtins::printf, including the drop helper the declare sparse-cell fix
 // needs to preserve the refuse-to-shadow-mirror rule.
 pub(crate) use arrays::{
-    drop_typed_indexed_array, replace_typed_indexed_array, sync_typed_indexed_storage,
+    array_value_at, drop_typed_indexed_array, replace_typed_indexed_array,
+    sync_typed_indexed_storage,
 };
 use builtin_names::*;
 use command_subst_helpers::*;
@@ -404,6 +407,20 @@ enum TypeDescribeMode {
 enum LoopControlKind {
     Break,
     Continue,
+}
+
+/// rubash#2969: one loop driver's verdict after consuming a pending
+/// DEBUG-trap loop-control flag (see ShellState::loop_breaking). Mirrors
+/// the three shapes of GNU's post-body flag checks (execute_cmd.c:
+/// 3108-3118 for, 3840-3850 while/until): nothing pending, the consumed
+/// level ends this loop (a break, or a continue whose remaining levels
+/// target an outer loop — the flag stays standing for that driver), or
+/// a continue consumed at its target level so the driver advances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControlFlow {
+    None,
+    BreakLoop,
+    NextIteration,
 }
 
 pub(crate) type FunctionBody = Rc<Ast>;
@@ -584,6 +601,22 @@ pub(in crate::executor) struct SubshellProcessSave {
     pub(in crate::executor) pending_job_completions: Vec<(u32, i32, Option<i32>)>,
     pub(in crate::executor) pending_coproc_retirements: Vec<u32>,
     pub(in crate::executor) procsub_stream_children: HashMap<u32, bool>,
+}
+
+/// rubash#3071: one apply_temporary_assignments frame's record of the
+/// values it actually bound, keyed by the exact assignment word (name
+/// as written, cooked value text) that produced each bind, plus the
+/// env name the value was bound under. The command's word list rides
+/// along as the frame's identity: compose_external_environment may use
+/// a record only for the very command whose apply created the frame
+/// (its spawns run under that frame), never for a different command
+/// that merely executes while the frame is live (a pipeline element
+/// composed by the spawner inside a tempenv'd function call — its RHS
+/// must expand against the live table, not replay the call's binds).
+#[derive(Debug, Default)]
+pub(in crate::executor) struct TempenvBoundFrame {
+    pub(in crate::executor) words: Vec<String>,
+    pub(in crate::executor) records: Vec<(String, String, String, String)>,
 }
 
 /// Command executor
@@ -900,6 +933,18 @@ pub struct Executor {
     /// reads — is never mutated (rubash#1047).
     standard_path_scope: Option<String>,
     debug_trap_running: bool,
+    /// rubash#2969: true only while the DEBUG trap ACTION's own AST
+    /// executes (the execute_ast call in run_debug_trap). Distinct from
+    /// debug_trap_running, which also covers debugger consults whose
+    /// evaluations rely on the re-entrancy flag: a break/continue
+    /// defers to the pending loop-control flags only when it is part
+    /// of the action itself (GNU assigns `breaking`/`continuing` for
+    /// the action's commands); debugger-typed evaluations and
+    /// breakpoint conditions are a separate principal whose
+    /// break/continue keeps the unwind channel (debugger design 5.3:
+    /// a condition that unwinds is a failed condition; a typed
+    /// `break 1` preempts the pending command like script text).
+    debug_action_running: bool,
     /// rubash#375: parse-once cache for the DEBUG trap action. GNU parses a
     /// trap action once at `trap` invocation (trap.c read_trap_action) and
     /// runs the cached parse per firing; re-tokenizing + re-parsing the same
@@ -942,6 +987,13 @@ pub struct Executor {
     /// not against the map value (rubash perf12: the map-value gate
     /// produced stale alias/declare line numbers after an ambient restore).
     line_env_os_value: std::cell::RefCell<Option<String>>,
+    /// The last value written to the OS environment's
+    /// __RUBASH_CURRENT_FILE mirror (None = never written this process).
+    /// Twin of `line_env_os_value` for the file half of the diagnostic
+    /// frame stamp (rubash#3035): `stamp_current_file` skips the OS
+    /// write when this equals the newly computed frame file, and skips
+    /// the removal when it is already None.
+    file_env_os_value: std::cell::RefCell<Option<String>>,
     /// #682 stamped-by-caller contract: the execute_ast command loop stamps
     /// `__RUBASH_CURRENT_LINE`/`__RUBASH_CMD_START_LINE` for the node it is
     /// about to dispatch (GNU stamps line_number once per command,
@@ -1196,6 +1248,19 @@ pub struct Executor {
     /// restore_temporary_assignments so nested commands truncate the
     /// tempenv-name stack to the boundary recorded by the outer call.
     tempenv_marks: Vec<usize>,
+    /// rubash#3071: bound-value records per tempenv frame, pushed and
+    /// popped in lockstep with tempenv_marks. GNU variables.c:3536
+    /// assign_in_env expands a prefix RHS exactly once and the child
+    /// environment carries that literal result; rubash's spawn-time
+    /// env composition (compose_external_environment) re-expanded the
+    /// raw RHS against the post-bind table, so a self-referencing RHS
+    /// (`v="p${v}q" printenv v`) expanded twice. The records let the
+    /// composition reuse the value the apply already bound instead of
+    /// expanding again; composition paths whose assignments were never
+    /// applied on this executor (the concurrent pipeline spawner) find
+    /// no frame for their command and keep expanding — once, against
+    /// the unbound table, which is exactly their tempenv application.
+    tempenv_bound_frames: Vec<TempenvBoundFrame>,
     /// GNU variables.c:2604-2620 make_local_variable (was_tmpvar): a
     /// `declare`/`typeset`/`local` operand whose name is bound by this
     /// command's own `name=value` prefix promotes the tempenv binding to a
@@ -1473,6 +1538,14 @@ pub struct Executor {
     /// came from that upfront lex (not from a later eval-time lex) and is
     /// eligible for the read-time re-derivation.
     unit_lex_locale: std::cell::RefCell<Option<String>>,
+    /// rubash#2772: extquote state in effect when each SOURCE LINE was
+    /// first reached at reader level — the state GNU's parser applies to
+    /// that line's `$'...'` translation verdicts (parse.y:4053 translates
+    /// a span inside a `${}` body only when `extended_quote` held at the
+    /// moment the line was read, for word-region spans in double quotes).
+    /// Same recording discipline as `line_lex_locales`; consumed by the
+    /// word re-derivation in command_prepare.
+    line_lex_extquotes: std::cell::RefCell<HashMap<usize, bool>>,
     /// GNU `line_number` ambient: at top level it advances to each
     /// command's parse-end line; inside a pre-parsed body it freezes at
     /// the enclosing command's established line (execute_cmd.c — only
@@ -1784,6 +1857,18 @@ pub struct Executor {
     /// branches, failglob pattern) leaves the gate's existing behavior
     /// untouched, so an unquoted `$var` that word-splits stays ambiguous.
     redirect_target_single_glob_match: RefCell<HashSet<String>>,
+    /// The transport fact the folded target string cannot carry: keys
+    /// are folded redirect-target strings whose literal expansion
+    /// carried raw-byte transport (a stored E000 pair or E400 escape).
+    /// A folded byte char (e.g. U+009C for byte 0x9C) is
+    /// indistinguishable from a genuine char of the same code point,
+    /// so the output open funnels consult this set — cleared at each
+    /// execute_command entry like redirect_target_memo — to decide
+    /// whether the target's byte chars emit raw bytes or the name
+    /// takes the plain UTF-8 funnel. Only the literal arms of
+    /// expand_redirect_operand_fields set it; glob matches, procsub
+    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
+    redirect_target_had_transport: RefCell<HashSet<String>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.
@@ -1860,6 +1945,18 @@ pub struct Executor {
     /// command the gate is validating, not to an enclosing command
     /// whose applier ran earlier.
     fd_var_close_generation: u64,
+    /// rubash#2629: the binds the most recent successful
+    /// apply_dynamic_fd_var_redirects run produced on this executor,
+    /// recorded so a later helper walk over the SAME redirect list
+    /// (the pipeline stream-routing bracket) can rebind them from
+    /// the record instead of running the applier again — a second
+    /// applier run re-expands every `{var}` target word, and a
+    /// target with a side effect (`$((i+=1))` in the filename,
+    /// `$(mktemp)`) then evaluates twice where GNU's single
+    /// do_redirections pass (redir.c:237) evaluates it once. The
+    /// record is replaced by every successful apply and cleared by
+    /// every failed one; see FdVarApplySnapshot.
+    fd_var_apply_snapshot: Option<trap_exec::FdVarApplySnapshot>,
     /// rubash#2281: the fd_var_close_generation value whose applier
     /// run recorded the current fd_var_pending_closes contents.
     fd_var_pending_close_generation: u64,
@@ -2066,3 +2163,6 @@ mod tests;
 
 #[cfg(test)]
 mod splits_gate;
+
+#[cfg(test)]
+mod markers_decoder_tests;

@@ -520,7 +520,10 @@ pub(crate) fn valid_number(s: &str) -> Option<i64> {
     // so an expansion-produced \f counts as the form feed it
     // carries (rubash#2958).
     let decoded;
-    let s = if s.contains('\u{E000}') {
+    let s = if s.contains(
+        char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE)
+            .expect("sentinel is valid"),
+    ) {
         decoded = crate::executor::substitution_metadata::decode_raw_byte_markers_to_byte_chars(s);
         decoded.as_str()
     } else {

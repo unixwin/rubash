@@ -322,7 +322,7 @@ impl Executor {
         // allocates and assigns the dynamic fd like any other command.
         // This path bypasses the simple-command dispatch, so apply the
         // fd_var redirects here.
-        if self.apply_dynamic_fd_var_redirects(cmd, true)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, true, true)? {
             self.exit_code = 1;
             return Ok(());
         }
@@ -606,24 +606,35 @@ impl Executor {
             // command-words hook applies; pure-assignment commands reach
             // this loop without passing expand_command_words.
             let value_owned;
-            let value = match raw.filter(|raw| crate::lexer::raw_has_ansi_u_escape(raw)) {
+            let value = match raw.filter(|raw| {
+                crate::lexer::raw_has_ansi_u_escape(raw)
+                    || crate::lexer::raw_has_dolbrace_ansi_c(raw)
+            }) {
                 Some(raw) => {
                     let unit_locale = self.unit_lex_locale.borrow().clone();
-                    match self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line) {
-                        Some(line_locale) => {
-                            // Re-derive the FULL `name=raw` word so the
-                            // assignment dispatch (quoted-RHS markers and
-                            // all) reproduces the lexed value exactly.
-                            let full = format!("{name}={raw}");
-                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
-                            let rhs = rederived
-                                .split_once('=')
-                                .map(|(_, rhs)| rhs.to_string())
-                                .unwrap_or_else(|| value.clone());
-                            value_owned = rhs;
-                            value_owned.as_str()
-                        }
-                        None => value.as_str(),
+                    let line_locale = self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line);
+                    // rubash#2772: same read-time extquote re-derivation
+                    // as the command-words hook.
+                    let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                        && self.line_extquote_was_off(cmd.line);
+                    if line_locale.is_some() || extquote_off {
+                        // Re-derive the FULL `name=raw` word so the
+                        // assignment dispatch (quoted-RHS markers and
+                        // all) reproduces the lexed value exactly.
+                        let full = format!("{name}={raw}");
+                        let rederived = self.rederive_word_for_line(
+                            &full,
+                            line_locale.as_deref(),
+                            extquote_off,
+                        );
+                        let rhs = rederived
+                            .split_once('=')
+                            .map(|(_, rhs)| rhs.to_string())
+                            .unwrap_or_else(|| value.clone());
+                        value_owned = rhs;
+                        value_owned.as_str()
+                    } else {
+                        value.as_str()
                     }
                 }
                 None => value.as_str(),
@@ -848,7 +859,7 @@ impl Executor {
         // allocation and variable bind happen in the child, so the parent
         // keeps the file side effects but never sees the variable value.
         // Apply the redirects for their side effects, then undo the binds.
-        if self.apply_dynamic_fd_var_redirects(cmd, false)? {
+        if self.apply_dynamic_fd_var_redirects(cmd, false, false)? {
             status = 1;
         }
         self.undo_child_fd_var_redirects();
@@ -1118,6 +1129,35 @@ impl Executor {
         let line = line?;
         let line_locale = self.line_lex_locales.borrow().get(&line).cloned()?;
         (line_locale != lex_locale).then_some(line_locale)
+    }
+
+    /// rubash#2772: whether the recorded read-time extquote state for
+    /// `line` is OFF (see `line_lex_extquotes`). A line with no record
+    /// (a function body line, a word lexed inside eval's own run) keeps
+    /// the lexed form, exactly like the #353 locale record.
+    fn line_extquote_was_off(&self, line: Option<usize>) -> bool {
+        line.and_then(|line| self.line_lex_extquotes.borrow().get(&line).copied()) == Some(false)
+    }
+
+    /// Re-derive a raw word under its line's read-time state: the #353
+    /// locale pin (when the line's locale differs) and the #2772
+    /// extquote pin (when the line was read with extquote off), composed
+    /// — GNU applies both verdicts when the reader pulls the list.
+    fn rederive_word_for_line(
+        &self,
+        raw: &str,
+        line_locale: Option<&str>,
+        extquote_off: bool,
+    ) -> String {
+        let derive = || match line_locale {
+            Some(locale) => self.rederive_word_under_locale(raw, locale),
+            None => crate::lexer::word_value_from_raw(raw, self.posix_mode_enabled(), true).0,
+        };
+        if extquote_off {
+            crate::lexer::with_lex_extquote_pin(false, derive)
+        } else {
+            derive()
+        }
     }
 
     /// rubash#353: re-derive a raw word's value under `line_locale` through
@@ -1588,16 +1628,26 @@ impl Executor {
                 .iter()
                 .zip(cmd.assignment_raws.iter())
                 .map(|((name, value), raw)| {
-                    if crate::lexer::raw_has_ansi_u_escape(raw) {
+                    if crate::lexer::raw_has_ansi_u_escape(raw)
+                        || crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                    {
                         let unit_locale = self.unit_lex_locale.borrow().clone();
-                        if let Some(line_locale) =
-                            self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line)
-                        {
+                        let line_locale =
+                            self.ansi_word_line_locale(unit_locale.as_deref(), cmd.line);
+                        // rubash#2772: same read-time extquote
+                        // re-derivation as the command-words hook.
+                        let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(raw)
+                            && self.line_extquote_was_off(cmd.line);
+                        if line_locale.is_some() || extquote_off {
                             // Re-derive the FULL `name=raw` word so the
                             // assignment dispatch (quoted-RHS markers and
                             // all) reproduces the lexed pair exactly.
                             let full = format!("{name}={raw}");
-                            let rederived = self.rederive_word_under_locale(&full, &line_locale);
+                            let rederived = self.rederive_word_for_line(
+                                &full,
+                                line_locale.as_deref(),
+                                extquote_off,
+                            );
                             if let Some((_, rhs)) = rederived.split_once('=') {
                                 return (name.clone(), rhs.to_string());
                             }
@@ -1650,6 +1700,10 @@ impl Executor {
             conditional_command: cmd.conditional_command.clone(),
             brace_group: cmd.brace_group.clone(),
             line: cmd.line,
+            // rubash#3028: the first-element end line is part of the
+            // node's line identity (Simple->line) — carry it like `line`
+            // or the rebuilt command loses the continuation-aware stamp.
+            first_word_end_line: cmd.first_word_end_line,
             ..CommandNode::new()
         };
         // GNU execute_cmd.c:4366 fix_arrayref_words (called at
@@ -1705,15 +1759,31 @@ impl Executor {
                 // line therefore applies). No-op unless the word carries
                 // such an escape AND the locales differ.
                 let word_owned;
-                let word = match metadata.and_then(|metadata| {
-                    self.ansi_word_line_locale(metadata.lex_locale.as_deref(), cmd.line)
-                        .map(|line_locale| (line_locale, metadata.raw.clone()))
-                }) {
-                    Some((line_locale, raw)) => {
-                        word_owned = self.rederive_word_under_locale(&raw, &line_locale);
-                        word_owned.as_str()
+                let word = match metadata {
+                    Some(metadata)
+                        if metadata.lex_locale.is_some()
+                            || crate::lexer::raw_has_dolbrace_ansi_c(&metadata.raw) =>
+                    {
+                        let line_locale =
+                            self.ansi_word_line_locale(metadata.lex_locale.as_deref(), cmd.line);
+                        // rubash#2772: a `$'...'` span inside a `${...}`
+                        // unit is re-derived under the line's read-time
+                        // extquote state (GNU parse.y:4053's verdict is
+                        // taken when the line is read, not at expansion).
+                        let extquote_off = crate::lexer::raw_has_dolbrace_ansi_c(&metadata.raw)
+                            && self.line_extquote_was_off(cmd.line);
+                        if line_locale.is_some() || extquote_off {
+                            word_owned = self.rederive_word_for_line(
+                                &metadata.raw,
+                                line_locale.as_deref(),
+                                extquote_off,
+                            );
+                            word_owned.as_str()
+                        } else {
+                            word.as_str()
+                        }
                     }
-                    None => word.as_str(),
+                    _ => word.as_str(),
                 };
                 self.expand_command_word(cmd, index, word, raw)
                     .into_iter()
@@ -1941,14 +2011,17 @@ impl Executor {
             crate::executor::markers::PARAM_NAME_END_MARKER_STR,
             "",
         );
-        let restored = crate::executor::markers::cow_replace(
+        // E400-aware (rubash#2882): a typed `$'\uE002'` arrives
+        // E400-escaped and is user data — restore only the BARE
+        // quoted-null carrier, copying the escaped pair verbatim, like
+        // the sibling chains (conditional.rs,
+        // field_split_values_with_quoted_nulls). The blind cow_replace
+        // ate the pair's char and left a stray E400 introducer.
+        let restored = crate::executor::markers::restore_bare_sentinels(
             &restored,
-            crate::executor::markers::QUOTED_NULL_MARKER_STR,
-            "",
+            &[(crate::executor::markers::QUOTED_NULL_MARKER, "")],
         );
-        Some(vec![
-            strip_ifs_protection_markers(&restored.into_owned()).into_owned()
-        ])
+        Some(vec![strip_ifs_protection_markers(&restored).into_owned()])
     }
 
     fn expand_simple_substitution_fragments(
@@ -2667,11 +2740,11 @@ impl Executor {
         // \x1d quote marker for the whole-word braced form so the operator
         // expander can tell "${v:-~}" (no tilde) from ${v:-~} (tilde).
         let word = if raw.is_some_and(|raw| raw.starts_with('"') && raw.ends_with('"'))
-            && !word.starts_with('\u{1d}')
+            && !word.starts_with(STORAGE_WORD_PREFIX)
             && word.starts_with("${")
             && word.ends_with('}')
         {
-            format!("\u{1d}{word}")
+            format!("{STORAGE_WORD_PREFIX}{word}")
         } else {
             word.to_string()
         };
@@ -3029,6 +3102,17 @@ impl Executor {
             rest.strip_suffix('}')?
         };
 
+        // GNU subst.c:9777-9917 — same dispatch-order repair as
+        // `quoted_braced_alternate_positional_at_values` (rubash#3022):
+        // a body whose name head is immediately followed by `/` is a
+        // pattern substitution, never an operator alternate. The splits
+        // below would re-read the pattern/replacement text as a
+        // parameter name and `parameter_operator_value` would evaluate
+        // it (`${foo/[/]-$@}`: the `-` in `]-` splits off `foo/[/]`).
+        if parse_parameter_replacement(name).is_some() {
+            return None;
+        }
+
         // `+`/`:+` use the word when the parameter is set (non-empty for
         // `:+`); `-`/`:-` use the word when it is unset (or empty for `:-`).
         // `$@`/`$*` inside the word must expand to their own field boundaries
@@ -3366,17 +3450,25 @@ impl Executor {
             // array6.sub:26). The unquoted path would treat `'` as an sq
             // opener instead.
             let expanded = if outer_double_quoted {
-                crate::executor::parameter_words::unescape_parameter_operator_result(
-                    &self.expand_embedded_parameters_mut_with_context(
-                        &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
-                            alternate,
-                            self.posix_mode_enabled(),
-                            false,
+                // rubash#3088: the walk must NOT restore expansion-result
+                // backslashes before the operator-result unescape below —
+                // it would fold them as source escapes (subst.c:4773
+                // quote_string CTLESC-protects expansion results; subst.c:4807
+                // dequote_string strips only CTLESC). The walk defers both
+                // carriers; restore them after the pass.
+                crate::executor::parameter_words::restore_deferred_operator_backslashes(
+                    &crate::executor::parameter_words::unescape_parameter_operator_result(
+                        &self.expand_embedded_parameters_mut_with_context_no_restore(
+                            &crate::executor::parameter_words::decode_double_quotes_in_quoted_parameter_word(
+                                alternate,
+                                self.posix_mode_enabled(),
+                                false,
+                            ),
+                            SubstitutionQuoteContext::DoubleQuoted,
                         ),
                         SubstitutionQuoteContext::DoubleQuoted,
+                        self.shell_state.env_vars.get("IFS").map(String::as_str),
                     ),
-                    SubstitutionQuoteContext::DoubleQuoted,
-                    self.shell_state.env_vars.get("IFS").map(String::as_str),
                 )
             } else {
                 self.expand_alternate_parameter_word(alternate)
@@ -3384,8 +3476,13 @@ impl Executor {
             // Quoted-empty spans in the alternate carry the quoted-null
             // marker: the splitter keeps each marker-only field as an empty
             // argument (quote2.sub: ${x:+"$e" "$e"} -> two empty args,
-            // subst.c list_string:3181-3186 QUOTED_NULL branch).
-            if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+            // subst.c list_string:3181-3186 QUOTED_NULL branch). Bare
+            // carriers only: a typed `$'\uE002'` is E400-escaped user data
+            // and takes the ordinary split path (rubash#2882).
+            if crate::executor::markers::contains_bare_sentinel(
+                &expanded,
+                crate::executor::embedded_mutations::QUOTED_NULL_MARKER,
+            ) {
                 return Some(field_split_values_with_quoted_nulls(
                     &expanded,
                     self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -3429,6 +3526,18 @@ impl Executor {
             return None;
         }
         let inner = &braced[2..braced.len() - 1];
+        // GNU subst.c:9777-9917 — a body whose name head is immediately
+        // followed by `/` is a pattern substitution, never an operator
+        // alternate: the operator splits below would re-read the
+        // pattern/replacement text as a parameter name (`${foo/[/]-}`
+        // splits at the `-` in `]-` and evaluates the `/` subscript
+        // arithmetically; `"${foo/bar-$@}"` whole-word returns the
+        // positional list instead of the patsub result — rubash#3022).
+        // Return None so the word falls through to the normal quoted
+        // expansion path, which claims the replacement arm first.
+        if parse_parameter_replacement(inner).is_some() {
+            return None;
+        }
         // GNU param_expand reads the operator only at the top level of the
         // `${}` body: `+`/`-`/`:` inside `[...]` belong to the array
         // subscript (`${a[i++]:-x}` has no `-` operator). A naive split_once
@@ -3669,7 +3778,13 @@ impl Executor {
             return None;
         }
         let expanded = self.expand_alternate_parameter_word(alternate);
-        if expanded.contains(crate::executor::embedded_mutations::QUOTED_NULL_MARKER) {
+        // Bare quoted-null carriers only: a typed `$'\uE002'` is
+        // E400-escaped user data and takes the ordinary split path
+        // (rubash#2882).
+        if crate::executor::markers::contains_bare_sentinel(
+            &expanded,
+            crate::executor::embedded_mutations::QUOTED_NULL_MARKER,
+        ) {
             return Some(field_split_values_with_quoted_nulls(
                 &expanded,
                 self.shell_state.env_vars.get("IFS").map(String::as_str),
@@ -3777,8 +3892,11 @@ impl Executor {
         let assignment_raws = (materialized_cmd.assignment_raws.len()
             == materialized_cmd.assignments.len())
         .then(|| materialized_cmd.assignment_raws.as_slice());
-        let (temporary_assignments, assignments_failed) =
-            self.apply_temporary_assignments(&materialized_cmd.assignments, assignment_raws);
+        let (temporary_assignments, assignments_failed) = self.apply_temporary_assignments(
+            &materialized_cmd.assignments,
+            assignment_raws,
+            &materialized_cmd.words,
+        );
         if let Some(rejection) = redirect_rejection {
             // Only the FatalNounset class routes through the expansion-error
             // classifier (rubash#535): an unbound variable in a function
@@ -5378,13 +5496,17 @@ pub(in crate::executor) fn mark_quoted_ifs_from_raw(
             }
             let next = raw_chars.get(index + 1).copied();
             if in_single {
-                // Single-quote span: a backslash is span data and stays a
-                // pair (walk `'` span loop).
-                simulated.push(ch);
-                if let Some(n) = next {
-                    simulated.push(n);
-                }
-                index += 2;
+                // Single-quote span: a backslash is ordinary span data.
+                // GNU calls string_extract_single_quoted with allowesc=0
+                // (subst.c:1088, subst.c:11887), so the backslash neither
+                // escapes nor consumes the following byte; the extracted
+                // span is then quoted byte-by-byte by quote_string
+                // (subst.c:4773). Consume only the backslash here and let
+                // the next byte take its normal single-quoted arm, so an
+                // IFS byte after `\` is recorded as quoted and a closing
+                // quote still closes the span.
+                push_quoted_char(&mut simulated, &mut quoted_ifs_positions, ch, ifs, true);
+                index += 1;
                 continue;
             }
             if in_double {

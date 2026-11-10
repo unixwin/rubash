@@ -1062,7 +1062,9 @@ impl Executor {
         if let Some(input) = self.external_fd_heredoc_input(cmd, fd) {
             // The stored body may still carry the STORAGE_WORD_PREFIX
             // quoting marker; fd bytes are the dequoted content.
-            let input = input.strip_prefix('\u{1d}').unwrap_or(&input);
+            let input = input
+                .strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                .unwrap_or(&input);
             return Some(DevFdOperandRead {
                 bytes: crate::executor::substitution_metadata::shell_text_to_raw_bytes(input),
                 stdout_file: false,

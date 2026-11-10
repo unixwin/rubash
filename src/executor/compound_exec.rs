@@ -1457,6 +1457,14 @@ impl Executor {
         // can land here — no stale OS-env copies.
         let mut child_trap_table = self.shell_state.env_vars.clone();
         crate::builtins::trap::reset_for_subshell_child(&mut child_trap_table);
+        // rubash#2982: the wrapper child re-defines the parent's
+        // functions from a textual prelude — its table is empty until
+        // the prelude is evaluated — so the functrace/errtrace-kept
+        // DEBUG and ERR traps must not arrive live (they would fire
+        // before the first prelude definition, while the handler
+        // functions do not exist yet). Reset them here; the -c source
+        // re-arms them after the prelude (background_trap_rearm_source).
+        crate::builtins::trap::reset_traps_for_background_wrapper(&mut child_trap_table);
         for (key, value) in &child_trap_table {
             if key.starts_with("__RUBASH_TRAP") {
                 env_map.insert(key.clone(), value.clone());
@@ -2304,14 +2312,34 @@ impl Executor {
         // command's own fd-1 redirects below still override this, and
         // `2>&1`-style dups copy it, matching the sequential dup2 ordering a
         // forked GNU child would apply on top of the inherited pipe.
+        // rubash#2660: the base stdio above starts from the PROCESS
+        // descriptors, but an enclosing compound command's
+        // redirections live in this executor's fd table — the flat
+        // body never touches the process's real descriptors. GNU's
+        // async child is a fork of the shell AS REDIRECTED
+        // (execute_cmd.c:2837 execute_connection '&' forks after the
+        // compound applied do_redirections to its own descriptors),
+        // so it is born holding the compound's bindings. Seed slots
+        // 1/2 from the live fd table — the same source a foreground
+        // spawn inherits from — before the capture override below:
+        // an explicit binding (e.g. `>/dev/null`) beats the capture
+        // pipe, exactly like GNU's ordering (the subshell's redirect
+        // rebinds the capture child's fd 1 before the body forks).
+        for slot in 1..=2u32 {
+            if let Some(seeded) = self.background_stdio_from_fd_table(slot) {
+                stdio[slot as usize] = seeded;
+            }
+        }
         let mut captured_pipe_writer = false;
-        if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
-            stdio[1] = BackgroundStdio::File(write);
-            // Registration is conservative: a later fd-1 redirect may drop
-            // the pipe for THIS child, but reaping it then only drains an
-            // empty pipe — never another child's bytes (the drain fires when
-            // the whole writer set is reaped).
-            captured_pipe_writer = true;
+        if matches!(stdio[1], BackgroundStdio::Inherit) {
+            if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
+                stdio[1] = BackgroundStdio::File(write);
+                // Registration is conservative: a later fd-1 redirect may drop
+                // the pipe for THIS child, but reaping it then only drains an
+                // empty pipe — never another child's bytes (the drain fires when
+                // the whole writer set is reaped).
+                captured_pipe_writer = true;
+            }
         }
         // rubash#1862 bookkeeping for the FIFO deferral further down:
         // the stdio the child spawns with before any of the command's
@@ -2489,10 +2517,9 @@ impl Executor {
                         // child; this redirect stays in its source.
                         continue;
                     } else {
-                        match open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        ))) {
+                        match open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(&target)),
+                        ) {
                             Ok(file) => BackgroundStdio::File(file),
                             Err(_) => continue,
                         }
@@ -2500,8 +2527,7 @@ impl Executor {
                 }
                 RedirectKind::ReadWrite => {
                     let target = self.expand_redirect_target(redirect);
-                    let path = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
                     // rubash#1862: keep the parent's hands off FIFO
                     // opens uniformly, even though `<>` itself would
                     // not block — the open belongs to the child.
@@ -2594,6 +2620,44 @@ impl Executor {
         }
 
         (stdio, consumed, captured_pipe_writer)
+    }
+
+    /// rubash#2660: the async spawn's base for one stdio slot, read
+    /// from the executor's LIVE fd table — the bindings an enclosing
+    /// compound command's redirections installed (`( ... ) >/dev/null`,
+    /// `{ ...; } >file`, `exec >file`, a function's redirects). GNU's
+    /// async child forks from the shell holding exactly these
+    /// descriptors (execute_cmd.c:2837), so a file-backed binding
+    /// hands the child a duplicate of the same open file description
+    /// (shared offset, like dup2). Returns None to keep the caller's
+    /// default (process inherit) when the slot carries no spawnable
+    /// binding: unbound slots, the process-stdio markers naming the
+    /// slot itself, and the in-process channel endpoints
+    /// (process-substitution / pipe-channel writers), which a spawned
+    /// child cannot hold — the same shapes the foreground faces serve
+    /// in-process instead. A CLOSED slot maps to Null, matching this
+    /// resolver's own treatment of the command's `>&-` redirects.
+    fn background_stdio_from_fd_table(&self, fd: u32) -> Option<BackgroundStdio> {
+        use super::fd_table::FdWriteEndpoint;
+        if self.fd_table.is_closed(fd) {
+            return Some(BackgroundStdio::Null);
+        }
+        let dup_file = |handle: crate::fd::HANDLE| -> Option<BackgroundStdio> {
+            crate::fd::duplicate_handle(handle)
+                .ok()
+                .map(|dup| BackgroundStdio::File(crate::fd::handle_to_file(dup)))
+        };
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => dup_file(file_fd.handle),
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => dup_file(file_fd.handle),
+            // The slot was dup'd from the sibling stdio slot (e.g.
+            // `2>&1` at compound level): the marker names the process
+            // descriptor as bound at entry, so hand the child a
+            // duplicate of that live process descriptor.
+            Some(FdWriteEndpoint::Stdout) if fd != 1 => dup_file(1),
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => dup_file(2),
+            _ => None,
+        }
     }
 
     /// True when a background redirect target resolves to an existing
@@ -2873,8 +2937,46 @@ impl Executor {
 
     fn background_command_source(&self, command: &CommandNode) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_source_text(command));
         source
+    }
+
+    /// rubash#2982: re-arm the DEBUG/ERR traps the wrapper child starts
+    /// without (reset_traps_for_background_wrapper) — after the function
+    /// prelude, so the handler functions exist when the traps first
+    /// fire, and before the body, so the body's commands run traced
+    /// exactly as GNU's forked async child (execute_cmd.c:1576
+    /// execute_in_subshell). Only the traps the parent would have
+    /// inherited are re-armed: DEBUG under functrace, ERR under
+    /// errtrace (trap.c:1467 reset_or_restore_signal_handlers /
+    /// trap.c:1526 reset_signal_handlers). The
+    /// re-arm is a single line with no newline, so the prelude
+    /// line-offset math (prelude_newlines) is unaffected.
+    fn background_trap_rearm_source(&self) -> String {
+        let env_vars = &self.shell_state.env_vars;
+        let mut rearm = String::new();
+        if crate::builtins::set::shell_option_enabled(env_vars, "functrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "DEBUG")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} DEBUG; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        if crate::builtins::set::shell_option_enabled(env_vars, "errtrace") {
+            if let Some(action) = crate::builtins::trap::get_trap_action(env_vars, "ERR")
+                .filter(|action| !action.is_empty())
+            {
+                rearm.push_str(&format!(
+                    "trap {} ERR; ",
+                    super::parameter_replace::shell_single_quote_assignment_value(&action)
+                ));
+            }
+        }
+        rearm
     }
 
     /// rubash#1095: `background_command_source` for an absorbed `( list )`
@@ -2882,6 +2984,7 @@ impl Executor {
     /// spawn itself realized the subshell level (GNU execute_cmd.c:701).
     fn background_command_source_for_body(&self, body: &[CommandNode]) -> String {
         let mut source = self.background_function_prelude();
+        source.push_str(&self.background_trap_rearm_source());
         source.push_str(&bash_command_sequence_text(body));
         source
     }
@@ -3537,6 +3640,15 @@ impl Executor {
             // `breaking`; consume one level and abandon the loop,
             // before the test-outcome break (a false test must not
             // let the count leak to an enclosing loop).
+            // rubash#2969: a pending DEBUG-trap flag banked by the init
+            // or step expression's firing is consumed at this same
+            // checkpoint (GNU execute_cmd.c:3252-3262 reads the flags
+            // once per iteration): a break ends the loop; a continue
+            // drained to zero falls through to the test and body.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration | LoopControlFlow::None => {}
+            }
             if self.consume_stopped_loop_breaking() {
                 break;
             }
@@ -3622,9 +3734,19 @@ impl Executor {
                 // then escapes as a script-fatal error instead of
                 // discarding just this for command (rubash#1911).
                 Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
                     self.shell_state.loop_depth -= 1;
                     return Err(error);
                 }
+            }
+            // rubash#2969: GNU execute_cmd.c:3277-3290 — consume one
+            // pending DEBUG-trap flag level after the body, before the
+            // step: a break ends the loop; a continue drained to zero
+            // falls through to the step expression.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration | LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3277-3280
             // execute_arith_for_command — a SIGTSTP stop in the body set
@@ -3741,6 +3863,9 @@ impl Executor {
         if !crate::executor::arithmetic::arith_write_log_is_empty() {
             return None;
         }
+        if !crate::executor::arithmetic::arith_locale_bind_log_is_empty() {
+            return None;
+        }
         if self.arith_counter_trap_installed() {
             return None;
         }
@@ -3844,6 +3969,18 @@ impl Executor {
                     .env_vars
                     .insert(var.clone(), new_value.clone());
                 crate::executor::arithmetic::record_arith_write(&var, old_value);
+                crate::executor::arithmetic::record_arith_locale_bind(
+                    &var,
+                    &new_value,
+                    executor
+                        .shell_state
+                        .env_vars
+                        .get("LC_ALL")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    executor.shell_state.env_vars.attr_of("LC_ALL").array,
+                    executor.shell_state.env_vars.attr_of("LC_ALL").assoc,
+                );
                 crate::executor::sync_shell_assignment_process_env(
                     &executor.shell_state.env_vars,
                     &var,
@@ -4523,11 +4660,21 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
             }
             self.run_pending_signal_traps()?;
             let condition_matched = self.exit_code == 0;
             if condition_matched == loop_command.until {
+                // rubash#2969: GNU execute_cmd.c:3819-3831 — the
+                // test-side exit also decrements each pending DEBUG-trap
+                // flag once, so a level banked against this loop (the
+                // test's own trap action set it) does not leak into the
+                // enclosing list.
+                self.drain_pending_loop_control();
                 // rubash#2838: GNU execute_cmd.c:3819-3831
                 // execute_while_or_until — a stop in the test set
                 // `breaking`; the test-side exit consumes one level so
@@ -4567,7 +4714,25 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: frame abandoned; drop banked flags.
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
+            }
+            // rubash#2969: GNU execute_cmd.c:3840-3850 — consume one
+            // pending DEBUG-trap flag level after the body: a break
+            // ends the loop (ended_by_break keeps the status the
+            // consumer settled, like the Break arm above); a continue
+            // re-tests, or — with levels remaining — ends this loop
+            // with the flag standing for the outer driver.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => {
+                    ended_by_break = true;
+                    break;
+                }
+                LoopControlFlow::NextIteration => continue,
+                LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3840-3843
             // execute_while_or_until — a SIGTSTP stop in the body set
@@ -6044,8 +6209,8 @@ impl Executor {
                     }
                 }
                 crate::parser::RedirectKind::Append => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let fd = redirect.fd.unwrap_or(1);
                     match fd {
@@ -6087,14 +6252,14 @@ impl Executor {
                     );
                     err_spec = CoprocFdSpec::File(shared);
                     err_touched = true;
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     out_path = Some(session_target.clone());
                     err_path = Some(session_target);
                 }
                 crate::parser::RedirectKind::CombinedAppend => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let shared = file.try_clone()?;
                     replace_coproc_out_spec(
@@ -7515,7 +7680,13 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                 if quote == '\'' {
                     output.push_str(&decode_ansi_c_escapes(&body));
                 } else {
-                    output.push_str(&expand_word(&body));
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data.
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7538,17 +7709,16 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // comsub scanner (rubash#153: `case 'a'\''`b`'` ran `b`).
                     output.push_str(&body);
                 } else {
-                    // parse.y read_token_word: a `'` inside double quotes is
-                    // literal data; tag it so expand_word's quote removal
-                    // does not collapse it (same protection the pattern
-                    // twin applies). Quotes inside a `${...}`/`$(...)`/
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\"`/`\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data. Quotes inside a `${...}`/`$(...)`/
                     // backtick unit belong to the substitution's own
                     // grammar (parse.y:3877 parse_matched_pair) and stay
-                    // raw — `${x#'foo'}` in a double-quoted case word must
-                    // keep stripping the quoted pattern (rubash#258
-                    // BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
-                    output.push_str(&expand_word(&body));
+                    // raw through the cooker (rubash#258 BUG_PSUBSQUOT).
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    output.push_str(&expand_word(&cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7687,6 +7857,15 @@ enum CasePatternSegment {
 /// belongs to the pattern — text before the expansion glues onto that
 /// field, text after it belongs to later fields. A one-element
 /// expansion glues whole; an empty one contributes nothing.
+/// Cook one double-quoted case-pattern segment chunk to the lexer's carrier
+/// spelling before expanding it (same DQ-context rule as
+/// quote_aware_glob_rhs, rubash#2981): `\"`/`\$`/`\\`/`` \` `` resolve as
+/// double-quote escapes and `'` travels as DATA_SQUOTE data, instead of the
+/// raw fragment being re-read without its quoting context.
+fn cook_dquoted_case_segment(chunk: &str) -> String {
+    crate::lexer::quotes::cook_double_quoted_segment(chunk)
+}
+
 fn case_pattern_quoted_segment(
     body: &str,
     expand_word: &mut impl FnMut(&str) -> String,
@@ -7696,11 +7875,11 @@ fn case_pattern_quoted_segment(
     let mut rest = body;
     loop {
         let Some((start, end, name)) = find_case_pattern_array_at(rest) else {
-            literal.push_str(&expand_word(rest));
+            literal.push_str(&expand_word(&cook_dquoted_case_segment(rest)));
             return CasePatternSegment::Continues(literal);
         };
         let (first, count) = array_at.get(&name).cloned().unwrap_or_default();
-        literal.push_str(&expand_word(&rest[..start]));
+        literal.push_str(&expand_word(&cook_dquoted_case_segment(&rest[..start])));
         if count == 0 {
             rest = &rest[end..];
             continue;
@@ -7762,14 +7941,14 @@ fn quote_aware_case_pattern(
                     // opens single-quote state: a `'` inside the body is
                     // literal data (GNU case patterns keep it, so
                     // `case $s in "''")` matches the two quote characters).
-                    // A bare `'` pair fed to expand_word_mut collapses to
-                    // the empty string via quote removal, so tag each one
-                    // with the lexer's decoded-quote marker first — the
-                    // same protection escape_decoded_ansi_c_quotes applies.
-                    // Quotes inside a `${...}`/`$(...)`/backtick unit stay
-                    // raw (parse.y:3877 parse_matched_pair owns them;
+                    // The segment expander cooks each chunk to the lexer's
+                    // carrier spelling before expanding (same DQ-context
+                    // rule as quote_aware_glob_rhs, rubash#2981), so the
+                    // `'` travels as DATA_SQUOTE data and `\"`/`\$`/`\\`/
+                    // `` \` `` resolve as double-quote escapes. Quotes
+                    // inside a `${...}`/`$(...)`/backtick unit stay raw
+                    // (parse.y:3877 parse_matched_pair owns them;
                     // rubash#258 BUG_PSUBSQUOT).
-                    let body = crate::lexer::quotes::mark_data_squotes_around_substitutions(&body);
                     match case_pattern_quoted_segment(&body, &mut expand_word, array_at) {
                         CasePatternSegment::Continues(literal) => {
                             output.push_str(&escape_case_pattern_literal(&literal));
@@ -7980,8 +8159,19 @@ fn escape_case_pattern_literal(value: &str) -> String {
     // matching — `z=$'\v\f\a\b'; case "$z" in "$z")` and the
     // `$'\v\f\a\b')` clause of nquote.tests line 79 printed `bad'
     // (nquote snapshot red gate, regression window beb1eca6..d3e8affa).
+    //
+    // The literal-char escape pair is the same shape in the other
+    // registry family: a typed registry-zone char rides transport as
+    // LITERAL_CHAR_ESCAPE + the char (markers.rs push_literal_char) —
+    // ONE user character, so it likewise takes one guard as a unit.
+    // Guarding the halves separately interposed a CTLESC inside the
+    // pair; the matcher's flattening reads a literal-escape pair
+    // greedily as one data char, so it consumed E400+CTLESC as a pair
+    // whose payload is CTLESC itself and the real char (a typed
+    // `$'\uE002'`) could never match (rubash#3014).
     use crate::executor::markers::{
-        CTLESC, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST, RAW_BYTE_MARKER_LAST,
+        CTLESC, LITERAL_CHAR_ESCAPE, RAW_BYTE_MARKER_ESCAPE, RAW_BYTE_MARKER_FIRST,
+        RAW_BYTE_MARKER_LAST,
     };
     let mut escaped = String::new();
     let mut chars = value.chars().peekable();
@@ -7993,6 +8183,14 @@ fn escape_case_pattern_literal(value: &str) -> String {
                 if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(payload as u32)) {
                     escaped.push(chars.next().expect("peeked raw-byte payload"));
                 }
+            }
+        }
+        if ch == LITERAL_CHAR_ESCAPE {
+            // Greedy pairing, mirroring flatten_pattern_to_byte_chars:
+            // the payload is part of the same character unit. A lone
+            // trailing escape has no payload and stays a single unit.
+            if let Some(payload) = chars.next() {
+                escaped.push(payload);
             }
         }
     }

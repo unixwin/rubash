@@ -718,7 +718,7 @@ impl Executor {
         // POSIX target word is kept for diagnostics. A path that exists
         // (or misses under both spellings) keeps the plain mapped form.
         let win_path = self.session_path(crate::executor::path::windows_operand_file_path(
-            shell_path_to_windows(target, &self.shell_state.env_vars),
+            self.redirect_target_filesystem_path(target),
             &self.shell_state.env_vars,
         ));
         // A spawned child reading a `<(cmd)` carrier must get the stream's
@@ -2162,6 +2162,26 @@ impl Executor {
         }
     }
 
+    /// The filesystem path for an expanded redirect target. When the
+    /// target's expansion carried raw-byte transport (recorded by
+    /// expand_redirect_operand_fields in `redirect_target_had_transport`),
+    /// its byte chars emit raw bytes — GNU redir.c:298 opens the name
+    /// bytes verbatim, so a folded U+009C must reach the disk as 0x9C,
+    /// not re-encoded as UTF-8 C2 9C. Any other target takes the
+    /// existing shell-name funnel unchanged, so a genuine non-ASCII
+    /// name keeps its UTF-8 bytes. (rubash#3104 p23)
+    pub(in crate::executor) fn redirect_target_filesystem_path(
+        &self,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
+        if self.redirect_target_had_transport.borrow().contains(target) {
+            crate::executor::path::path_buf_from_folded_name(&normalized.to_string_lossy())
+        } else {
+            normalized
+        }
+    }
+
     pub(in crate::executor) fn create_redirect_output(
         &self,
         target: &str,
@@ -2252,7 +2272,7 @@ impl Executor {
             };
         }
         let target = self.redirect_output_path_target(target);
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
             && !Self::noclobber_target_is_device_like(&path)
@@ -2529,9 +2549,9 @@ impl Executor {
                 match self.open_output_fd_append(target) {
                     Ok(file) => Ok(file),
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
+                        crate::executor::execution_misc::open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(target)),
+                        )
                     }
                     Err(error) => Err(error),
                 }
@@ -2543,11 +2563,9 @@ impl Executor {
                         "Permission denied",
                     )),
                     Some(true) => Self::synthetic_proc_write_sink(true),
-                    None => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
-                    }
+                    None => crate::executor::execution_misc::open_redirect_append(
+                        &self.session_path(self.redirect_target_filesystem_path(target)),
+                    ),
                 }
             }
             SpecialPathClass::SyntheticLink => {
@@ -2569,7 +2587,7 @@ impl Executor {
                 }
             }
             SpecialPathClass::Filesystem => crate::executor::execution_misc::open_redirect_append(
-                &self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(target)),
             ),
         }
     }
@@ -3289,6 +3307,23 @@ impl Executor {
     }
 
     pub(in crate::executor) fn expand_case_word(&mut self, word: &str) -> String {
+        // rubash#3045: a `${var=word}` assignment is a side effect of the
+        // expansion wherever it occurs (GNU subst.c:9777
+        // parameter_brace_expand -> subst.c:10346 `case '='` ->
+        // subst.c:7966 parameter_brace_expand_rhs -> bind_variable; the
+        // case subject reaches that path via execute_cmd.c:3686
+        // expand_word_leave_quoted). The bind lives in the `&mut` apply
+        // pass below, not in the `&self` value render that follows — run
+        // it here, mirroring expand_command_word (command_prepare.rs),
+        // under the same one-word cross-pass scope so the applied-value
+        // memo and the rubash#1169 freeze key exactly as they do for a
+        // plain argument. Without this the subject renders correctly
+        // while the assignment is silently lost.
+        let _xpass = crate::executor::expand_braced_indices::SubXpassFrame::new();
+        let _wctx = crate::executor::expand_braced_indices::WordCtxGuard::new(
+            crate::executor::expand_braced_indices::next_word_ctx(),
+        );
+        self.apply_parameter_assignment_expansions_in_word(word);
         let mut expanded = if let Some(value) =
             tilde_expand::expand_word_prefix(word, &self.shell_state.env_vars)
         {
@@ -3483,7 +3518,9 @@ impl Executor {
                     return Some(input);
                 }
                 if let Some(body) = redirect.body.clone() {
-                    if let Some(word) = body.strip_prefix('\u{1d}') {
+                    if let Some(word) =
+                        body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                    {
                         // rubash#1965: a STORAGE_WORD_PREFIX here-string body
                         // is already-decoded text whose $'...' blanks carry
                         // the ANSI_C_IFS_GUARD carrier. The canonical funnel
@@ -3588,7 +3625,9 @@ impl Executor {
                         return Some(input);
                     }
                     if let Some(body) = redirect.body.as_deref() {
-                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                        if let Some(word) =
+                            body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                        {
                             // rubash#1965: the same storage arm as the mut
                             // ladder above — its decode-or-expand result must
                             // pass the value-boundary ANSI_C_IFS_GUARD strip
@@ -3642,7 +3681,9 @@ impl Executor {
                         }
                     }
                     if let Some(body) = redirect.body.as_deref() {
-                        if let Some(word) = body.strip_prefix('\u{1d}') {
+                        if let Some(word) =
+                            body.strip_prefix(crate::executor::markers::STORAGE_WORD_PREFIX)
+                        {
                             let mut input = decode_ansi_c_quoted_word(word)
                                 .unwrap_or_else(|| self.expand_word(word));
                             input.push('\n');

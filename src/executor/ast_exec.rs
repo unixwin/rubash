@@ -57,6 +57,7 @@ impl Executor {
         self.unit_lex_locale
             .replace(Some(crate::locale::locale_name()));
         self.line_lex_locales.borrow_mut().clear();
+        self.line_lex_extquotes.borrow_mut().clear();
 
         // G-01: EXECUTION_LOCK is no longer held for the whole run.
         // EXECUTION_LOCK_DEPTH is now only the run-nesting marker (it
@@ -539,6 +540,38 @@ impl Executor {
                 }
                 return Err(ExecuteError::SigintUnwind);
             }
+            // rubash#2969: the same execute_cmd.c:635-636 gate for the
+            // DEBUG-trap pending flags — a break/continue executed inside
+            // a DEBUG trap action only SET loop_breaking/loop_continuing
+            // (builtins/break.def:88/133); every command entered while a
+            // flag stands is skipped whole (it neither runs nor fires
+            // the trap), and the loop driver that owns this list
+            // consumes one level after the body. Returning Ok abandons
+            // the rest of the list, the stopped arm's shape below; the
+            // flags are NOT consumed here — consumption is the driver's,
+            // because GNU's flag survives the abandoned list and the
+            // driver reads it after execute_command returns. A flat
+            // `( )` region open in this frame closes first: the restore
+            // reverts the ShellState, so a flag set inside the region
+            // dies with it (the forked child's copy never reaches the
+            // parent's loops), while a flag banked before the region
+            // node was entered can never be standing here — this gate
+            // would have abandoned the list at that node already.
+            if self.loop_control_pending() {
+                if let Some(saved_state) = subshell_state.take() {
+                    self.restore_flat_subshell(saved_state);
+                    if let Some(saved) = subshell_fd_table.take() {
+                        self.fd_table = saved;
+                    }
+                    if let Some(saved) = subshell_timed_stdin.take() {
+                        self.timed_stdin = saved;
+                    }
+                    if let Some(saved) = saved_fork_collapse.take() {
+                        self.subshell_fork_collapse.set(saved);
+                    }
+                }
+                return Ok(());
+            }
             // rubash#2838: GNU execute_cmd.c:635 execute_command_internal —
             // while `breaking` stands, no further command executes. A
             // SIGTSTP stop in this list set the count (see the
@@ -929,6 +962,21 @@ impl Executor {
                             .borrow_mut()
                             .entry(line)
                             .or_insert_with(crate::locale::locale_name);
+                        // rubash#2772: same first-reach record for the
+                        // extquote state — the state GNU's parser applies
+                        // to this line's `$'...'` translation verdicts
+                        // (parse.y:4053's extended_quote gate is evaluated
+                        // when the line is READ, and the first command of
+                        // the line fixes it for the whole list).
+                        self.line_lex_extquotes
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(|| {
+                                crate::builtins::shopt::option_enabled(
+                                    &self.shell_state.env_vars,
+                                    "extquote",
+                                )
+                            });
                     }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir

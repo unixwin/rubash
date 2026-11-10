@@ -137,7 +137,12 @@ impl Executor {
             return if left == 0 {
                 self.execute_conditional(&args[index + 1..])
             } else {
-                1
+                // GNU execute_cmd.c:3997-4001 (COND_AND): a non-zero
+                // left result — including an error code such as the
+                // rc 2 a `-t` operand raises (test.c:106
+                // TEST_ERREXIT_STATUS) — propagates verbatim; only a
+                // success evaluates the right side.
+                left
             };
         }
 
@@ -499,7 +504,10 @@ impl Executor {
                 self.conditional_status_with_metadata(&args[index + 1..], &metadata[index + 1..])
                     .unwrap_or_else(|| self.execute_conditional(&args[index + 1..]))
             } else {
-                1
+                // Same GNU COND_AND rule as execute_conditional
+                // (execute_cmd.c:3997-4001): propagate the left
+                // result verbatim, error codes included.
+                left
             });
         }
 
@@ -646,8 +654,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -663,8 +682,19 @@ impl Executor {
                 let right = self.expand_conditional_word(right);
                 self.xtrace_conditional_term(op, &left, Some(&right));
                 let right_pattern = self.quote_aware_glob_rhs(&right, &metadata[2]);
-                let matched =
-                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left);
+                let nocasematch = crate::builtins::shopt::option_enabled(
+                    &self.shell_state.env_vars,
+                    "nocasematch",
+                );
+                let matched = if raw_rhs_has_unquoted_extglob_group(&metadata[2].raw) {
+                    if nocasematch {
+                        extglob_case_pattern_matches_nocase(&right_pattern, &left)
+                    } else {
+                        extglob_case_pattern_matches(&right_pattern, &left)
+                    }
+                } else {
+                    crate::executor::conditional::case_pattern_matches(&right_pattern, &left)
+                };
                 Some(match op.as_str() {
                     "!=" => i32::from(matched),
                     _ => i32::from(!matched),
@@ -822,17 +852,37 @@ impl Executor {
                 QuoteKind::Single | QuoteKind::Backslash => body,
                 QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
                 QuoteKind::Double | QuoteKind::Locale => {
-                    // parse.y read_token_word's double-quote scanner never
-                    // opens single-quote state, so a `'` inside the body is
-                    // literal data (GNU cond_expand_word keeps it). Feeding
-                    // a bare `'` to expand_word_mut makes quote removal
-                    // treat it as an unclosed single-quote span and drop
-                    // it, collapsing `[[ "''" == "''" ]]`'s pattern to the
-                    // empty string. Tag it with the lexer's decoded-quote
-                    // marker (the same protection escape_decoded_ansi_c_
-                    // quotes applies) so it survives as data.
-                    let body = body.replace('\'', crate::lexer::ANSI_C_QUOTE_MARKER_STR);
-                    self.expand_conditional_word(&body)
+                    // GNU cond.c cond_expand_word expands the pattern
+                    // operand as a word WITH its quoting intact (parse.y
+                    // read_token_word + subst.c expand_word_internal):
+                    // inside double quotes `\$`, `\\`, `\"` and `` \` ``
+                    // are escapes resolving to literal `$`, `\`, `"`,
+                    // `` ` ``, and `'` is data (the double-quote scanner
+                    // never opens single-quote state). Expanding the
+                    // quote-stripped body as a bare fragment loses that
+                    // context: `\$` misreads as `\` + a live `$name`
+                    // expansion, `\\` never collapses, and a `'` hand-
+                    // tagged with the U+E010 decoded-quote marker
+                    // survives whenever a backslash routes the fragment
+                    // through the mutable walker (which never decodes
+                    // that marker) — so `[[ "\`x'" == ... ]]`,
+                    // `[[ "a\$b" == ... ]]` and `[[ "a\\b" == ... ]]`
+                    // all fail against GNU (rubash#2981). Cook the body
+                    // to the lexer's carrier spelling first
+                    // (cook_double_quoted_segment): escapes become DATA_*
+                    // carriers and `'` becomes DATA_SQUOTE, the exact
+                    // spelling the whole-word expansion of `right`
+                    // already consumes correctly — so the segment expands
+                    // to its literal text with no re-interpretation of
+                    // raw escapes. Quotes inside a nested `$(...)`/
+                    // `${...}`/backtick unit belong to that unit's own
+                    // grammar and travel verbatim through the cooker
+                    // (parse.y:3877 parse_matched_pair), so cooking
+                    // cannot corrupt them; a raw `"` cannot appear in the
+                    // body (it would have ended the span).
+                    let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                    let value = self.expand_conditional_word(&cooked);
+                    value
                 }
             };
             append_literal_glob_text(&mut output, &value);
@@ -1377,7 +1427,16 @@ impl Executor {
                 let quoted = match kind {
                     QuoteKind::Single | QuoteKind::Backslash => body,
                     QuoteKind::AnsiC => decode_ansi_c_escapes(&body),
-                    QuoteKind::Double | QuoteKind::Locale => self.expand_conditional_word(&body),
+                    // Same DQ-context rule as quote_aware_glob_rhs
+                    // (rubash#2981): cook the body to the lexer's carrier
+                    // spelling before expanding, so `\$`/`\\`/`` \` ``
+                    // resolve as double-quote escapes and `'` travels as
+                    // DATA_SQUOTE data instead of being re-read from the
+                    // raw fragment.
+                    QuoteKind::Double | QuoteKind::Locale => {
+                        let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
+                        self.expand_conditional_word(&cooked)
+                    }
                 };
                 let quoted =
                     crate::executor::substitution_metadata::shell_text_to_raw_bytes(&quoted);
@@ -1724,6 +1783,42 @@ fn contains_extglob_pattern(pattern: &str) -> bool {
     false
 }
 
+/// Whether the raw spelling of a `[[ == ]]` / `[[ != ]]` RHS carries an
+/// extglob group operator in an unquoted span. GNU forces
+/// `extended_glob = 1` for the conditional pattern test
+/// (execute_cmd.c:4116-4118) and expands the RHS with mode 1
+/// (execute_cmd.c:4068), so quoting inside a group only makes the quoted
+/// characters literal — the group itself stays live, with or without
+/// `shopt extglob`. The cooked pattern cannot carry this decision (a
+/// fully quoted `"@(a)"` cooks to text shaped like a group), so the raw
+/// spelling is scanned: nested expansion bodies, backslash escapes and
+/// quoted spans are skipped as units, and only an operator character met
+/// in the remaining unquoted text counts.
+fn raw_rhs_has_unquoted_extglob_group(raw: &str) -> bool {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(&chars, index) {
+            index = next;
+            continue;
+        }
+        if chars[index] == '\\' {
+            index += 2;
+            continue;
+        }
+        if let Some((_, _, end)) = raw_quote_at(&chars, index) {
+            index = end + 1;
+            continue;
+        }
+        if matches!(chars[index], '@' | '*' | '+' | '?' | '!') && chars.get(index + 1) == Some(&'(')
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
 fn raw_quote_at(chars: &[char], start: usize) -> Option<(QuoteKind, usize, usize)> {
     let (kind, opener_len, terminator) = match chars.get(start)? {
         '$' if chars.get(start + 1) == Some(&'\'') => (QuoteKind::AnsiC, 2, '\''),
@@ -1735,6 +1830,21 @@ fn raw_quote_at(chars: &[char], start: usize) -> Option<(QuoteKind, usize, usize
 
     let mut index = start + opener_len;
     while index < chars.len() {
+        // GNU parse.y skip_double_quoted (via parse_matched_pair,
+        // parse.y:5416-5432): inside `"..."` a substitution unit owns its
+        // own quoting — `$(` takes parse_comsub/parse_matched_pair, `${`
+        // takes parse_matched_pair, and a backquote opens backquote mode
+        // — so an inner `"` never ends the span. The case side's
+        // quoted_case_pattern_end already skips these units (rubash#259);
+        // without the skip here, `"$(echo "x")"` truncated at the inner
+        // quote and the comsub looked unclosed (rubash#2981).
+        if terminator == '"' {
+            if let Some(next) = crate::parser::pathname_pattern::skip_nested_expansion(chars, index)
+            {
+                index = next;
+                continue;
+            }
+        }
         if chars[index] == '\\' && terminator != '\'' {
             index += 2;
             continue;

@@ -878,14 +878,20 @@ impl Executor {
         if base.is_empty() {
             return false;
         }
-        if let Some(prefix) = base.strip_suffix(['@', '*']) {
-            return !prefix.is_empty() && is_shell_name(prefix);
-        }
+        // The body may BE a special parameter (`${!*}`, `${!@}`,
+        // `${!#}`...): subst.c:122 VALID_INDIR_PARAM takes `*`/`@` as
+        // the indirect SOURCE itself. This check must run before the
+        // prefix-list arm below — a body of exactly `*` or `@` also
+        // "strips" to an empty prefix, which shadowed the special and
+        // misreported the form as a bad substitution (rubash#2649).
         if matches!(base, "@" | "*" | "#" | "?" | "$" | "-" | "!" | "0")
             || base.parse::<usize>().is_ok()
             || is_shell_name(base)
         {
             return true;
+        }
+        if let Some(prefix) = base.strip_suffix(['@', '*']) {
+            return !prefix.is_empty() && is_shell_name(prefix);
         }
         // GNU also accepts a valid leading name followed by an operator
         // expression applied to the indirect value (${!x//c/x}, ${!x:-y},
@@ -1527,6 +1533,25 @@ impl Executor {
     /// the fold must not fire (execute_cmd.c:1821-1825).
     pub(in crate::executor) fn in_parse_and_execute_frame(&self) -> bool {
         self.parse_and_execute_frames.last() == Some(&self.shell_state.subshell_depth.get())
+    }
+
+    /// rubash#2960: GNU eval.c:206-207 — reader_loop takes EOF right
+    /// after a command completes when `just_one_command` stands
+    /// (flags.c:184, the `onecmd` option: `set -t`, `set -o onecmd`,
+    /// or the `-t` invocation flag). The check belongs to the
+    /// PRINCIPAL reader only (script file, stdin, host submissions):
+    /// a parse_and_execute body — the `-c` string (shell.c
+    /// run_one_command), an eval string, a sourced file — never
+    /// takes it, and neither does a command-string run. Drivers
+    /// consult this after each completed read unit; the unit that
+    /// set the flag has already completed by then, and a flag a
+    /// sourced/evaluated unit set is live state, so the caller's
+    /// next consultation stops the caller — both halves measured
+    /// against GNU bash 5.3.20.
+    pub fn onecmd_reader_stop(&self) -> bool {
+        !self.command_string_mode()
+            && !self.in_parse_and_execute_frame()
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "onecmd")
     }
 
     /// rubash#1563: true when this executor is executing a subshell
@@ -2188,6 +2213,26 @@ impl Executor {
                         }
                     }
                 }
+                // GNU subst.c:7883-7952 parameter_brace_expand_indir on a
+                // SPECIAL source: `${!*}` / `${!@}` indirect through the
+                // positional parameters themselves. find_indir expands
+                // the source with PF_ASSIGNRHS + no-split dollar star
+                // (subst.c:7847-7861): `*` joins with IFS[0], `@` joins
+                // with a space. The joined text is then judged exactly
+                // like any other t (subst.c:7947): non-empty and not a
+                // valid brace-expansion word reports
+                // `<t>: invalid variable name`; an empty join (no
+                // positionals) proceeds silently (rubash#2649).
+                if indirect == "*" || indirect == "@" {
+                    let t = if indirect == "*" {
+                        self.positional_params_star_joined()
+                    } else {
+                        self.shell_state.positional_window().join(" ")
+                    };
+                    if !t.is_empty() && !Self::is_valid_indirect_target(&t) {
+                        return Some((t, "invalid variable name".to_string(), 1));
+                    }
+                }
                 if Self::is_indirect_array_operator_expression(indirect) {
                     // GNU treats `${!name[@]<op>...}` as indirection through
                     // the VALUE of `name` re-expanded as a parameter
@@ -2402,11 +2447,17 @@ impl Executor {
                             })
                     };
                     if is_invalid {
-                        return Some((
-                            length.to_string(),
-                            "substring expression < 0".to_string(),
-                            1,
-                        ));
+                        // GNU subst.c:8487/8502 reports the RAW length
+                        // slice (text after the separator colon, verbatim)
+                        // in this diagnostic, not the evaluated number:
+                        // `${arr[@]: 1: -1}` reads ` -1: substring
+                        // expression < 0` with the leading blank kept
+                        // (rubash#2713). The evaluated value remains the
+                        // fallback for any shape the raw split cannot see.
+                        let display = Self::parameter_substring_raw_length_text(inner)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| length.to_string());
+                        return Some((display, "substring expression < 0".to_string(), 1));
                     }
                 }
             }

@@ -233,6 +233,14 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
 /// against WSL GNU Bash 5.3.0, probes q4/q7/q9 under
 /// target/deep201/probes). Only plain simple commands use this; compound
 /// keywords keep their own token line (For->line etc.).
+///
+/// rubash#3028: the newline count below only sees literal newlines in
+/// the word text, so a first word split by backslash-newline
+/// CONTINUATIONS (whose newline bytes the lexer elided) measured 0 and
+/// the stamp kept the start line. The parser now records the exact
+/// value on the node (`CommandNode::first_word_end_line`, from the
+/// lexer's per-token end line); this function prefers it and keeps the
+/// text count as the floor/fallback for unstamped nodes.
 pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode) -> Option<usize> {
     let start = cmd.line?;
     let simple = cmd.for_command.is_none()
@@ -264,7 +272,21 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     } else {
         cmd.words.first().map(|word| word.matches('\n').count())?
     };
-    Some(start + first_word_newlines)
+    let text_based = start + first_word_newlines;
+    // rubash#3028: the parser's first-element end-line stamp is the
+    // exact value — it counts the physical lines the reader crossed
+    // while reading the first element, including backslash-newline
+    // continuations, which the word text no longer contains (the lexer
+    // elides the pair). The text count remains as the floor for nodes
+    // whose stamp is absent or stale (synthetic nodes, bodies re-parsed
+    // from rendered text): it is exact for the quoted-newline shapes
+    // that produced those nodes, and the stamp is exact whenever the
+    // feeder produced the tokens, so the max is the GNU value in both
+    // worlds.
+    match cmd.first_word_end_line {
+        Some(stamped) if stamped >= start => Some(stamped.max(text_based)),
+        _ => Some(text_based),
+    }
 }
 
 /// GNU print_cmd.c prints the command node's OWN redirection list. A
@@ -775,10 +797,22 @@ fn for_command_source_text(for_command: &ForCommand) -> String {
         // `for i; do` form's map_list as the literal `"$@"` word.
         format!("for {} in \"$@\"; {}", for_command.variable, body)
     } else {
+        // print_cmd.c:602 print_for_command_head prints the map_list
+        // through command_print_word_list (print_cmd.c:586) — stored
+        // word text, quotes intact. Joining the cooked words split a
+        // quoted `"a b"` entry into two iterations on re-parse
+        // (rubash#2987, same cooked-join family as the conditional
+        // arm); render each word through command_word_source_text.
+        let rendered = for_command
+            .words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| command_word_source_text(index, word, &for_command.word_metadata))
+            .collect::<Vec<_>>();
         format!(
             "for {} in {}; {}",
             for_command.variable,
-            for_command.words.join(" "),
+            rendered.join(" "),
             body
         )
     }
@@ -921,7 +955,27 @@ fn loop_command_source_text(loop_command: &LoopCommand) -> String {
 }
 
 fn conditional_command_source_text(conditional_command: &ConditionalCommand) -> String {
-    format!("[[ {}", conditional_command.args.join(" "))
+    // GNU print_cmd.c:881 print_cond_node prints each conditional word
+    // from its stored text (`cond->op->word`), quotes intact — the
+    // parser's word text still carries the quoting, exactly like
+    // command_print_word_list (print_cmd.c:586) for the for/select
+    // heads. Joining the COOKED args instead dropped that quoting:
+    // `[[ "$1" != '|' ]]` re-serialized as `[[ $1 != | ]]` and
+    // `[[ "$1" == "" ]]` as `[[ $1 == ]]`, both unparseable, and a
+    // quoted glob RHS (`== "a*"`) silently became a pattern. A
+    // respawned background child re-parses the whole prelude, so one
+    // such conditional in ANY function killed the child before its
+    // first command (rubash#2987: the bats per-test timeout watchdog
+    // subshell never ran). Render each arg through the same raw
+    // contract as simple-command words — the case arm of this
+    // renderer already keeps it (rubash#1704).
+    let rendered = conditional_command
+        .args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| command_word_source_text(index, arg, &conditional_command.arg_metadata))
+        .collect::<Vec<_>>();
+    format!("[[ {}", rendered.join(" "))
 }
 
 fn subshell_command_source_text(subshell_command: &SubshellCommand) -> String {
@@ -956,10 +1010,21 @@ fn select_command_source_text(select_command: &SelectCommand) -> String {
         // implicit `select x; do` form's map_list as the literal `"$@"`.
         format!("select {} in \"$@\"; {}", select_command.variable, body)
     } else {
+        // Same raw word-list contract as the for head above
+        // (print_cmd.c:656 via command_print_word_list :586);
+        // cooked-join split quoted entries on re-parse (rubash#2987).
+        let rendered = select_command
+            .words
+            .iter()
+            .enumerate()
+            .map(|(index, word)| {
+                command_word_source_text(index, word, &select_command.word_metadata)
+            })
+            .collect::<Vec<_>>();
         format!(
             "select {} in {}; {}",
             select_command.variable,
-            select_command.words.join(" "),
+            rendered.join(" "),
             body
         )
     }

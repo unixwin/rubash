@@ -315,14 +315,28 @@ impl Executor {
         // VarTable::from_values also imports any __RUBASH_*_VARS attribute
         // lists a parent rubash left in the environment — the structured
         // form of the cross-process attribute transport.
+        // rubash#2884: the imported values are entry-encoded at this
+        // funnel (env_helpers::entry_encode_imported_env) — GNU
+        // variables.c:368 stores environ verbatim, but this engine's
+        // stored spelling is a transport domain and environment import
+        // was the one entry that skipped the encoding every other
+        // value channel applies. The process_env_snapshot FIELD keeps
+        // the raw values: the Drop-time restore writes them back to
+        // the process environment verbatim.
         let mut env_vars = if process_exit {
             crate::shell::var_table::VarTable::from_values(
-                crate::executor::env_helpers::process_env_pairs()
-                    .into_iter()
-                    .collect(),
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    crate::executor::env_helpers::process_env_pairs()
+                        .into_iter()
+                        .collect(),
+                ),
             )
         } else {
-            crate::shell::var_table::VarTable::from_values(process_env_snapshot.clone())
+            crate::shell::var_table::VarTable::from_values(
+                crate::executor::env_helpers::entry_encode_imported_env(
+                    process_env_snapshot.clone(),
+                ),
+            )
         };
         // rubash#2356: out-of-band respawn state transport — the
         // spawn side moved every oversized environment entry into a
@@ -487,15 +501,34 @@ impl Executor {
         for name in imported_functions.keys() {
             mark_env_name(&mut env_vars, EXPORTED_FUNCTIONS, name);
         }
-        // GNU variables.c import refusal (the ShellShock guard) reports
-        // both lines under the shell's invocation name (rubash#1276).
-        if !failed_function_imports.is_empty() {
+        // GNU variables.c import refusals report under the shell's
+        // invocation name, split by failure class (rubash#2728): a
+        // parse failure prints the parser's own diagnostics first
+        // (evalstring.c parse_command failure arm), a parsed-but-not-
+        // a-definition attempt prints only the warning
+        // (evalstring.c:478); both end with variables.c:441's single
+        // error line and leave last_command_exit_value at
+        // EXECUTION_FAILURE (variables.c:440), seeded below.
+        let function_import_failed = !failed_function_imports.is_empty();
+        if function_import_failed {
             let shell_name = std::env::args()
                 .next()
                 .unwrap_or_else(|| "rubash".to_string());
-            for name in &failed_function_imports {
-                eprintln!("{shell_name}: warning: {name}: ignoring function definition attempt");
-                eprintln!("{shell_name}: error importing function definition for `{name}'");
+            for failure in &failed_function_imports {
+                match failure {
+                    ImportedFunctionFailure::Parse { name, diagnostics } => {
+                        for (line, message) in diagnostics {
+                            eprintln!("{shell_name}: {name}: line {line}: {message}");
+                        }
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                    ImportedFunctionFailure::IgnoredAttempt { name } => {
+                        eprintln!(
+                            "{shell_name}: warning: {name}: ignoring function definition attempt"
+                        );
+                        eprintln!("{shell_name}: error importing function definition for `{name}'");
+                    }
+                }
             }
         }
         // GNU variables.c:397-446 (initialize_shell_variables,
@@ -693,6 +726,11 @@ impl Executor {
             // other entry must not execute under a foreign parent's
             // line number.
             env_vars.remove("__RUBASH_CURRENT_LINE");
+            // rubash#3035: the frame FILE half of the same diagnostic
+            // transport — a validated respawn child keeps the stamped
+            // frame file, any other entry must not execute under a
+            // foreign parent's definition-file name.
+            env_vars.remove("__RUBASH_CURRENT_FILE");
             // dollar_vars[0] slot reset at script entry (shell.c:1613) —
             // see main.rs; the snapshot rides the process env otherwise.
             env_vars.remove("__RUBASH_ARGV0_AFTER_UNSET");
@@ -724,6 +762,7 @@ impl Executor {
             mirror_env_remove("__RUBASH_SCRIPT_NAME");
             mirror_env_remove("__RUBASH_TOP_LEVEL_NAME");
             mirror_env_remove("__RUBASH_CURRENT_LINE");
+            mirror_env_remove("__RUBASH_CURRENT_FILE");
             mirror_env_remove("__RUBASH_ARGV0_AFTER_UNSET");
         }
         mirror_env_remove("__RUBASH_SHELL_NAME");
@@ -1004,6 +1043,11 @@ impl Executor {
                 // validated stamp IS this child's invocation shape.
                 invocation_interactive: false,
                 invocation_login: respawn_login_shell,
+                // rubash#2961: forced_interactive is seeded by the
+                // same funnels that seed invocation_interactive
+                // (the host declares the shape after construction);
+                // a respawned child re-derives it there too.
+                forced_interactive: false,
                 aliases: HashMap::new(),
                 functions: imported_functions,
                 function_definition_redirects: HashMap::new(),
@@ -1034,6 +1078,9 @@ impl Executor {
                 // respawn verbatim; None keeps the arrays unmaterialized
                 // exactly as the parent's fork left them.
                 bash_arg_bottom: std::cell::RefCell::new(respawn_argv_bottom),
+                dynamic_cells: std::cell::RefCell::new(
+                    crate::shell::state::DynamicCellState::default(),
+                ),
                 bash_lineno_stack: Vec::new(),
                 bash_source_stack: Vec::new(),
                 exit_unwind_leaked_frames: std::cell::Cell::new(0),
@@ -1054,6 +1101,8 @@ impl Executor {
                 loop_depth: 0,
                 inherited_loop_depth: 0,
                 subshell_saved_loop_depth: 0,
+                loop_breaking: 0,
+                loop_continuing: 0,
                 read_generation: 0,
                 read_generation_ceiling: 0,
                 command_number: 1,
@@ -1083,6 +1132,7 @@ impl Executor {
                 // process boundary (rubash#2487).
                 job_control: Cell::new(false),
                 subshell_source_text: None,
+                reader_unit_source: std::cell::RefCell::new(None),
                 in_command_substitution: Cell::new(false),
                 stdin_redir: Cell::new(false),
                 xtrace_indirection_level: Cell::new(0),
@@ -1092,8 +1142,8 @@ impl Executor {
                 last_procsub_pid: None,
                 coproc_names: HashMap::new(),
                 completion_specs: crate::builtins::complete::CompletionRegistry::new(),
-                pcomp_curcs: None,
-                pcomp_curcmd: None,
+                pcomp_curcs: std::rc::Rc::new(std::cell::RefCell::new(None)),
+                pcomp_curcmd: std::rc::Rc::new(std::cell::RefCell::new(None)),
                 line_completion_depth: 0,
                 bind_registry: std::rc::Rc::new(std::cell::RefCell::new(
                     crate::shell::bind_registry::BindRegistry::default(),
@@ -1116,9 +1166,13 @@ impl Executor {
                 procsub_streams: std::cell::RefCell::new(HashMap::new()),
                 procsub_adhoc_carriers: std::cell::RefCell::new(Vec::new()),
                 fork_saved_process_umask: None,
+                fork_saved_process_rlimits: None,
             },
             fd_table: FdTable::new(),
-            exit_code: 0,
+            // variables.c:440: a refused function import leaves
+            // last_command_exit_value = EXECUTION_FAILURE, so the
+            // first command observes `$?` = 1 (rubash#2728).
+            exit_code: if function_import_failed { 1 } else { 0 },
             parse_error_occurred: false,
             signal_discard_pending: false,
             errexit_unwind_pending: false,
@@ -1170,10 +1224,12 @@ impl Executor {
             builtin_wrapper_depth: 0,
             standard_path_scope: None,
             debug_trap_running: false,
+            debug_action_running: false,
             debug_trap_action_cache: std::cell::RefCell::new(None),
             debug_driver: None,
             debug_syntax_unit_file: None,
             line_env_os_value: std::cell::RefCell::new(None),
+            file_env_os_value: std::cell::RefCell::new(None),
             pre_stamped_line: std::cell::Cell::new(false),
             expansion_probe_active: std::rc::Rc::new(std::cell::Cell::new(false)),
             return_trap_running: false,
@@ -1209,6 +1265,7 @@ impl Executor {
             no_closing_brace_failure: Cell::new(false),
             tempenv_names: Vec::new(),
             tempenv_marks: Vec::new(),
+            tempenv_bound_frames: Vec::new(),
             applying_temporary_assignments: false,
             tempenv_promoted_names: Vec::new(),
             tempenv_previous: HashMap::new(),
@@ -1246,6 +1303,7 @@ impl Executor {
             exec_replace_shlvl_snapshot: Cell::new(None),
             line_lex_locales: std::cell::RefCell::new(HashMap::new()),
             unit_lex_locale: std::cell::RefCell::new(None),
+            line_lex_extquotes: std::cell::RefCell::new(HashMap::new()),
             ambient_line: Cell::new(None),
             inside_compound_condition: Cell::new(false),
             conditional_invert_pending: Cell::new(false),
@@ -1283,12 +1341,14 @@ impl Executor {
             alias_introduced_words: Cell::new(0),
             redirect_target_memo: RefCell::new(HashMap::new()),
             redirect_target_single_glob_match: RefCell::new(std::collections::HashSet::new()),
+            redirect_target_had_transport: RefCell::new(std::collections::HashSet::new()),
             assignment_expansion_memo: RefCell::new(HashMap::new()),
             alias_select_scan_memo: RefCell::new(None),
             fd_var_external_undo: Vec::new(),
             fd_var_deferred_closes: Vec::new(),
             fd_var_pending_closes: Vec::new(),
             fd_var_close_generation: 0,
+            fd_var_apply_snapshot: None,
             fd_var_pending_close_generation: 0,
             fd_var_close_restore: Vec::new(),
             deferred_varredir_closes: Vec::new(),
@@ -1639,6 +1699,12 @@ impl Executor {
         // exists (`declare -p COMP_WORDBREAKS` succeeds) but print_var_list
         // (the `set` listing) skips invisible variables (rubash#1325).
         mark_env_name(env_vars, INVISIBLE_VARS, "COMP_WORDBREAKS");
+        // BASH_ARGV0 carries att_invisible in GNU too (variables.c
+        // table registration): the same two listing rules apply — the
+        // `set` form skips it, and declaration listings render the
+        // bare name (show_var_attributes) while a NAMED lookup still
+        // prints its value (rubash#2973).
+        mark_env_name(env_vars, INVISIBLE_VARS, "BASH_ARGV0");
         // GNU shell.c: a shell whose environment carries no TERM binds
         // TERM="dumb" (plain, unexported) instead of leaving it unset
         // (rubash#1325).

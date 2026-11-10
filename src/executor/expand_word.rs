@@ -1,6 +1,49 @@
 use super::*;
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
+thread_local! {
+    /// Whether the fragment currently being dispatched sits inside a
+    /// quoted word context (double quotes or a here-document body) for
+    /// the extquote `$'name'` decode gate in the embedded walker.
+    ///
+    /// GNU translates a `$'...'` parameter name while READING the word
+    /// (parse.y parse_matched_pair), so the verdict is a property of
+    /// the enclosing word's quoting, and it reaches fragments nested
+    /// inside that word's pattern / replacement sub-words (the
+    /// DOLBRACE_QUOTE / DOLBRACE_QUOTE2 regions). The pattern pipeline
+    /// expands those sub-words through the context-free embedded
+    /// walker, which would otherwise re-judge the nested fragment as
+    /// unquoted and reject a name the enclosing word's quoting admits
+    /// (rubash#2650: `"${x#${$'x1'%$'t'}}"` was a bad substitution while
+    /// the same fragment in a default word expanded). The whole-word
+    /// dispatchers and the walker's own `${` arm record the context
+    /// here for the duration of one fragment dispatch; the scope is
+    /// always restored, so an unquoted fragment nested inside a quoted
+    /// one (a command-substitution body runs its own dispatches, which
+    /// record their own context) is judged on its own quoting.
+    static EXTQUOTE_NAME_QUOTED_CONTEXT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the extquote-name quoted-context record set to
+/// `quoted` (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]); the previous value
+/// is restored on return.
+pub(in crate::executor) fn with_extquote_name_quoted_context<T>(
+    quoted: bool,
+    f: impl FnOnce() -> T,
+) -> T {
+    let previous = EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.replace(quoted));
+    let result = f();
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.set(previous));
+    result
+}
+
+/// The recorded extquote-name quoted context for the fragment being
+/// dispatched (see [`EXTQUOTE_NAME_QUOTED_CONTEXT`]).
+pub(in crate::executor) fn extquote_name_quoted_context() -> bool {
+    EXTQUOTE_NAME_QUOTED_CONTEXT.with(|slot| slot.get())
+}
+
 /// GNU bash accepts an ANSI-C quoted span as the parameter name (the extquote
 /// feature: subst.c expand_brace_dollar decodes the name word and re-dispatches
 /// the expansion). Only $'...' is accepted; single-quoted, double-quoted, and
@@ -66,9 +109,16 @@ fn redirect_operand_literal(expanded: &str) -> String {
     if !crate::executor::markers::contains_word_marker_bytes(expanded) {
         return expanded.to_string();
     }
-    crate::executor::markers::decode_word_position_carriers(
+    let decoded = crate::executor::markers::decode_word_position_carriers(
         &expanded.replace(crate::executor::markers::CTLESC, ""),
-    )
+    );
+    // The operand is now a FILENAME: GNU redir.c:298
+    // redirection_expand returns the string do_redirection_internal
+    // opens verbatim, so a stored value's E400 literal-char escape
+    // pairs — transport for the raw chars — fold here through the
+    // same boundary decoder the argv/env crossings use (rubash#2881,
+    // rubash#3040); left in, the pair lands in the on-disk name.
+    crate::executor::substitution_metadata::fold_literal_char_escapes(&decoded)
 }
 
 impl Executor {
@@ -277,6 +327,22 @@ impl Executor {
             .contains(&Self::redirect_target_memo_key(redirect))
     }
 
+    /// Record that a redirect target's literal expansion carried
+    /// raw-byte transport (see `redirect_target_had_transport`): the
+    /// folded target string alone cannot tell a byte char (e.g. U+009C
+    /// for byte 0x9C) from a genuine char of the same code point, so
+    /// the output open funnels consult this set to decide whether the
+    /// target's byte chars emit raw bytes. Keyed by the folded literal
+    /// string; recorded only when the pre-literal expansion carried
+    /// decodable transport. (rubash#3104 p23)
+    fn note_redirect_target_transport(&self, literal: &str, expanded: &str) {
+        if crate::executor::markers::contains_decodable_transport(expanded) {
+            self.redirect_target_had_transport
+                .borrow_mut()
+                .insert(literal.to_string());
+        }
+    }
+
     /// GNU redir.c:298 redirection_expand → subst.c:12590
     /// expand_words_no_vars: a file-redirect operand goes through the same
     /// word-list pipeline as command arguments — brace expansion first (on
@@ -366,7 +432,9 @@ impl Executor {
             // GNU subst.c:12683-12688 (expand_words_no_vars else-branch): a
             // word that does not glob is still DEQUOTED before it becomes
             // the literal filename.
-            return (redirect_operand_literal(&expanded), false);
+            let literal = redirect_operand_literal(&expanded);
+            self.note_redirect_target_transport(&literal, &expanded);
+            return (literal, false);
         }
         match glob::pathname_expand_word(
             &expanded,
@@ -401,7 +469,11 @@ impl Executor {
             // boundary — a `>"@(zz)q"` target opens `@(zz)q`, not a name
             // led by the CTLESC byte \x11 (rubash#424: Windows open()
             // failed ERROR_INVALID_NAME on the carrier byte).
-            glob::PathnameExpansion::NoMatch => (redirect_operand_literal(&expanded), false),
+            glob::PathnameExpansion::NoMatch => {
+                let literal = redirect_operand_literal(&expanded);
+                self.note_redirect_target_transport(&literal, &expanded);
+                (literal, false)
+            }
             // GNU subst.c:12663-12668 (fail_glob_expansion): report_error
             // `no match: WORD' (the dequoted word) and exp_jump_to_
             // top_level(DISCARD) — the redirection NEVER opens and the
@@ -411,6 +483,11 @@ impl Executor {
             // site (redirect gate / compound binding), mirroring the
             // argument-word failglob port (command_prepare.rs).
             glob::PathnameExpansion::Fail(pattern) => {
+                // The diagnostic names the operand being finalized as
+                // a filename, so its E400 pairs fold like the literal
+                // outcomes above (rubash#3040).
+                let pattern =
+                    crate::executor::substitution_metadata::fold_literal_char_escapes(&pattern);
                 // GNU performs ONE do_redirections per command, so the
                 // word expands (and reports) exactly once. Rubash's
                 // multi-phase redirect pipeline can expand the same operand
@@ -443,36 +520,60 @@ impl Executor {
             return value;
         }
 
-        if let Some(name) = word
-            .strip_prefix("${")
-            .and_then(|rest| rest.strip_suffix('}'))
-        {
-            // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: `${` +
-            // blank/newline/`|` is a bash-5.3 nofork command substitution
-            // (`${ cmd; }` / `${| cmd; }`), executed by function_substitute
-            // (subst.c:6917) rather than the parameter machinery. The body
-            // must be a terminated command list (`;`/newline before `}`).
-            if let Some(introducer) = name.chars().next() {
-                if crate::executor::command_substitution::funsub_introducer(introducer).is_some() {
-                    let body = &name[1..];
-                    if crate::executor::command_substitution::funsub_body_is_terminated(body) {
-                        let valsub = introducer == '|';
-                        return protect_command_substitution_output(
-                            &substitution_result_visible_text(
-                                &self.function_substitute(body, valsub),
-                            ),
-                        );
+        // rubash#3045: take the whole-word `${...}` arm only when the word
+        // IS one `${...}` fragment. The naive strip_prefix/strip_suffix
+        // below pairs the first `${` with the LAST `}` — for a
+        // multi-fragment word ending in `}` (`${a:-d}/${a:=x}`) it
+        // mis-extracts the body as `a:-d}/${a:=x` and, worse, installs a
+        // spurious fragment site (word, 0) before delegating to the
+        // embedded walker, which then keys the same fragments one level
+        // deeper ([0, 0] / [0, 1]). The cross-pass memos the apply pass
+        // keys at [0] / [1] — the rubash#1169 frozen-fragment map and the
+        // `:=` applied-value memo — then miss on the render, so an
+        // earlier fragment re-derives against the post-assignment value
+        // and a `$(...)` alternate can re-execute. The same
+        // strip-prefix/strip-suffix pitfall is documented at
+        // parameter_ops.rs:345-351; use the brace-matching whole-word
+        // check here, so multi-fragment words fall through to the
+        // embedded walker (which is also the arm's own delegation for
+        // them, via expand_braced_parameter_word) with no spurious
+        // site. Genuine whole-word fragments — including the `${ cmd; }`
+        // / `${| cmd; }` nofork forms above, whose braces match at the
+        // word end — still take this arm unchanged.
+        if braced_parameter_spans_whole_word(word) {
+            if let Some(name) = word
+                .strip_prefix("${")
+                .and_then(|rest| rest.strip_suffix('}'))
+            {
+                // GNU parser.h:85 FUNSUB_CHAR + parse.y:4475-4516: `${` +
+                // blank/newline/`|` is a bash-5.3 nofork command substitution
+                // (`${ cmd; }` / `${| cmd; }`), executed by function_substitute
+                // (subst.c:6917) rather than the parameter machinery. The body
+                // must be a terminated command list (`;`/newline before `}`).
+                if let Some(introducer) = name.chars().next() {
+                    if crate::executor::command_substitution::funsub_introducer(introducer)
+                        .is_some()
+                    {
+                        let body = &name[1..];
+                        if crate::executor::command_substitution::funsub_body_is_terminated(body) {
+                            let valsub = introducer == '|';
+                            return protect_command_substitution_output(
+                                &substitution_result_visible_text(
+                                    &self.function_substitute(body, valsub),
+                                ),
+                            );
+                        }
                     }
                 }
+                // When the word IS the `${}` fragment being expanded (no
+                // enclosing fragment site), record site (word, 0) so the
+                // `:=`/`-=` layered re-checks dedup subscript side effects
+                // (SUB_RES_XPASS). An active site means the `${` walker arm
+                // already named this fragment — keep it.
+                let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
+                    .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
+                return self.expand_braced_parameter_word(word, name);
             }
-            // When the word IS the `${}` fragment being expanded (no
-            // enclosing fragment site), record site (word, 0) so the
-            // `:=`/`-=` layered re-checks dedup subscript side effects
-            // (SUB_RES_XPASS). An active site means the `${` walker arm
-            // already named this fragment — keep it.
-            let _site_guard = (!crate::executor::expand_braced_indices::sub_site_active())
-                .then(|| crate::executor::expand_braced_indices::SubSiteGuard::new(0));
-            return self.expand_braced_parameter_word(word, name);
         }
 
         if let Some(name) = word.strip_prefix('$') {
@@ -779,21 +880,27 @@ impl Executor {
         } else {
             raw_value
         };
-        if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
-        }
-        if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted) {
-            let marker = if compound_assignment {
-                COMPOUND_ASSIGNMENT_MARKER.to_string()
-            } else {
-                String::new()
-            };
-            return format!("{name}={marker}{expanded}");
+        // Compound-claim gate (rubash#3034): the two functions below
+        // implement GNU expand_compound_array_assignment (arrayfunc.c:557),
+        // which only ever runs on a genuine compound assignment — a decision
+        // the parser makes positionally (parse.y:5648-5657: only an unquoted
+        // `(` immediately after `=` starts parse_compound_assignment,
+        // parse.y:7104) and records as COMPOUND_ASSIGNMENT_MARKER. A
+        // parenthesized word WITHOUT the marker is a quoted scalar whose
+        // parens are literal data (subst.c:4357 expand_string_assignment);
+        // claiming it as an element list let the
+        // ARRAY_FIELD_SPLIT_MARKER-tagged field transport (`\x10"..."`)
+        // leak into scalar storage (`y="($x)"` stored `(\x10"v1.0")`).
+        if compound_assignment {
+            if let Some(expanded) = self.expand_unquoted_parameter_compound_assignment(raw_value) {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
+            {
+                let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
+                return format!("{name}={marker}{expanded}");
+            }
         }
         // GNU arrayfunc.c:557 expand_compound_array_assignment tokenizes the
         // raw parenthesized text first; the preserve variant keeps element
@@ -826,7 +933,11 @@ impl Executor {
         let expanded = if compound_assignment {
             self.expand_embedded_parameters_compound(value)
         } else if tilde_first {
-            self.expand_embedded_parameters(&self.expand_assignment_tilde(value))
+            // rubash#2651: the tilde pass result is data for the rest
+            // of the walk (GNU subst.c:11862 add_quoted_string); the
+            // protected form carrier-encodes the resolved prefixes so
+            // this second walk cannot rescan them.
+            self.expand_embedded_parameters(&self.expand_assignment_tilde_protected(value))
         } else {
             self.expand_embedded_parameters(value)
         };

@@ -17,8 +17,8 @@ mod spec;
 pub(crate) mod time;
 mod value;
 
+use crate::executor::markers::STORAGE_WORD_PREFIX;
 use crate::executor::markers::STORAGE_WORD_PREFIX_STR;
-use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 use escape::expand_format_escape;
 use identifier::valid_identifier;
 use spec::{parse_format_spec, resolve_dynamic_format_args, valid_format_specifier};
@@ -130,6 +130,16 @@ where
     W: Write,
     E: Write,
 {
+    // GNU resolves printf's locale questions (asciicode's mbrtowc,
+    // printf.def:1522-1547) in the shell's CURRENT locale, and the
+    // LC_ALL watcher (variables.c sv_lc_all) makes an in-script
+    // assignment change it at once. This funnel is the one entry every
+    // printf dispatch face flows through (plain, pipeline stage,
+    // command substitution), so install the variable-table locale
+    // override here for the builtin's duration — the rubash#1488
+    // ShellLocaleGuard mechanism the echo paths already use
+    // (rubash#2965). On drop it restores any outer guard's value.
+    let _locale_guard = crate::locale::ShellLocaleGuard::new(&*env_vars);
     // W_ARRAYREF (in-band ARRAYREF_FLAG) is consumed by the executor's
     // SET_VFLAGS pre-pass (printf.def:305); strip any surviving prefix off
     // the operand text so it never leaks into format/arguments.
@@ -369,6 +379,40 @@ fn printf_attribute_value(
     }
 }
 
+/// GNU printf.def PRETURN: `builtin_bind_variable (vname, ...)` then
+/// `stupidly_hack_special_variables (vname)` — the special-variable
+/// consequences key on the literal `-v` OPERAND name, never on the
+/// nameref-resolved target. For the locale family the consequence is
+/// sv_locale (variables.c:6272 -> locale.c set_locale_var): the
+/// process-env mirror every other bind channel runs (rubash#1531) plus
+/// the one shared setlocale attempt/warning funnel (rubash#1692,
+/// `crate::locale::locale_assignment_warning`). A bind THROUGH a
+/// nameref (`declare -n r=LC_ALL; printf -v r <bad>`) stores into
+/// LC_ALL silently in GNU precisely because the hack sees `r`; an
+/// array-element operand (`LC_ALL[0]`) is not a family name either.
+/// rubash#3009: printf's own bind path ran neither consequence.
+fn note_printf_locale_bind(
+    env_vars: &crate::shell::var_table::VarTable,
+    operand: &str,
+    stderr: &mut dyn Write,
+) -> io::Result<()> {
+    if !crate::locale::is_locale_family_name(operand) {
+        return Ok(());
+    }
+    if let Some(value) = env_vars.get(operand).cloned() {
+        crate::executor::local_helpers::sync_shell_assignment_process_env(env_vars, operand, value);
+    }
+    if let Some(warning) = crate::locale::locale_assignment_warning(operand, env_vars) {
+        writeln!(
+            stderr,
+            "{}warning: {}",
+            diagnostic_prefix(env_vars),
+            warning
+        )?;
+    }
+    Ok(())
+}
+
 fn assign_printf_output(
     env_vars: &mut crate::shell::var_table::VarTable,
     name: &str,
@@ -376,6 +420,9 @@ fn assign_printf_output(
     mut variables: Option<&mut VariableStore>,
     stderr: &mut dyn Write,
 ) -> io::Result<Option<i32>> {
+    // The -v operand as written; GNU's special-variable hack keys on
+    // it (see note_printf_locale_bind), not on the resolved name.
+    let operand = name;
     // GNU printf.def -v: the value is a C string, truncated at the first
     // NUL byte (rubash#1418).
     let output = match output.find('\0') {
@@ -406,6 +453,7 @@ fn assign_printf_output(
         if name == "PATH" {
             crate::builtins::hash::flush_command_hash_table(env_vars);
         }
+        note_printf_locale_bind(env_vars, operand, stderr)?;
         return Ok(None);
     }
     let resolved = resolve_printf_bind_name(env_vars, name);
@@ -473,6 +521,7 @@ fn assign_printf_output(
             )?;
             return Ok(Some(1));
         }
+        note_printf_locale_bind(env_vars, operand, stderr)?;
         return Ok(None);
     }
 
@@ -486,6 +535,7 @@ fn assign_printf_output(
     if name == "PATH" {
         crate::builtins::hash::flush_command_hash_table(env_vars);
     }
+    note_printf_locale_bind(env_vars, operand, stderr)?;
     Ok(None)
 }
 
@@ -530,7 +580,16 @@ fn assign_printf_indexed_element(
         .unwrap_or_default();
     entries.insert(index, output);
     env_vars.insert(name.to_string(), format_indexed_storage(entries));
-    mark_printf_var(env_vars, "__RUBASH_ARRAY_VARS", name);
+    // rubash#3061: the array attribute lives in the VarTable's
+    // structured flag map — for the ten attribute keys that map is
+    // authoritative and NO serialized string is maintained, so the
+    // mark must go through mark_name (as declare/read do). The old
+    // raw-string write into the values map was invisible to attr_of,
+    // and a scalar read-back of the variable then returned the raw
+    // storage render instead of projecting element 0 (GNU
+    // printf.def:112 binds via builtin_bind_variable, the same
+    // variables.c path as a plain `x[0]=...` assignment).
+    env_vars.mark_name(crate::executor::types::ARRAY_VARS, name);
 }
 
 fn assign_printf_assoc_element(
@@ -761,21 +820,6 @@ fn split_storage_words(value: &str) -> Vec<String> {
 
 fn is_marked(env_vars: &crate::shell::var_table::VarTable, marker: &str, name: &str) -> bool {
     env_vars.is_marked(marker, name)
-}
-
-fn mark_printf_var(env_vars: &mut crate::shell::var_table::VarTable, marker: &str, name: &str) {
-    if is_marked(env_vars, marker, name) {
-        return;
-    }
-    env_vars
-        .entry(marker.to_string())
-        .and_modify(|value| {
-            if !value.is_empty() {
-                value.push(DATA_DOLLAR);
-            }
-            value.push_str(name);
-        })
-        .or_insert_with(|| name.to_string());
 }
 
 fn render(

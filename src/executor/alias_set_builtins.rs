@@ -172,6 +172,15 @@ impl Executor {
             if name == "monitor" {
                 self.shell_state.job_control.set(*enabled);
             }
+            // flags.c:226: change_flag('i') flips forced_interactive
+            // — reachable only inside an inline `-o` operand
+            // (`set -ovi`; a standalone ±i is refused by the
+            // pre-scan). The state lives on ShellState beside the
+            // invocation bit, and `$-` renders from it
+            // (rubash#2961).
+            if name == "forced_interactive" {
+                self.shell_state.forced_interactive = *enabled;
+            }
         }
         if cmd.words.len() == 1 && !self.posix_mode_enabled() {
             // GNU set.def set_builtin with no arguments calls

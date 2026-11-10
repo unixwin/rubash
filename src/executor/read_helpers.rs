@@ -135,18 +135,13 @@ pub(in crate::executor) fn note_reaped_child_cpu<C: ReapedChildCpu>(child: &C) {
     }
 }
 
+/// The SELF counters on Windows: GetProcessTimes on the current
+/// process — also where rubash's no-fork subshell and builtin work
+/// lands, so it is the half that moves for in-process timed commands
+/// (a pure builtin loop under `time` used to report user 0m0.000s
+/// here).
 #[cfg(windows)]
-fn rusage_counters() -> RusageCounters {
-    // Windows has no getrusage. The SELF half of GNU's SELF+CHILDREN
-    // sum maps to GetProcessTimes on the current process — which is
-    // also where rubash's no-fork subshell and builtin work lands, so
-    // it is the half that moves for in-process timed commands (a pure
-    // builtin loop under `time` used to report user 0m0.000s here).
-    // The CHILDREN half is the reap-site accumulator above
-    // (rubash#1776): external children sampled at wait time. One
-    // known gap remains: a capture pipeline's last member is consumed
-    // by wait_with_output, which closes its handle before any sample
-    // point, so that member's CPU is still missing.
+fn windows_self_counters() -> RusageCounters {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
@@ -172,16 +167,67 @@ fn rusage_counters() -> RusageCounters {
     if ok == 0 {
         return RusageCounters::default();
     }
-    let mut counters = RusageCounters {
+    RusageCounters {
         user: ticks(user),
         sys: ticks(kernel),
-    };
+    }
+}
+
+#[cfg(windows)]
+fn rusage_counters() -> RusageCounters {
+    // Windows has no getrusage. The SELF half of GNU's SELF+CHILDREN
+    // sum is windows_self_counters; the CHILDREN half is the reap-site
+    // accumulator above (rubash#1776): external children sampled at
+    // wait time. One known gap remains: a capture pipeline's last
+    // member is consumed by wait_with_output, which closes its handle
+    // before any sample point, so that member's CPU is still missing.
+    let mut counters = windows_self_counters();
     let reaped = REAPED_CHILDREN_CPU
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     counters.user += reaped.1.user;
     counters.sys += reaped.1.sys;
     counters
+}
+
+/// The four counters the `times` builtin prints, kept SEPARATE
+/// (rubash#2932): GNU builtins/times.def:65-88 calls
+/// getrusage(RUSAGE_SELF) for the first line and
+/// getrusage(RUSAGE_CHILDREN) for the second. Unlike rusage_counters
+/// (the `time` keyword's merged SELF+CHILDREN sum), the halves must
+/// not merge here. Returns (self_user, self_sys, child_user,
+/// child_sys). On Windows the children half is the reap accumulator's
+/// current sum — the same source rusage_counters merges in.
+pub(crate) fn process_times() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
+    #[cfg(unix)]
+    {
+        let (self_user, self_sys) = read_rusage(libc::RUSAGE_SELF);
+        let (child_user, child_sys) = read_rusage(libc::RUSAGE_CHILDREN);
+        (self_user, self_sys, child_user, child_sys)
+    }
+    #[cfg(windows)]
+    {
+        let self_counters = windows_self_counters();
+        let reaped = REAPED_CHILDREN_CPU
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .1;
+        (
+            self_counters.user,
+            self_counters.sys,
+            reaped.user,
+            reaped.sys,
+        )
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Default::default()
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -544,6 +590,45 @@ pub(in crate::executor) fn read_delimiter_needle(delimiter: char) -> String {
     }
 }
 
+/// The single-byte marker form of a byte-locale delimiter: a delimiter
+/// char in U+0080..=U+00FF stands for ONE raw stream byte (GNU
+/// builtins/read.def:385 takes the first byte of the `-d` word), and
+/// that byte travels in shell text as the single marker pair
+/// `bytes_to_shell_text(&[byte])` — not as the marker pairs of the
+/// char's UTF-8 encoding (the `read_delimiter_needle` form). A
+/// text-domain scan that never tests this form never sees the
+/// delimiter: the read runs to EOF and the record is lost
+/// (rubash#2662).
+pub(in crate::executor) fn read_delimiter_single_form(delimiter: char) -> Option<String> {
+    let code = delimiter as u32;
+    (0x80..=0xFF)
+        .contains(&code)
+        .then(|| substitution_metadata::bytes_to_shell_text(&[code as u8]))
+}
+
+/// Byte length of the delimiter form matching at the START of `text`:
+/// the needle (tagged / multibyte transport form), the single-byte
+/// form, or the literal char. The forms are mutually exclusive at any
+/// one position (their first units differ), so the check order only
+/// preserves the needle priority the split chains historically gave
+/// it; callers precompute `needle` and `single` once per scan.
+pub(in crate::executor) fn read_delimiter_match_len(
+    text: &str,
+    needle: &str,
+    single: Option<&str>,
+    delimiter: char,
+) -> Option<usize> {
+    if text.starts_with(needle) {
+        return Some(needle.len());
+    }
+    if let Some(form) = single {
+        if text.starts_with(form) {
+            return Some(form.len());
+        }
+    }
+    text.starts_with(delimiter).then(|| delimiter.len_utf8())
+}
+
 /// True when `text` holds the delimiter in any transport form: the tagged
 /// marker pair (normalized records), the single-byte marker form a
 /// byte-locale delimiter takes (the delimiter char then stands for one
@@ -562,9 +647,7 @@ pub(in crate::executor) fn record_contains_delimiter(
     if text.contains(delimiter) || text.contains(&read_delimiter_needle(delimiter)) {
         return true;
     }
-    let code = delimiter as u32;
-    if (0x80..=0xFF).contains(&code) {
-        let single = substitution_metadata::bytes_to_shell_text(&[code as u8]);
+    if let Some(single) = read_delimiter_single_form(delimiter) {
         return text.contains(&single);
     }
     false
@@ -597,6 +680,7 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
     raw: bool,
 ) -> bool {
     let needle = read_delimiter_needle(delimiter);
+    let single = read_delimiter_single_form(delimiter);
     let chars: Vec<(usize, char)> = input.char_indices().collect();
     let mut cursor = 0usize;
     let mut units = 0usize;
@@ -604,7 +688,9 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
     while cursor < chars.len() {
         let (index, ch) = chars[cursor];
         if !exact_char_limit && !escaped && !(escape_aware && ch == '\\') {
-            if input[index..].starts_with(&needle) || input[index..].starts_with(delimiter) {
+            if read_delimiter_match_len(&input[index..], &needle, single.as_deref(), delimiter)
+                .is_some()
+            {
                 return false;
             }
         }
@@ -648,10 +734,7 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
 /// and the single-byte marker form of a U+0080..=U+00FF delimiter.
 pub(in crate::executor) fn unescaped_delimiter_index(text: &str, delimiter: char) -> Option<usize> {
     let needle = read_delimiter_needle(delimiter);
-    let code = delimiter as u32;
-    let single = (0x80..=0xFF)
-        .contains(&code)
-        .then(|| substitution_metadata::bytes_to_shell_text(&[code as u8]));
+    let single = read_delimiter_single_form(delimiter);
     let mut escaped = false;
     for (index, ch) in text.char_indices() {
         if escaped {
@@ -663,10 +746,7 @@ pub(in crate::executor) fn unescaped_delimiter_index(text: &str, delimiter: char
             continue;
         }
         let rest = &text[index..];
-        if rest.starts_with(&needle)
-            || rest.starts_with(delimiter)
-            || single.as_deref().is_some_and(|form| rest.starts_with(form))
-        {
+        if read_delimiter_match_len(rest, &needle, single.as_deref(), delimiter).is_some() {
             return Some(index);
         }
     }
@@ -1050,37 +1130,38 @@ pub(in crate::executor) fn read_stdin_until(
 
 /// First UNESCAPED occurrence of the read delimiter: the needle form
 /// wins over the literal char (the priority the split_once chain gave
-/// it), and a position is unescaped when it is not quoted by an odd run
-/// of backslashes — a `\` quotes the next character, `\\` is itself
-/// quoted. Returns the record text before the delimiter (rubash#1328).
+/// it), the single-byte marker form of a U+0080..=U+00FF delimiter
+/// ranks between them (rubash#2662), and a position is unescaped when
+/// it is not quoted by an odd run of backslashes — a `\` quotes the
+/// next character, `\\` is itself quoted. Returns the record text
+/// before the delimiter (rubash#1328).
 fn find_unescaped_read_delimiter<'a>(
     input: &'a str,
     needle: &str,
     delimiter: char,
 ) -> Option<&'a str> {
-    let scan = |needle_mode: bool| -> Option<usize> {
+    let single = read_delimiter_single_form(delimiter);
+    let literal = delimiter.to_string();
+    let scan = |form: &str| -> Option<usize> {
         let mut escaped = false;
-        for (index, ch) in input.char_indices() {
+        for (index, _) in input.char_indices() {
             if escaped {
                 escaped = false;
                 continue;
             }
-            if ch == '\\' {
+            if input[index..].starts_with('\\') {
                 escaped = true;
                 continue;
             }
-            if needle_mode {
-                if input[index..].starts_with(needle) {
-                    return Some(index);
-                }
-            } else if ch == delimiter {
+            if input[index..].starts_with(form) {
                 return Some(index);
             }
         }
         None
     };
-    scan(true)
-        .or_else(|| scan(false))
+    scan(needle)
+        .or_else(|| single.as_deref().and_then(|form| scan(form)))
+        .or_else(|| scan(&literal))
         .map(|index| &input[..index])
 }
 
@@ -1120,17 +1201,21 @@ fn trim_read_input_literal(
         // yields "a\r" and `printf 'a\r' | read x` yields "a\r" too. The '\r'
         // stripping is the Windows CRT-text-mode compensation (native tools
         // emit CRLF); on unix it would eat legal filename bytes.
-        // The needle covers the raw-byte transport form; a multibyte
-        // delimiter character (rubash#1062) travels as the literal char,
-        // so fall back to it when the needle form is absent. In a
+        // The needle covers the raw-byte transport form; a byte-locale
+        // high-byte delimiter travels as the single-byte marker form
+        // (rubash#2662), and a multibyte delimiter character
+        // (rubash#1062) travels as the literal char, so fall back
+        // through both when the earlier form is absent. In a
         // non-raw read the split point is the first UNESCAPED delimiter:
         // an escaped one is record data — for a custom delimiter
         // (rubash#1300) and for the newline continuation alike
         // (rubash#1328: the naive split cut `a\\<LF>zz<LF>` to `a\\`).
         let needle = read_delimiter_needle(delimiter);
+        let single = read_delimiter_single_form(delimiter);
         let split_at = if raw {
             input
                 .split_once(&needle)
+                .or_else(|| single.as_deref().and_then(|form| input.split_once(form)))
                 .or_else(|| input.split_once(delimiter))
                 .map(|(before, _)| before.len())
         } else {

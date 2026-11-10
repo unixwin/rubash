@@ -318,7 +318,68 @@ impl Executor {
         self.applying_temporary_assignments || self.dynamic_name_shadowed(name)
     }
 
+    /// Every by-name read of a dynamic variable passes through here.
+    /// GNU's find_variable_internal (variables.c:1175-1189) fires the
+    /// getter on each by-name lookup and the getter STORES its result
+    /// into the variable's cell — so a later enumeration renders the
+    /// cached value, not a fresh computation (rubash#2973). Record
+    /// the materialization for the getter-backed scalar cells; the
+    /// live-maintained faces (PIPESTATUS, the stack arrays, the
+    /// option strings, the table-backed BASH_ARGV0) keep their own
+    /// storage and are not cached here.
     pub(in crate::executor) fn dynamic_parameter_value(&self, name: &str) -> Option<String> {
+        let value = self.dynamic_parameter_value_live(name)?;
+        match name {
+            "SECONDS" => {
+                let mut cells = self.shell_state.dynamic_cells.borrow_mut();
+                cells.values.insert(name.to_string(), value.clone());
+                // get_seconds earns att_integer on fire
+                // (variables.c:1294-1295 via set_int_value).
+                cells.integer_earned.insert(name.to_string());
+            }
+            "EPOCHSECONDS" | "EPOCHREALTIME" | "BASH_MONOSECONDS" | "RANDOM" | "SRANDOM"
+            | "BASHPID" | "BASH_SUBSHELL" | "HISTCMD" | "LINENO" | "BASH_COMMAND" => {
+                self.shell_state
+                    .dynamic_cells
+                    .borrow_mut()
+                    .values
+                    .insert(name.to_string(), value.clone());
+            }
+            "GROUPS" => {
+                // A read regenerates the cell (variables.c
+                // regen_pgroups); listings show the real elements
+                // from then on instead of the empty fresh cell.
+                self.shell_state
+                    .dynamic_cells
+                    .borrow_mut()
+                    .groups_materialized = true;
+            }
+            _ => {}
+        }
+        Some(value)
+    }
+
+    /// GNU's attribute builtins resolve every name-only operand
+    /// through find_variable (the operand walks of builtins/
+    /// setattr.def export/readonly and builtins/declare.def), and
+    /// find_variable_internal fires a dynamic variable's getter,
+    /// storing the value into its cell (variables.c:1175-1189). So
+    /// `export RANDOM`, `readonly SECONDS` and `declare RANDOM` all
+    /// materialize the dynamic cell even though they bind nothing —
+    /// a later listing renders the drawn value (rubash#2973; the
+    /// behavior rubash#2700's export row pins). Callers gate this on
+    /// non-print invocations: assignment operands bind instead of
+    /// looking up, and print forms render through the live views.
+    pub(in crate::executor) fn fire_dynamic_operand_lookups(&self, args: &[String]) {
+        for arg in args {
+            if arg.starts_with('-') || arg.starts_with('+') || arg.contains('=') {
+                continue;
+            }
+            let _ = self.dynamic_parameter_value(arg);
+        }
+    }
+
+    fn dynamic_parameter_value_live(&self, name: &str) -> Option<String> {
         // Hot-path reorder: the UNSET_DYNAMIC_VARS probe below is a
         // SipHash over the name, paid on EVERY variable read (the assoc
         // `k$i` key/value fast lanes resolve `i` through here twice per
@@ -625,6 +686,13 @@ impl Executor {
                 }
                 _ => unreachable!(),
             }
+            // The declare-family bind stores the literal into the
+            // dynamic cell like any bind_variable (rubash#2973).
+            self.shell_state
+                .dynamic_cells
+                .borrow_mut()
+                .values
+                .insert(name.to_string(), value.to_string());
         }
     }
 
@@ -646,14 +714,20 @@ impl Executor {
     }
 
     /// The assignment-form listing supply for the dynamic registry's
-    /// VISIBLE class (GROUPS and the source-stack arrays): `set` and
-    /// bare `declare` enumerate them from the live composition, like
-    /// GNU's print_var_list over real cells (rubash#2700). A shadowed
-    /// or unset name is skipped — its plain binding (or absence) owns
-    /// the listing line. PIPESTATUS is not in this class: GNU's `set`
-    /// listing omits it (its cell is unset-valued between commands),
-    /// and the invisible provider scalars never appear in
-    /// print_var_list.
+    /// VISIBLE class (GROUPS, PIPESTATUS and the source-stack
+    /// arrays): `set` and bare `declare` enumerate them from the
+    /// cell contents, like GNU's print_var_list over real cells
+    /// (rubash#2700). A shadowed or unset name is skipped — its plain
+    /// binding (or absence) owns the listing line. The GROUPS cell
+    /// is empty until a read regenerates it (rubash#2973). The
+    /// PIPESTATUS cell holds the last pipeline's statuses once a
+    /// command has run, and print_var_list shows it
+    /// (`PIPESTATUS=([0]="0")`); only its live-array shape is a cell
+    /// enumeration renders — the scalar/valueless shapes are plain
+    /// bindings the table walk already owns. The invisible provider
+    /// scalars never appear in print_var_list (their cells are
+    /// value-less until read, and print_assignment skips unset-valued
+    /// cells), so they stay out of this supply.
     pub(in crate::executor) fn dynamic_set_views(
         &self,
     ) -> Vec<crate::builtins::set::DynamicSetView> {
@@ -665,7 +739,11 @@ impl Executor {
                 continue;
             }
             let values = if name == "GROUPS" {
-                groups_words()
+                if self.shell_state.dynamic_cells.borrow().groups_materialized {
+                    groups_words()
+                } else {
+                    Vec::new()
+                }
             } else {
                 self.dynamic_stack_array_values(name).unwrap_or_default()
             };
@@ -674,7 +752,143 @@ impl Executor {
                 storage: format_indexed_array_values(values),
             });
         }
+        if matches!(
+            self.shell_state.pipestatus_shape,
+            crate::shell::state::PipestatusShape::LiveArray
+        ) && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "PIPESTATUS")
+        {
+            let mut entries: Vec<(i64, i32)> = self.shell_state.pipestatus.clone();
+            entries.sort_by_key(|(index, _)| *index);
+            views.push(crate::builtins::set::DynamicSetView {
+                name: "PIPESTATUS".to_string(),
+                storage: format_indexed_array_values(
+                    entries
+                        .into_iter()
+                        .map(|(_, status)| status.to_string())
+                        .collect(),
+                ),
+            });
+        }
         views
+    }
+
+    /// The LISTING form of a dynamic variable's declaration view
+    /// (rubash#2973): GNU enumeration renders the variable's CELL,
+    /// and for the getter-backed dynamics the cell holds only what a
+    /// by-name read (or an assignment) stored into it — enumeration
+    /// never fires getters (variables.c print_var_list walks cells;
+    /// dynamic_value is called from find_variable_internal only,
+    /// variables.c:1175-1189). So the provider scalars render from
+    /// `dynamic_cells`: the bare name when never materialized, the
+    /// cached value otherwise, with att_integer only where the cell
+    /// carries it (SECONDS earns it on its first getter fire,
+    /// variables.c:1294-1295). GROUPS renders its elements only after
+    /// a read regenerated the cell. The live-maintained faces (the
+    /// stack arrays, PIPESTATUS) hold their current contents in their
+    /// cells continuously, so they delegate to the live view.
+    /// BASH_ARGV0 is a table cell and never reaches this path.
+    pub(in crate::executor) fn dynamic_cell_view(
+        &self,
+        name: &str,
+    ) -> Option<crate::builtins::declare::DynamicDeclarationView> {
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return None;
+        }
+        if name != "PIPESTATUS" && self.dynamic_name_shadowed(name) {
+            return None;
+        }
+        let readonly = if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
+            "r"
+        } else {
+            ""
+        };
+        let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+            "x"
+        } else {
+            ""
+        };
+        match name {
+            // GNU's PIPESTATUS cell does not exist until the first
+            // pipeline completes (the Absent shape): enumeration
+            // shows nothing for it. The declared valueless shapes DO
+            // render (their bare attribute form, rubash#1364), and a
+            // live array renders its contents — both via the live
+            // view.
+            "PIPESTATUS"
+                if matches!(
+                    self.shell_state.pipestatus_shape,
+                    crate::shell::state::PipestatusShape::Absent
+                ) =>
+            {
+                return None;
+            }
+            "PIPESTATUS" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV" => {
+                return self.dynamic_view(name);
+            }
+            "GROUPS" => {
+                let elements = if self.shell_state.dynamic_cells.borrow().groups_materialized {
+                    groups_words()
+                        .iter()
+                        .enumerate()
+                        .map(|(index, group)| format!("[{index}]={}", sh_double_quote_text(group)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    String::new()
+                };
+                return Some(crate::builtins::declare::DynamicDeclarationView {
+                    name: name.to_string(),
+                    text: format!("declare -a{readonly}{exported} GROUPS=({elements})"),
+                    integer: false,
+                    array: true,
+                });
+            }
+            _ => {}
+        }
+        if !matches!(
+            name,
+            "SECONDS"
+                | "EPOCHSECONDS"
+                | "EPOCHREALTIME"
+                | "BASH_MONOSECONDS"
+                | "RANDOM"
+                | "SRANDOM"
+                | "BASHPID"
+                | "BASH_SUBSHELL"
+                | "HISTCMD"
+                | "LINENO"
+                | "BASH_COMMAND"
+        ) {
+            return None;
+        }
+        let cells = self.shell_state.dynamic_cells.borrow();
+        // variables.c:1858-1875: the integer dynamics carry
+        // att_integer from registration; SECONDS is the exception —
+        // its cell shows -i only after a getter fire earned it.
+        let integer = match name {
+            "RANDOM" | "SRANDOM" | "BASHPID" | "HISTCMD" => true,
+            "SECONDS" => cells.integer_earned.contains(name),
+            _ => false,
+        };
+        let mut flags = String::new();
+        if integer {
+            flags.push('i');
+        }
+        flags.push_str(readonly);
+        flags.push_str(exported);
+        if flags.is_empty() {
+            flags.push('-');
+        }
+        let text = match cells.values.get(name) {
+            Some(value) => format!("declare -{flags} {name}={}", sh_double_quote_text(value)),
+            None => format!("declare -{flags} {name}"),
+        };
+        Some(crate::builtins::declare::DynamicDeclarationView {
+            name: name.to_string(),
+            text,
+            integer,
+            array: false,
+        })
     }
 
     /// A dynamic variable's declaration view in the builtin's carrier
@@ -1697,15 +1911,83 @@ impl Executor {
         // `declare -a | ignore_builtin_arrays` lines). See
         // sync_dirstack_cell for the named-access materialization.
         let storage = self.bash_aliases_storage();
-        self.shell_state
-            .env_vars
-            .insert("BASH_ALIASES".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_ALIASES");
+        self.publish_dynamic_assoc_var("BASH_ALIASES", &storage);
         let storage = self.bash_cmds_storage();
+        self.publish_dynamic_assoc_var("BASH_CMDS", &storage);
+    }
+
+    /// Publish one dynamic associative variable's owner-table render as
+    /// its mirror, refreshing a live typed cell from the same render.
+    ///
+    /// GNU has ONE object here: `get_aliasvar` / `get_hashcmd`
+    /// (variables.c:1745 / :1675) rebuild the assoc cell from the alias
+    /// table / `hashed_filenames` on every access, so the cell can never
+    /// disagree with its owner. Rubash splits the object into the
+    /// env mirror plus a typed `AssociativeArray` cell; republishing
+    /// the mirror under a live cell without refreshing the cell leaves
+    /// the pair incoherent — the next command boundary's verifier
+    /// panics, and element reads trust the stale cell (rubash#3107:
+    /// `declare -p BASH_ALIASES; alias ll='ls -l'; declare -p
+    /// BASH_ALIASES`). An absent cell stays absent, exactly like
+    /// `sync_dirstack_cell` (rubash#2424): the cell materializes only
+    /// on named access.
+    fn publish_dynamic_assoc_var(&mut self, name: &str, storage: &str) {
         self.shell_state
             .env_vars
-            .insert("BASH_CMDS".to_string(), storage);
-        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, "BASH_CMDS");
+            .insert(name.to_string(), storage.to_string());
+        mark_env_name(&mut self.shell_state.env_vars, ASSOC_VARS, name);
+        if matches!(
+            self.shell_state
+                .variables
+                .get(name)
+                .map(|variable| &variable.value),
+            Some(crate::shell::ShellValue::AssociativeArray(_))
+        ) {
+            super::arrays::sync_typed_assoc_storage(&mut self.shell_state.variables, name, storage);
+            self.note_typed_cell_synced(name);
+        }
+    }
+
+    /// Command-boundary reconciliation for the two dynamic associative
+    /// variables (rubash#3107). Their owner tables mutate WITHOUT a
+    /// mirror write — `alias` / `unalias` rewrite `shell_state.aliases`
+    /// (alias.c add_alias / remove_alias), and `hash -p` / `hash -d` /
+    /// `hash -r` plus ordinary command lookups rewrite
+    /// `hashed_filenames` (hashcmd.c phash_insert / phash_remove /
+    /// phash_flush) — so a typed cell materialized by an earlier named
+    /// access goes stale in place, with neither half of the pair
+    /// recording the write. GNU's getters rebuild the cell from the
+    /// owner on every access (variables.c:1745 build_aliasvar,
+    /// variables.c:1675 build_hashcmd); the boundary is rubash's
+    /// rebuild point. Only a name with a live typed cell pays the
+    /// render, and only when the render actually moved: an unmaterialized
+    /// name keeps the mirror-only state every read already renders live.
+    pub(in crate::executor) fn sync_dynamic_assoc_cells(&mut self) {
+        for name in ["BASH_ALIASES", "BASH_CMDS"] {
+            if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+                continue;
+            }
+            if !matches!(
+                self.shell_state
+                    .variables
+                    .get(name)
+                    .map(|variable| &variable.value),
+                Some(crate::shell::ShellValue::AssociativeArray(_))
+            ) {
+                continue;
+            }
+            let storage = if name == "BASH_ALIASES" {
+                self.bash_aliases_storage()
+            } else {
+                self.bash_cmds_storage()
+            };
+            if self.shell_state.env_vars.get(name) == Some(&storage)
+                && self.shell_state.env_vars.cell_is_fresh(name)
+            {
+                continue;
+            }
+            self.publish_dynamic_assoc_var(name, &storage);
+        }
     }
 
     /// True while the dynamic DIRSTACK variable does NOT own its name,
@@ -1822,6 +2104,14 @@ impl Executor {
     }
 
     pub(in crate::executor) fn groups_words(&self) -> Vec<String> {
+        // Every read-path access to the GROUPS cell regenerates it in
+        // GNU (variables.c get_groups / regen_pgroups on any
+        // find_variable), so listings stop showing the fresh empty
+        // cell from the first read on (rubash#2973).
+        self.shell_state
+            .dynamic_cells
+            .borrow_mut()
+            .groups_materialized = true;
         groups_words()
     }
 

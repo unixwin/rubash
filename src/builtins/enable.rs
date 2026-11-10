@@ -169,6 +169,10 @@ where
     }
 
     if let Some(file) = load_file {
+        // The -f operand is a pathname: fold a stored E400 pair so
+        // the dlopen probe and its diagnostics name the raw file
+        // (rubash#3076).
+        let file = crate::executor::substitution_metadata::fold_literal_char_escapes(&file);
         let names: Vec<String> = operands.iter().map(|name| name.to_string()).collect();
         let loadables_path = env_vars.get("BASH_LOADABLES_PATH").map(String::as_str);
         match dynamic::load_builtin(&file, &names, loadables_path, cwd, special_only, disable) {
@@ -266,12 +270,24 @@ pub fn is_disabled(env_vars: &HashMap<String, String>, name: &str) -> bool {
         .any(|disabled| disabled == name)
 }
 
-fn disabled_builtins(env_vars: &HashMap<String, String>) -> Vec<String> {
+/// The one reader for the disabled-builtin carrier (the completion
+/// candidates in `complete.rs` read through here too).
+///
+/// rubash#2942: the carrier is NEWLINE-joined, not colon-joined. A
+/// builtin name is a single shell word from the static table or a
+/// loadable-builtin symbol name; neither can contain a newline — but
+/// `:` is itself a builtin name, so the colon-joined form stored the
+/// single-element list `[":"]` as `":"` and the split read it back as
+/// zero names, silently un-disabling `:`. (A value inherited from an
+/// older shell in the colon-joined form reads as one inert name that
+/// matches no builtin; the carrier is rubash-internal and is rewritten
+/// on the first `enable` change.)
+pub(crate) fn disabled_builtins(env_vars: &HashMap<String, String>) -> Vec<String> {
     env_vars
         .get(DISABLED_BUILTINS)
         .map(|value| {
             value
-                .split(':')
+                .split('\n')
                 .filter(|name| !name.is_empty())
                 .map(str::to_string)
                 .collect()
@@ -283,7 +299,7 @@ fn set_disabled_builtins(env_vars: &mut VarTable, disabled: &[String]) {
     if disabled.is_empty() {
         env_vars.remove(DISABLED_BUILTINS);
     } else {
-        env_vars.insert(DISABLED_BUILTINS.to_string(), disabled.join(":"));
+        env_vars.insert(DISABLED_BUILTINS.to_string(), disabled.join("\n"));
     }
 }
 

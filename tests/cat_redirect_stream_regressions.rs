@@ -14,8 +14,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 fn shell_bin() -> PathBuf {
+    // The `bash` bin is a Windows-only shim (required-features
+    // windows-shim); on Unix cargo still sets CARGO_BIN_EXE_bash at
+    // compile time, but the file is never built. Take it only when it
+    // actually exists, else fall through to rubash (the shell under
+    // test on this platform). Found while verifying rubash #2885: a
+    // fresh `cargo test --test cat_redirect_stream_regressions` fails
+    // both tests with spawn NotFound on the never-built shim path.
     if let Some(path) = option_env!("CARGO_BIN_EXE_bash") {
-        return PathBuf::from(path);
+        let p = PathBuf::from(path);
+        if p.exists() {
+            return p;
+        }
     }
     if let Some(path) = option_env!("CARGO_BIN_EXE_rubash") {
         return PathBuf::from(path);

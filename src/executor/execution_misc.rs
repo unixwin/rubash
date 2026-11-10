@@ -9,6 +9,15 @@ use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
 pub(crate) fn printable_filename(name: &str) -> String {
     if word_needs_ansic_quote(name) {
         ansic_quote_with_markers(name)
+    } else if name.contains(crate::executor::markers::LITERAL_CHAR_ESCAPE) {
+        // The name arrives in transport form: a typed registry-zone
+        // char rides as an E400 literal-char escape pair
+        // (push_literal_char). GNU's printable_filename judges the raw
+        // word (execute_cmd.c:5909 over general.c:1040), so the pair
+        // folds back to the raw char through the same boundary decoder
+        // the argv/env crossings use (rubash#2881, rubash#3040) —
+        // otherwise the diagnostic names the pair instead of the char.
+        super::substitution_metadata::decode_raw_byte_markers_to_byte_chars(name)
     } else {
         name.to_string()
     }
@@ -24,11 +33,21 @@ pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
     if super::substitution_metadata::has_raw_byte_marker_pair(word) {
         return true;
     }
+    // GNU ansic_shouldquote (strtrans.c:341) judges printability in the
+    // ACTIVE locale: byte-wise isprint in a single-byte locale (every byte
+    // >= 0x80 fails it in the C locale), the wide-char test
+    // (ansic_wshouldquote, strtrans.c:341) only under a multibyte locale.
+    // A non-ASCII character is therefore quotable per se outside a
+    // multibyte locale (rubash#3029: LC_ALL=C printed the raw UTF-8 bytes
+    // of `à' where GNU prints $'\303\240').
+    let multibyte = crate::locale::is_multi_byte_active();
     word.chars().any(|ch| {
         if ch.is_ascii() {
             !(0x20..=0x7e).contains(&(ch as u8))
-        } else {
+        } else if multibyte {
             ch.is_control()
+        } else {
+            true
         }
     })
 }
@@ -39,6 +58,11 @@ pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
 /// characters. Printable ASCII and printable wide chars stay literal.
 pub(crate) fn ansic_quote_with_markers(word: &str) -> String {
     let bytes = super::substitution_metadata::shell_text_to_raw_bytes(word);
+    // GNU ansic_quote (strtrans.c:230) keeps a printable wide character
+    // verbatim only under a multibyte locale (the ansic_wshouldquote
+    // test); in a single-byte locale every byte >= 0x80 is octal-escaped
+    // per byte (rubash#3029).
+    let multibyte = crate::locale::is_multi_byte_active();
     let mut out = String::with_capacity(4 * bytes.len() + 4);
     out.push_str("$'");
     let mut index = 0;
@@ -89,7 +113,7 @@ pub(crate) fn ansic_quote_with_markers(word: &str) -> String {
                 out.push(byte as char);
                 index += 1;
             }
-            _ if byte >= 0x80 => {
+            _ if byte >= 0x80 && multibyte => {
                 // Try to decode a full UTF-8 character (GNU strtrans.c:266-282
                 // emits a printable wide char verbatim under a UTF-8 locale).
                 match std::str::from_utf8(&bytes[index..]) {
@@ -575,7 +599,7 @@ pub(in crate::executor) fn decode_stdin_body_enq(text: &str) -> String {
     ]
     .iter()
     .collect::<String>();
-    text.replace(&pair, "\u{5}")
+    text.replace(&pair, crate::executor::markers::PREEXPANDED_STDIN_BODY_STR)
 }
 
 pub(in crate::executor) fn unterminated_heredoc_body_line_count(body: &str) -> usize {
@@ -865,6 +889,36 @@ pub(in crate::executor) fn shell_display_path(path: &str) -> String {
         return windows_native_to_slash_drive_display(&path);
     }
     path.to_string()
+}
+
+/// GNU findcmd.c:365/416 (search_for_command): a plain name resolved
+/// through PATH for execution enters the hash table with
+/// times_found=1; a repeat run bumps times_found (hashlib.c:254).
+/// The Fastpath-class faces (sleep / dirname / basename) answer
+/// in-process for exactly the name find_user_command resolves, so an
+/// ANSWERED fast path records the same resolution — otherwise
+/// `type <name>` reports the PATH body while `hash` has never heard
+/// of it (rubash#2736). Same guards as the emulated layer's record
+/// block (external_file_builtins::record_emulated_command_resolution)
+/// and tput's Separate route: slash-free name, hashall on, temp-PATH
+/// suppression. Called only from faces that actually answered: a
+/// stand-down or a declined shape falls through to execute_external,
+/// which records through the standard path.
+pub(in crate::executor) fn record_fastpath_command_resolution(
+    env_vars: &mut crate::shell::var_table::VarTable,
+    name: &str,
+) {
+    if name.contains('/')
+        || name.contains('\\')
+        || !crate::builtins::set::shell_option_enabled(env_vars, "hashall")
+        || env_vars.get("__RUBASH_TEMP_PATH").map(String::as_str) == Some("1")
+    {
+        return;
+    }
+    if let Some(program) = crate::executor::path::find_user_command(name, env_vars) {
+        let display = shell_display_path(&program.to_string_lossy().replace('\\', "/"));
+        crate::builtins::hash::record_command_resolution(env_vars, name, &display);
+    }
 }
 
 fn windows_native_to_slash_drive_display(path: &str) -> String {

@@ -5,8 +5,8 @@
 use rubash::executor::Executor;
 use rubash::script_driver::{
     check_binary_file, finish_shell, prepare_interactive_history, run_interactive_stdin,
-    run_script_with_history, run_source, run_source_with_line_offset, script_uses_aliases,
-    script_uses_history, script_uses_runtime_parse_gates,
+    run_script_with_history, run_source, run_source_with_line_offset, script_may_set_onecmd,
+    script_uses_aliases, script_uses_history, script_uses_runtime_parse_gates,
 };
 use std::env;
 use std::fs;
@@ -245,7 +245,13 @@ fn run_main() -> i32 {
         .filter(|value| !value.is_empty())
     {
         Some(imported) => {
-            executor.set_env("BASH_ARGV0", &imported);
+            // rubash#3105: this re-seed reads the RAW process
+            // environment, so it entry-encodes like every raw-data
+            // channel — otherwise it overwrote the import table's
+            // encoded value (entry_encode_imported_env) with the
+            // bare spelling and $0 lost carrier bytes at word
+            // finalization.
+            executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&imported));
         }
         None => {
             if let Some(shell_name) = &invocation_name {
@@ -256,7 +262,11 @@ fn run_main() -> i32 {
                 // shim-forwarded face is a bare name by construction.
                 let display = rubash::executor::shell_pwd_display_path(shell_name);
                 executor.set_env("__RUBASH_SHELL_NAME", &display);
-                executor.set_env("BASH_ARGV0", &display);
+                // rubash#3105: BASH_ARGV0 is a shell-visible
+                // variable seeded from raw argv[0] — entry-encode
+                // the display spelling (the __RUBASH_SHELL_NAME
+                // carrier above keeps the raw spelling).
+                executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&display));
             }
         }
     }
@@ -377,6 +387,30 @@ fn invocation_shell_name(argv0: &str) -> Option<String> {
     let basename = argv0.rsplit(['/', '\\']).next()?;
     let stem = basename.strip_suffix(".exe").unwrap_or(basename);
     Some(stem.to_ascii_lowercase())
+}
+
+/// rubash#3105: OS argv is RAW data entering the storage domain.
+/// GNU binds it verbatim (shell.c:1505-1515 `-c` dollar_vars +
+/// remember_args; shell.c:1613-1614 the script-name $0;
+/// variables.c:368 environ verbatim) because GNU has no transport
+/// domain; this engine's storage contract entry-encodes every
+/// raw-data value channel — environment import does, through
+/// `entry_encode_value_text` — so the argv faces encode here, at the
+/// entry. Never encode in the shared `set_positional_params`
+/// setter: its other callers (the `set` builtin, function calls,
+/// source args) hand it cooked shell words, and encoding there
+/// would double-encode them. The public `bytes_to_shell_text` is
+/// the same encoding (its valid-text arm is exactly
+/// `entry_encode_value_text`'s escape).
+fn entry_encode_argv_value(value: &str) -> String {
+    rubash::executor::bytes_to_shell_text(value.as_bytes())
+}
+
+fn entry_encode_argv(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| entry_encode_argv_value(value))
+        .collect()
 }
 
 fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i32 {
@@ -895,8 +929,15 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
                     executor.set_env("BASH_EXECUTION_STRING", script);
                     if let Some(command_name) = args.get(index + 1) {
                         executor.set_env("__RUBASH_SCRIPT_NAME", command_name);
-                        executor.set_env("BASH_ARGV0", command_name);
-                        executor.set_positional_params(args[index + 2..].to_vec());
+                        // rubash#3105: the `-c` name operand and the
+                        // trailing positionals are raw argv — entry-
+                        // encode both (GNU binds them verbatim,
+                        // shell.c:1505-1515; the storage contract
+                        // encodes at the entry). __RUBASH_SCRIPT_NAME
+                        // above is the internal reader-name carrier
+                        // and keeps the raw spelling.
+                        executor.set_env("BASH_ARGV0", &entry_encode_argv_value(command_name));
+                        executor.set_positional_params(entry_encode_argv(&args[index + 2..]));
                     } else if executor.get_env("__RUBASH_SCRIPT_NAME").is_none() {
                         // GNU error.c:88-120 get_name_for_error: a `-c`
                         // string's BASH_SOURCE[0] is empty, so diagnostics
@@ -1003,7 +1044,8 @@ fn run_args(executor: &mut Executor, args: &[String], argv0: Option<&str>) -> i3
     }
 
     if read_from_stdin {
-        executor.set_positional_params(std::mem::take(&mut stdin_positionals));
+        // rubash#3105: `-s` positionals are raw argv words.
+        executor.set_positional_params(entry_encode_argv(&std::mem::take(&mut stdin_positionals)));
         return run_stdin_script_with_init(
             executor,
             init_file.as_deref(),
@@ -1047,17 +1089,35 @@ fn apply_cli_shell_flags(executor: &mut Executor, option: &str) -> bool {
 }
 
 fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
+    // The full letter set GNU's parse_shell_options (shell.c:913-974)
+    // admits as invocation shell flags — the same table the library
+    // keeps for its own invocation parse (invocation.rs cli_flag_name).
+    // The partial table that stood here made every unlisted letter
+    // fall through to the script-operand arm, so `rubash -t script`
+    // treated `-t` as the script name and exited 127 (rubash#2960);
+    // completing the table from the library's own list fixes the
+    // class, not just the one letter.
     match flag {
+        'a' => Some("allexport"),
+        'b' => Some("notify"),
         'e' => Some("errexit"),
-        'u' => Some("nounset"),
-        'x' => Some("xtrace"),
-        'C' => Some("noclobber"),
         'f' => Some("noglob"),
         'h' => Some("hashall"),
+        'k' => Some("keyword"),
         'm' => Some("monitor"),
         'n' => Some("noexec"),
-        'B' => Some("braceexpand"),
+        'p' => Some("privileged"),
         'r' => Some("restricted"),
+        't' => Some("onecmd"),
+        'u' => Some("nounset"),
+        'v' => Some("verbose"),
+        'x' => Some("xtrace"),
+        'B' => Some("braceexpand"),
+        'C' => Some("noclobber"),
+        'E' => Some("errtrace"),
+        'H' => Some("histexpand"),
+        'P' => Some("physical"),
+        'T' => Some("functrace"),
         _ => None,
     }
 }
@@ -1666,13 +1726,18 @@ fn run_script_file_with_init(
     // vs shell.c:1640, above).
     let reader_name = path_found_name.as_deref().unwrap_or(&script_name);
     executor.set_env("__RUBASH_SCRIPT_NAME", reader_name);
-    executor.set_env("BASH_ARGV0", &script_name);
+    // rubash#3105: the script name is raw argv seeding a
+    // shell-visible variable — entry-encode it (GNU binds
+    // dollar_vars[0] verbatim, shell.c:1613-1614). The reader-name
+    // carrier above keeps the raw spelling.
+    executor.set_env("BASH_ARGV0", &entry_encode_argv_value(&script_name));
     // shell.c:1613 rebinds dollar_vars[0] to script_name at every script
     // entry, so a parent's BASH_ARGV0 assignment snapshot must not survive
     // the boundary (the __RUBASH_* keys ride the process env).
     executor.remove_env("__RUBASH_ARGV0_AFTER_UNSET");
     executor.inherit_process_stdin();
-    executor.set_positional_params(args.to_vec());
+    // rubash#3105: script-file positionals are raw argv words.
+    executor.set_positional_params(entry_encode_argv(args));
     // shell.c:722 run_startup_files precedes the rcfile/script body
     // (rubash#487): `bash -l script` reads the profile chain first.
     // shell.c:795: start_debugger gates scripts too, before any body
@@ -1728,7 +1793,15 @@ fn run_script_file_with_init(
     // below already parsed them. Route such scripts through the grouped
     // driver, which lexes each group after the previous groups ran.
     let uses_parse_gates = script_uses_runtime_parse_gates(&contents);
-    let status = if uses_hist || uses_alias || uses_parse_gates {
+    // rubash#2960: a script that may leave `onecmd` standing — or one
+    // entered with the flag already on (`-t` at invocation, read
+    // through the option's env key like apply_startup_job_control
+    // reads monitor's) — needs the grouped reader's per-unit
+    // consultation (eval.c:206-207); the whole-file fast path has no
+    // unit boundary to consult at.
+    let uses_onecmd = script_may_set_onecmd(&contents)
+        || executor.get_env("__RUBASH_SETOPT_onecmd").as_deref() == Some("1");
+    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)

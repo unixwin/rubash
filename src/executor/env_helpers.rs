@@ -26,6 +26,60 @@ pub(crate) fn process_env_pairs() -> Vec<(String, String)> {
         .collect()
 }
 
+/// rubash#2884 (PUA sweep F6): entry-encode imported environment
+/// values before they become shell variables. GNU variables.c:368
+/// initialize_shell_variables stores environ verbatim because GNU
+/// has no transport domain; this engine does, and every OTHER value
+/// entry channel (stdin lines, `read` input, comsub output,
+/// assignment RHS) entry-encodes at its boundary — environment
+/// import was the one gap, so bare registry chars in inherited user
+/// values were read as live protocol downstream (a bare U+E314
+/// eaten by the display decoder's guard arm; a U+E400+U+E314 pair
+/// collapsing to one char on expansion; a raw ESC byte losing its
+/// `$'...'` quoting in `declare -p`). The encoding is per channel,
+/// matching the channel that consumes the entry:
+/// * `__RUBASH_*` names are the shell's own cross-process
+///   transport — the interpretation is deliberate, values pass
+///   verbatim.
+/// * `BASH_FUNC_*%%` entries are consumed by the function-source
+///   channel (import_exported_functions_from_env tokenizes the
+///   value as source text), so they take the SOURCE encoding
+///   (escape_marker_zone_chars, the bytes_to_script_text parity);
+///   raw carrier bytes in a body keep the lexer meaning they
+///   would have in a script file.
+/// * every other (user) value takes the DATA encoding
+///   (entry_encode_value_text, the bytes_to_shell_text parity).
+/// Per-name entry encoding for a single RAW host/env value (rubash#3207):
+/// the channel rule `entry_encode_imported_env` applies to the whole
+/// imported environment, factored out so the host API faces
+/// (`SessionBuilder` env seeds, `VariablesView::set` / `set_array` /
+/// `set_assoc`) encode each value at their own boundary instead of
+/// landing it bare in storage (rubash#3105's contract, extended here).
+/// `__RUBASH_*` names are the shell's own cross-process transport and
+/// pass verbatim; `BASH_FUNC_*%%` names take the SOURCE encoding; every
+/// other (user) value takes the DATA encoding.
+pub(crate) fn entry_encode_imported_env_value(name: &str, value: &str) -> String {
+    if name.starts_with("__RUBASH_") {
+        value.to_string()
+    } else if super::function_env::imported_function_name(name).is_some() {
+        crate::executor::substitution_metadata::escape_marker_zone_chars(value)
+    } else {
+        crate::executor::substitution_metadata::entry_encode_value_text(value)
+    }
+}
+
+pub(in crate::executor) fn entry_encode_imported_env(
+    values: HashMap<String, String>,
+) -> HashMap<String, String> {
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            let value = entry_encode_imported_env_value(&name, &value);
+            (name, value)
+        })
+        .collect()
+}
+
 /// Exact-case bare-name fallback into the process environment.
 ///
 /// GNU variables.c: the shell variable table is case-sensitive and the
@@ -305,5 +359,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// rubash#2884: the import funnel encodes per channel — user
+    /// values take the data encoding (bare registry chars E400-escaped,
+    /// raw carrier bytes as raw-byte marker pairs), `__RUBASH_*`
+    /// transport stays verbatim, and BASH_FUNC bodies take only the
+    /// source encoding (marker-zone escape; carrier bytes keep their
+    /// script-file lexer meaning).
+    #[test]
+    fn entry_encode_imported_env_follows_the_consuming_channel() {
+        let encoded = entry_encode_imported_env(HashMap::from([
+            ("PLAIN".to_string(), "hello world".to_string()),
+            ("GUARD".to_string(), "\u{E314}".to_string()),
+            ("PAIR".to_string(), "\u{E400}\u{E314}".to_string()),
+            ("ESC".to_string(), "A\u{1B}B".to_string()),
+            (
+                "__RUBASH_TRANSPORT".to_string(),
+                "\u{E314}\u{1B}".to_string(),
+            ),
+            (
+                "BASH_FUNC_f%%".to_string(),
+                "() { echo '\u{E314}\u{1B}'; }".to_string(),
+            ),
+        ]));
+        assert_eq!(encoded["PLAIN"], "hello world");
+        assert_eq!(encoded["GUARD"], "\u{E400}\u{E314}");
+        assert_eq!(encoded["PAIR"], "\u{E400}\u{E400}\u{E400}\u{E314}");
+        assert_eq!(encoded["ESC"], "A\u{E000}\u{E01C}B");
+        assert_eq!(encoded["__RUBASH_TRANSPORT"], "\u{E314}\u{1B}");
+        assert_eq!(
+            encoded["BASH_FUNC_f%%"],
+            "() { echo '\u{E400}\u{E314}\u{1B}'; }"
+        );
     }
 }

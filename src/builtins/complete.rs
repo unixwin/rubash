@@ -10,8 +10,8 @@ use std::io::{self, Write};
 use std::sync::{Mutex, OnceLock};
 
 use crate::executor::path::{
-    command_lookup_fingerprint, completion_executable_qualifies, shell_directory_entries,
-    shell_path_entries,
+    anchor_at_session_cwd, command_lookup_fingerprint, completion_executable_qualifies,
+    shell_directory_entries, shell_directory_entries_in, shell_path_entries, shell_path_to_windows,
 };
 
 use crate::api::capabilities::{Candidate, CandidateKind};
@@ -59,7 +59,6 @@ pub(crate) fn compgen_command_builtin_names() -> Vec<&'static str> {
 pub(crate) fn shell_keyword_names() -> Vec<&'static str> {
     crate::executor::command_registry::introspection_keyword_names()
 }
-const DISABLED_BUILTINS: &str = "__RUBASH_DISABLED_BUILTINS";
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 const ARRAY_VARS: &str = "__RUBASH_ARRAY_VARS";
 const ASSOC_VARS: &str = "__RUBASH_ASSOC_VARS";
@@ -894,7 +893,7 @@ pub(crate) fn apply_completion_actions_with_settings(
                 SHOPT_COMPLETIONS.iter().map(|s| s.to_string()).collect(),
             )),
             "signal" => candidates.extend(plain(signal_completion_candidates())),
-            "user" => candidates.extend(plain(user_completion_candidates(env_vars))),
+            "user" => candidates.extend(plain(user_completion_candidates_for_word(env_vars, word))),
             "variable" => candidates.extend(plain(variable_completion_candidates(
                 env_vars,
                 underlay,
@@ -1298,6 +1297,28 @@ fn tokenize_completion_region(region: &str, wordbreaks: &str) -> Vec<(usize, usi
             }
             current_is_break_run = false;
         } else if is_break(c) {
+            // rubash#2846: a leading Windows drive prefix is not a
+            // word break. When the token so far is exactly one ASCII
+            // letter, a `:` from the break set belongs to the word:
+            // `C:/...` completes as one word, the way the host's
+            // token view already sees it. Splitting there completed
+            // only the post-colon fragment and discarded the drive,
+            // so a drive path could never complete. GNU has no drive
+            // letters (bashline.c:313 puts `:` in the default break
+            // set), so this is the engine's platform-semantics
+            // carve-out, not a GNU behavior: it fires only at a
+            // word's first two bytes, and a colon anywhere else —
+            // after a longer head, after the drive colon itself —
+            // breaks exactly as before.
+            if c == ':'
+                && in_token
+                && !current_is_break_run
+                && current.len() == 1
+                && current.as_bytes()[0].is_ascii_alphabetic()
+            {
+                current.push(c);
+                continue;
+            }
             if in_token && !current_is_break_run {
                 tokens.push((current_start, off, std::mem::take(&mut current)));
                 in_token = false;
@@ -1564,6 +1585,104 @@ fn alias_value_first_word(value: &str) -> &str {
         .find(['(', ')', '<', '>', '&', ';', '|', ' ', '\t', '\n'])
         .unwrap_or(trimmed.len());
     &trimmed[..end]
+}
+
+/// The rebuilt command context after an alias hop governed the
+/// resolution (rubash#2610): GNU's programmable_completions splices
+/// the alias value into pcomp_line in place of the command word and
+/// restarts the whole lookup, so the governing spec's generators run
+/// against the REBUILT line — build_arg_list (pcomplete.c:1004)
+/// hands the rebuilt first word as $1, and bind_compfunc_variables
+/// binds COMP_WORDS / COMP_CWORD / COMP_LINE from the rebuilt text.
+/// `words` is the rebuilt segment word list, `line` the rebuilt
+/// segment text, and `point` the segment point shifted by the total
+/// length difference (pcomp_ind += lendiff per hop).
+#[derive(Debug, Clone)]
+pub(crate) struct RebuiltCommandLine {
+    pub(crate) words: Vec<String>,
+    pub(crate) line: String,
+    pub(crate) point: usize,
+}
+
+/// [`resolve_compspec`] plus the alias-hop rebuild context: when the
+/// governing spec was reached through the progcomp_alias retry chain,
+/// the second element carries the rebuilt command line the spec's
+/// -F/-C generators must be bound with. All other arms (verbatim /
+/// basename / -D / -E / -I) bind the line as typed and yield None.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_compspec_with_rebuild<'a>(
+    specs: &'a CompletionRegistry,
+    words: &[String],
+    cur_idx: usize,
+    aliases: &HashMap<String, Alias>,
+    progcomp_alias: bool,
+    segment_line: &str,
+    segment_point: usize,
+    wordbreaks: &str,
+) -> Option<(&'a Compspec, Option<RebuiltCommandLine>)> {
+    if words.is_empty() || cur_idx == 0 {
+        return resolve_compspec(specs, words, cur_idx, aliases, progcomp_alias)
+            .map(|cs| (cs, None));
+    }
+    let ocmd = words[0].as_str();
+    if let Some(cs) = lookup_command_compspec(specs, ocmd) {
+        return Some((cs, None));
+    }
+    if let Some(cs) = specs.get("-D") {
+        return Some((cs, None));
+    }
+    if !progcomp_alias {
+        return None;
+    }
+    // The alias retry chain, tracked over the word list and the
+    // segment text so a governing hop can hand the rebuilt line to
+    // the caller (the spec-only chain in resolve_command_compspec
+    // walks the same visited set over first words alone).
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(ocmd.to_string());
+    let mut cur_words: Vec<String> = words.to_vec();
+    let mut cur_line = segment_line.to_string();
+    let mut cur_point = segment_point as isize;
+    loop {
+        let alias = aliases.get(cur_words[0].as_str())?;
+        let value = alias.value.clone();
+        // Splice the alias value into the line in place of the
+        // current first word's token span (pcomp_line rebuild).
+        let tokens = tokenize_completion_region(&cur_line, wordbreaks);
+        let (span_start, span_end, _) = tokens.first()?;
+        let (span_start, span_end) = (*span_start, *span_end);
+        let value_words: Vec<String> = tokenize_completion_region(&value, wordbreaks)
+            .into_iter()
+            .map(|(_, _, text)| text)
+            .collect();
+        if value_words.is_empty() {
+            return None;
+        }
+        let mut new_words = value_words;
+        new_words.extend_from_slice(&cur_words[1..]);
+        let hop = new_words[0].clone();
+        if !visited.insert(hop.clone()) {
+            return None;
+        }
+        cur_point += value.len() as isize - (span_end - span_start) as isize;
+        cur_line = format!(
+            "{}{}{}",
+            &cur_line[..span_start],
+            value,
+            &cur_line[span_end..]
+        );
+        cur_words = new_words;
+        if let Some(cs) = lookup_command_compspec(specs, &hop) {
+            return Some((
+                cs,
+                Some(RebuiltCommandLine {
+                    words: cur_words,
+                    line: cur_line,
+                    point: cur_point.max(0) as usize,
+                }),
+            ));
+        }
+    }
 }
 
 /// Host completion hook. Given the in-progress command `line` and the `cursor`
@@ -2301,7 +2420,23 @@ fn path_completion_candidates(
         }
     }
     let (search_dir, display_prefix) = path_completion_base(word);
-    let Ok(entries) = shell_directory_entries(search_dir, env_vars) else {
+    // The directory part is a shell-namespace relative path whenever it
+    // does not lead with `/`: GNU's generator hands it verbatim to
+    // opendir (lib/readline/complete.c:2587, in
+    // rl_filename_completion_function), which resolves it against the
+    // shell's one cwd. The session cwd is a state field, not the
+    // process cwd, so the mapped directory must be anchored at it
+    // explicitly — the G-02 discipline the lookup walks already
+    // follow (executor/path.rs anchor_at_session_cwd). Unanchored, a
+    // relative directory part (a plain `sub/dir`, a bare word's `.`,
+    // or a drive-shaped first component like `C:` — an ordinary
+    // relative component on this platform: complete.c:2523-2531
+    // gates the drive reading to MS-DOS/Win32) enumerated whatever
+    // directory the host process happened to sit in, so after a
+    // session `cd` the listing missed and produced no candidates
+    // (rubash#2846, second face).
+    let physical_dir = anchor_at_session_cwd(shell_path_to_windows(search_dir, env_vars), env_vars);
+    let Ok(entries) = shell_directory_entries_in(&physical_dir) else {
         return Vec::new();
     };
 
@@ -2383,16 +2518,9 @@ fn enabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) -> 
 }
 
 fn disabled_builtin_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String> {
-    let mut candidates = env_vars
-        .get(DISABLED_BUILTINS)
-        .map(|value| {
-            value
-                .split(':')
-                .filter(|name| !name.is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    // Read through the carrier's owner (rubash#2942): the parse used to
+    // be duplicated here with the old colon split.
+    let mut candidates = crate::builtins::enable::disabled_builtins(env_vars);
     candidates.sort();
     candidates.dedup();
     candidates
@@ -2525,6 +2653,26 @@ fn user_completion_candidates(env_vars: &HashMap<String, String>) -> Vec<String>
     #[cfg(windows)]
     {
         env_account_candidates(env_vars, &["USER", "LOGNAME", "USERNAME"])
+    }
+}
+
+/// The CA_USER generator for a concrete word (rubash#2737):
+/// rl_username_completion_function (lib/readline/complete.c:2377)
+/// treats a leading `~` as a prefix sigil — it is stripped for the
+/// database match and re-applied to every generated candidate, so
+/// the word `~ro` generates `~root`. Callers prefix-filter the
+/// generated texts against the full word, so the sigil has to ride
+/// the candidates themselves; a plain word generates bare names.
+/// (bash_groupname_completion_function has no such sigil rule.)
+fn user_completion_candidates_for_word(
+    env_vars: &HashMap<String, String>,
+    word: &str,
+) -> Vec<String> {
+    let names = user_completion_candidates(env_vars);
+    if word.starts_with('~') {
+        names.into_iter().map(|name| format!("~{name}")).collect()
+    } else {
+        names
     }
 }
 

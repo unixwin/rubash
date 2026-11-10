@@ -3,7 +3,7 @@
 //! GNU Bash source ownership:
 //! - builtins/exec.def (`exec_builtin`)
 
-use std::collections::HashMap;
+use super::diagnostic::diagnostic_prefix;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 
@@ -13,18 +13,9 @@ const EX_NOTFOUND: i32 = 127;
 const EX_NOEXEC: i32 = 126;
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";
 
-/// GNU exec.def diagnostics go through builtin_error -> error_prolog, which
-/// prefixes `./script: line N:` when running a script file (mirrors
-/// builtins/trap.rs).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// GNU exec.def diagnostics go through builtin_error -> error_prolog:
+// the shared prolog builder lives in super::diagnostic and names the
+// frame's definition file (rubash#3035).
 
 thread_local! {
     /// The (pid, signal) of the most recent `exec`-spawned child that
@@ -254,7 +245,7 @@ where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin)
+    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
@@ -279,6 +270,43 @@ where
         stderr,
         Some((child_stdout, child_stderr)),
         child_stdin,
+        &[],
+    )
+}
+
+/// execute_with_child_stdio plus genuinely closed child std fds
+/// (rubash#2803): a `>&-` binding is a CLOSED descriptor in GNU —
+/// the child's writes fail EBADF and the child reports them itself
+/// (redir.c r_close_this). Stdio::null() would let the writes
+/// silently succeed, so the spawner inherits the descriptor and
+/// closes it in the child before execve, the same realization the
+/// external-command spawn uses for closed slots
+/// (external_redirects.rs register_pre_exec_close).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_with_child_stdio_closing<W, E>(
+    args: &[String],
+    env_vars: &crate::shell::var_table::VarTable,
+    cwd: &std::path::Path,
+    stdout: &mut W,
+    stderr: &mut E,
+    child_stdout: Stdio,
+    child_stderr: Stdio,
+    child_stdin: Stdio,
+    close_fds: &[u32],
+) -> io::Result<i32>
+where
+    W: Write,
+    E: Write,
+{
+    execute_impl(
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        Some((child_stdout, child_stderr)),
+        child_stdin,
+        close_fds,
     )
 }
 
@@ -290,6 +318,7 @@ fn execute_impl<W, E>(
     stderr: &mut E,
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     W: Write,
@@ -354,6 +383,39 @@ where
 
     if let Some(command) = command {
         let Some(program) = crate::executor::path::find_user_command(command, env_vars) else {
+            // The failure report names and probes the real file: fold
+            // the stored E400 pair to the raw char for every probe and
+            // diagnostic in this block (rubash#3076). The success path
+            // keeps `command` as invoked (argv0 seeding).
+            let folded_command =
+                crate::executor::substitution_metadata::fold_literal_char_escapes(command);
+            let command = folded_command.as_str();
+            // GNU builtins/exec.def:163-166: whatever the spelling, an
+            // operand that IS a directory as written is classified before
+            // the generic not-found report — file_isdir(args[0]) probes
+            // the operand itself, so `exec .` and `exec somedir` (no
+            // slash; the PATH walk discarded the directory per findcmd.c
+            // FS_NODIRS) report "cannot execute: Is a directory"
+            // (EX_NOEXEC), not "not found" (rubash#2661). The probe
+            // anchors at the session cwd (G-02), like the slash branch
+            // below.
+            let as_written = crate::executor::path::shell_path_to_windows(command, env_vars);
+            let as_written = if as_written.is_absolute() {
+                as_written
+            } else {
+                cwd.join(&as_written)
+            };
+            if std::fs::metadata(&as_written)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+            {
+                writeln!(
+                    stderr,
+                    "{}exec: {command}: cannot execute: Is a directory",
+                    diagnostic_prefix(env_vars)
+                )?;
+                return Ok(EX_NOEXEC);
+            }
             // GNU builtins/exec.def:151: a slash-containing operand bypasses
             // search_for_command and is handed to shell_execve directly, so
             // the diagnostic is the execve errno text (exec.def:231 ->
@@ -432,6 +494,7 @@ where
                 child_stderr,
                 child_stdin,
                 stderr,
+                close_fds,
             ),
             None => run_external_exec(
                 &program,
@@ -641,6 +704,7 @@ fn run_external_exec_with_stdio<E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     stderr: &mut E,
+    close_fds: &[u32],
 ) -> io::Result<i32>
 where
     E: Write,
@@ -655,6 +719,24 @@ where
         cwd,
     );
     process.stdout(child_stdout).stderr(child_stderr);
+    // rubash#2803: genuinely closed std fds (see
+    // execute_with_child_stdio_closing): std arranges the inherited
+    // descriptors first, then the pre_exec closures run, so the
+    // close lands on the arranged slot before execve.
+    #[cfg(unix)]
+    if !close_fds.is_empty() {
+        let close_fds = close_fds.to_vec();
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            process.pre_exec(move || {
+                for fd in &close_fds {
+                    libc::close(*fd as std::os::unix::io::RawFd);
+                }
+                Ok(())
+            });
+        }
+    }
+    let _ = close_fds;
     // Explicit for symmetry with run_external_exec: `.status()` would
     // inherit by default, but every spawn site of the exec builtin must
     // state its child-stdin source (fd-table endpoint 0 resolution),

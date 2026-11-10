@@ -18,6 +18,13 @@ impl Executor {
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
+        // rubash#3107: the dynamic associative variables' owner tables
+        // (aliases, hashed_filenames) mutate without a mirror write, so
+        // a materialized typed cell goes stale at this boundary;
+        // reconcile it from the owner before the verifier below (and
+        // before any later read trusts the cell). See
+        // Executor::sync_dynamic_assoc_cells.
+        self.sync_dynamic_assoc_cells();
         // Debug-only systemic regression net for the typed-cell ↔ mirror
         // invariant: after every command boundary every fresh (undirty)
         // structured array cell must still equal its mirror projection.
@@ -46,6 +53,7 @@ impl Executor {
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
         self.redirect_target_single_glob_match.borrow_mut().clear();
+        self.redirect_target_had_transport.borrow_mut().clear();
         self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand
@@ -507,8 +515,9 @@ impl Executor {
         // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
         // applies them in list order with persistent semantics), so it is
         // excluded here.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(&cmd);
         if cmd.words.first().map(String::as_str) != Some("exec")
-            && self.apply_dynamic_fd_var_redirects(&cmd, true)?
+            && self.apply_dynamic_fd_var_redirects(&cmd, true, fd_var_walk_undoable)?
         {
             // rubash#2125: the applier rendered the diagnostic and set
             // status 1, but the failure never becomes an IoError at the
@@ -1281,6 +1290,27 @@ impl Executor {
         let mut harvested: Vec<(String, String)> = Vec::new();
         let mut indexes: Vec<usize> = Vec::new();
         for (index, word) in cmd.words.iter().enumerate() {
+            // GNU takes the assignment verdict at READ time, on the
+            // raw token: parse.y stamps W_ASSIGNMENT via assignment()
+            // (general.c:480) over the token exactly as read — quotes
+            // included — and the sweep moves exactly the stamped
+            // words. The cooked word cannot carry the verdict: a
+            // quoted `"v=$v"` cooks to the same text as the bare
+            // token but was never stamped, so judging the cooked
+            // word harvested quoted arguments out of the command
+            // line (rubash#2959). Judge the raw text with the
+            // parser's own predicate (the same one the leading-run
+            // classification reads, parse_loop.rs); the cooked word
+            // only supplies the (name, value) pair. A synthetic word
+            // has no raw token and is never stamped.
+            let raw = cmd
+                .word_metadata
+                .get(index)
+                .map(|meta| meta.raw.as_str())
+                .unwrap_or("");
+            if !crate::lexer::is_assignment(raw) {
+                continue;
+            }
             let Some((name, value)) = split_assignment_word(word) else {
                 continue;
             };
@@ -1679,6 +1709,27 @@ impl Executor {
                             | crate::parser::RedirectKind::Input
                     ) && matches!(redirect.fd, None | Some(0)))
             })
+    }
+
+    /// rubash#2615: whether THIS command's own do_redirections walk
+    /// runs with RX_UNDOABLE, so its fixed entries' undo saves occupy
+    /// descriptor slots while the walk evolves (redir.c:243). GNU's
+    /// in-process dispatch (builtins, functions, exec —
+    /// execute_builtin_or_function, execute_cmd.c:5606) and the
+    /// compound prologue (execute_cmd.c:854) are undoable; the fork
+    /// child's walks are RX_ACTIVE only (execute_disk_command,
+    /// execute_cmd.c:5522; the subshell's own list,
+    /// execute_cmd.c:1761). A subshell-headed node therefore walks
+    /// active even though its body later runs in a child executor,
+    /// and a compound node without a simple word walks undoable.
+    pub(in crate::executor) fn redirect_walk_is_undoable(&mut self, cmd: &CommandNode) -> bool {
+        if cmd.subshell_command.is_some() {
+            return false;
+        }
+        if cmd.words.is_empty() {
+            return true;
+        }
+        self.heredoc_error_command_runs_in_main_shell(cmd)
     }
 
     /// True when the command carrying a failing heredoc would dispatch to

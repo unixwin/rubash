@@ -56,6 +56,7 @@ use crate::shell::var_table::VarTable;
 use std::collections::HashMap;
 use std::io::{self, Write};
 
+use super::diagnostic::diagnostic_prefix;
 use super::help;
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -316,6 +317,86 @@ mod plat {
             return Err(io::Error::last_os_error());
         }
         Ok((limit.rlim_cur as u64, limit.rlim_max as u64))
+    }
+
+    /// rubash#2636: snapshot the whole PROCESS rlimit set (every
+    /// table resource except `-p`, which has no rlimit behind it).
+    /// One entry per resource: (option letter, soft, hard).
+    pub(super) fn snapshot_rlimits() -> Vec<(char, u64, u64)> {
+        LIMITS
+            .iter()
+            .map(|spec| spec.option)
+            .filter(|option| *option != 'p')
+            .filter_map(|option| {
+                rlimit_get(resource(option))
+                    .ok()
+                    .map(|(soft, hard)| (option, soft, hard))
+            })
+            .collect()
+    }
+
+    /// rubash#2636: put a `snapshot_rlimits` set back. Best effort per
+    /// resource: a pair whose HARD side the region lowered cannot be
+    /// raised back without CAP_SYS_RESOURCE (setrlimit EPERM), so on
+    /// a failed pair restore fall back to the soft side alone,
+    /// clamped to the hard limit currently in force — the parent
+    /// must never be left with a soft limit above its hard limit,
+    /// and a soft restore that IS permitted must not be skipped
+    /// just because the hard side is pinned.
+    pub(super) fn apply_rlimits(snapshot: &[(char, u64, u64)]) {
+        for &(option, soft, hard) in snapshot {
+            let res = resource(option);
+            let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+            limit.rlim_cur = soft as libc::rlim_t;
+            limit.rlim_max = hard as libc::rlim_t;
+            if unsafe { libc::setrlimit(res, &limit) } == 0 {
+                continue;
+            }
+            if let Ok((_, current_hard)) = rlimit_get(res) {
+                let mut fallback: libc::rlimit = unsafe { std::mem::zeroed() };
+                fallback.rlim_cur = soft.min(current_hard) as libc::rlim_t;
+                fallback.rlim_max = current_hard as libc::rlim_t;
+                unsafe {
+                    libc::setrlimit(res, &fallback);
+                }
+            }
+        }
+    }
+}
+
+/// rubash#2636: the PROCESS rlimit set recorded at a flat fork-save
+/// point. GNU's fork boundaries (execute_cmd.c:1576
+/// execute_in_subshell, subst.c:7143 command_substitute,
+/// execute_cmd.c:2620 execute_pipeline) give the child its own
+/// process, so a `ulimit` set inside dies with the child
+/// (builtins/ulimit.def set_limit -> setrlimit, ulimit.def:632).
+/// rubash's regions are flat — they run against this same process —
+/// so the boundary snapshots the process rlimits into the saved
+/// state and re-applies them when the region ends, exactly like the
+/// process umask (rubash#1907). Returns None where there are no
+/// process rlimits (Windows: the emulated table lives in the env
+/// map, which already rides the state save/restore), which makes
+/// the restore a no-op there.
+pub(crate) fn snapshot_process_rlimits() -> Option<Vec<(char, u64, u64)>> {
+    #[cfg(unix)]
+    {
+        Some(plat::snapshot_rlimits())
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// The restore half of `snapshot_process_rlimits`.
+pub(crate) fn apply_process_rlimits(snapshot: &[(char, u64, u64)]) {
+    #[cfg(unix)]
+    {
+        plat::apply_rlimits(snapshot);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = snapshot;
     }
 }
 
@@ -776,16 +857,8 @@ where
     }
 }
 
-/// Build the shell diagnostic prefix (`<script>: line N: `) from the shell
-/// environment, falling back to `rubash: ` without script context — GNU
-/// builtin_error prefixes `./script: line N:` when running a script file
-/// (baseline: `./builtins11.sub: line 37: ulimit: -g: invalid option`).
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefix is the shared builtin_error prolog
+// (`super::diagnostic::diagnostic_prefix`): GNU prefixes
+// `./script: line N:` when running a script file (baseline:
+// `./builtins11.sub: line 37: ulimit: -g: invalid option`), and the
+// shared builder names the frame's definition file (rubash#3035).

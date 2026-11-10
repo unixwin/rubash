@@ -11,6 +11,7 @@ use std::collections::HashMap;
 // instead of trusting a possibly-forged $PWD (rubash#2408).
 pub(crate) mod paths;
 
+use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 
 use paths::{
@@ -26,33 +27,10 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
-/// GNU builtins/common.c:83-94 builtin_error_prolog: the shell name, the
-/// executing line for scripts, then the builtin name.
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
-
-/// GNU error.c:453 err_readonly (report_error family): the bare
-/// `VAR: readonly variable` bind diagnostic honors gnu_errfmt
-/// (rubash#1038), unlike the builtin_error lines sharing this file.
-fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{script}:{line}: ");
-        }
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
+// The diagnostic prefixes are the shared builders in
+// super::diagnostic (GNU builtins/common.c:83-94 builtin_error_prolog
+// and the error.c:453 err_readonly twin), which name the frame's
+// definition file (rubash#3035).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -475,11 +453,17 @@ where
 {
     match operand {
         None => match shell_var(env_vars, "HOME") {
-            Some(home) => Ok(Some(Target {
-                path: filesystem_path_for_display(&home, env_vars),
-                display: Some(PathBuf::from(home)),
-                print: PrintPath::Never,
-            })),
+            // The substituted value IS the pathname (cd.def step 1):
+            // fold a stored E400 pair in it like an operand's
+            // (rubash#3076).
+            Some(home) => {
+                let home = crate::executor::substitution_metadata::fold_literal_char_escapes(&home);
+                Ok(Some(Target {
+                    path: filesystem_path_for_display(&home, env_vars),
+                    display: Some(PathBuf::from(home)),
+                    print: PrintPath::Never,
+                }))
+            }
             // GNU builtins/cd.def:316-322: the operand-less refusal is
             // `dirname == 0` (POSIX cd step 1) — a MISSING variable only. A
             // set-but-EMPTY HOME flows on through make_absolute, glues the
@@ -502,11 +486,15 @@ where
             Ok(None)
         }
         Some("-") => match shell_var(env_vars, "OLDPWD") {
-            Some(old_pwd) => Ok(Some(Target {
-                path: filesystem_path_for_display(&old_pwd, env_vars),
-                display: Some(PathBuf::from(old_pwd)),
-                print: PrintPath::Always,
-            })),
+            Some(old_pwd) => {
+                let old_pwd =
+                    crate::executor::substitution_metadata::fold_literal_char_escapes(&old_pwd);
+                Ok(Some(Target {
+                    path: filesystem_path_for_display(&old_pwd, env_vars),
+                    display: Some(PathBuf::from(old_pwd)),
+                    print: PrintPath::Always,
+                }))
+            }
             None => {
                 writeln!(stderr, "{}cd: OLDPWD not set", diagnostic_prefix(env_vars))?;
                 Ok(None)
@@ -525,7 +513,12 @@ where
             // host normalizers (niubash#483) — on the same resolution.
             // `D:rel` drive-relative spellings stay untouched: a mid-word
             // colon past position 1 is filename data, not a designator.
-            let dir = windows_bare_drive_operand(dir);
+            // The operand is a pathname from here on: fold a stored
+            // E400 pair to the raw char so the probe, the CDPATH joins
+            // downstream, and the failure diagnostic all name the real
+            // directory (rubash#3076).
+            let dir = crate::executor::substitution_metadata::fold_literal_char_escapes(dir);
+            let dir = windows_bare_drive_operand(&dir);
             Ok(Some(Target {
                 path: filesystem_path_for_display(&dir, env_vars),
                 display: Some(PathBuf::from(dir)),
@@ -620,6 +613,9 @@ fn resolve_cdable_vars(
     }
 
     let value = shell_var(env_vars, name)?;
+    // The variable's VALUE becomes the pathname (cd.def LCD_DOVARS):
+    // fold a stored E400 pair in it (rubash#3076).
+    let value = crate::executor::substitution_metadata::fold_literal_char_escapes(&value);
     Some(Target {
         path: filesystem_path_for_display(&value, env_vars),
         display: Some(PathBuf::from(value)),

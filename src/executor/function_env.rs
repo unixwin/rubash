@@ -1,11 +1,33 @@
 use super::*;
 
+/// How one `BASH_FUNC_*%%` entry's import failed, split the way GNU
+/// splits it (rubash#2728). The caller owns printing: both classes end
+/// with the single `error importing function definition` line
+/// (variables.c:441), but what precedes it differs by class.
+pub(in crate::executor) enum ImportedFunctionFailure {
+    /// The value engaged the import (starts with `() {`) but the
+    /// parser rejected the rebuilt definition: GNU's parse_and_execute
+    /// prints the parser's own diagnostics (builtins/evalstring.c,
+    /// parse_command failure arm) — `(line, message)` pairs in GNU's
+    /// line numbering (the definition's first line is line 0) — and
+    /// NO warning line.
+    Parse {
+        name: String,
+        diagnostics: Vec<(usize, String)>,
+    },
+    /// The value parsed but is not one straight function definition
+    /// (builtins/evalstring.c:465-486 SEVAL_FUNCDEF check): GNU prints
+    /// `warning: <name>: ignoring function definition attempt` and
+    /// nothing else before the caller's error line.
+    IgnoredAttempt { name: String },
+}
+
 pub(in crate::executor) fn import_exported_functions_from_env(
     env_vars: &HashMap<String, String>,
 ) -> (
     HashMap<String, FunctionBody>,
     HashMap<String, crate::executor::FunctionDefInfo>,
-    Vec<String>,
+    Vec<ImportedFunctionFailure>,
 ) {
     let mut functions = HashMap::new();
     let mut def_infos = HashMap::new();
@@ -14,12 +36,26 @@ pub(in crate::executor) fn import_exported_functions_from_env(
         let Some(name) = imported_function_name(env_name) else {
             continue;
         };
-        let Some((body, def_redirects)) = parse_exported_function_body(value) else {
-            // GNU variables.c refuses the definition (ShellShock guard)
-            // and reports it at startup; the caller owns the diagnostic
-            // (rubash#1276).
-            failed.push(name.to_string());
-            continue;
+        let (body, def_redirects) = match classify_exported_function_value(name, value) {
+            ExportedFunctionParse::Defined(body, def_redirects) => (body, def_redirects),
+            // GNU variables.c: the `() {` prefix check failed, so the
+            // entry never engaged the function import — it is bound as
+            // an ordinary variable and the function silently stays
+            // undefined. Not a failure, no diagnostic (rubash#2728).
+            ExportedFunctionParse::NotAFunctionValue => continue,
+            ExportedFunctionParse::ParseFailure(diagnostics) => {
+                failed.push(ImportedFunctionFailure::Parse {
+                    name: name.to_string(),
+                    diagnostics,
+                });
+                continue;
+            }
+            ExportedFunctionParse::IgnoredAttempt => {
+                failed.push(ImportedFunctionFailure::IgnoredAttempt {
+                    name: name.to_string(),
+                });
+                continue;
+            }
         };
         functions.insert(name.to_string(), Rc::new(Ast { commands: body }));
         // The exportstr carries the function-definition redirections after
@@ -58,88 +94,185 @@ pub(in crate::executor) fn is_exportable_function_name(name: &str) -> bool {
     is_imported_function_name(name) && !name.contains('/') && !name.contains('\\')
 }
 
+/// The four outcomes of one exported-function value, mirroring GNU's
+/// import decision tree (rubash#2728):
+/// variables.c:395-446 (initialize_shell_variables, FUNCTION_IMPORT)
+/// gates on STREQN("() {", string, 4) over the RAW value, rebuilds
+/// `name + " " + value`, and runs parse_and_execute with
+/// SEVAL_FUNCDEF|SEVAL_ONECMD (builtins/evalstring.c).
+pub(in crate::executor) enum ExportedFunctionParse {
+    /// One straight function definition: defined, att_exported kept.
+    Defined(Vec<CommandNode>, Vec<crate::parser::Redirect>),
+    /// The `() {` prefix check failed: the entry is an ordinary
+    /// variable; the function silently stays undefined.
+    NotAFunctionValue,
+    /// parse_command failed: the parser's diagnostics, as
+    /// `(line, message)` pairs in GNU's line numbering.
+    ParseFailure(Vec<(usize, String)>),
+    /// Parsed, but not one straight function definition
+    /// (evalstring.c:465-486): rejected with the warning line.
+    IgnoredAttempt,
+}
+
+pub(in crate::executor) fn classify_exported_function_value(
+    name: &str,
+    value: &str,
+) -> ExportedFunctionParse {
+    // variables.c:404: STREQN("() {", string, 4) on the raw value —
+    // no trim: a leading space or a missing space after `()` means
+    // the entry never engages the import at all.
+    if !value.starts_with("() {") {
+        return ExportedFunctionParse::NotAFunctionValue;
+    }
+    // variables.c:415-424: the definition text is rebuilt as
+    // `name + " " + value` and parsed under the function's own name.
+    let synthetic = format!("{name} {value}");
+    let tokens = crate::lexer::tokenize(&synthetic);
+    let ast = crate::parser::parse(&tokens);
+    // A syntax error anywhere in the definition bubbles to the top
+    // command's marker assignments (parser propagate_subtree_parse_
+    // error), which is exactly the unit GNU's parse_command aborts.
+    if let Some(marked) = ast
+        .commands
+        .iter()
+        .find(|command| command.has_parse_error_marker())
+    {
+        return ExportedFunctionParse::ParseFailure(import_parse_diagnostics(marked, &synthetic));
+    }
+    let straight_definition = |cmd: &CommandNode| {
+        cmd.function_command
+            .as_ref()
+            .filter(|func| func.name == name)
+            .map(|func| {
+                (
+                    func.body.clone(),
+                    crate::parser::ast_print::collected_redirects(cmd),
+                )
+            })
+    };
+    match ast.commands.as_slice() {
+        [only] => match straight_definition(only) {
+            Some((body, def_redirects)) => ExportedFunctionParse::Defined(body, def_redirects),
+            None => ExportedFunctionParse::IgnoredAttempt,
+        },
+        [first, second, ..] => {
+            // SEVAL_ONECMD (evalstring.c:577): parse_and_execute stops
+            // after the first command, so input on LATER lines is never
+            // read and the definition stands; a second command sharing
+            // the definition's line means the parsed unit was not one
+            // straight definition (the ShellShock shape).
+            let def_end = first.end_line.or(first.line).unwrap_or(1);
+            let next_line = second.line.unwrap_or(usize::MAX);
+            if next_line > def_end {
+                if let Some((body, def_redirects)) = straight_definition(first) {
+                    return ExportedFunctionParse::Defined(body, def_redirects);
+                }
+            }
+            ExportedFunctionParse::IgnoredAttempt
+        }
+        [] => ExportedFunctionParse::IgnoredAttempt,
+    }
+}
+
+/// The parser's own diagnostics for a rejected import, in the shape
+/// GNU's yyerror path prints them (parse.y report_syntax_error via
+/// error.c parser_error): a `syntax error ...` line, plus — for the
+/// near-token and plain classes — the offending line echoed verbatim.
+/// Lines are converted to GNU's string-input numbering: the
+/// definition's first line is line 0 where the synthetic text counts
+/// it as line 1.
+fn import_parse_diagnostics(cmd: &CommandNode, synthetic: &str) -> Vec<(usize, String)> {
+    let gnu_line = |line: usize| line.saturating_sub(1);
+    // The offending-line echo shares the diagnostic's GNU line number
+    // and reproduces that line of the rebuilt definition verbatim.
+    let echo = |line: usize| -> (usize, String) {
+        let text = synthetic
+            .lines()
+            .nth(line.saturating_sub(1))
+            .unwrap_or_default();
+        (gnu_line(line), format!("`{text}'"))
+    };
+    if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_NEAR__") {
+        let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+        let token = fields.next().unwrap_or_default();
+        let line = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_else(|| cmd.line.unwrap_or(1));
+        return vec![
+            (
+                gnu_line(line),
+                format!("syntax error near unexpected token `{token}'"),
+            ),
+            echo(line),
+        ];
+    }
+    if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
+        let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+        let compound_name = fields.next().unwrap_or("(");
+        let open_line = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let eof_line = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        return vec![(
+            gnu_line(eof_line),
+            format!(
+                "syntax error: unexpected end of file from `{compound_name}' command on line {}",
+                gnu_line(open_line)
+            ),
+        )];
+    }
+    if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
+        let line = cmd.line.unwrap_or(1);
+        return vec![(line, "syntax error: unexpected end of file".to_string())];
+    }
+    if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
+        // Conditional diagnostics carry their own message fields after
+        // (shape, token, line): (line, message) pairs, each rendered
+        // verbatim — the same reading command_execute's COND arm uses.
+        let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
+        let _shape = fields.next();
+        let _token = fields.next();
+        let _line = fields.next();
+        let mut out = Vec::new();
+        while let (Some(line), Some(message)) = (fields.next(), fields.next()) {
+            let line = line.parse::<usize>().unwrap_or(1);
+            out.push((gnu_line(line), message.to_string()));
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    let message = cmd
+        .get_assignment("__RUBASH_PARSE_ERROR__")
+        .map(String::as_str)
+        .unwrap_or("unexpected token");
+    let line = cmd.line.unwrap_or(1);
+    if message.starts_with("syntax error:") || message.starts_with("unexpected EOF") {
+        vec![(gnu_line(line), message.to_string())]
+    } else {
+        vec![
+            (gnu_line(line), format!("syntax error near {message}")),
+            echo(line),
+        ]
+    }
+}
+
 pub(in crate::executor) fn parse_exported_function_body(
     value: &str,
 ) -> Option<(Vec<CommandNode>, Vec<crate::parser::Redirect>)> {
-    let value = value.trim();
-    // GNU variables.c:initialize_shell_variables checks STREQN("() {", string, 4)
-    // – the definition must start with "() {" exactly (no "(){" without space
-    // is already covered by the trim_start check below, but the 4-char prefix
-    // enforces the required space). The rest of the validation mirrors
-    // parse_and_execute(SEVAL_FUNCDEF|SEVAL_ONECMD): only a single function
-    // definition with optional redirections is accepted; trailing `; cmd` or
-    // extra brace groups (ShellShock) must be rejected.
-    let rest = value.strip_prefix("()")?.trim_start();
-    if !rest.starts_with('{') {
-        return None;
+    // Carrier-comparison callers (compound_exec) only need the
+    // defined-or-not reading under a name that is already a live
+    // function; the name is irrelevant to the body shape, so reuse
+    // the classifier under a placeholder.
+    match classify_exported_function_value("__rubash_carrier_probe", value) {
+        ExportedFunctionParse::Defined(body, def_redirects) => Some((body, def_redirects)),
+        _ => None,
     }
-    // Validate via the real parser: build a synthetic definition
-    // `__rubash_import_test () { ... }` and require exactly one command which
-    // is a function definition. This rejects trailing commands (`; echo BAD`),
-    // extra brace groups (`} { echo vuln;}`), and malformed redirections that
-    // the manual rfind('}') would otherwise swallow.
-    let dummy = "__rubash_import_test";
-    let synthetic = format!("{} {}", dummy, value);
-    let tokens = crate::lexer::tokenize(&synthetic);
-    let ast = crate::parser::parse(&tokens);
-    if ast.commands.len() != 1 {
-        return None;
-    }
-    let cmd = &ast.commands[0];
-    let func = cmd.function_command.as_ref()?;
-    if func.name != dummy {
-        return None;
-    }
-    // Ensure the synthetic string was consumed entirely: the parser must not
-    // have left extra tokens (e.g., `; echo BAD` would be a second command,
-    // already rejected by len !=1; a stray `}` would also produce a second
-    // command). Additionally, reject if the original value's trailing part
-    // after the function's `}` contains non-redirect words – the synthetic
-    // check already covers it, but we keep the explicit redirect extraction
-    // for the exportstr rendering path.
-    let def_redirects = crate::parser::ast_print::collected_redirects(cmd);
-    // Verify trailing part is only redirects/whitespace: re-slice original rest
-    // to ensure no `;` or extra command leaked through brace matching quirks
-    // (e.g., `>_[${...}] { echo vuln;}` where the `{` could be mis-identified
-    // as function body). The synthetic single-command guarantee already ensures
-    // this, but we add a lightweight lexical check for `;` after the final `}`
-    // to guard against future parser divergences.
-    if let Some(close) = rest.rfind('}') {
-        let trailing = rest[close + 1..].trim();
-        if !trailing.is_empty() {
-            // Valid trailing is only whitespace and redirections; a `;` or `&`
-            // indicates an extra command and must be rejected (CVE-2014-6271).
-            if trailing.contains(';') || trailing.contains('&') || trailing.contains('|') {
-                // However redirections themselves may contain `&` as in `2>&1`;
-                // parse trailing as `:` + trailing and check for extra commands.
-                let t_tokens = crate::lexer::tokenize(&format!(": {}", trailing));
-                let t_ast = crate::parser::parse(&t_tokens);
-                // A valid redirection list is a single `:` command with only
-                // redirects and no extra words/commands.
-                if t_ast.commands.len() != 1 {
-                    return None;
-                }
-                let first = &t_ast.commands[0];
-                // If the first command has words beyond `:`, it's not just
-                // redirects (e.g., `: ; echo BAD` has second command).
-                if first.words.len() > 1 {
-                    return None;
-                }
-                if t_ast.commands.len() != 1 || first.words.first().map(String::as_str) != Some(":")
-                {
-                    return None;
-                }
-                // Check that all remaining tokens after `:` are redirects, not words.
-                // collected_redirects will be empty for `; echo` case, but the
-                // parse would have produced a second command which we already
-                // rejected via len check. So trailing with `;` is already
-                // rejected by the synthetic len check; this path is for
-                // `>file` vs `;` differentiation.
-            }
-        }
-    }
-    let body = func.body.clone();
-    Some((body, def_redirects))
 }
 
 pub(in crate::executor) fn exported_function_env_name(name: &str) -> String {

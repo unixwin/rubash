@@ -176,6 +176,23 @@ impl Executor {
                 // `until false; do break; done` must leave $? = 0, and
                 // `until (exit 7); do break; done` must not leak the 7.
                 self.exit_code = 0;
+                if self.debug_action_running && own_loop_depth > 0 {
+                    // rubash#2969: inside a DEBUG trap action the builtin
+                    // must not unwind — the firing site is not this loop's
+                    // frame (a for head's frame is not even entered when
+                    // its trap fires). GNU only ASSIGNS the pending flag
+                    // (builtins/break.def:88 `breaking = newbreak`,
+                    // :133 `continuing = newcont`); the command-entry
+                    // gate (execute_cmd.c:635-636) skips the commands
+                    // still to run and the loop driver consumes one
+                    // level after the body (execute_cmd.c:3108-3118).
+                    // Fork-boundary executors (own depth 0) keep the
+                    // ExitCode arm below: their list end IS their flag
+                    // consumption, and no live frame here could receive
+                    // an unwind either.
+                    self.defer_loop_control(kind, level);
+                    return Ok(());
+                }
                 if own_loop_depth == 0 {
                     // Fork-boundary child (comsub body / simple pipeline or
                     // async element): GNU's `breaking`/`continuing` unwind
@@ -233,6 +250,15 @@ impl Executor {
                 // cases return Break.
                 self.break_failure_status.set(Some(1));
                 self.exit_code = 1;
+                if self.debug_action_running && own_loop_depth > 0 {
+                    // rubash#2969: GNU break.def:88 still assigns
+                    // `breaking = loop_level` on the range failure; the
+                    // parked failure status above rides to the consuming
+                    // loop driver (consume_pending_loop_control), exactly
+                    // as it rides ExecuteError::Break today.
+                    self.defer_loop_control(LoopControlKind::Break, total_loop_depth);
+                    return Ok(());
+                }
                 if own_loop_depth == 0 {
                     // Fork-boundary child: `breaking = loop_level` ends the
                     // child's list with the builtin's failure status (1).
@@ -282,6 +308,73 @@ impl Executor {
         } else {
             false
         }
+    }
+
+    /// rubash#2969: record a break/continue executed inside a DEBUG trap
+    /// action as GNU's pending flag instead of unwinding (builtins/
+    /// break.def:88 `breaking = newbreak`, :133 `continuing =
+    /// newcont`). Assignment, not accumulation — a later action
+    /// overwrites an earlier one, as in C.
+    pub(in crate::executor) fn defer_loop_control(&mut self, kind: LoopControlKind, level: usize) {
+        match kind {
+            LoopControlKind::Break => self.shell_state.loop_breaking = level,
+            LoopControlKind::Continue => self.shell_state.loop_continuing = level,
+        }
+    }
+
+    /// rubash#2969: the execute_cmd.c:635-636 command-entry gate — while
+    /// either pending flag stands, every command entered is skipped
+    /// whole (it does not run, and the DEBUG trap does not fire for it).
+    pub(in crate::executor) fn loop_control_pending(&self) -> bool {
+        self.shell_state.loop_breaking > 0 || self.shell_state.loop_continuing > 0
+    }
+
+    /// rubash#2969: one loop driver consuming the pending flags after a
+    /// body (GNU execute_cmd.c:3108-3118). A parked break failure status
+    /// (a `break 0` in the trap action) becomes the loop's status, like
+    /// the ExecuteError::Break consumer arms; a plain flag leaves the
+    /// completed body's status standing, as GNU's
+    /// last_command_exit_value does.
+    pub(in crate::executor) fn consume_pending_loop_control(&mut self) -> LoopControlFlow {
+        if self.shell_state.loop_breaking > 0 {
+            self.shell_state.loop_breaking -= 1;
+            if let Some(status) = self.take_break_failure_status() {
+                self.exit_code = status;
+            }
+            return LoopControlFlow::BreakLoop;
+        }
+        if self.shell_state.loop_continuing > 0 {
+            self.shell_state.loop_continuing -= 1;
+            return if self.shell_state.loop_continuing > 0 {
+                LoopControlFlow::BreakLoop
+            } else {
+                LoopControlFlow::NextIteration
+            };
+        }
+        LoopControlFlow::None
+    }
+
+    /// rubash#2969: GNU execute_cmd.c:3819-3831 — a while/until whose
+    /// test fails while a flag stands decrements each flag once, so the
+    /// level banked against this loop does not leak into the enclosing
+    /// list (no driver would ever consume it there; the command-entry
+    /// gate would skip the next command forever).
+    pub(in crate::executor) fn drain_pending_loop_control(&mut self) {
+        if self.shell_state.loop_breaking > 0 {
+            self.shell_state.loop_breaking -= 1;
+        }
+        if self.shell_state.loop_continuing > 0 {
+            self.shell_state.loop_continuing -= 1;
+        }
+    }
+
+    /// rubash#2969: a non-loop-control unwind crossing a loop frame
+    /// abandons every frame it crosses (GNU's jump targets discard the
+    /// whole construct), so flags banked against those frames must not
+    /// survive into the enclosing list.
+    pub(in crate::executor) fn clear_pending_loop_control(&mut self) {
+        self.shell_state.loop_breaking = 0;
+        self.shell_state.loop_continuing = 0;
     }
 
     pub(in crate::executor) fn execute_return(

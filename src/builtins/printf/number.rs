@@ -4,7 +4,7 @@ use super::ParsedNumber;
 pub(super) fn parse_i64(value: &str) -> ParsedNumber<i64> {
     if let Some(ch) = printf_char_constant(value) {
         return ParsedNumber {
-            value: ch as i64,
+            value: i64::from(ch),
             invalid: None,
         };
     }
@@ -43,7 +43,7 @@ pub(super) fn parse_i64(value: &str) -> ParsedNumber<i64> {
 pub(super) fn parse_u64(value: &str) -> ParsedNumber<u64> {
     if let Some(ch) = printf_char_constant(value) {
         return ParsedNumber {
-            value: ch as u64,
+            value: u64::from(ch),
             invalid: None,
         };
     }
@@ -133,11 +133,9 @@ pub(super) fn parse_long_double(value: &str) -> ParsedNumber<FloatVal> {
     }
 }
 
-/// printf.def:1519-1544 asciicode(): a quote operand yields arg[1]
-/// converted with mbrtowc — a single BMP char is its own code point, so a
-/// quoted char is the exact small integer of that code point.
-fn longdouble_char_constant(ch: char) -> FloatVal {
-    FloatVal::from_small_int(ch as u32 as u64, false)
+/// The float form of an asciicode() value (see printf_char_constant).
+fn longdouble_char_constant(value: u32) -> FloatVal {
+    FloatVal::from_small_int(u64::from(value), false)
 }
 
 /// GNU printf.def:834-838 printf_erange()/1391-1398 chk_converror(): the
@@ -164,15 +162,52 @@ pub(super) fn invalid_number_error(value: &str) -> String {
 
 /// printf.def:1416-1419 getintmax(): an operand whose first byte is a quote
 /// goes to asciicode() BEFORE any numeric parse, and asciicode
-/// (printf.def:1520-1543) converts arg[1] with mbrtowc without any
+/// (printf.def:1522-1547) converts arg[1] with mbrtowc without any
 /// chk_converror -- so `'a ` yields 'a' (97) with no diagnostic, and a lone
 /// quote yields the NUL at arg[1] (0, also no diagnostic).
-fn printf_char_constant(value: &str) -> Option<char> {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some('\'') | Some('"') => chars.next().or(Some('\0')),
-        _ => None,
+///
+/// asciicode is a BYTE-level reader in the locale in effect: mbrtowc
+/// decodes the first character of arg+1 under the current locale, so a
+/// single-byte locale yields the first byte itself (`'é` is 195, the
+/// 0xC3 lead byte, under LC_ALL=C), a multibyte locale yields the
+/// decoded character (233 under C.UTF-8), and a failed decode
+/// (MB_INVALIDCH — invalid or incomplete sequence, include/shmbutil.h:44)
+/// falls back to `(unsigned char)arg[1]`. The operand is therefore read
+/// through its raw byte span (marker pairs decoded), never through the
+/// text layer: a marker-carried high byte is the byte it carries, not
+/// the marker character's code point (rubash#2965).
+fn printf_char_constant(value: &str) -> Option<u32> {
+    let raw = super::value::locale_byte_span(value);
+    match raw.first() {
+        Some(b'\'') | Some(b'"') => {}
+        _ => return None,
     }
+    let rest = &raw[1..];
+    if rest.is_empty() {
+        return Some(0);
+    }
+    if char_constant_multibyte() {
+        if let Some((ch, consumed)) = crate::locale::decode_utf8_char(rest) {
+            // mbrtowc also rejects overlong encodings, which
+            // decode_utf8_char accepts; requiring the canonical
+            // encoding length keeps the two in agreement.
+            if ch.len_utf8() == consumed {
+                return Some(ch as u32);
+            }
+        }
+    }
+    Some(u32::from(rest[0]))
+}
+
+/// Whether the locale in effect for this builtin is multibyte: the
+/// shell's variable-table locale when a dispatch guard is installed
+/// (the rubash#1488 ShellLocaleGuard, installed at printf's
+/// execute_with_io_and_store funnel), the process environment
+/// otherwise. GNU resolves the same question through the LC_ALL
+/// watcher (variables.c sv_lc_all) at the moment the builtin runs, so
+/// an in-script `LC_ALL=C` assignment flips the answer at once.
+fn char_constant_multibyte() -> bool {
+    crate::locale::is_multi_byte_active()
 }
 
 /// One strtoimax/strtoumax subject scan (printf.def:1437 getintmax and

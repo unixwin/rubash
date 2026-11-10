@@ -167,9 +167,19 @@ impl Executor {
             // on the final iteration leaves the for command's status at the
             // trap's status (probe k1: `FOR=1`).
             if self.debug_trap_in_scope() {
-                if let Some(skip_status) =
-                    self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text)?
-                {
+                // rubash#2969: GNU's loop_level is already 1 when the
+                // head trap fires (execute_cmd.c increments it at
+                // execute_for_command entry; the fire is :3053), so a
+                // break/continue in the head's trap action validates
+                // against this loop and defers to its pending flag.
+                // This port raises loop_depth only around the body walk
+                // below; raise it across the fire too — otherwise the
+                // action's break saw depth 0, misreported "only
+                // meaningful", and the loop ran on (issue #2969 face A).
+                self.shell_state.loop_depth += 1;
+                let fire = self.run_debug_trap(crate::debugger::SeamKind::ForHead, &for_text);
+                self.shell_state.loop_depth -= 1;
+                if let Some(skip_status) = fire? {
                     self.exit_code = skip_status;
                     ran_body = true;
                     continue;
@@ -232,6 +242,13 @@ impl Executor {
                 self.shell_state
                     .env_vars
                     .insert(for_command.variable.clone(), value.clone());
+                // rubash#3060: this arm performs the store itself (the
+                // nameref-cell write bypasses apply_shell_assignment),
+                // so the bind's sv_locale note lives here — GNU
+                // execute_cmd.c:3097-3100 runs
+                // stupidly_hack_special_variables(identifier) for the
+                // ASS_NAMEREF cell bind too.
+                self.note_locale_assignment(&for_command.variable);
                 for_command.variable.clone()
             } else {
                 // GNU execute_cmd.c:3081-3095: an att_noassign loop
@@ -283,9 +300,14 @@ impl Executor {
                 &for_command.variable,
                 &value,
             );
-            // rubash#1692: the loop-variable bind is bind_variable —
-            // sv_locale fires on it like any other bind.
-            self.note_locale_assignment(&for_command.variable);
+            // rubash#3060: no locale note at this level — a bind is
+            // noted exactly once, by the code that performs the store.
+            // The plain arm delegates the store to
+            // apply_shell_assignment, whose tail notes it
+            // (temporary_assignments.rs, rubash#1692); the nameref-cell
+            // arm above stores directly and notes at its insert. The
+            // unconditional note that stood here fired sv_locale a
+            // second time for every plain-arm iteration.
 
             // GNU execute_for_command (execute_cmd.c:3201+) runs the body by
             // POINTER — the COMMAND list make_cmd.c allocated once at parse
@@ -313,7 +335,25 @@ impl Executor {
                 Err(ExecuteError::Continue(level)) => {
                     return Err(ExecuteError::Continue(level - 1));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    // rubash#2969: the unwind abandons this frame; flags
+                    // banked against it must not survive into the
+                    // enclosing list (no driver remains to consume them).
+                    self.clear_pending_loop_control();
+                    return Err(error);
+                }
+            }
+            // rubash#2969: GNU execute_cmd.c:3108-3118 — consume one
+            // pending DEBUG-trap flag level after the body: a break
+            // ends the loop; a continue advances, or — with levels
+            // remaining for an outer loop — ends this loop with the
+            // flag still standing for that driver. Runs before the
+            // stopped check below: in GNU the stop banks into the same
+            // `breaking` global this check reads.
+            match self.consume_pending_loop_control() {
+                LoopControlFlow::BreakLoop => break,
+                LoopControlFlow::NextIteration => continue,
+                LoopControlFlow::None => {}
             }
             // rubash#2838: GNU execute_cmd.c:3108-3111
             // execute_for_command — a SIGTSTP stop in the body set
@@ -458,7 +498,7 @@ impl Executor {
                 _ => None,
             };
         }
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         if redirect.append {
             let _ = OpenOptions::new()
                 .create(true)

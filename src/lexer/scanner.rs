@@ -43,6 +43,27 @@ pub(super) struct LexerParseState {
     /// `time -p { echo; }' keeps `{' a group opener. True when last_token
     /// was such an option word.
     last_was_time_option: bool,
+    /// GNU ARITH_CMD as last_read_token: reserved_word_acceptable
+    /// (parse.y:5899-5940) names ARITH_CMD among the predecessors after
+    /// which a reserved word — and an assignment word, via
+    /// assignment_acceptable (parse.y:3163) — is acceptable, but the
+    /// folded arithmetic token's (kind, value) history entry matches no
+    /// arm of that test: its value is the whole `((…))' text, not a
+    /// keyword literal. This bit records, for the token currently in
+    /// `last_token`, whether it was that folded ARITH_CMD token (the
+    /// fold branch in the scanner is the value shape's only producer).
+    /// Maintained by record_token alongside the last_token rewrite and
+    /// cleared by note_line_break (rubash#3203/#3204).
+    last_token_arith_cmd: bool,
+    /// GNU COND_END as last_read_token: the same reserved_word_acceptable
+    /// predecessor set names COND_END, but a genuine `]]' closer is
+    /// recorded as an ordinary (kind, value) pair that no arm matches
+    /// either. This bit is set ONLY by record_token's PST_CONDCMD reset
+    /// arm — the exact point where the reader state proves the token
+    /// closed a conditional — never by the word VALUE `]]': an
+    /// argument-position `]]' is ordinary word text and must not arm
+    /// compound-after treatment for what follows (rubash#3203).
+    last_token_cond_end: bool,
     /// GNU PST_CONDCMD (parser.h:33): set while the conditional command's
     /// tokens are being read (parse.y:3654 on `[[', cleared by `]]').
     in_cond_command: bool,
@@ -232,6 +253,12 @@ impl LexerParseState {
         self.last_token = Some((TokenKind::Semicolon, TokStr::from(";")));
         self.redirlist_open = false;
         self.word_element_seen = false;
+        // The ARITH_CMD / COND_END bits describe the token folded into
+        // token_before_that above; the `;' that replaces it in
+        // last_token is neither, so both clear with the fold
+        // (rubash#3203/#3204).
+        self.last_token_arith_cmd = false;
+        self.last_token_cond_end = false;
     }
 }
 
@@ -340,6 +367,13 @@ impl<'a> Lexer<'a> {
         let Some((kind, value)) = &self.parse_state.last_token else {
             return true;
         };
+        // ARITH_CMD / COND_END predecessors (parse.y:5899-5940): the
+        // recorded (kind, value) pair matches no arm below for either
+        // token, so record_token carries the two facts as state bits
+        // (rubash#3203/#3204).
+        if self.parse_state.last_token_arith_cmd || self.parse_state.last_token_cond_end {
+            return true;
+        }
         match kind {
             TokenKind::Semicolon
             | TokenKind::Pipe
@@ -466,8 +500,19 @@ impl<'a> Lexer<'a> {
         // clause) no longer opens a phantom compound frame there.
         if token.kind == TokenKind::Keyword && is_keyword(&token.value) {
             token.reserved_position = if self.parse_state.case_pattern {
+                // parse.y:3181-3184 (CHECK_FOR_RESERVED_WORD under
+                // PST_CASEPAT): an `esac' directly after `|' (Posix grammar
+                // rule 4) or `(' (the phantom rule) is pattern text, never
+                // the terminator — it is not a reserved word there.
                 token.value == "esac"
-                    && !matches!(self.parse_state.last_token, Some((TokenKind::Pipe, _)))
+                    && !matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    )
+                    && !matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    )
             } else {
                 self.reserved_word_position()
             };
@@ -496,7 +541,11 @@ impl<'a> Lexer<'a> {
 
         // `case` is a reserved word only in command position; counting it
         // unconditionally would turn `echo case x in {)` into pattern state.
-        if self.reserved_word_position() && keyword_is("case") {
+        // parse.y:3177-3178: inside PST_CASEPAT only `esac' is recognized,
+        // so a pattern-list `case' (`(case|...)`) is pattern text — it must
+        // not open a nested case frame (rubash#3000: it inflated
+        // case_stmt_depth, so a later terminator left the depth wrong).
+        if !self.parse_state.case_pattern && self.reserved_word_position() && keyword_is("case") {
             self.parse_state.case_stmt_depth += 1;
             self.parse_state.case_expect_word = true;
         } else if self.parse_state.case_expect_word {
@@ -529,7 +578,44 @@ impl<'a> Lexer<'a> {
         {
             self.parse_state.case_pattern = true;
         }
-        if self.parse_state.case_stmt_depth > 0 && (keyword_is("esac") || word_is("esac")) {
+        // GNU CHECK_FOR_RESERVED_WORD (parse.y:3168-3177): inside PST_CASEPAT
+        // only an UNQUOTED `esac' terminates the case. A backslash-quoted
+        // `\esac' (Word, raw `\esac') is pattern text, as is an `esac'
+        // directly after `|' (Posix grammar rule 4, parse.y:3181-3182) or
+        // `(' (parse.y:3183-3184) — the parser side already carries this
+        // shape (is_case_end_keyword). The one Word-`esac' that DOES
+        // terminate is the empty case's (parse.y:3433-3441
+        // special_case_tokens): `case x in esac' lexes `esac' as a Word
+        // (reserved_word_position is false after `in'), so a Word `esac'
+        // while the pattern state the header `in' just armed is still live
+        // — the header consumed (case_expect_in clear, so not the subject
+        // `in' of `case in esac'), directly after that `in' (so not a
+        // pattern `in' after `|' / `(') — closes the case. A Word `esac'
+        // in a clause body (`foo in esac') is an argument, never a
+        // terminator: case_pattern is false there.
+        let terminates_case = self.parse_state.case_stmt_depth > 0
+            && ((keyword_is("esac")
+                && !(self.parse_state.case_pattern
+                    && (matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    ) || matches!(
+                        &self.parse_state.last_token,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    ))))
+                || (word_is("esac")
+                    && self.parse_state.case_pattern
+                    && !self.parse_state.case_expect_in
+                    && matches!(&self.parse_state.last_token, Some((_, v)) if v == "in")
+                    && !matches!(
+                        &self.parse_state.token_before_that,
+                        Some((TokenKind::Pipe, _)) | Some((TokenKind::PipeErr, _))
+                    )
+                    && !matches!(
+                        &self.parse_state.token_before_that,
+                        Some((TokenKind::Keyword, v)) if v == "("
+                    )));
+        if terminates_case {
             self.parse_state.case_stmt_depth -= 1;
             self.parse_state.case_pattern = false;
             self.parse_state.case_expect_in = false;
@@ -569,6 +655,11 @@ impl<'a> Lexer<'a> {
             }
         };
         let token_end = token.position + token.raw.len();
+        // rubash#3203: whether THIS token is a genuine COND_END — set
+        // only by the PST_CONDCMD reset arm below, the one place the
+        // reader state proves the token closed a conditional. Synced
+        // into parse_state at the last_token rewrite at the bottom.
+        let mut token_is_cond_end = false;
         if self.reserved_word_position() && (keyword_is("[[") || word_is("[[")) {
             self.parse_state.in_cond_command = true;
             self.parse_state.cond_rhs_regexp = false;
@@ -601,6 +692,7 @@ impl<'a> Lexer<'a> {
             self.parse_state.cond_rhs_regexp = false;
             self.parse_state.cond_rhs_started = false;
             self.parse_state.cond_rhs_paren_depth = 0;
+            token_is_cond_end = true;
         } else if self.parse_state.in_cond_command && word_is("=~") {
             self.parse_state.cond_rhs_regexp = true;
             self.parse_state.cond_rhs_started = false;
@@ -790,6 +882,17 @@ impl<'a> Lexer<'a> {
         }
         self.parse_state.token_before_that = self.parse_state.last_token.take();
         self.parse_state.last_token = Some((history_kind, TokStr::from(token.value.as_str())));
+        // The ARITH_CMD / COND_END predecessor bits for the token just
+        // recorded (rubash#3203/#3204): cond_end comes from the
+        // PST_CONDCMD reset arm above, never from the word value;
+        // arith_cmd from the folded token's value shape — kind Keyword
+        // with the whole `((…))' text, whose only producer is the
+        // scanner's parse_dparen fold branch (single `('/`)' word
+        // tokens carry one-character values and never match).
+        self.parse_state.last_token_cond_end = token_is_cond_end;
+        self.parse_state.last_token_arith_cmd = token.kind == TokenKind::Keyword
+            && token.value.starts_with("((")
+            && token.value.ends_with("))");
     }
 
     #[inline]

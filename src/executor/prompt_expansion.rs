@@ -650,6 +650,17 @@ impl Executor {
         tilde_expand::expand_assignment_value(value, &self.shell_state.env_vars)
     }
 
+    /// rubash#2651: like [`Self::expand_assignment_tilde`], but the
+    /// resolved tilde prefixes are carrier-encoded as data so the
+    /// caller's second expansion walk cannot rescan them (GNU joins
+    /// the tilde result as a quoted string, subst.c:11862).
+    pub(in crate::executor) fn expand_assignment_tilde_protected(&self, value: &str) -> String {
+        if value.contains('=') {
+            return value.to_string();
+        }
+        tilde_expand::expand_assignment_value_protected(value, &self.shell_state.env_vars)
+    }
+
     pub(in crate::executor) fn home_value(&self) -> String {
         tilde_expand::home_value(&self.shell_state.env_vars)
     }
@@ -661,8 +672,11 @@ impl Executor {
         // the one table letter with no `set -o` name — flags.c:174 maps it
         // to `forced_interactive`, which shell.c:672 turns on for every
         // interactive shell (`-i` forced, or tty-detected at
-        // shell.c:540-547) — so it renders from the interactive marker in
-        // its table position between `h` and `k`.
+        // shell.c:540-547) — so it renders from that state in its table
+        // position between `h` and `k`. The state is seeded from the
+        // invocation shape but change_flag can move it afterwards
+        // (`set -ovi` / `set +ovi`, rubash#2961), so it must NOT be
+        // read off the immutable invocation bit.
         for (flag, option) in [
             ('a', Some("allexport")),
             ('b', Some("notify")),
@@ -702,7 +716,7 @@ impl Executor {
                 Some(option) => {
                     crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, option)
                 }
-                None => self.invocation_interactive(),
+                None => self.shell_state.forced_interactive,
             };
             if on {
                 flags.push(flag);
@@ -1334,8 +1348,16 @@ where
 /// (subst.c command_substitute → the prompt string bytes), so a PS0 like
 /// `$(printf '\033]3008;…\033\\')` must reach the terminal as real ESC
 /// bytes, not U+E000/U+E01C PUA pairs that render as `]3008;…` text.
+/// The same pass carries typed registry-zone chars from stored values as
+/// E400 literal-char pairs (markers::push_literal_char): a stored
+/// `$'\uE314'` reaches the expansion result as E400+E314, and GNU renders
+/// the raw char (parse.y:6689 inserts the stored value verbatim), so the
+/// E400 pair must fold here too. The gate therefore opens on EITHER
+/// transport family — gating on the raw-byte marker alone left the E400
+/// pair unfolded whenever no unrelated raw-byte pair happened to be
+/// present in the same prompt (rubash#3038).
 pub(in crate::executor) fn decode_prompt_transport(text: &str) -> String {
-    if !text.contains(char::from_u32(crate::executor::markers::RAW_BYTE_MARKER_ESCAPE).unwrap()) {
+    if !crate::executor::markers::contains_decodable_transport(text) {
         return text.to_string();
     }
     let decoded = crate::executor::substitution_metadata::decode_raw_byte_markers(text.as_bytes());

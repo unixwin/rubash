@@ -218,7 +218,12 @@ impl Executor {
         self.shell_state
             .env_vars
             .insert("__RUBASH_GETOPTS_OFFSET".to_string(), offset.to_string());
-        self.getopts_unbind_optarg();
+        // getopts.def:301: the valid-option path binds OPTARG
+        // unconditionally — with sh_optarg == NULL for a no-argument
+        // option, i.e. bound with no value, NOT unbound (rubash#2970).
+        // The unbind belongs only to the G_EOF / non-silent
+        // G_INVALID_OPT / G_ARG_MISSING paths above.
+        self.getopts_bind_optarg_null(stderr);
         self.getopts_bind_name(&variable, &option.to_string(), stderr)
     }
 
@@ -358,6 +363,37 @@ impl Executor {
             return;
         }
         self.getopts_apply_bind("getopts", "OPTARG", value, stderr);
+    }
+
+    /// The NULL-valued half of getopts.def:301's unconditional
+    /// bind_variable ("OPTARG", sh_optarg, 0): for a no-argument
+    /// option sh_optarg is NULL, so OPTARG ends up BOUND WITH NO
+    /// VALUE — any earlier value is replaced, and `declare -p OPTARG`
+    /// prints `declare -- OPTARG` (rubash#2970). The representation
+    /// is the same one a value-less `declare OPTARG` leaves: no
+    /// stored value, presence carried by the DECLARED_UNSET mark.
+    /// A readonly OPTARG reports the error and keeps its value,
+    /// exactly like the valued bind above; a nameref OPTARG binds
+    /// through to its target (bind_variable follows namerefs),
+    /// unlike getopts_unbind_optarg below, whose GNU model
+    /// (getopts_unbind_variable) unsets the ref itself.
+    fn getopts_bind_optarg_null<W>(&mut self, stderr: &mut W)
+    where
+        W: Write,
+    {
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, "OPTARG") {
+            let _ = writeln!(stderr, "{}OPTARG: readonly variable", self.error_prefix());
+            return;
+        }
+        let target = if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, "OPTARG") {
+            self.nameref_target_name("OPTARG")
+        } else {
+            None
+        };
+        let name = target.as_deref().unwrap_or("OPTARG");
+        self.remove_env(name);
+        self.shell_state.variables.remove(name);
+        mark_env_name(&mut self.shell_state.env_vars, DECLARED_UNSET_VARS, name);
     }
 
     /// getopts.def getopts_unbind_variable -> unbind_variable_noref: the

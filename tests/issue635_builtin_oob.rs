@@ -22,6 +22,14 @@
 //! Expectations come from the C source above; spot-checked against GNU Bash
 //! 5.3.20 locally (the repo oracle is WSL 5.3.0 — no version-specific
 //! behavior is asserted here).
+//!
+//! rubash#2935: on unix the helper pins argv[0] to `bash` via
+//! `arg0`. D1 (rubash#2714) renders the invocation name VERBATIM in
+//! the `bash: line 1:` diagnostic prefix — GNU does exactly the
+//! same (oracle probe: `exec -a /x/y/zsh bash -c '...'` prefixes
+//! `/x/y/zsh: line 1:`) — so the byte-exact expectations hold only
+//! with argv[0] controlled; spawning by the absolute CARGO_BIN_EXE
+//! path made the prefix the path.
 
 use std::process::Command;
 
@@ -32,11 +40,13 @@ struct Run {
 }
 
 fn run(script: &str) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
-        .arg("-c")
-        .arg(script)
-        .output()
-        .expect("run rubash");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rubash"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.arg0("bash");
+    }
+    let output = command.arg("-c").arg(script).output().expect("run rubash");
     Run {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

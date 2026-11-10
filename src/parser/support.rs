@@ -5,6 +5,19 @@ use crate::lexer::{Token, TokenKind};
 pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
     if cmd.line.is_none() {
         cmd.line = Some(token.position);
+        // rubash#3028: provisional first-element end line (GNU
+        // simplecmd_lineno, parse.y:5849-5851). For a word or
+        // assignment-word first element this is already exact — the
+        // element is that one token, whose end_position the lexer
+        // stamped at its last byte. For a redirection first element it
+        // is the OPERATOR's end line; the target-consumption sites
+        // correct it to the target's end line
+        // (correct_first_word_end_for_redirect_target), because GNU
+        // captures the value when the redirection element reduces,
+        // after its target word was read (parse.y:811).
+        if cmd.first_word_end_line.is_none() {
+            cmd.first_word_end_line = Some(token.end_position);
+        }
     }
     // The logical line (the reader's command-list boundary) travels beside
     // the physical line so DISCARD-family skips keep working across
@@ -14,7 +27,41 @@ pub(super) fn note_command_line(cmd: &mut CommandNode, token: &Token) {
     }
 }
 
+/// rubash#3028: correct the first-element end line at a redirection
+/// TARGET consumption site. `note_command_line` provisionally stamped
+/// the operator token's end line; GNU captures `simplecmd_lineno` when
+/// the redirection element reduces — after its target word was read
+/// (parse.y:811) — so when this redirection is still the command's
+/// only element, the stamp is the target token's end line. A target
+/// split by a continuation (`>x\<newline>y`) therefore stamps the
+/// line its last byte sits on.
+pub(super) fn correct_first_word_end_for_redirect_target(cmd: &mut CommandNode, target: &Token) {
+    if cmd.words.is_empty()
+        && cmd.assignments.is_empty()
+        && cmd.compound_assignments.is_empty()
+        && cmd.array_element_assignments.is_empty()
+        && cmd.redirects.len() == 1
+    {
+        cmd.first_word_end_line = Some(target.end_position);
+    }
+}
+
 pub(super) fn push_command_word(cmd: &mut CommandNode, token: &Token) {
+    // rubash#3028: when no element has been recorded yet, this word IS
+    // the first element, so (re)stamp the first-element end line from
+    // its own end line — this also supersedes a provisional stamp left
+    // by a prefix token that recorded no element (the `!` BANG arm
+    // notes the command line but pushes no word; GNU's simple command
+    // inside the pipeline still captures at its own first word).
+    if cmd.words.is_empty()
+        && cmd.assignments.is_empty()
+        && cmd.compound_assignments.is_empty()
+        && cmd.array_element_assignments.is_empty()
+        && cmd.redirects.is_empty()
+        && cmd.heredoc_redirects.is_empty()
+    {
+        cmd.first_word_end_line = Some(token.end_position);
+    }
     let word_index = cmd.words.len();
     // Word intake runs ONLY the scans whose findings a consumer still reads
     // (process substitutions, extglob, pathname). Command substitutions

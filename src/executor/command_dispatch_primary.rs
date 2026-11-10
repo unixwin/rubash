@@ -184,6 +184,13 @@ impl Executor {
                     // replacement and keeps the fast path.
                     && !(cfg!(unix) && self.exec_replace_dispatch_stamp.get() != 0)
                 {
+                    // rubash#2736: GNU records the PATH resolution at
+                    // locate time (findcmd.c:416); the in-process
+                    // answer must leave the same hash-table record.
+                    super::execution_misc::record_fastpath_command_resolution(
+                        &mut self.shell_state.env_vars,
+                        "sleep",
+                    );
                     // GNU sleep is an external child process, so the waiting
                     // shell is interruptible: a caught signal is recorded
                     // (trap.c:545 trap_handler -> trap.c:537 set_trap_state)

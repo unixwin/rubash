@@ -93,23 +93,23 @@ pub(super) fn apply_export_arg(
             // `export -a name` alone just marks att_exported.
             let has_assign = value.is_some();
             let converted = env_vars.contains_key(name);
-            let (value, bound_array) = value
-                .map(|value| {
-                    array_attribute_assignment_value(
-                        value, array, assoc, append, env_vars, name, oob_word,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        env_vars.get(name).cloned().unwrap_or_default(),
-                        array || assoc,
-                    )
-                });
+            // rubash#2971: the -a/-A delegation (setattr.def:240-258)
+            // runs only for an assignment operand (`if (assign)`) — a
+            // name-only operand merely gains att_exported below, so
+            // it gets no conversion and no array/assoc marks
+            // (`x=1; export -A x` keeps x a scalar). With an operand,
+            // mark exactly the storage kind the conversion produced.
+            let (value, produced) = match value {
+                Some(value) => array_attribute_assignment_value(
+                    value, array, assoc, append, env_vars, name, oob_word,
+                ),
+                None => (env_vars.get(name).cloned().unwrap_or_default(), None),
+            };
             env_vars.insert(name.to_string(), value.clone());
-            if assoc && has_assign {
-                mark_assoc(env_vars, name, converted);
-            } else if (array && has_assign) || bound_array {
-                mark_array(env_vars, name);
+            match produced {
+                Some(true) => mark_assoc(env_vars, name, converted),
+                Some(false) => mark_array(env_vars, name),
+                None => {}
             }
             // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
             // rubash#635): the partial store and marks above stay; fail the
@@ -168,7 +168,7 @@ pub(super) fn apply_export_arg(
                     return Ok(EXECUTION_FAILURE);
                 }
                 let converted = env_vars.contains_key(name);
-                let (new_value, bound_array) = array_attribute_assignment_value(
+                let (new_value, produced) = array_attribute_assignment_value(
                     assigned, array, assoc, append, env_vars, name, oob_word,
                 );
                 env_vars.insert(name.to_string(), new_value);
@@ -177,10 +177,12 @@ pub(super) fn apply_export_arg(
                 if name == "PATH" {
                     crate::builtins::hash::flush_command_hash_table(env_vars);
                 }
-                if assoc {
-                    mark_assoc(env_vars, name, converted);
-                } else if array || bound_array {
-                    mark_array(env_vars, name);
+                // Same produced-kind marking as the Set arm
+                // (rubash#2971).
+                match produced {
+                    Some(true) => mark_assoc(env_vars, name, converted),
+                    Some(false) => mark_array(env_vars, name),
+                    None => {}
                 }
                 if oob_word.is_some() {
                     return Ok(EXECUTION_FAILURE);
@@ -276,21 +278,20 @@ pub(super) fn apply_readonly_arg(
     // printed list, so the marks below need the assignment word.
     let has_assign = value.is_some();
     let converted = env_vars.contains_key(name);
-    let (value, bound_array) = value
-        .map(|value| {
+    // Same delegation discipline as export (rubash#2971): no
+    // assignment operand, no conversion and no array/assoc marks;
+    // with one, mark the storage kind the conversion produced.
+    let (value, produced) = match value {
+        Some(value) => {
             array_attribute_assignment_value(value, array, assoc, append, env_vars, name, oob_word)
-        })
-        .unwrap_or_else(|| {
-            (
-                env_vars.get(name).cloned().unwrap_or_default(),
-                array || assoc,
-            )
-        });
+        }
+        None => (env_vars.get(name).cloned().unwrap_or_default(), None),
+    };
     env_vars.insert(name.to_string(), value.clone());
-    if assoc && has_assign {
-        mark_assoc(env_vars, name, converted);
-    } else if (array && has_assign) || bound_array {
-        mark_array(env_vars, name);
+    match produced {
+        Some(true) => mark_assoc(env_vars, name, converted),
+        Some(false) => mark_array(env_vars, name),
+        None => {}
     }
     // Same OOB stop as export above (arrayfunc.c:804-809, rubash#635):
     // fail here, diagnostic + DISCARD abort at the Executor layer.

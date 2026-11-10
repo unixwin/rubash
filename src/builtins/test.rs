@@ -12,8 +12,8 @@ mod variable;
 
 pub(crate) use variable::variable_is_set;
 
+use crate::builtins::diagnostic::diagnostic_prefix;
 use crate::executor::markers::DATA_DOLLAR;
-use std::collections::HashMap;
 use std::fs;
 #[cfg(windows)]
 use std::fs::File;
@@ -23,18 +23,6 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_BADUSAGE: i32 = 2;
 
-/// Build the shell diagnostic prefix (`<script>: line N: `) from the
-/// executor environment, falling back to `rubash: ` when no script context
-/// is active. This mirrors GNU Bash's command-error reporting.
-fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
-}
 const NAMEREF_VARS: &str = "__RUBASH_NAMEREF_VARS";
 
 /// Execute `test` or `[` with arguments after the command name.
@@ -892,6 +880,11 @@ fn test_path(operand: &str, env_vars: &crate::shell::var_table::VarTable) -> std
     if operand.is_empty() {
         return std::path::PathBuf::new();
     }
+    // The operand is the pathname the syscalls see: fold a stored
+    // E400 pair to the raw char (rubash#3076). This funnel serves
+    // every file unary and binary in both `[ ]` and `[[ ]]`.
+    let folded_operand = crate::executor::substitution_metadata::fold_literal_char_escapes(operand);
+    let operand = folded_operand.as_str();
     let path = crate::executor::path::shell_path_to_windows_for_lookup(operand, env_vars);
     if path.is_absolute() {
         return path;
@@ -1171,7 +1164,7 @@ fn file_type_matches(
 #[cfg(not(any(unix, windows)))]
 fn file_type_matches(
     _path: &str,
-    _env_vars: &HashMap<String, String>,
+    _env_vars: &crate::shell::var_table::VarTable,
     _kind: UnixFileKind,
 ) -> bool {
     false
@@ -1274,7 +1267,11 @@ fn group_member(gid: libc::gid_t) -> bool {
 }
 
 #[cfg(not(unix))]
-fn file_mode_has_bit(_path: &str, _env_vars: &HashMap<String, String>, _bit: u32) -> bool {
+fn file_mode_has_bit(
+    _path: &str,
+    _env_vars: &crate::shell::var_table::VarTable,
+    _bit: u32,
+) -> bool {
     false
 }
 
