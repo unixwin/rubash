@@ -591,6 +591,60 @@ fn resolve_cdpath(
     None
 }
 
+/// The directory-search resolution `pushd` inherits from `cd_builtin`:
+/// GNU `pushd_builtin` routes its Dir operand through `cd_builtin`
+/// (builtins/pushd.def:296-302), so the CDPATH loop (cd.def:353-388)
+/// and the cdable_vars fallback (cd.def, LCD_DOVARS) are pushd's own
+/// resolution too, in cd's order — CDPATH first, then the plain
+/// operand, then cdable_vars. This wrapper runs the same two private
+/// stages `execute_with_io` runs, over a Target built the way
+/// `resolve_target` builds a plain operand, so pushd shares the one
+/// funnel instead of carrying a second CDPATH implementation
+/// (rubash#3196).
+pub(crate) enum SearchResolution {
+    /// A CDPATH unit produced the directory: `candidate` is the found
+    /// display spelling (the unit joined with the operand); `announce`
+    /// is cd's PrintPath::CdPath verdict — a hit through a NON-empty
+    /// unit echoes the found directory, an empty-unit (cwd) hit is
+    /// silent.
+    CdPath { candidate: String, announce: bool },
+    /// cdable_vars produced the directory: `value` is the variable's
+    /// raw value, which cd echoes verbatim on success.
+    CdableVars { value: String },
+}
+
+pub(crate) fn resolve_search_operand(
+    operand: &str,
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> Option<SearchResolution> {
+    let target = Target {
+        path: filesystem_path_for_display(operand, env_vars),
+        display: Some(PathBuf::from(operand)),
+        print: PrintPath::Never,
+    };
+    if let Some(found) = resolve_cdpath(&target, env_vars, cwd) {
+        return Some(SearchResolution::CdPath {
+            candidate: found
+                .display
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            announce: found.print == PrintPath::CdPath,
+        });
+    }
+    if let Some(found) = resolve_cdable_vars(&target, env_vars, cwd) {
+        return Some(SearchResolution::CdableVars {
+            value: found
+                .display
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
+    }
+    None
+}
+
 fn resolve_cdable_vars(
     target: &Target,
     env_vars: &HashMap<String, String>,
