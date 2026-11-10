@@ -2421,11 +2421,17 @@ impl Executor {
                             })
                     };
                     if is_invalid {
-                        return Some((
-                            length.to_string(),
-                            "substring expression < 0".to_string(),
-                            1,
-                        ));
+                        // GNU subst.c:8487/8502 reports the RAW length
+                        // slice (text after the separator colon, verbatim)
+                        // in this diagnostic, not the evaluated number:
+                        // `${arr[@]: 1: -1}` reads ` -1: substring
+                        // expression < 0` with the leading blank kept
+                        // (rubash#2713). The evaluated value remains the
+                        // fallback for any shape the raw split cannot see.
+                        let display = Self::parameter_substring_raw_length_text(inner)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| length.to_string());
+                        return Some((display, "substring expression < 0".to_string(), 1));
                     }
                 }
             }
