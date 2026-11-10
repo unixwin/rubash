@@ -136,22 +136,16 @@ impl Executor {
                 }
             }
             let output = self.process_substitution_output(source)?;
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &output,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 output,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
 
         let target = self.expand_redirect_target(redirect);
@@ -245,22 +239,16 @@ impl Executor {
                 Ok(bytes) => crate::executor::substitution_metadata::bytes_to_shell_text(&bytes),
                 Err(_) => return None,
             };
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
         // Same byte-preserving contract as read_io.rs for the shell-owned
         // descriptor path (GNU redir.c feeds raw bytes to the read owner).
@@ -268,22 +256,16 @@ impl Executor {
             Ok(text) => text,
             Err(_) => return None,
         };
-        self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-            &input,
-            delimiter,
-            char_limit,
-            exact_char_limit,
-            escape_aware,
-            raw,
-        );
-        Some(trim_read_input(
+        let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
             char_limit,
             exact_char_limit,
             escape_aware,
             raw,
-        ))
+        );
+        self.read_eof_no_delimiter |= eof_no_delimiter;
+        Some(record)
     }
 
     pub(in crate::executor) fn read_heredoc_fd_input(
@@ -370,66 +352,48 @@ impl Executor {
             if let crate::parser::StdinBody::Preexpanded(text) = carrier {
                 let mut input = text.clone();
                 input.push('\n');
-                self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                    &input,
-                    delimiter,
-                    char_limit,
-                    exact_char_limit,
-                    escape_aware,
-                    raw,
-                );
-                return Some(trim_read_input(
+                let (record, eof_no_delimiter) = slurped_record(
                     input,
                     delimiter,
                     char_limit,
                     exact_char_limit,
                     escape_aware,
                     raw,
-                ));
+                );
+                self.read_eof_no_delimiter |= eof_no_delimiter;
+                return Some(record);
             }
         }
         if let Some(word) = body.strip_prefix(STORAGE_WORD_PREFIX) {
             let mut input =
                 decode_ansi_c_quoted_word(word).unwrap_or_else(|| self.expand_word(word));
             input.push('\n');
-            self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-                &input,
-                delimiter,
-                char_limit,
-                exact_char_limit,
-                escape_aware,
-                raw,
-            );
-            return Some(trim_read_input(
+            let (record, eof_no_delimiter) = slurped_record(
                 input,
                 delimiter,
                 char_limit,
                 exact_char_limit,
                 escape_aware,
                 raw,
-            ));
+            );
+            self.read_eof_no_delimiter |= eof_no_delimiter;
+            return Some(record);
         }
         let input = if let Some(pre) = preexpanded_stdin_body(body) {
             pre.to_string()
         } else {
             strip_unterminated_heredoc_marker(strip_quoted_heredoc_marker(body)).to_string()
         };
-        self.read_eof_no_delimiter |= slurped_record_eof_no_delimiter(
-            &input,
-            delimiter,
-            char_limit,
-            exact_char_limit,
-            escape_aware,
-            raw,
-        );
-        Some(trim_read_input(
+        let (record, eof_no_delimiter) = slurped_record(
             input,
             delimiter,
             char_limit,
             exact_char_limit,
             escape_aware,
             raw,
-        ))
+        );
+        self.read_eof_no_delimiter |= eof_no_delimiter;
+        Some(record)
     }
 }
 
