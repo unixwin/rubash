@@ -1859,6 +1859,29 @@ impl Executor {
                         }
                     }
                 }
+                Some('"')
+                    if !heredoc
+                        && !in_double
+                        && matches!(context, SubstitutionQuoteContext::Unquoted) =>
+                {
+                    chars.next();
+                    // rubash#3086: `$"..."` locale string — the mutable
+                    // walker's twin of the `&self` walker's arm in
+                    // embedded_parameters.rs (GNU subst.c:4133
+                    // expand_string_dollar_quote; subst.c:1639): consume
+                    // the dollar as quote syntax and open a double-quoted
+                    // span exactly like this walker's bare `"` arm,
+                    // including compound quote retention and the
+                    // alternate-mode quoted-null bookkeeping. Inside an
+                    // open span, in heredocs, and in quoted contexts the
+                    // `$` stays literal via the fall-through below.
+                    in_double = true;
+                    if preserve_quotes {
+                        output.push('"');
+                    } else if alternate {
+                        dquote_open_len = Some(output.len());
+                    }
+                }
                 Some(other) => {
                     chars.next();
                     output.push('$');
