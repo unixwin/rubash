@@ -2473,14 +2473,16 @@ impl Executor {
                         state.redirect_failed = true;
                         return Ok(true);
                     }
-                    if redirect_target_is_ambiguous(
+                    if (redirect_target_is_ambiguous(
                         &redirect.target_metadata.raw,
                         &target,
                         crate::builtins::shopt::option_enabled(
                             &self.shell_state.env_vars,
                             "extglob",
                         ),
-                    ) && !self.redirect_target_resolved_single_glob_match(redirect)
+                    ) || self.redirect_target_resolved_multi_field(redirect))
+                        && !self.redirect_target_resolved_single_glob_match(redirect)
+                        && !self.redirect_target_resolved_single_field(redirect)
                     {
                         self.write_ambiguous_redirect_diagnostic(
                             state,
