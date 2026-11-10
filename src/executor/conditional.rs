@@ -431,6 +431,7 @@ impl Executor {
                     let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
                     let _ = self.write_diagnostic_fd2(line.as_bytes());
                     self.exit_code = if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         1
                     } else {
                         self.expansion_fatal_status()
@@ -1188,6 +1189,7 @@ impl Executor {
             return None;
         }
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             self.command_expansion_failed.set(true);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
@@ -1676,6 +1678,7 @@ impl Executor {
         );
         let _ = self.write_diagnostic_fd2(line.as_bytes());
         self.exit_code = if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             1
         } else {
             self.expansion_fatal_status()
