@@ -604,6 +604,36 @@ impl Executor {
                 if self.posix_special_redirect_failure_exits(&cmd) {
                     return Err(ExecuteError::ExitCode(1));
                 }
+                // rubash#2659: GNU execute_cmd.c:854-883 — when a
+                // compound command's OWN do_redirections fails, the
+                // failure return runs the same adjudication a simple
+                // command gets at execute_cmd.c:993-1010: run_error_trap
+                // under was_error_trap (independent of errexit), then
+                // the ERREXIT jump. The compound_redirect_failed mark
+                // certifies this IoError is the compound's own redirect
+                // failure (noted by the prepare pass and by
+                // with_command_input_redirects); the ast_exec loop
+                // treats these compounds' status as body-produced and
+                // never adjudicates it, so the adjudication belongs
+                // here. When errexit is active the branch below already
+                // fires the trap before its jump, so this block covers
+                // exactly the errexit-inactive remainder. The fire
+                // call's own gates keep inverted, and-or and suppressed
+                // contexts exempt, and its fired-at-dispatch record
+                // keeps the loop-side look for the pass-through forms
+                // ([[ ]], (( ))) from firing a second time.
+                // rubash#1611: inside a timed dispatch the ast_exec
+                // time branch adjudicates once — record the conversion
+                // for it instead of firing, like the branch below.
+                if self.compound_redirect_failed.get()
+                    && !(self.errexit_enabled() && self.errexit_is_active())
+                {
+                    if self.timed_dispatch_depth.get() == 0 {
+                        self.maybe_run_error_trap(&cmd)?;
+                    } else {
+                        self.err_trap_fired_at_dispatch.set(true);
+                    }
+                }
                 if self.errexit_enabled() && self.errexit_is_active() {
                     // rubash#1171 (same class): a redirect-failed simple
                     // command is a failed command — GNU fires the ERR

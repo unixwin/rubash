@@ -275,6 +275,39 @@ impl Executor {
         cmd: &CommandNode,
         execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
+        let result = self.with_command_input_redirects_scoped(cmd, execute);
+        // rubash#2659: a failure to apply a statement compound's OWN
+        // redirection list is GNU's do_redirections failure for the
+        // compound itself (execute_cmd.c:854-883) — an ordinary command
+        // failure the ERR trap adjudicates. The prepare pass notes the
+        // output side before this scope runs; every apply failure
+        // inside the scope (numbered opens, the plain input open, the
+        // output opens, a bad-fd dup) funnels out through this one
+        // return, so the note belongs here. Only the statement
+        // compounds are noted: their status is body-produced at the
+        // ast_exec loop, which therefore never adjudicates it — the
+        // conversion arm in execute_command and the brace pre-dispatch
+        // arm consume the mark instead. Subshells, function calls and
+        // the [[ ]] / (( )) forms keep their existing loop-side
+        // adjudication and are deliberately not noted.
+        if result.is_err()
+            && (cmd.if_command.is_some()
+                || cmd.for_command.is_some()
+                || cmd.loop_command.is_some()
+                || cmd.case_command.is_some()
+                || cmd.select_command.is_some()
+                || cmd.brace_group.is_some())
+        {
+            self.note_compound_redirect_failure();
+        }
+        result
+    }
+
+    fn with_command_input_redirects_scoped<T: Default>(
+        &mut self,
+        cmd: &CommandNode,
+        execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
+    ) -> Result<T, ExecuteError> {
         // GNU redir.c do_redirection_internal (redir.c:767-955) applies a
         // compound command's redirections before the command runs, and
         // execute_cmd.c undoes them when the command finishes (RX_UNDOABLE /
