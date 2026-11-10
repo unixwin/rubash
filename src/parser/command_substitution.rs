@@ -161,6 +161,17 @@ fn dollar_command_substitution(
     let mut case_pattern_paren_depth = 0usize;
     let mut case_pattern_opener_available = true;
     let mut case_pattern_region_seen = false;
+    // rubash#2789: completion latch for the SPACED empty preamble
+    // (`$(case x in )`). When `in` completes at a blank, the
+    // reserved-word machine's stage bookkeeping collapses before
+    // the pattern region can arm (its word-boundary preempt zeroes
+    // the stage), so none of the close arm's three conditions can
+    // see the shape. The latch remembers "an `in` word just
+    // completed and nothing has been consumed since": it is set at
+    // the completion char, cleared by any pattern-content char and
+    // when the region disarms, and it lets the `)` that follows
+    // close the substitution like its glued twin `in)`.
+    let mut case_in_completed_empty = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -281,6 +292,14 @@ fn dollar_command_substitution(
         let content_before = case_pattern_content;
         let stage_before = case_in_stage;
         let word_before = word.clone();
+        // rubash#2789: note the `in` completion (see the declaration
+        // above); the latch itself is applied after the region
+        // bookkeeping at the bottom of the loop, so the disarm-clear
+        // there cannot erase it in its own iteration. The completing
+        // char itself is not `)` — the glued form is condition (b)
+        // at the close arm, not the latch.
+        let in_completed_here =
+            word_before == "in" && stage_before == 2 && ch != ')' && !single && !double;
         if case_depth > 0 && region_before && !single && !double {
             match ch {
                 '(' => {
@@ -294,6 +313,7 @@ fn dollar_command_substitution(
                     } else {
                         case_pattern_paren_depth += 1;
                         case_pattern_content = true;
+                        case_in_completed_empty = false;
                     }
                 }
                 '|' if case_pattern_paren_depth == 0 => {
@@ -308,11 +328,15 @@ fn dollar_command_substitution(
                     // `;&` is a clause terminator, not pattern content.
                     if chars.get(index.wrapping_sub(1)) != Some(&';') {
                         case_pattern_content = true;
+                        case_in_completed_empty = false;
                     }
                 }
                 ';' => {}
                 c if c.is_whitespace() => {}
-                _ => case_pattern_content = true,
+                _ => {
+                    case_pattern_content = true;
+                    case_in_completed_empty = false;
+                }
             }
         }
         update_command_substitution_case_depth(
@@ -341,7 +365,8 @@ fn dollar_command_substitution(
         if case_close_candidate
             && ((region_before && !content_before)
                 || (word_before == "in" && stage_before == 2)
-                || (case_in_stage == 2 && !region_before && !word_before.is_empty()))
+                || (case_in_stage == 2 && !region_before && !word_before.is_empty())
+                || case_in_completed_empty)
         {
             let text = chars[start..=index].iter().collect();
             let source = chars[start + 2..index].iter().collect();
@@ -386,6 +411,12 @@ fn dollar_command_substitution(
             }
         } else {
             case_pattern_region_seen = false;
+            // A disarmed region means the case moved past the empty
+            // preamble (or ended): the completion latch is stale.
+            case_in_completed_empty = false;
+        }
+        if in_completed_here {
+            case_in_completed_empty = true;
         }
         index += 1;
     }
