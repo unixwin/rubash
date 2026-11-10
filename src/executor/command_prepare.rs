@@ -280,6 +280,7 @@ impl Executor {
             // `-c` top level; a `( ... )` subshell child contains the jump
             // at execute_cmd.c:1811 and exits 1 — niubash#163).
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -547,6 +548,7 @@ impl Executor {
                 // interactive session died on `echo ${X?}` — the theme-
                 // source session-killer (wt90).
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
@@ -698,6 +700,7 @@ impl Executor {
                     // exits 1 (eval.c:104-109) and a `( ... )` subshell
                     // contains it to 1 (execute_cmd.c:1811 — niubash#163).
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -1030,6 +1033,7 @@ impl Executor {
                 // execute_empty_words_command above: interactive_shell
                 // selects the DISCARD-class error so the session survives.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
