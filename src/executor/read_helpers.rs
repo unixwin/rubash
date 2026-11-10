@@ -677,9 +677,9 @@ pub(in crate::executor) fn joined_delimiter_scan_applies(text: &str, delimiter: 
         // delimiter byte or a budget cut; raw-byte marker pairs are
         // single bytes the historical forms already match exactly.
         return read_delimiter_single_form(delimiter).is_some()
-            && text
-                .chars()
-                .any(|ch| (ch as u32) > 0x7F && !crate::executor::markers::is_marker_zone_char(ch));
+            && text.chars().any(|ch| {
+                (ch as u32) > 0x7F && !crate::executor::markers::is_marker_zone_char(ch)
+            });
     }
     let delim_byte = delimiter_stream_byte(delimiter, true);
     let mut units = text.char_indices().peekable();
@@ -706,7 +706,11 @@ pub(in crate::executor) fn joined_delimiter_scan_applies(text: &str, delimiter: 
             // literal unit and skip its spelling.
             if let Some((_, literal)) = units.next() {
                 let mut buf = [0u8; 4];
-                if literal.encode_utf8(&mut buf).as_bytes().contains(&delim_byte) {
+                if literal
+                    .encode_utf8(&mut buf)
+                    .as_bytes()
+                    .contains(&delim_byte)
+                {
                     return true;
                 }
             }
