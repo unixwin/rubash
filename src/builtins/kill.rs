@@ -1909,14 +1909,10 @@ where
 }
 
 fn diagnostic_prefix() -> String {
-    if let (Ok(script), Ok(line)) = (
-        std::env::var("__RUBASH_SCRIPT_NAME"),
-        std::env::var("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
+    // The single argv[0] carrier chain (builtins::prefix,
+    // rubash#2791): the old fallback's "rubash: " literal named
+    // every renamed shell "rubash" whenever one arm was missing.
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| std::env::var(key).ok())
 }
 
 fn deliver_rubash_signal(pid: u32, signal: i32) -> io::Result<bool> {

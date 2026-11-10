@@ -268,29 +268,22 @@ where
 /// prefixes `./script: line N:` when running a script file and falls back to
 /// the shell name without script context (mirrors builtins/trap.rs).
 fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
+    // The single argv[0] carrier chain (builtins::prefix,
+    // rubash#2791): the old fallback's "rubash: " literal named
+    // every renamed shell "rubash" whenever one arm was missing.
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| env_vars.get(key).cloned())
 }
 
 /// GNU variables.c assign_readonly via bind_variable (printf.def -v):
 /// the bare `name: readonly variable` is report_error family and honors
 /// gnu_errfmt (rubash#1038).
 fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{script}:{line}: ");
-        }
-        return format!("{script}: line {line}: ");
-    }
-    "rubash: ".to_string()
+    // The single argv[0] carrier chain (builtins::prefix,
+    // rubash#2791), gnu_errfmt arm included.
+    crate::builtins::prefix::readonly_error_prefix(
+        &|key: &str| env_vars.get(key).cloned(),
+        crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt"),
+    )
 }
 
 fn valid_printf_array_target(name: &str, env_vars: &crate::shell::var_table::VarTable) -> bool {

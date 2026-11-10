@@ -33,11 +33,21 @@ pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
     if super::substitution_metadata::has_raw_byte_marker_pair(word) {
         return true;
     }
+    // GNU ansic_shouldquote (strtrans.c:341) judges printability in the
+    // ACTIVE locale: byte-wise isprint in a single-byte locale (every byte
+    // >= 0x80 fails it in the C locale), the wide-char test
+    // (ansic_wshouldquote, strtrans.c:341) only under a multibyte locale.
+    // A non-ASCII character is therefore quotable per se outside a
+    // multibyte locale (rubash#3029: LC_ALL=C printed the raw UTF-8 bytes
+    // of `à' where GNU prints $'\303\240').
+    let multibyte = crate::locale::is_multi_byte_active();
     word.chars().any(|ch| {
         if ch.is_ascii() {
             !(0x20..=0x7e).contains(&(ch as u8))
-        } else {
+        } else if multibyte {
             ch.is_control()
+        } else {
+            true
         }
     })
 }
@@ -48,6 +58,11 @@ pub(crate) fn word_needs_ansic_quote(word: &str) -> bool {
 /// characters. Printable ASCII and printable wide chars stay literal.
 pub(crate) fn ansic_quote_with_markers(word: &str) -> String {
     let bytes = super::substitution_metadata::shell_text_to_raw_bytes(word);
+    // GNU ansic_quote (strtrans.c:230) keeps a printable wide character
+    // verbatim only under a multibyte locale (the ansic_wshouldquote
+    // test); in a single-byte locale every byte >= 0x80 is octal-escaped
+    // per byte (rubash#3029).
+    let multibyte = crate::locale::is_multi_byte_active();
     let mut out = String::with_capacity(4 * bytes.len() + 4);
     out.push_str("$'");
     let mut index = 0;
@@ -98,7 +113,7 @@ pub(crate) fn ansic_quote_with_markers(word: &str) -> String {
                 out.push(byte as char);
                 index += 1;
             }
-            _ if byte >= 0x80 => {
+            _ if byte >= 0x80 && multibyte => {
                 // Try to decode a full UTF-8 character (GNU strtrans.c:266-282
                 // emits a printable wide char verbatim under a UTF-8 locale).
                 match std::str::from_utf8(&bytes[index..]) {
