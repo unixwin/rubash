@@ -736,6 +736,47 @@ impl Executor {
         }
     }
 
+    /// rubash#2659: GNU execute_cmd.c:854-883 — a compound command's
+    /// own do_redirections failure is an ordinary command failure:
+    /// run_error_trap under was_error_trap, then the ERREXIT jump.
+    /// The two absorption arms in with_command_input_redirects_inner
+    /// (the fd-0 open pre-check and the net fd-0 bind) report the
+    /// diagnostic and record status 1 but complete as if the command
+    /// had run, and every downstream adjudication treats a statement
+    /// compound's status as body-produced — so neither consequence
+    /// ever ran for an absorbed failure. Adjudicate at the absorption
+    /// site: note the failure, fire the ERR trap, and report whether
+    /// errexit claims the failure (the caller then unwinds with the
+    /// errexit exit instead of completing). Only the statement
+    /// compounds are adjudicated here; subshells, function calls and
+    /// the [[ ]] / (( )) forms complete as before and keep their
+    /// existing loop-side adjudication. The fire call's own gates
+    /// keep inverted, and-or and suppressed contexts exempt.
+    /// rubash#1611: inside a timed dispatch the time branch
+    /// adjudicates once — record the conversion for it instead of
+    /// firing.
+    fn adjudicate_absorbed_compound_redirect_failure(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        if !(cmd.if_command.is_some()
+            || cmd.for_command.is_some()
+            || cmd.loop_command.is_some()
+            || cmd.case_command.is_some()
+            || cmd.select_command.is_some()
+            || cmd.brace_group.is_some())
+        {
+            return Ok(false);
+        }
+        self.note_compound_redirect_failure();
+        if self.timed_dispatch_depth.get() == 0 {
+            self.maybe_run_error_trap(cmd)?;
+        } else {
+            self.err_trap_fired_at_dispatch.set(true);
+        }
+        Ok(self.errexit_enabled() && self.errexit_is_active())
+    }
+
     fn with_command_input_redirects_inner<T: Default>(
         &mut self,
         cmd: &CommandNode,
@@ -754,6 +795,13 @@ impl Executor {
             writeln!(&mut stderr, "{message}")?;
             self.write_redirected_command_stderr(cmd, &stderr)?;
             self.exit_code = 1;
+            // rubash#2659: the absorbed failure is adjudicated like
+            // any other command failure (see
+            // adjudicate_absorbed_compound_redirect_failure); when
+            // errexit claims it, the unwind replaces the completion.
+            if self.adjudicate_absorbed_compound_redirect_failure(cmd)? {
+                return Err(self.errexit_exit(1));
+            }
             // The compound command is terminated without running: its
             // result is the default (unit for loop/group bodies, None for
             // the source-test `if` scanner, which then consumes the frame).
@@ -801,6 +849,11 @@ impl Executor {
                 let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
                 self.write_redirected_command_stderr(cmd, &stderr)?;
                 self.exit_code = 1;
+                // rubash#2659: same adjudication as the fd-0 open
+                // pre-check arm above.
+                if self.adjudicate_absorbed_compound_redirect_failure(cmd)? {
+                    return Err(self.errexit_exit(1));
+                }
                 return Ok(T::default());
             }
         };
