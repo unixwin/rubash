@@ -1,4 +1,7 @@
 use super::*;
+use crate::executor::builtin_diag::{Diag, DiagKind};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::{builtin_table_row, BuiltinRow, OptSpec};
 use crate::executor::markers::STORAGE_WORD_PREFIX;
 
 /// Scan a declare/typeset command line the way GNU's internal getopt
@@ -31,20 +34,22 @@ fn declare_written_operand_hints(
     hints
 }
 
-/// The ONE declare-family option-letter table: GNU declare.def:145
-/// `#define DECLARE_OPTS "+acfgilnprtuxAFGI"` (the ARRAY_VARS branch —
-/// rubash always has arrays). Every scanner in the family
-/// (`scan_declare_options`, `validate_local_options`, and the routing
-/// in `execute_local`/`execute_declare_command`) derives its letter
-/// set from this constant; rubash#2582 was the three hand-copied
-/// tables disagreeing in both directions (`local -c` rejected by the
-/// local validator, `local -f` accepted there then rejected by the
-/// declare scanner).
-pub(crate) const DECLARE_OPTION_LETTERS: &str = "acfgilnprtuxAFGI";
+/// The declare-family option letters, derived from the table
+/// row (D1 — the spec IS the table, declare.def:145
+/// `DECLARE_OPTS "+acfgilnprtuxAFGI"`), never a hand-copied
+/// constant: rubash#2582 was three hand-copied tables disagreeing
+/// in both directions. The row's spec string carries its leading
+/// `+` (plus mode); the letters are everything after it.
+pub(in crate::executor) fn declare_option_letters() -> &'static str {
+    match builtin_table_row("declare").expect("declare row").opt_spec {
+        OptSpec::Getopt(spec) => spec.trim_start_matches(['+', '-']),
+        _ => "",
+    }
+}
 
 /// Whether a declare-family invocation carries NAME operands (as
 /// opposed to only option clusters): the walk mirrors
-/// scan_declare_options' stop rules — `--` ends the option run and
+/// declare_option_scan's stop rules — `--` ends the option run and
 /// every later word is an operand, a lone `-`/`+` is an operand, and
 /// any word that does not open an option cluster is an operand.
 fn declare_invocation_has_operands(args: &[String]) -> bool {
@@ -62,55 +67,128 @@ fn declare_invocation_has_operands(args: &[String]) -> bool {
     false
 }
 
-fn scan_declare_options(args: &[String]) -> (Vec<char>, Option<char>) {
-    const VALID: &str = DECLARE_OPTION_LETTERS;
-    let mut letters = Vec::new();
-    for arg in args {
-        if arg == "--" {
-            break;
-        }
-        if !(arg.starts_with('-') || arg.starts_with('+')) || arg.len() <= 1 {
-            continue;
-        }
-        for ch in arg[1..].chars() {
-            if VALID.contains(ch) {
-                letters.push(ch);
-            } else {
-                return (letters, Some(ch));
-            }
+/// Scan the option region of a declare-family invocation with the
+/// row's own machine: BuiltinOpt stops at the first non-option word
+/// exactly like GNU internal_getopt, so `-f` after an operand is an
+/// operand, never a diversion (the old `scan_declare_options`
+/// skipped operands and kept scanning). Returns the (letter, set?)
+/// pairs seen in the option region, in order, plus the first
+/// invalid letter, if any. The invalid letter is rendered lossy
+/// (U+FFFD for a non-ASCII byte, the codebase's standard rendering
+/// — cf. `builtin_opt::diagnostic_byte`): it comes from user argv
+/// and must never be widened with `as char`. Diagnostics go to a
+/// discard sink: the callers that REPORT an invalid letter (the
+/// function face, the local validator) do so themselves from the
+/// returned value.
+fn declare_option_scan(
+    row: &'static BuiltinRow,
+    args: &[String],
+) -> (Vec<(char, bool)>, Option<String>) {
+    // Fast path: when the row's spec takes no option arguments
+    // (no `:`/`;`/`#` kinds), the machine is a pure byte scan —
+    // every event is a flag letter, `OptArg` cannot occur, and the
+    // scan below reproduces the machine's stop rules exactly
+    // (option-word gate, `--help`, `--`, first invalid byte ends
+    // the scan with that byte as `optopt`). This predicate runs
+    // several times per declare-family call (the function-face
+    // gate, the allexport post-pass, `local`), and constructing
+    // the full machine + a discard Diag for it was a measurable
+    // per-call tax (E4, PR #2968). Specs with argument kinds keep
+    // the machine path.
+    if let OptSpec::Getopt(spec) = row.opt_spec {
+        if let Some(scanned) = scan_flag_only_spec(spec, args) {
+            return scanned;
         }
     }
-    (letters, None)
+    let mut sink = Vec::new();
+    let mut diag = Diag::new(row, &mut sink);
+    let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+    let mut letters = Vec::new();
+    loop {
+        match opt.next() {
+            OptEvent::Opt(c) => letters.push((c as char, opt.opttype() == b'-')),
+            OptEvent::OptArg(_, _) => {}
+            OptEvent::Help | OptEvent::End => break,
+        }
+    }
+    (
+        letters,
+        opt.optopt()
+            .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+    )
+}
+
+/// The byte-scan form of `declare_option_scan` for a flag-only
+/// spec (see the fast path there): returns the (letter, set?)
+/// pairs in scan order and the first invalid byte rendered lossy,
+/// or `None` when the spec is not flag-only (an argument-kind
+/// marker is present) and the caller must use the machine.
+fn scan_flag_only_spec(
+    spec: &'static str,
+    args: &[String],
+) -> Option<(Vec<(char, bool)>, Option<String>)> {
+    let bytes = spec.as_bytes();
+    let plus = bytes.first() == Some(&b'+');
+    let letter_bytes: &[u8] = if plus { &bytes[1..] } else { bytes };
+    // A `:` in letter position is inert to the parser (fc's
+    // leading one), but any argument-kind marker anywhere means
+    // some letter takes an argument — not flag-only.
+    if letter_bytes.iter().any(|b| matches!(b, b':' | b';' | b'#')) {
+        return None;
+    }
+    let mut letters = Vec::new();
+    let mut optopt = None;
+    'words: for word in args {
+        let word_bytes = word.as_bytes();
+        if !super::builtin_opt::is_option_word(word_bytes, plus) {
+            break;
+        }
+        if word == "--help" || word == "--" {
+            break;
+        }
+        let sign = word_bytes[0];
+        for &c in &word_bytes[1..] {
+            // An option character of ':' is always invalid,
+            // whatever the spec says (bashgetopt.c:99) — the
+            // guard above already excludes it from the set.
+            if c == b':' || !letter_bytes.contains(&c) {
+                optopt = Some(c);
+                break 'words;
+            }
+            letters.push((c as char, sign == b'-'));
+        }
+    }
+    Some((
+        letters,
+        optopt.map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+    ))
+}
+
+/// Whether a declare/typeset/local invocation diverts to the
+/// function face: a MINUS-signed `f`/`F` in the option region.
+/// `+f`/`+F` clear att_function and stay on the variable path
+/// (declare.def: the function branch keys on `flags_on &
+/// att_function`).
+fn declare_has_function_option(args: &[String]) -> bool {
+    let row = builtin_table_row("declare").expect("declare row");
+    let (letters, _) = declare_option_scan(row, args);
+    letters
+        .iter()
+        .any(|(letter, set)| *set && (*letter == 'f' || *letter == 'F'))
 }
 
 /// Whether a declare/typeset/local invocation's -a/-A attribute ends up
 /// SET. The last occurrence wins and `+a`/`+A` unset, so `declare +a s=1`
 /// binds a scalar (and marks under set -a) while `declare -a s=1` binds
-/// an array element (and does not). Walks the arguments with the same
-/// stop rules as scan_declare_options.
+/// an array element (and does not). The scan stops at the first
+/// operand — an `-a` after an operand is a name, not an option.
 fn declare_invocation_sets_array_attribute(args: &[String]) -> bool {
+    let row = builtin_table_row("declare").expect("declare row");
+    let (letters, _) = declare_option_scan(row, args);
     let mut sets = false;
-    for arg in args {
-        if arg == "--" {
-            break;
-        }
-        let (setting, rest) = if let Some(rest) = arg.strip_prefix('-') {
-            (true, rest)
-        } else if let Some(rest) = arg.strip_prefix('+') {
-            (false, rest)
-        } else {
-            continue;
-        };
-        if rest.is_empty() {
-            continue;
-        }
-        for ch in rest.chars() {
-            if !DECLARE_OPTION_LETTERS.contains(ch) {
-                return sets;
-            }
-            if ch == 'a' || ch == 'A' {
-                sets = setting;
-            }
+    for (letter, set) in letters {
+        if letter == 'a' || letter == 'A' {
+            sets = set;
         }
     }
     sets
@@ -119,6 +197,7 @@ fn declare_invocation_sets_array_attribute(args: &[String]) -> bool {
 impl Executor {
     pub(in crate::executor) fn execute_declare_functions(
         &mut self,
+        command_name: &str,
         args: &[String],
         stdout: &mut impl Write,
         stderr: &mut impl Write,
@@ -128,23 +207,24 @@ impl Executor {
         // bodies, so render the simple function form used by builtins6.sub.
         // GNU declare.def declare_invalid_opts: att_function combined with
         // att_array/att_assoc/att_integer/att_nameref is a usage error.
-        let (option_letters, invalid_letter) = scan_declare_options(args);
-        let function_flag_on = option_letters.contains(&'f');
+        // The face speaks through the row of the INVOKED name, so
+        // `local -fZ x` reports `local: -Z: invalid option` (Stage-2
+        // ④ Phase 4 — the old code hardcoded `declare:` here).
+        let row = builtin_table_row(command_name).expect("declare-family row");
+        let mut diag = Diag::new(row, stderr);
+        let (option_letters, invalid_letter) = declare_option_scan(row, args);
+        let function_flag_on = option_letters
+            .iter()
+            .any(|(letter, set)| *set && (*letter == 'f' || *letter == 'F'));
         if function_flag_on {
             // A getopt-level invalid letter is reported (with usage,
             // EX_USAGE) before the attribute-combination check below:
             // `declare -fZ x` names `-Z`, never a combination
             // (rubash#1259).
             if let Some(invalid) = invalid_letter {
-                writeln!(
-                    stderr,
-                    "{}declare: -{invalid}: invalid option",
-                    self.diagnostic_prefix()
-                )?;
-                writeln!(
-                    stderr,
-                    "declare: usage: declare [-aAfFgiIlnrtux] [name[=value] ...] or declare -p [-aAfFilnrtux] [name ...]"
-                )?;
+                diag.error(DiagKind::InvalidOpt(format!("-{invalid}")));
+                diag.usage();
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(2);
             }
             // GNU declare.def declare_invalid_opts checks the conflicting
@@ -152,15 +232,11 @@ impl Executor {
             // order the letters appear in the command line.
             let bad_opt: Option<String> = ['n', 'i', 'A', 'a']
                 .iter()
-                .find(|letter| option_letters.contains(letter))
+                .find(|letter| option_letters.iter().any(|(seen, _)| seen == *letter))
                 .map(|letter| format!("-{letter}"));
             if let Some(opt) = bad_opt {
-                writeln!(
-                    stderr,
-                    "{}declare: {}: invalid option",
-                    self.diagnostic_prefix(),
-                    opt
-                )?;
+                diag.error(DiagKind::InvalidOpt(opt));
+                diag.flush_with(|| self.diagnostic_prolog());
                 return Ok(1);
             }
         }
@@ -171,11 +247,8 @@ impl Executor {
         if function_flag_on {
             for arg in args {
                 if !arg.starts_with('-') && !arg.starts_with('+') && arg.contains('=') {
-                    writeln!(
-                        stderr,
-                        "{}declare: cannot use `-f' to make functions",
-                        self.diagnostic_prefix()
-                    )?;
+                    diag.free(format_args!("cannot use `-f' to make functions"));
+                    diag.flush_with(|| self.diagnostic_prolog());
                     return Ok(1);
                 }
             }
@@ -1656,12 +1729,20 @@ impl Executor {
                     self.fire_dynamic_operand_lookups(&args);
                 }
                 let dynamic_set_views = self.dynamic_set_views();
+                // The Diag's sink is this command's own stderr buffer,
+                // so a readonly diagnostic lands in the command's
+                // redirection, not the shell's (A3-R1, rubash#2707).
+                let row = crate::executor::builtin_table::builtin_table_row(command_name)
+                    .expect("declare-family row");
+                let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                let prolog = self.diagnostic_prolog_parts();
                 let status = crate::builtins::declare::execute_with_io_named_in_context(
                     command_name,
                     &args,
                     &mut self.shell_state.env_vars,
                     &mut stdout,
-                    &mut stderr,
+                    &mut diag,
+                    &prolog,
                     self.shell_state.function_depth > 0,
                     &frame_locals,
                     &dynamic_views,
@@ -1670,6 +1751,7 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
                 // GNU err_badarraysub + any_failed (arrayfunc.c:804-809,
                 // rubash#635): report_error carries no `command:` segment
                 // (unlike `declare: x: readonly variable`); abort the list
@@ -1908,12 +1990,16 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        let (option_letters, _) = scan_declare_options(&cmd.words[1..]);
-        if option_letters.contains(&'f') || option_letters.contains(&'F') {
+        if declare_has_function_option(&cmd.words[1..]) {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            self.exit_code =
-                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+            let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
+            self.exit_code = self.execute_declare_functions(
+                command_name,
+                &cmd.words[1..],
+                &mut stdout,
+                &mut stderr,
+            )?;
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(());
         }
@@ -1931,9 +2017,64 @@ impl Executor {
         // locals with nodefs set (declare.def's local branch passes
         // nodefs to show_local_var_attributes); the values are
         // stripped from the rendered listing at the flush below.
-        let nodefs_listing = scan_declare_options(&cmd.words[1..]).0.contains(&'F')
+        // The scan is the row's own machine now (declare_option_scan);
+        // GNU declare.def's `case 'F'` raises nodefs for either sign
+        // (`nodefs++` runs unconditionally, before att_function is
+        // split into flags_on/flags_off), so the letter alone
+        // decides here.
+        let nodefs_listing = declare_option_scan(
+            builtin_table_row("declare").expect("declare row"),
+            &cmd.words[1..],
+        )
+        .0
+        .iter()
+        .any(|(letter, _)| *letter == 'F')
             && !declare_invocation_has_operands(&cmd.words[1..]);
-        let (status, final_args) = if self.shell_state.function_depth == 0 {
+        // GNU declare.def local_builtin catches a STRAIGHT `local
+        // --help' (first word) before checking function context, while
+        // `--help` after other options (`local -a --help`) reaches the
+        // context check first — outside a function that reports "can
+        // only be used in a function", inside one the getopt scan
+        // reports Help before any operand processing. The pre-core
+        // local logic below (frame save, -p missing-name reports,
+        // substring option detectors) must not run for either Help
+        // shape, so both route straight to the core, whose BuiltinOpt
+        // emits the Help (and reports an earlier invalid letter, e.g.
+        // `local -97 --help`, in scan order).
+        let straight_help = cmd.words.get(1).is_some_and(|word| word == "--help");
+        let region_help = local_args_request_help(&cmd.words[1..]);
+        let (status, final_args) = if straight_help
+            || (region_help && self.shell_state.function_depth != 0)
+        {
+            // Route straight to the core, whose BuiltinOpt emits the
+            // Help (and reports an earlier invalid letter, e.g.
+            // `local -97 --help` inside a function, in scan order).
+            let row =
+                crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+            let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+            let prolog = self.diagnostic_prolog_parts();
+            let dynamic_set_views = self.dynamic_set_views();
+            let underlay = crate::shell::var_table::TempenvListingUnderlay::new();
+            let mut oob_word = None;
+            let mut written_hints = crate::builtins::declare::WrittenOperandHints::default();
+            let status = crate::builtins::declare::execute_with_io_named_in_context(
+                "local",
+                &cmd.words[1..],
+                &mut self.shell_state.env_vars,
+                &mut stdout,
+                &mut diag,
+                &prolog,
+                true,
+                &[],
+                &[],
+                &dynamic_set_views,
+                &underlay,
+                &mut oob_word,
+                &mut written_hints,
+            )?;
+            diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
+            (status, Vec::new())
+        } else if self.shell_state.function_depth == 0 {
             writeln!(
                 stderr,
                 "{}local: can only be used in a function",
@@ -1948,10 +2089,7 @@ impl Executor {
             )?;
             writeln!(stderr, "local: usage: local [option] name[=value] ...")?;
             (2, Vec::new())
-        } else if scan_declare_options(&cmd.words[1..])
-            .0
-            .iter()
-            .any(|letter| *letter == 'f' || *letter == 'F')
+        } else if declare_has_function_option(&cmd.words[1..])
             && declare_invocation_has_operands(&cmd.words[1..])
         {
             // rubash#2582: GNU's local is declare_internal in a local
@@ -1968,7 +2106,7 @@ impl Executor {
             // branch (show_local_var_attributes, nodefs for -F) and
             // prints the frame's locals, never function definitions.
             let status =
-                self.execute_declare_functions(&cmd.words[1..], &mut stdout, &mut stderr)?;
+                self.execute_declare_functions("local", &cmd.words[1..], &mut stdout, &mut stderr)?;
             (status, Vec::new())
         } else {
             let written_args = self.expand_declare_assignment_args(&cmd.words[1..]);
@@ -2263,12 +2401,18 @@ impl Executor {
                 // rubash#1569: same listing underlay as declare.
                 let underlay = self.tempenv_listing_underlay();
                 let dynamic_set_views = self.dynamic_set_views();
+                // Same A3-R1 sink binding as the declare route above.
+                let row =
+                    crate::executor::builtin_table::builtin_table_row("local").expect("local row");
+                let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
+                let prolog = self.diagnostic_prolog_parts();
                 let builtin_status = crate::builtins::declare::execute_with_io_named_in_context(
                     "local",
                     &args,
                     &mut self.shell_state.env_vars,
                     &mut stdout,
-                    &mut stderr,
+                    &mut diag,
+                    &prolog,
                     true,
                     &frame_locals,
                     &dynamic_views,
@@ -2277,6 +2421,7 @@ impl Executor {
                     &mut oob_word,
                     &mut written_hints,
                 )?;
+                diag.flush_with(|| prolog.build(&self.shell_state.env_vars));
                 let status = if local_blocked.is_empty()
                     && noassign_blocked.is_empty()
                     && print_missing.is_empty()
@@ -2715,4 +2860,80 @@ pub(in crate::executor) fn declare_words_name_dirstack(words: &[String]) -> bool
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The machine-driven scan, spelled out the way
+    /// `declare_option_scan`'s slow path performs it — the
+    /// reference the flag-only fast path must agree with.
+    fn machine_scan(
+        row: &'static BuiltinRow,
+        args: &[String],
+    ) -> (Vec<(char, bool)>, Option<String>) {
+        let mut sink = Vec::new();
+        let mut diag = Diag::new(row, &mut sink);
+        let mut opt = BuiltinOpt::new(row, args, &mut diag, false);
+        let mut letters = Vec::new();
+        loop {
+            match opt.next() {
+                OptEvent::Opt(c) => letters.push((c as char, opt.opttype() == b'-')),
+                OptEvent::OptArg(_, _) => {}
+                OptEvent::Help | OptEvent::End => break,
+            }
+        }
+        (
+            letters,
+            opt.optopt()
+                .map(|c| String::from_utf8_lossy(&[c]).into_owned()),
+        )
+    }
+
+    #[test]
+    fn flag_only_fast_scan_agrees_with_machine() {
+        let row = builtin_table_row("declare").expect("declare row");
+        let OptSpec::Getopt(spec) = row.opt_spec else {
+            panic!("declare row must carry a getopt spec");
+        };
+        let shapes: &[&[&str]] = &[
+            &[],
+            &["x=1"],
+            &["-a", "x"],
+            &["-aA", "x=1"],
+            &["+a", "x"],
+            &["-p"],
+            &["--", "-a"],
+            &["--help"],
+            &["-a", "--help", "x"],
+            &["-Z"],
+            &["-aZ", "x"],
+            &["-"],
+            &["+"],
+            &["++"],
+            &["-p", "--", "-f"],
+            &["x", "-a"],
+            &["-ai", "x=1", "-r"],
+            &["-\u{c3}\u{a9}"],
+            &["-fF", "g"],
+            &["-g", "-n", "r=v"],
+        ];
+        for shape in shapes {
+            let args: Vec<String> = shape.iter().map(|s| s.to_string()).collect();
+            let fast = scan_flag_only_spec(spec, &args)
+                .expect("declare spec is flag-only and must take the fast path");
+            assert_eq!(fast, machine_scan(row, &args), "shape {shape:?}");
+            assert_eq!(declare_option_scan(row, &args), fast, "shape {shape:?}");
+        }
+    }
+
+    #[test]
+    fn flag_only_fast_scan_declines_argument_specs() {
+        let args: Vec<String> = vec!["-e".to_string(), "vi".to_string()];
+        assert!(scan_flag_only_spec("e:lnrs", &args).is_none());
+        assert!(scan_flag_only_spec("o;v", &args).is_none());
+        assert!(scan_flag_only_spec("n#", &args).is_none());
+        assert!(scan_flag_only_spec(":e:lnrs", &args).is_none());
+    }
 }

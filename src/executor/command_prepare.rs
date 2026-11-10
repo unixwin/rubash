@@ -779,7 +779,7 @@ impl Executor {
             }
             self.pending_scalar_assignment =
                 expanded_value.starts_with(STORAGE_WORD_PREFIX) && value.contains(['$', '`']);
-            if !self.apply_shell_assignment(name, expanded_value) {
+            if !self.apply_shell_assignment(name, expanded_value, None) {
                 // GNU subst.c:8153-8165 + 11169 bash_variable_assignment_error:
                 // a failed standalone assignment (readonly violation, invalid
                 // nameref value, ...) prints its diagnostic and then

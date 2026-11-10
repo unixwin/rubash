@@ -1227,7 +1227,23 @@ impl Executor {
                     // failure produces exactly one diagnostic line).
                     self.shell_state.arithmetic_readonly_error.set(true);
                     if !self.shell_state.arithmetic_expansion_error.replace(true) {
-                        eprintln!("{}{}: readonly variable", self.error_prefix(), name);
+                        // GNU error.c:453 err_readonly (report_error
+                        // family): the diagnostic goes to fd 2 AS BOUND
+                        // by the command's redirections —
+                        // `(( a = 6 )) 2>&1` lands it on stdout, `2>f`
+                        // in f. Route through arith_diag
+                        // (write_diagnostic_fd2) like every sibling
+                        // arithmetic diagnostic; a raw eprintln! here
+                        // bypasses the binding and leaks to the shell's
+                        // real stderr (rubash#2707, A3-R1). This arm
+                        // carries the routing fix the standalone
+                        // report_arithmetic_readonly_error held before
+                        // PR #3244 folded that reporter into this log.
+                        self.arith_diag(&format!(
+                            "{}{}: readonly variable\n",
+                            self.error_prefix(),
+                            name
+                        ));
                         printed = true;
                     }
                 }
