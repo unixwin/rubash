@@ -279,6 +279,14 @@ pub(super) struct Lexer<'a> {
     /// pass over one accumulating logical line (rubash#176/#178). `None`
     /// for one-shot Lexer uses that get no reuse anyway.
     pub(super) brace_cache: Option<&'a mut BraceScanCache>,
+    /// Continuation-join columns of the logical line being scanned
+    /// (rubash#3210): byte offsets where a backslash-newline join
+    /// consumed a physical line break, as recorded by the feeder
+    /// (`GroupScanFeeder::continuation_join_columns`, mod.rs:1469).
+    /// One-shot tokenize paths flow through the feeder too, so they
+    /// carry joins; only the cond-command probe (which consumes no
+    /// tokens) passes empty.
+    pub(super) join_columns: Vec<usize>,
     /// Open `(` groups of the logical line being scanned, innermost last.
     /// An entry is an arithmetic-command candidate when it is the first
     /// `(` of an adjacent `((` pair; `arith_close_verified` memoizes the
@@ -326,6 +334,7 @@ impl<'a> Lexer<'a> {
             extended_glob: false,
             parse_state: LexerParseState::default(),
             brace_cache: None,
+            join_columns: Vec::new(),
             open_parens: Vec::new(),
             last_token_end: None,
             last_token_was_open_paren: false,
@@ -346,6 +355,13 @@ impl<'a> Lexer<'a> {
             brace_cache: Some(brace_cache),
             ..Self::new(input, posix)
         }
+    }
+
+    /// Carry the feeder's continuation-join columns into this pass
+    /// (rubash#3210). Cloned: joins are rare (usually zero) and the
+    /// pass is short-lived.
+    pub(super) fn set_join_columns(&mut self, joins: &[usize]) {
+        self.join_columns = joins.to_vec();
     }
 
     /// Carry the GNU reader state in from a previous logical line
@@ -1509,6 +1525,36 @@ impl<'a> Lexer<'a> {
                         self.position = comment_start;
                         return Some(Token::new(kind, &value, start));
                     }
+                }
+                // rubash#3210: a continuation join inside the group span
+                // destroys the body's relative line stamps when the group
+                // is folded into one token: the re-lex
+                // (tokenize_locked_body) sees the joined value with no
+                // newlines, so every body command reports the group's
+                // first line (GNU reports each first element's physical
+                // end line — parse.y:5849 simplecmd_lineno,
+                // execute_cmd.c:936). Refuse the fold exactly when a
+                // join falls strictly inside the span (a join at the `{`
+                // column or at the byte past `}` is a join before/after
+                // the group, not inside it) and emit the bare opener
+                // like the unclosed path, so the parser takes the
+                // already-correct slice path (matching_brace_group_end)
+                // with feeder-stamped tokens.
+                if self
+                    .join_columns
+                    .iter()
+                    .any(|&join| join > start && join < self.position)
+                {
+                    if self.opener_snapshot.is_none() {
+                        if let Some(state) = self.boundary_state() {
+                            self.opener_snapshot = Some(OpenerSnapshot {
+                                brace_offset: start,
+                                state,
+                            });
+                        }
+                    }
+                    self.position = start + 1;
+                    return Some(Token::new(TokenKind::Keyword, "{", start));
                 }
                 // `{`/`}` are not word delimiters (syntax.h:29-30): any brace
                 // glued to the closed group keeps the word alive, matching
