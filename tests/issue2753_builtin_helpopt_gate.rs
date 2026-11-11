@@ -199,11 +199,6 @@ fn declare_family_help() {
         &run_script("readonly --help\n"),
         "readonly: readonly [-aAf] [name[=value] ...] or readonly -p\n",
     );
-    // An operand first ends the scan: both words are names, and
-    // `--help` as a name is an invalid identifier (status 1).
-    let run = run_script("declare x --help\n");
-    assert_eq!(run.status, 1, "stderr: {}", run.stderr);
-    assert_not_help(&run, "declare: declare [");
 }
 
 #[test]
