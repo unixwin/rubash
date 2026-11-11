@@ -474,6 +474,15 @@ pub(super) fn finish_arithmetic_command(
     mut index: usize,
 ) -> (CommandNode, usize) {
     collect_trailing_redirections(tokens, &mut index, &mut command);
+    // Same parse-end stamp as finish_compound_command: a `(( ))'
+    // command's diagnostics (and the ambient line it pins) anchor on
+    // the line its parse completed — the folded token's closing line
+    // when the body spans lines (rubash#3183).
+    command.end_line = index
+        .checked_sub(1)
+        .and_then(|i| tokens.get(i))
+        .map(|token| token.position.max(token.end_position))
+        .or(command.line);
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::Pipe) => {
             command.pipe = Some(1);
@@ -514,10 +523,16 @@ pub(super) fn finish_compound_command(
     // GNU sets each top-level command's ambient line_number from where its
     // parse ended — the last token consumed by the command itself (closing
     // keyword or trailing redirect target), before the list terminator.
+    // A token the reader finished on a later physical line than it
+    // started (a folded `{ ... }' group, a body closed after a
+    // continuation) ends the parse on that later line. Rebased token
+    // streams (function bodies) maintain `position' under the shift
+    // and leave `end_position' stale, so the stamp is the LATER of the
+    // two fields (rubash#3183).
     command.end_line = index
         .checked_sub(1)
         .and_then(|i| tokens.get(i))
-        .map(|token| token.position)
+        .map(|token| token.position.max(token.end_position))
         .or(command.line);
     match tokens.get(index).map(|token| &token.kind) {
         Some(TokenKind::Pipe) => {

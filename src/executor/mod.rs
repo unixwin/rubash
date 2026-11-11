@@ -1918,15 +1918,31 @@ pub struct Executor {
     /// The transport fact the folded target string cannot carry: keys
     /// are folded redirect-target strings whose literal expansion
     /// carried raw-byte transport (a stored E000 pair or E400 escape).
-    /// A folded byte char (e.g. U+009C for byte 0x9C) is
-    /// indistinguishable from a genuine char of the same code point,
-    /// so the output open funnels consult this set — cleared at each
-    /// execute_command entry like redirect_target_memo — to decide
-    /// whether the target's byte chars emit raw bytes or the name
-    /// takes the plain UTF-8 funnel. Only the literal arms of
-    /// expand_redirect_operand_fields set it; glob matches, procsub
-    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
-    redirect_target_had_transport: RefCell<HashSet<String>>,
+    /// The byte spelling of a folded redirect target whose expansion
+    /// carried raw-byte transport, computed at expansion time from
+    /// the pre-fold text (transport_name_spelling_bytes): a folded
+    /// byte char (e.g. U+009C for byte 0x9C) is indistinguishable from
+    /// a genuine char of the same code point in the folded literal,
+    /// so the spelling cannot be re-derived at open time
+    /// (rubash#3218). Keyed by the folded literal; every later
+    /// literal outcome for the same string in the same command span
+    /// replaces the record — and a no-transport outcome clears it —
+    /// because the redirect walks expand and open in list order, so
+    /// an open must see its OWN redirect's verdict, never an earlier
+    /// same-spelling target's (rubash#3218 face 2). Cleared at each
+    /// execute_command entry like redirect_target_memo. Only the
+    /// literal arms of expand_redirect_operand_fields record it;
+    /// glob matches, procsub carriers and heredoc delimiters never
+    /// do. (rubash#3104 p23, rubash#3218)
+    redirect_target_transport_spellings: RefCell<HashMap<String, Vec<u8>>>,
+    /// The same spelling keyed by redirect NODE (the
+    /// redirect_target_memo key): the string-keyed record cannot
+    /// serve two redirects in one command whose expansions fold to
+    /// the SAME string with different transport verdicts — both
+    /// expansions are recorded before either open runs — so the
+    /// redirect walks, which hold the node, consult this map and get
+    /// their own redirect's spelling. (rubash#3218)
+    redirect_target_node_spellings: RefCell<HashMap<String, Vec<u8>>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.

@@ -572,8 +572,17 @@ impl ConditionalArithParser<'_> {
             return None;
         }
 
-        let value = value.trim();
-        if value.is_empty() {
+        // GNU expr.c:1241 expr_streval hands the RAW value to subexpr,
+        // whose `expression' global is the value verbatim (expr.c:469):
+        // evalerror echoes it with only leading blanks skipped
+        // (expr.c:1528-1530) and lasttp runs to its end, so a trailing
+        // blank is part of both the echoed text and the error token
+        // (`A="4 + "; $(( A ))` reports `4 + ' / token `+ '`). The trim
+        // below therefore feeds only the empty check and the strlong /
+        // plain-decimal shortcuts; the nested parser's input is the
+        // value as stored (rubash#3184).
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
             return Some(0);
         }
         // GNU expr.c:1557 strlong (contract at expr.c:1539: "0nnn ->
@@ -581,7 +590,7 @@ impl ConditionalArithParser<'_> {
         // digits re-parses octal — `x=010; $((x))` is 8 (rubash#341).
         // `0x` hex and `base#n` forms keep flowing to the nested
         // expression parser below.
-        if let Some(number) = strlong_leading_zero_octal(value) {
+        if let Some(number) = strlong_leading_zero_octal(trimmed) {
             return Some(bash_arith(number));
         }
         // rubash#1101: a leading-zero digit string containing 8/9 (`08`,
@@ -591,8 +600,8 @@ impl ConditionalArithParser<'_> {
         // swallow it; let it fall through to the nested expression parser,
         // whose literal reader raises exactly that error (the same path
         // that already handles `08x` / `0x1g` values correctly).
-        if !leading_zero_digit_string(value) {
-            if let Ok(number) = value.parse::<i128>() {
+        if !leading_zero_digit_string(trimmed) {
+            if let Ok(number) = trimmed.parse::<i128>() {
                 return Some(bash_arith(number));
             }
         }
