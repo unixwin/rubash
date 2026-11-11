@@ -458,8 +458,22 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::help::execute_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
+        // help.def's listing reads COLUMNS through get_string_value
+        // (general.c default_columns) and picks its column renderer by
+        // the active locale's MB_CUR_MAX — both are session state, so
+        // they travel from this variable table, not the process env.
+        let layout = crate::builtins::help::HelpListingLayout {
+            columns_var: self.shell_state.env_vars.get("COLUMNS").cloned(),
+            multibyte: crate::locale::locale_name_selects_utf8(
+                &crate::locale::locale_name_from_vars(&self.shell_state.env_vars),
+            ),
+        };
+        let status = crate::builtins::help::execute_with_io_and_layout(
+            &cmd.words[1..],
+            &mut stdout,
+            &mut stderr,
+            &layout,
+        )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }
