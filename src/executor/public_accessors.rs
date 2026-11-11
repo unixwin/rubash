@@ -3670,8 +3670,7 @@ impl Executor {
         // current interactive input (piped -i, -i -c, the reader) takes
         // this branch. The EVAL/TRAP/source context arms keep their
         // existing order below it.
-        if self.invocation_interactive()
-            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
         {
             return format!(
                 "{}: ",
@@ -3727,8 +3726,7 @@ impl Executor {
         // rubash#2734: parser_error's interactive first branch
         // (error.c:308-309) — see parser_diagnostic_prefix. Current
         // interactive input reports the shell basename alone.
-        if self.invocation_interactive()
-            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
         {
             return format!(
                 "{}: ",
@@ -3862,8 +3860,7 @@ impl Executor {
         // (error.c:308-309) — see parser_diagnostic_prefix. Current
         // interactive input reports the shell basename alone, ahead
         // of the EVAL/source context arms below.
-        if self.invocation_interactive()
-            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
         {
             return format!(
                 "{}: ",
@@ -3916,8 +3913,7 @@ impl Executor {
         // (error.c:308-309) — see parser_diagnostic_prefix. Current
         // interactive input reports the shell basename alone, ahead
         // of the TRAP/EVAL context arms below.
-        if self.invocation_interactive()
-            && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
         {
             return format!(
                 "{}: ",
