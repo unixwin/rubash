@@ -15,9 +15,9 @@ use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 
 use paths::{
-    current_logical_pwd, filesystem_path_for_display, logical_destination_display,
-    logical_pwd_var_display, set_shell_env, shell_display_path, shell_pwd_display_path, shell_var,
-    starts_with_dot_component, validated_logical_pwd,
+    current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
+    logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
+    shell_pwd_display_path, shell_var, starts_with_dot_component, validated_logical_pwd,
 };
 use std::env;
 use std::io::{self, Write};
@@ -263,8 +263,26 @@ where
         Mode::Logical => {
             let logical_dest_display = logical_destination_display(&old_logical, target_display);
             let logical_probe_path = filesystem_path_for_display(&logical_dest_display, env_vars);
-            match probe(&logical_probe_path) {
-                Ok(physical) => Ok(Move {
+            // The textual destination is only sh_canonpath's result
+            // when canon itself succeeds, and canon carries an
+            // existence half the text cannot show: with
+            // PATH_CHECKEXISTS | PATH_CHECKDOTDOT
+            // (lib/sh/pathcanon.c) every component erased by a later
+            // `..` must still name an existing directory, or canon
+            // returns NULL and change_to_directory adjudicates by the
+            // verbatim chdir — the fallthrough arm below — instead of
+            // the canonical form. So the canonical probe stands only
+            // when every erased component checks out; on a canon
+            // failure the verbatim arm is the whole adjudication,
+            // exactly as in GNU (rubash#2796).
+            let logical_probe =
+                if logical_canon_erased_components_exist(&old_logical, target_display, env_vars) {
+                    Some(probe(&logical_probe_path))
+                } else {
+                    None
+                };
+            match logical_probe {
+                Some(Ok(physical)) => Ok(Move {
                     // GNU builtins/cd.def:136-175 bindpwd stores ONE
                     // canonical logical PWD string that `pwd` then
                     // echoes verbatim (pwd.def). Rubash's canonical
@@ -275,7 +293,7 @@ where
                     physical,
                     stayed_deleted_dot: None,
                 }),
-                Err(_) => match probe(&native_target) {
+                _ => match probe(&native_target) {
                     // GNU's canon-failed fallback: chdir(newdir)
                     // verbatim succeeds, resetpwd re-reads the
                     // position with getcwd, and bindpwd binds that
