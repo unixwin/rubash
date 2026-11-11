@@ -1410,6 +1410,7 @@ impl Executor {
             command_expansion_failed: Cell::new(false),
             err_trap_fired_at_dispatch: Cell::new(false),
             exit_trap_ran: Cell::new(false),
+            nohist_parse_depth: Cell::new(0),
             err_trap_armed_sample: Cell::new(None),
             evalerror_exec_depth: Cell::new(0),
             reader_command_line: Cell::new(None),

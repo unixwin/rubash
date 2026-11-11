@@ -1140,7 +1140,18 @@ impl Executor {
         // must persist, exactly like GNU's single variable — restoring
         // the value saved at entry would silently undo it.
         self.pin_extglob_gate_to_live();
+        // rubash#2824: this unit is a parse_and_execute string unit;
+        // GNU runs those with SEVAL_NOHIST unless the caller asked
+        // otherwise (evalstring.c:291-292), which clears
+        // remember_on_history for the unit — a `history -s` inside
+        // appends without popping (builtins/history.def:435-439).
+        // The depth is raised around the inner body only, so the
+        // restore below runs on every path out of the unit.
+        self.nohist_parse_depth
+            .set(self.nohist_parse_depth.get() + 1);
         let result = self.execute_eval_source_inner(source, caller_line, cmd);
+        self.nohist_parse_depth
+            .set(self.nohist_parse_depth.get() - 1);
         self.pin_extglob_gate_to_live();
         self.exit_parse_and_execute_frame(saved_frame);
         self.exit_read_unit(saved_read_generation);
