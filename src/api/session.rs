@@ -218,6 +218,24 @@ pub struct RunClassification {
     /// Populated by `run`/`run_line`; the stdin routes leave
     /// the mark to their callers and report `false`.
     pub signal_discard: bool,
+    /// An expansion-error DISCARD was the run's terminal
+    /// class (rubash#2794): a FATAL-class word-expansion
+    /// error — `${var:?}` (subst.c:10416-10418), nounset
+    /// unbound (subst.c:11032-11034), arithmetic nounset
+    /// (expr.c:1208-1216), bad @-transform (subst.c:8949) —
+    /// that the executor adjudicated an interactive DISCARD
+    /// at its raise point (the error branch, not the fatal
+    /// FORCE_EOF branch): the unit was dropped with status
+    /// 1 and the session lives, a fate indistinguishable
+    /// from an ordinary status-1 completion without this
+    /// face. Noted by the executor where the adjudication
+    /// is made; the session layer reports it, it does not
+    /// recompute it. The fact can stand alongside
+    /// `errexit_break`: the discard dropped the line, the
+    /// verdict on its status ended the session. The lesser
+    /// expansion classes (bad substitution and kin) carry
+    /// no interactive/fatal branch in GNU and never set it.
+    pub expansion_error_discard: bool,
     /// A real `exit`/FatalFunctionError jump ended the run's
     /// terminal unit (Q6 arm B: corrected by the executor's
     /// errexit-unwind mark — an errexit break no longer reads
@@ -478,7 +496,12 @@ impl Session {
         let (status, flow, mut classification, diagnostics) = if !unclosed
             && (options.interactive
                 || script_driver::script_uses_history(source)
-                || script_driver::script_uses_aliases(source, alias_live))
+                || script_driver::script_uses_aliases(source, alias_live)
+                // rubash#2773: a submission that may toggle `set -v`
+                // mid-read needs the grouped reader's per-line read
+                // point (flags.c:284; parse.y:2712) — the whole-source
+                // route below can only sample the entry state.
+                || script_driver::script_may_toggle_verbose(source))
         {
             let (status, _unwound, facts) =
                 script_driver::run_script_with_history_at_line_offset_classified(
@@ -503,6 +526,7 @@ impl Session {
             let classification = RunClassification {
                 parse_error: facts.parse_error,
                 signal_discard: facts.signal_discard,
+                expansion_error_discard: facts.expansion_error_discard,
                 exit_jump: facts.exit_jump,
                 exit_jump_raw: facts.exit_jump_raw,
                 errexit_break: facts.errexit_stop,
@@ -532,6 +556,15 @@ impl Session {
             // echoed verbatim. The name keeps its own jobs (the
             // diagnostic values' source_name, the event record);
             // the parse receives the input text explicitly.
+            //
+            // rubash#2773: this route likewise reads the whole
+            // submission as one unit before anything in it executes
+            // (the parse_and_execute model), so its lines are echoed
+            // at this read boundary when verbose is on (flags.c:284
+            // echo_input_at_read = verbose_flag; parse.y:2712 prints
+            // shell_input_line as read). The grouped route above gets
+            // the same answer from its per-line read point.
+            script_driver::echo_verbose_input_lines(&self.executor, source);
             let status = script_driver::run_source_with_line_offset(
                 &mut self.executor,
                 source,
@@ -769,6 +802,7 @@ impl Session {
         RunClassification {
             parse_error: self.executor.take_parse_error(),
             signal_discard: self.executor.take_signal_discard_pending(),
+            expansion_error_discard: self.executor.take_unit_expansion_error_discard(),
             exit_jump: exit_jump_raw && !errexit_unwind,
             exit_jump_raw,
             errexit_break: false,
@@ -1558,6 +1592,7 @@ impl Session {
                     classification: RunClassification {
                         parse_error: false,
                         signal_discard: false,
+                        expansion_error_discard: false,
                         exit_jump: false,
                         exit_jump_raw,
                         errexit_break: true,
@@ -1580,6 +1615,7 @@ impl Session {
                     classification: RunClassification {
                         parse_error: false,
                         signal_discard: false,
+                        expansion_error_discard: false,
                         exit_jump: true,
                         exit_jump_raw,
                         errexit_break: false,
@@ -1723,6 +1759,7 @@ impl Session {
         let errexit_unwind = self.executor.take_errexit_unwind_armed();
         let exit_jump = exit_jump_raw && !errexit_unwind;
         let discarded = self.executor.take_unit_signal_discard();
+        let expansion_discarded = self.executor.take_unit_expansion_error_discard();
         let errexit_break = script_driver::errexit_break_verdict(&self.executor, status);
         let unwind = if exit_jump && !parse_error {
             Some(RunUnwind::ExitJump)
@@ -1743,6 +1780,7 @@ impl Session {
             classification: RunClassification {
                 parse_error,
                 signal_discard: discarded,
+                expansion_error_discard: expansion_discarded,
                 exit_jump,
                 exit_jump_raw,
                 errexit_break,

@@ -275,6 +275,39 @@ impl Executor {
         cmd: &CommandNode,
         execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
     ) -> Result<T, ExecuteError> {
+        let result = self.with_command_input_redirects_scoped(cmd, execute);
+        // rubash#2659: a failure to apply a statement compound's OWN
+        // redirection list is GNU's do_redirections failure for the
+        // compound itself (execute_cmd.c:854-883) — an ordinary command
+        // failure the ERR trap adjudicates. The prepare pass notes the
+        // output side before this scope runs; every apply failure
+        // inside the scope (numbered opens, the plain input open, the
+        // output opens, a bad-fd dup) funnels out through this one
+        // return, so the note belongs here. Only the statement
+        // compounds are noted: their status is body-produced at the
+        // ast_exec loop, which therefore never adjudicates it — the
+        // conversion arm in execute_command and the brace pre-dispatch
+        // arm consume the mark instead. Subshells, function calls and
+        // the [[ ]] / (( )) forms keep their existing loop-side
+        // adjudication and are deliberately not noted.
+        if result.is_err()
+            && (cmd.if_command.is_some()
+                || cmd.for_command.is_some()
+                || cmd.loop_command.is_some()
+                || cmd.case_command.is_some()
+                || cmd.select_command.is_some()
+                || cmd.brace_group.is_some())
+        {
+            self.note_compound_redirect_failure();
+        }
+        result
+    }
+
+    fn with_command_input_redirects_scoped<T: Default>(
+        &mut self,
+        cmd: &CommandNode,
+        execute: impl FnOnce(&mut Executor) -> Result<T, ExecuteError>,
+    ) -> Result<T, ExecuteError> {
         // GNU redir.c do_redirection_internal (redir.c:767-955) applies a
         // compound command's redirections before the command runs, and
         // execute_cmd.c undoes them when the command finishes (RX_UNDOABLE /
@@ -703,6 +736,57 @@ impl Executor {
         }
     }
 
+    /// rubash#2659: GNU execute_cmd.c:854-883 — a compound command's
+    /// own do_redirections failure is an ordinary command failure:
+    /// run_error_trap under was_error_trap, then the ERREXIT jump.
+    /// The two absorption arms in with_command_input_redirects_inner
+    /// (the fd-0 open pre-check and the net fd-0 bind) report the
+    /// diagnostic and record status 1 but complete as if the command
+    /// had run, and every downstream adjudication treats a statement
+    /// compound's status as body-produced — so neither consequence
+    /// ever ran for an absorbed failure. Adjudicate at the absorption
+    /// site: note the failure, fire the ERR trap, and report whether
+    /// errexit claims the failure (the caller then unwinds with the
+    /// errexit exit instead of completing). Only the statement
+    /// compounds are adjudicated here; subshells, function calls and
+    /// the [[ ]] / (( )) forms complete as before and keep their
+    /// existing loop-side adjudication. The fire call's own gates
+    /// keep inverted, and-or and suppressed contexts exempt.
+    /// rubash#1611 + PR #3269 review R1: inside a timed dispatch
+    /// the site does NOT adjudicate at all — no fire, and above all
+    /// no err_trap_fired_at_dispatch record: that flag means "the
+    /// ERR trap already fired at dispatch" (the #2117 suppression
+    /// gate in maybe_run_error_trap), so recording it without
+    /// firing suppresses the ast_exec time branch's own
+    /// adjudication look and the timed compound loses its ERR trap
+    /// (the timed branch of this adjudication did exactly that when
+    /// first written). The absorbed completion — diagnostic
+    /// printed, status 1, Ok — is already the shape the time branch
+    /// adjudicates from, so only the failure mark is noted (the
+    /// #846 inversion suppression reads it) and the branch decides
+    /// ERR and errexit against the final status, as the pre-#2659
+    /// base did.
+    fn adjudicate_absorbed_compound_redirect_failure(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        if !(cmd.if_command.is_some()
+            || cmd.for_command.is_some()
+            || cmd.loop_command.is_some()
+            || cmd.case_command.is_some()
+            || cmd.select_command.is_some()
+            || cmd.brace_group.is_some())
+        {
+            return Ok(false);
+        }
+        self.note_compound_redirect_failure();
+        if self.timed_dispatch_depth.get() > 0 {
+            return Ok(false);
+        }
+        self.maybe_run_error_trap(cmd)?;
+        Ok(self.errexit_enabled() && self.errexit_is_active())
+    }
+
     fn with_command_input_redirects_inner<T: Default>(
         &mut self,
         cmd: &CommandNode,
@@ -721,6 +805,13 @@ impl Executor {
             writeln!(&mut stderr, "{message}")?;
             self.write_redirected_command_stderr(cmd, &stderr)?;
             self.exit_code = 1;
+            // rubash#2659: the absorbed failure is adjudicated like
+            // any other command failure (see
+            // adjudicate_absorbed_compound_redirect_failure); when
+            // errexit claims it, the unwind replaces the completion.
+            if self.adjudicate_absorbed_compound_redirect_failure(cmd)? {
+                return Err(self.errexit_exit(1));
+            }
             // The compound command is terminated without running: its
             // result is the default (unit for loop/group bodies, None for
             // the source-test `if` scanner, which then consumes the frame).
@@ -768,6 +859,11 @@ impl Executor {
                 let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
                 self.write_redirected_command_stderr(cmd, &stderr)?;
                 self.exit_code = 1;
+                // rubash#2659: same adjudication as the fd-0 open
+                // pre-check arm above.
+                if self.adjudicate_absorbed_compound_redirect_failure(cmd)? {
+                    return Err(self.errexit_exit(1));
+                }
                 return Ok(T::default());
             }
         };
@@ -849,9 +945,10 @@ impl Executor {
                     // the compound forever. The timed collection below
                     // is the spawn-failure fallback (its recorded
                     // schedule served #1141 before a live pipe could).
-                    if let Some(file_fd) =
-                        self.spawn_input_process_substitution_child(&source, cmd.line)
-                    {
+                    if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                        &source,
+                        super::command_text::procsub_body_seed_line(cmd),
+                    ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
@@ -1375,8 +1472,10 @@ impl Executor {
                 // (subst.c:6362) binds the forked body's pipe read end
                 // on the target fd; the collected form below is the
                 // spawn-failure fallback.
-                if let Some(file_fd) = self.spawn_input_process_substitution_child(source, cmd.line)
-                {
+                if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                    source,
+                    super::command_text::procsub_body_seed_line(cmd),
+                ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         self.set_fd_readwrite_file(fd, &target, true)
@@ -2690,6 +2789,43 @@ impl Executor {
             .ok()?;
             return Some(FileFd::from_file(file, path));
         }
+        // rubash#3268: from a deleted cwd the joined spelling's
+        // metadata and open both die at the dead component — when
+        // the cwd anchor applies for the relative operand, the
+        // classification comes from the anchor's fstatat and the
+        // bind's one open from openat, so a stream source keeps the
+        // live-descriptor bind (shared offset, FIFO rendezvous)
+        // instead of dropping to the text mirror. A target the
+        // anchor walk cannot stat keeps the plain decline — the
+        // validation probe (compound_stdin_open_failure) owns its
+        // diagnostic. The FileFd carries the joined path as its
+        // name, like the plain arm below.
+        #[cfg(unix)]
+        if !target.is_empty() {
+            let fs_operand = self.redirect_target_filesystem_path(&target);
+            if fs_operand.is_relative() {
+                if let Some(stat_result) = self.fstatat_via_cwd_anchor(&fs_operand) {
+                    let is_stream = stat_result.is_ok_and(|stat| {
+                        // Widened through u32: st_mode and the S_IF*
+                        // constants disagree in width across libc
+                        // targets (bionic/darwin).
+                        let kind = u32::from(stat.st_mode) & u32::from(libc::S_IFMT);
+                        kind == u32::from(libc::S_IFREG)
+                            || kind == u32::from(libc::S_IFDIR)
+                            || kind == u32::from(libc::S_IFIFO)
+                            || kind == u32::from(libc::S_IFCHR)
+                            || kind == u32::from(libc::S_IFBLK)
+                    });
+                    if !is_stream {
+                        return None;
+                    }
+                    return self
+                        .open_via_cwd_anchor(&fs_operand, libc::O_RDONLY, 0)
+                        .and_then(|result| result.ok())
+                        .map(|file| FileFd::from_file(file, path));
+                }
+            }
+        }
         if !std::fs::metadata(&path)
             .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)
@@ -2860,7 +2996,18 @@ impl Executor {
         // bind) needs, and blocks until a writer appears in its own
         // right. An existing FIFO validates through access(2) instead
         // (probe_input_redirect_gate), with the same errno surface.
-        let probe_error = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+        // rubash#3268: from a deleted cwd the joined spelling is dead
+        // by construction — when the cwd anchor applies, its verdict
+        // replaces every joined-path probe below (see
+        // Executor::anchored_redirect_probe); the empty-target arm
+        // above already returned, so the anchor's empty-word guard is
+        // never what decides here.
+        let probe_error = if let Some(verdict) = self.anchored_redirect_probe(
+            &target,
+            redirect.kind == crate::parser::RedirectKind::ReadWrite,
+        ) {
+            verdict.err()
+        } else if redirect.kind == crate::parser::RedirectKind::ReadWrite {
             OpenOptions::new()
                 .read(true)
                 .write(true)

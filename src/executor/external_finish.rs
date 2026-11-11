@@ -152,7 +152,15 @@ impl Executor {
         stderr: &[u8],
         status: i32,
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output(cmd, &[], stderr)?;
+        // rubash#3222: the staged diagnostic accompanies an outcome the
+        // caller has already decided; it is never part of the result.
+        // GNU assigns the exit status before printing (execute_cmd.c:6145
+        // shell_execve) and internal_error never observes the fprintf
+        // outcome (error.c:207-218), so a failed diagnostic write (ENOSPC
+        // on /dev/full, a closed descriptor) must not displace `status`:
+        // attempt the write, drop its result, and always record the
+        // status the caller decided.
+        let _ = self.write_buffered_builtin_output(cmd, &[], stderr);
         self.exit_code = status;
         Ok(())
     }
@@ -578,7 +586,7 @@ impl Executor {
             // readonly, UID/EUID/PPID, SHELLOPTS/BASHOPTS replay, SHLVL+1,
             // IFS default). Without this the in-process child fell back to
             // indexed-array handling for ${!BASH_CMDS[@]} (assoc audit C1).
-            Self::initialize_fresh_shell_env_vars(
+            let child_logical_cwd = Self::initialize_fresh_shell_env_vars(
                 &mut child_env,
                 &self.shell_state.cwd.clone(),
                 // An exec'd shell image is a genuinely new shell:
@@ -595,6 +603,10 @@ impl Executor {
             // getppid() == the parent shell's getpid()).
             child_env.insert("PPID".to_string(), self.shell_pid.to_string());
             self.shell_state.env_vars = child_env;
+            // variables.c:907 set_pwd: the fresh child's logical cwd
+            // is the adoption the initializer just performed against
+            // its inherited $PWD (rubash#2799).
+            self.shell_state.logical_cwd = Some(child_logical_cwd);
             self.shell_state.variables =
                 crate::shell::VariableStore::from_environment(&self.shell_state.env_vars);
             // GNU variables.c:511-526 (initialize_shell_variables): a fresh
@@ -674,6 +686,7 @@ impl Executor {
         let saved_pipestatus = self.shell_state.pipestatus.clone();
         let saved_positional_params = self.shell_state.positional_window_cloned();
         let saved_bash_source_stack = self.shell_state.bash_source_stack.clone();
+        let saved_bash_source_seed = self.shell_state.bash_source_seed.clone();
         let saved_bash_lineno_stack = self.shell_state.bash_lineno_stack.clone();
         let saved_bash_argc_stack = self.shell_state.bash_argc_stack.clone();
         let saved_bash_argv_stack = self.shell_state.bash_argv_stack.clone();
@@ -1252,6 +1265,7 @@ impl Executor {
         self.tempenv_promoted_names = saved_tempenv_promoted;
         self.tempenv_previous = saved_tempenv_previous;
         self.shell_state.bash_source_stack = saved_bash_source_stack;
+        self.shell_state.bash_source_seed = saved_bash_source_seed;
         self.shell_state.bash_lineno_stack = saved_bash_lineno_stack;
         self.shell_state.bash_argc_stack = saved_bash_argc_stack;
         self.shell_state.bash_argv_stack = saved_bash_argv_stack;

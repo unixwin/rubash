@@ -671,9 +671,11 @@ impl Executor {
             }
         }
         let mut sink: Vec<u8> = Vec::new();
+        let mut out_sink: Vec<u8> = Vec::new();
         let _ = crate::builtins::set::unset_with_stderr(
             [name].into_iter(),
             &mut self.shell_state.env_vars,
+            &mut out_sink,
             &mut sink,
         );
         self.shell_state.variables.remove(name);
@@ -732,16 +734,37 @@ impl Executor {
         let arg = path.to_string_lossy().into_owned();
         let mut stdout: Vec<u8> = Vec::new();
         let mut stderr: Vec<u8> = Vec::new();
+        // rubash#3268: same anchor loan as execute_cd (the resolver
+        // only ever answers for a relative operand; this funnel's
+        // argument is absolute, so the loan is inert here today and
+        // keeps the two cd entries on one contract).
+        let anchor_cwd = self.shell_state.cwd.clone();
+        let anchor_cell = &self.shell_state.cwd_anchor;
+        let anchor_resolver = |operand: &std::path::Path| {
+            #[cfg(unix)]
+            {
+                super::external_inner::cd_target_via_cwd_anchor(anchor_cell, &anchor_cwd, operand)
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (operand, anchor_cell, &anchor_cwd);
+                None
+            }
+        };
         let status = crate::builtins::cd::execute_with_io(
             [arg.as_str()].into_iter(),
             &mut self.shell_state.env_vars,
             &mut self.shell_state.cwd,
+            Some(&anchor_resolver),
+            &mut self.shell_state.logical_cwd,
             &mut stdout,
             &mut stderr,
         );
         match status {
             Ok(0) => {
                 self.sync_cd_variables();
+                // rubash#3198: see execute_cd's anchor warm-up.
+                self.refresh_cwd_anchor();
                 true
             }
             _ => false,

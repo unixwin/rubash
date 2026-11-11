@@ -130,6 +130,90 @@ fn set_args_may_set_onecmd(args: &str) -> bool {
     false
 }
 
+/// rubash#2773: over-admitting routing scan in the
+/// `script_may_set_onecmd` shape — the text may toggle `verbose`
+/// mid-read (`set -v`/`set +v`, a bundled `-…v…`/`+…v…`,
+/// `set -o/+o verbose`), or it may run a `.`/`source`/`eval` unit
+/// whose body toggles it where a text scan cannot see. GNU's reader
+/// echoes each input line at its read moment under the flag state
+/// THEN in effect (flags.c:284 echo_input_at_read = verbose_flag;
+/// parse.y:2712), so such texts take the grouped reader, whose
+/// per-line read point samples the live state; the whole-file fast
+/// path parses every line before any of them executes and cannot
+/// reproduce a mid-text toggle. A false positive only costs the
+/// incremental driver; the scan never decides semantics itself.
+pub fn script_may_toggle_verbose(contents: &str) -> bool {
+    contents.lines().any(line_may_toggle_verbose)
+}
+
+fn line_may_toggle_verbose(line: &str) -> bool {
+    // `set -o verbose` and `set -overbose` both carry the option
+    // name verbatim; so does a comment or string mentioning it —
+    // the scan only routes, so the substring is enough.
+    if line.contains("verbose") {
+        return true;
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let boundary = i == 0
+            || matches!(
+                bytes[i - 1],
+                b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b'{'
+            );
+        if boundary {
+            // A `.` in command position sources a file whose body
+            // can toggle the flag invisibly to this scan.
+            if bytes[i] == b'.' && dot_is_command_position(bytes, i) {
+                return true;
+            }
+            for word in ["set", "eval", "source"] {
+                let w = word.as_bytes();
+                if bytes.len() - i >= w.len()
+                    && &bytes[i..i + w.len()] == w
+                    && (i + w.len() == bytes.len()
+                        || matches!(bytes[i + w.len()], b' ' | b'\t' | b';' | b'&' | b'|'))
+                {
+                    // An eval/source body can toggle the flag where
+                    // the scan cannot see it; the reader's per-line
+                    // sampling after their unit is what GNU
+                    // adjudicates.
+                    if word != "set" {
+                        return true;
+                    }
+                    if set_args_may_toggle_verbose(&line[i + w.len()..]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn set_args_may_toggle_verbose(args: &str) -> bool {
+    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
+        if token.len() >= 2
+            && (token.starts_with('-') || token.starts_with('+'))
+            && !token.starts_with("--")
+            && !token.starts_with("++")
+        {
+            // A flag bundle carrying `v` in any position counts:
+            // GNU's set parser works the bundle letter by letter,
+            // and an `o` whose remainder is not an option name does
+            // not swallow the rest (verified against GNU bash
+            // 5.3.20: `set -ov` prints the option table AND sets
+            // verbose, `$-` = hvBc). A false positive (the `-ovi`
+            // name form) only costs the incremental driver.
+            if token[1..].contains('v') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn line_enables_history(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut i = 0usize;
@@ -397,6 +481,16 @@ pub struct GroupedRunClassification {
     /// DISCARD arm); it does not by itself decide the session —
     /// the errexit verdict on the interrupted status does.
     pub signal_discard: bool,
+    /// rubash#2794: the terminal group ended in an
+    /// expansion-error discard — a FATAL-class word-expansion
+    /// error (`${var:?}`, nounset unbound, bad @-transform) the
+    /// executor adjudicated an interactive DISCARD at its raise
+    /// point (subst.c:10416-10418's error branch) instead of
+    /// the fatal FORCE_EOF branch. Recorded per group like
+    /// `signal_discard`; like it, the discard abandons the
+    /// rest of the line without deciding the session — the
+    /// errexit verdict on status 1 does.
+    pub expansion_error_discard: bool,
 }
 
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
@@ -565,6 +659,9 @@ fn run_script_grouped_at_line_offset(
     // the run (a terminal discard group stops nothing, but the
     // classification must still report it).
     let mut terminal_discard = false;
+    // rubash#2794: the same carry for the expansion-error
+    // discard fact.
+    let mut terminal_expansion_discard = false;
     while index < raw_lines.len() {
         // One gather implementation for every grouped reader (the `source`
         // builtin shares it via read_next_source_group). The gather loop
@@ -597,6 +694,7 @@ fn run_script_grouped_at_line_offset(
                 // as the terminal one (Q6 arm B approximation
                 // (iii), resolved).
                 terminal_discard = false;
+                terminal_expansion_discard = false;
                 continue;
             }
             failglob_discard_until = None;
@@ -674,6 +772,10 @@ fn run_script_grouped_at_line_offset(
         // below is exactly what separates the two.
         let discarded = executor.take_unit_signal_discard();
         terminal_discard = discarded;
+        // rubash#2794: the same per-group take for the
+        // expansion-error discard record the raise points noted.
+        let expansion_discarded = executor.take_unit_expansion_error_discard();
+        terminal_expansion_discard = expansion_discarded;
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
@@ -700,6 +802,7 @@ fn run_script_grouped_at_line_offset(
                     None
                 },
                 signal_discard: discarded,
+                expansion_error_discard: expansion_discarded,
             };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
@@ -790,6 +893,7 @@ fn run_script_grouped_at_line_offset(
         GroupedRunClassification {
             last_inverted: executor.last_command_inverted(),
             signal_discard: terminal_discard,
+            expansion_error_discard: terminal_expansion_discard,
             ..GroupedRunClassification::default()
         },
     )
@@ -1019,6 +1123,43 @@ impl ParkShadow {
 /// The trailing line-break separator the feeder emits per committed
 /// logical line is left in place; the caller pops it with the same rule
 /// `tokenize_comsub_body_with_origin` applies to the fresh stream.
+
+/// GNU `set -v` (verbose): echo input lines to stderr as they are
+/// READ, never at execution time (flags.c:284
+/// `echo_input_at_read = verbose_flag`; parse.y:2712 prints
+/// `shell_input_line` with `fprintf (stderr, "%s\n", ...)`). Every
+/// read point routes here: the grouped reader's per-line consumption
+/// ([`read_next_source_group`] — script files, `-c` strings and host
+/// submissions on the grouped route, plus the `source` builtin's
+/// groups), the stdin script reader's per-line read
+/// ([`run_stdin_script`]), and the whole-string read units whose
+/// callers hand over their full text at its single read boundary (the
+/// `-c` and Session whole-source routes — reached only when
+/// [`script_may_toggle_verbose`] shows no mid-text toggle, so the
+/// entry state is the state at every line's read — and
+/// parse_and_execute strings via `execute_eval_source`). The verbose
+/// state is sampled at the read
+/// moment: a `set -v` line is not itself echoed (the flag was off when
+/// it was read) and a `set +v` line still is (it was on) — execution
+/// never echoes (rubash#2773).
+pub fn echo_verbose_input_lines(executor: &Executor, text: &str) {
+    if !crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "verbose") {
+        return;
+    }
+    use std::io::Write as _;
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    // A blank input line is a line too (GNU echoes it as an empty
+    // line); split_inclusive yields nothing for an empty text.
+    if text.is_empty() {
+        let _ = writeln!(lock);
+        return;
+    }
+    for line in text.split_inclusive('\n') {
+        let _ = writeln!(lock, "{}", line.trim_end_matches('\n'));
+    }
+}
+
 pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
@@ -1097,6 +1238,8 @@ pub(crate) fn read_next_source_group(
     // holds because the streaming expander only ever appends committed
     // output (it never revises text it already released).
     let mut text_scans = GroupTextScans::new(posix);
+    text_scans.extglob_seed =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
     // perf21 battery fusion: heredoc-body lines live in the pending mirror
     // but not in the feeder's logical-line mirror, so a group that saw any
     // must keep advancing the battery's quotes/comsub machines itself.
@@ -1105,6 +1248,16 @@ pub(crate) fn read_next_source_group(
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
         *index += 1;
+        // rubash#2773: this consumption point IS the read — GNU's
+        // reader echoes the physical line here when verbose is on
+        // (flags.c:284; parse.y:2712). Nothing executes mid-gather, so
+        // the flag sampled now is exactly the state in effect when the
+        // line is read; the previous group's `set -v`/`set +v` has
+        // already landed, this group's own toggles land for the NEXT
+        // group. Heredoc body and delimiter lines pass through this
+        // same point and echo too (make_cmd.c:584 read_secondary_line
+        // echoes secondary lines as they are read).
+        echo_verbose_input_lines(executor, text);
         let mut is_body = false;
         // perf21: with the alias table inert, expand_group_aliases is the
         // identity — skip its per-line String copy and scan the raw text
@@ -1659,6 +1812,11 @@ struct GroupTextScans {
     /// Exact char mirror of the accumulated `pending` group text.
     chars: Vec<char>,
     posix: bool,
+    /// rubash#3229: the reader's executed `extended_glob` state when
+    /// this gather started; seeds the extglob-group arm of
+    /// `needs_more` (whose in-text `shopt` mirror cannot see `shopt`
+    /// lines that were earlier, already-executed groups).
+    extglob_seed: bool,
     quotes: Option<ScanCheckpoint<crate::lexer::QuotesResidualState>>,
     comsub: Option<ScanCheckpoint<crate::lexer::ComsubResidualState>>,
     balanced: Option<ScanCheckpoint<crate::lexer::BalancedResidualState>>,
@@ -1673,6 +1831,7 @@ impl GroupTextScans {
         Self {
             chars: Vec::new(),
             posix,
+            extglob_seed: false,
             quotes: Some(ScanCheckpoint {
                 resume: 0,
                 snapshot: crate::lexer::QuotesResidualState::default(),
@@ -1749,6 +1908,15 @@ impl GroupTextScans {
             return true;
         }
         if self.advance_close_char() {
+            return true;
+        }
+        // rubash#3229: an unclosed extglob pattern group
+        // (parse.y:5466-5489) — word-internal, so no parked machine
+        // above can see it (the word tokenizer folds the group into
+        // the word). A fresh probe over the pending text instead; the
+        // scan's operator-byte fast reject keeps it at memchr speed
+        // for the groups that carry no group opener.
+        if crate::lexer::unclosed_extglob_group_line(pending, self.extglob_seed).is_some() {
             return true;
         }
         // parse.y:5379-5384: trailing unquoted backslash keeps the line
@@ -2632,6 +2800,13 @@ fn token_walk_verdict(source: &str) -> TokenWalkVerdict {
 /// stack and trailing-connector answer across appended lines.
 pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
     if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
+        return true;
+    }
+    // rubash#3229: an unclosed extglob pattern group keeps the reader
+    // open (parse.y:5466-5489). Seeded closed here — `shopt` lines
+    // inside the text itself open the scan's mirror; the parked
+    // gather (GroupTextScans) seeds it with the executed state.
+    if crate::lexer::unclosed_extglob_group_line(source, false).is_some() {
         return true;
     }
     // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
@@ -4135,6 +4310,7 @@ fn run_source_impl_inner_body(
                     Some(open_line + line_offset),
                 );
             }
+            executor.set_last_exit_code(2);
             return 2;
         }
     }
@@ -4162,12 +4338,29 @@ fn run_source_impl_inner_body(
     // instead of failing and the parser is NOT the authority. The
     // verification only pays on inputs the scanner flagged (and never on
     // heredoc inputs, which the gate already excludes).
-    if pre_lexed.is_none()
+    // rubash#3229: an unclosed extglob pattern group is a
+    // read_token_word matched-pair EOF (parse.y:5466-5489 ->
+    // parse.y:3901-3912) that no existing gate arm can see — the `(`
+    // is word-internal, so the close-char scan opens no frame for it,
+    // and the tokenizer folds the group into the word silently (a
+    // pre-lexed group therefore skips the gate below on the perf19
+    // certification even though its text was never pair-scanned). The
+    // dedicated scan is seeded with the EXECUTED gate state: in a
+    // grouped run the `shopt` line is an earlier group, so the group
+    // text alone cannot show the gate live.
+    let extglob_live =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
+    let extglob_eof_line = if interactive {
+        None
+    } else {
+        crate::lexer::unclosed_extglob_group_line(input, extglob_live)
+    };
+    let unclosed_route = pre_lexed.is_none()
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix)
-    {
+        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+    if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
         // `unexpected EOF while looking for matching `]'' at the line the
@@ -4179,7 +4372,7 @@ fn run_source_impl_inner_body(
         // closer char and report line are the QUOTE's (`a["x]=15` reports
         // `"' at the `"` line, not `]' at the `[` line).
         if let Some((open_line, closer, construct_line, inside_compassign)) =
-            crate::lexer::unclosed_array_subscript_eof(input)
+            crate::lexer::unclosed_array_subscript_eof_seeded(input, extglob_live)
         {
             let source = input.trim_end_matches('\n');
             // The prefix of COMPLETE commands stops at the `[` construct's
@@ -4223,9 +4416,12 @@ fn run_source_impl_inner_body(
             // error.c:324-327 forces exit status 2 whenever errexit is live
             // at the parser_error (rubash#306).
             if inside_compassign && executor.errexit_live_at_diagnostic() {
+                executor.set_last_exit_code(2);
                 return 2;
             }
-            return if inside_compassign { 1 } else { 2 };
+            let status = if inside_compassign { 1 } else { 2 };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
         // parse_matched_pair grouping scan opened by read_token_word's
@@ -4279,6 +4475,65 @@ fn run_source_impl_inner_body(
                 );
             }
             executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
+            return 2;
+        }
+        // rubash#3229: an unclosed extglob pattern group — GNU
+        // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
+        // reaches EOF and reports the pair's closer at the line the
+        // group opened (parse.y:3901-3912) with exit status 2. The
+        // word read bails, so nothing on the group's line runs, while
+        // complete commands before it already executed (the prefix
+        // model every arm of this route follows).
+        if let Some(open_line) = extglob_eof_line {
+            let source = input.trim_end_matches('\n');
+            let prefix = if open_line > 1 {
+                source
+                    .lines()
+                    .take(open_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            // Same #1589 retreat as the close-char section below: when
+            // the group's line sits inside a keyword compound that is
+            // itself unclosed at EOF (`case ab in` above the pattern
+            // line), GNU's reader died inside the compound — none of
+            // it ran — so the prefix must retreat to the compound's
+            // opening line instead of running the header standalone
+            // (which would print the compound's own EOF diagnostic
+            // ahead of the group's).
+            let prefix = match unclosed_compound_open_line(&prefix) {
+                Some(open) if open > 1 => {
+                    prefix.lines().take(open - 1).collect::<Vec<_>>().join("\n")
+                }
+                Some(_) => String::new(),
+                None => prefix,
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_prefix_diagnostic_owned(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            unclosed_report!(
+                "{}unexpected EOF while looking for matching `)'",
+                executor.parser_error_prefix_for_line(open_line + line_offset)
+            );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    "unexpected EOF while looking for matching `)'".to_string(),
+                    Some(open_line + line_offset),
+                );
+            }
+            executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
             return 2;
         }
         // GNU's incremental reader executes complete input lines before the
@@ -4387,6 +4642,7 @@ fn run_source_impl_inner_body(
                             unclosed_report!("{prefix}`{offending}'");
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // rubash#390 q1: a `((` at command position is NOT a
@@ -4421,6 +4677,7 @@ fn run_source_impl_inner_body(
                             );
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // Class B: the group closed but the next char was not
@@ -4443,8 +4700,10 @@ fn run_source_impl_inner_body(
                             );
                         }
                         if executor.errexit_live_at_diagnostic() {
+                            executor.set_last_exit_code(2);
                             return 2;
                         }
+                        executor.set_last_exit_code(1);
                         return 1;
                     }
                     unclosed_report!(
@@ -4476,9 +4735,11 @@ fn run_source_impl_inner_body(
                 // but error.c:324-327 forces exit status 2 whenever
                 // errexit is live at the parser_error (rubash#306).
                 if array_list && executor.errexit_live_at_diagnostic() {
+                    executor.set_last_exit_code(2);
                     return 2;
                 }
                 if array_list {
+                    executor.set_last_exit_code(1);
                     return 1;
                 }
             }
@@ -4492,6 +4753,7 @@ fn run_source_impl_inner_body(
                 }
             }
         }
+        executor.set_last_exit_code(2);
         return 2;
     }
 
@@ -4566,6 +4828,22 @@ fn run_source_impl_inner_body(
             parse_posix,
             line,
         );
+    }
+    // rubash#2789: GNU validates substitution bodies when the
+    // enclosing command is READ (parse.y:4451 parse_comsub), so a
+    // body grammar failure is this unit's first read error and kills
+    // it before anything executes — see
+    // Executor::screen_comsub_bodies_at_read. It runs ahead of the
+    // unit voiding below for the same reason (a top-level marker
+    // later in the unit is an error GNU's reader never reaches).
+    // Interactive readers keep their own per-line error reporting
+    // and discard shape; diagnostic-owned prefix runs
+    // (suppress_unclosed_diagnostic) keep their caller's single
+    // report and unchanged behavior.
+    if !interactive && !suppress_unclosed_diagnostic {
+        if let Some(status) = executor.screen_comsub_bodies_at_read(&ast.commands) {
+            return status;
+        }
     }
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
@@ -4969,8 +5247,14 @@ pub fn initialize_interactive_history(executor: &mut Executor) {
         executor.set_shell_option("history", true);
     }
     // shell.c init_interactive: interactive shells also default histexpand
-    // (set -H) on, so !!/!str expand on each accepted line.
-    executor.set_shell_option("histexpand", true);
+    // (set -H) on, so !!/!str expand on each accepted line. This site runs
+    // AFTER the startup files, so the default must be set-if-unset: an
+    // explicit `+H` at invocation or a startup file's `set +H` has already
+    // written the carrier and is the user's word (rubash#2733 — the
+    // unconditional set re-armed H over both).
+    if executor.get_env("__RUBASH_SETOPT_histexpand").is_none() {
+        executor.set_shell_option("histexpand", true);
+    }
     // The HISTFILE default is NOT this site's business. GNU defaults
     // HISTFILE once, at shell_initialize (shell.c:580) — variables.c:654-661
     // `if (remember_on_history) { name = bash_default_histfile();
@@ -5146,6 +5430,28 @@ fn controlling_terminal_available() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stderr())
 }
 
+/// The process-group number GNU's job-control diagnostics print:
+/// jobs.c:4737 `shell_pgrp = getpgid (0)` at initialize_job_control
+/// entry, reported verbatim by jobs.c:4844/4853
+/// `cannot set terminal process group (%d)`. It is the group the
+/// shell BELONGS to, not the shell's pid — the two coincide only for
+/// a session leader, and GNU's number is the group in every other
+/// shape (verified against GNU bash 5.3.20 with pid != pgid: the
+/// diagnostic names the inherited group). Non-unix targets have no
+/// process groups; the pid is the honest stand-in there (the same
+/// port the establishment's non-unix arm makes).
+#[cfg(unix)]
+pub fn shell_process_group_id() -> i32 {
+    // SAFETY: getpgrp takes no arguments and always succeeds.
+    unsafe { libc::getpgrp() }
+}
+
+/// Non-unix form of [`shell_process_group_id`].
+#[cfg(not(unix))]
+pub fn shell_process_group_id() -> i32 {
+    std::process::id() as i32
+}
+
 /// GNU shell.c:1969 -> jobs.c:4731-4869 initialize_job_control, the
 /// interactive establishment: jobs.c:4869 ends with
 /// `change_flag ('m', job_control ? '-' : '+')` — the monitor letter
@@ -5153,8 +5459,8 @@ fn controlling_terminal_available() -> bool {
 /// survive a terminal that cannot be taken (GNU `-i -m -c`, no tty:
 /// the two diagnostics + `hiBHc`), and an explicit `+m` does not
 /// suppress it when the terminal can be taken (GNU `+m -i -c` under
-/// a PTY: `himBHc`). Establishment failure prints jobs.c:4841
-/// "cannot set terminal process group (%d)" and jobs.c:4856
+/// a PTY: `himBHc`). Establishment failure prints jobs.c:4844
+/// "cannot set terminal process group (%d)" and jobs.c:4858
 /// "no job control in this shell".
 ///
 /// This is the engine's single establishment funnel (rubash#2948):
@@ -5178,7 +5484,7 @@ pub fn establish_interactive_job_control(executor: &mut Executor) {
             .unwrap_or("bash");
         eprintln!(
             "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
-            std::process::id()
+            shell_process_group_id()
         );
         eprintln!("{shell_name}: no job control in this shell");
     }
@@ -7385,6 +7691,14 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
                 break;
             }
         }
+
+        // rubash#2773: this read IS the line's read moment — GNU's
+        // reader echoes it here when verbose is on (flags.c:284
+        // echo_input_at_read = verbose_flag; parse.y:2712). The
+        // previous unit has already executed, so the sampled state
+        // is the live one; heredoc body lines pass through this same
+        // read and echo too (make_cmd.c:584).
+        echo_verbose_input_lines(executor, &input);
 
         if pending.is_empty() {
             pending_start_line = next_line;
