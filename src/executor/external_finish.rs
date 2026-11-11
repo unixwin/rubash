@@ -152,7 +152,15 @@ impl Executor {
         stderr: &[u8],
         status: i32,
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output(cmd, &[], stderr)?;
+        // rubash#3222: the staged diagnostic accompanies an outcome the
+        // caller has already decided; it is never part of the result.
+        // GNU assigns the exit status before printing (execute_cmd.c:6145
+        // shell_execve) and internal_error never observes the fprintf
+        // outcome (error.c:207-218), so a failed diagnostic write (ENOSPC
+        // on /dev/full, a closed descriptor) must not displace `status`:
+        // attempt the write, drop its result, and always record the
+        // status the caller decided.
+        let _ = self.write_buffered_builtin_output(cmd, &[], stderr);
         self.exit_code = status;
         Ok(())
     }
@@ -192,10 +200,16 @@ impl Executor {
             return Ok(false);
         };
         // GNU execute_cmd.c:6139 shell_execve decides same-shell by path
-        // equivalence, not by the command text naming THIS_SH — after
-        // expansion `${THIS_SH}` resolves to the same path, while a literal
-        // `THIS_SHxx` word must not match.
-        let expanded_command_name = self.expand_word(command_name);
+        // equivalence, not by the command text naming THIS_SH — the word
+        // arrives here already expanded by command materialization, so
+        // `${THIS_SH}` has resolved to the same path, while a literal
+        // `THIS_SHxx` word must not match. The materialized text is used
+        // verbatim: GNU expands a command word exactly once, and running
+        // the expansion engine over the result a second time would walk
+        // expansion DATA that merely looks like syntax (e.g. a trailing
+        // literal `${` produced by $'...' or by plain quoting) as a live
+        // fragment and print a spurious `bad substitution` (rubash#3030).
+        let expanded_command_name = command_name.clone();
         let expanded_is_this_shell =
             self.shell_state
                 .env_vars
@@ -271,7 +285,10 @@ impl Executor {
         let Some(script) = cmd.words.get(1) else {
             return Ok(false);
         };
-        let script = self.expand_word(script);
+        // Materialized like the command word above: already expanded
+        // once by the dispatch chain; a second expansion pass over the
+        // result is not GNU's model (rubash#3030).
+        let script = script.clone();
         let script_path = shell_path_to_windows(&script, &self.shell_state.env_vars);
         if !script_path.is_file() {
             return Ok(false);
@@ -341,7 +358,11 @@ impl Executor {
         // $0 keeps the invoked spelling (`./trap2.sub`), like
         // shell.c:720 dollar_vars[0] = shell_script_filename.
         let command_name = cmd.words.first()?;
-        let script = self.expand_word(command_name);
+        // The word arrives materialized (already expanded once by the
+        // dispatch chain); shell_execve's ENOEXEC tail classifies that
+        // exact text. Re-expanding it would treat expansion data as
+        // syntax and print a spurious `bad substitution` (rubash#3030).
+        let script = command_name.clone();
         // rubash#2302: for a slash-less word the invoked spelling is
         // NOT what GNU's reader sees. execute_disk_command resolves
         // the word through find_user_command (findcmd.c:247;
@@ -661,6 +682,7 @@ impl Executor {
         let saved_pipestatus = self.shell_state.pipestatus.clone();
         let saved_positional_params = self.shell_state.positional_window_cloned();
         let saved_bash_source_stack = self.shell_state.bash_source_stack.clone();
+        let saved_bash_source_seed = self.shell_state.bash_source_seed.clone();
         let saved_bash_lineno_stack = self.shell_state.bash_lineno_stack.clone();
         let saved_bash_argc_stack = self.shell_state.bash_argc_stack.clone();
         let saved_bash_argv_stack = self.shell_state.bash_argv_stack.clone();
@@ -1165,9 +1187,16 @@ impl Executor {
             // this same process, and a `umask` inside it must die at
             // this process boundary like GNU's exec'd child.
             let fork_saved_process_umask = saved_shell_state.fork_saved_process_umask;
+            // rubash#2636: the same bypass applies to the rlimit
+            // half — a `ulimit` inside the child script re-limited
+            // this process and must die at this boundary too.
+            let fork_saved_process_rlimits = saved_shell_state.fork_saved_process_rlimits.clone();
             self.shell_state = saved_shell_state;
             if let Some(mask) = fork_saved_process_umask {
                 crate::builtins::umask::apply_process_umask(mask);
+            }
+            if let Some(rlimits) = &fork_saved_process_rlimits {
+                crate::builtins::ulimit::apply_process_rlimits(rlimits);
             }
         }
         self.shell_state.coproc_names = saved_coproc_names;
@@ -1232,6 +1261,7 @@ impl Executor {
         self.tempenv_promoted_names = saved_tempenv_promoted;
         self.tempenv_previous = saved_tempenv_previous;
         self.shell_state.bash_source_stack = saved_bash_source_stack;
+        self.shell_state.bash_source_seed = saved_bash_source_seed;
         self.shell_state.bash_lineno_stack = saved_bash_lineno_stack;
         self.shell_state.bash_argc_stack = saved_bash_argc_stack;
         self.shell_state.bash_argv_stack = saved_bash_argv_stack;

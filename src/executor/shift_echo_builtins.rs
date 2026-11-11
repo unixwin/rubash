@@ -341,7 +341,7 @@ impl Executor {
                 return Ok(());
             }
             let mut file = open_redirect_append(
-                &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                &self.session_path(self.redirect_target_filesystem_path(&target)),
             )?;
             // rubash#1496: sh_chkwrite arm, as in the truncate path above.
             if let Err(error) = crate::builtins::echo::write_echo_decoded(

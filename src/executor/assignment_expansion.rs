@@ -904,13 +904,23 @@ impl Executor {
         // produced BY a parameter is likewise never re-expanded). Apply
         // the pass up front here and suppress the post-expansion pass at
         // the bottom of this function, which operated on expanded text.
+        //
+        // rubash#2651: GNU performs that pass INSIDE the one walk and
+        // joins the result as a quoted string (subst.c:11862
+        // add_quoted_string), so the resolved text is data for the rest
+        // of the walk. This port rewrites the string up front and walks
+        // the result, so the rewrite must carry the same protection:
+        // expand_assignment_tilde_protected carrier-encodes each
+        // resolved prefix, and only the raw tails stay live. Without it
+        // a `$x` inside $HOME was expanded a second time — in every
+        // mode, not only the POSIX/eval shape the report filed.
         let tilde_first = !quoted
             && !compound_assignment
             && !value.contains('=')
             && tilde_expand::assignment_value_needs_tilde_expansion(value, true);
         let tilde_resolved;
         let value = if tilde_first {
-            tilde_resolved = self.expand_assignment_tilde(value);
+            tilde_resolved = self.expand_assignment_tilde_protected(value);
             &tilde_resolved
         } else {
             value
@@ -1546,12 +1556,20 @@ impl Executor {
     }
 
     fn expand_fast_assignment_value(&mut self, value: &str) -> Option<String> {
-        if let Some(expression) = value
-            .strip_prefix("$((")
-            .and_then(|rest| rest.strip_suffix("))"))
-            .filter(|expression| !expression.contains("${"))
+        // rubash#2715: admission is the same whole-word verdict the
+        // sibling arms use (parameter_core / expand_word) — the naive
+        // prefix+suffix strip paired the first `$((` with the LAST
+        // `))`, and on eval failure the old code returned None, so
+        // the slower expanders re-processed the text and stored the
+        // spliced expression literally (`y=$(( ; echo 1))`). GNU's
+        // classification (subst.c:10842-10862 chk_arithsub) precedes
+        // expansion; once admitted as arithmetic, an evalexp failure
+        // is final (expand_wdesc_error), never a fall-through.
+        if let Some(expression) =
+            crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(value)
+                .filter(|expression| !expression.contains("${"))
         {
-            let Some(value) = self.eval_arithmetic_command_value(expression) else {
+            let Some(value) = self.eval_arithmetic_command_value_unlabeled(expression) else {
                 // GNU expr.c raises evalerror from the actual evaluation, so
                 // the recorded real-environment category decides fatality.
                 // A fresh-environment re-evaluation would lose state-dependent
@@ -1578,7 +1596,36 @@ impl Executor {
                     // `b: command not found` (issue #67).
                     return Some(String::new());
                 }
-                return None;
+                if actual_fatal
+                    || crate::executor::arithmetic::arithmetic_expansion_is_fatal(expression)
+                {
+                    self.shell_state.arithmetic_fatal_error.set(true);
+                }
+                if !self.shell_state.arithmetic_expansion_error.replace(true) {
+                    // GNU evalexp reports against the post-expansion
+                    // string (expand_arith_string ran first); the
+                    // captured eval input is that spliced text.
+                    let eval_input = self.arithmetic_last_eval_input.borrow().clone();
+                    let display = if eval_input.is_empty() {
+                        expression
+                    } else {
+                        eval_input.as_str()
+                    };
+                    let message = crate::executor::arithmetic::arithmetic_error_message(
+                        display,
+                        true,
+                        &self.shell_state.env_vars,
+                    )
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{display}: arithmetic syntax error in expression (error token is \"{display}\")"
+                        )
+                    });
+                    self.write_diagnostic_fd2(
+                        format!("{}{}\n", self.error_prefix(), message).as_bytes(),
+                    );
+                }
+                return Some(String::new());
             };
             return Some(self.expand_assignment_tilde_if_needed(value.to_string()));
         }

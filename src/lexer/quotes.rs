@@ -1473,6 +1473,472 @@ pub(crate) fn copy_braced_parameter_after_dollar_cursor<'a>(
     copy_braced_parameter_inner_cursor(out, rest, true, posix)
 }
 
+thread_local! {
+    /// Read-time extquote pin for word re-derivation (rubash#2772).
+    ///
+    /// GNU evaluates the `$'...'` translation verdict when a line is READ
+    /// (parse.y:4053 parse_matched_pair consults `extended_quote` at that
+    /// moment): inside a `${...}` body in a double-quoted word, a span in
+    /// a WORD region (default / alternate / assignment / error word) is
+    /// translated only when extquote held at read time; with extquote
+    /// off the span text stays literal. Rubash lexes upfront, so the
+    /// executor records the per-line read-time extquote state and
+    /// re-derives affected words under this pin (the same shape as the
+    /// rubash#353 read-time locale pin); the braced-copy functions below
+    /// consult it when copying a double-quoted `${...}` body. Outside a
+    /// re-derivation there is no pin and copying is exactly as before.
+    static LEX_EXTQUOTE_PIN: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f` with the lex-time extquote pin set to `enabled`
+/// (see [`LEX_EXTQUOTE_PIN`]); the previous pin is restored on return.
+pub(crate) fn with_lex_extquote_pin<T>(enabled: bool, f: impl FnOnce() -> T) -> T {
+    let previous = LEX_EXTQUOTE_PIN.with(|slot| slot.replace(Some(enabled)));
+    let result = f();
+    LEX_EXTQUOTE_PIN.with(|slot| slot.set(previous));
+    result
+}
+
+/// The lex-time extquote verdict for the word being cooked: the pin when
+/// one is active, otherwise the standing default (extquote on — the
+/// state the upfront lex has always assumed).
+fn lex_extquote_enabled() -> bool {
+    LEX_EXTQUOTE_PIN.with(|slot| slot.get()).unwrap_or(true)
+}
+
+/// Carrier-encode one raw `$'...'` span (the full span text, quotes
+/// included) so the expansion stage emits it byte-for-byte as data:
+/// every byte that could act as syntax in a `${...}` body or in the
+/// operator-word expansion travels as its data carrier (the CTLESC
+/// port), the rest verbatim.
+fn encode_literal_ansi_c_span(span: &[char], out: &mut String) {
+    for &ch in span {
+        match ch {
+            '$' => out.push(DATA_DOLLAR),
+            '\'' => out.push(DATA_SQUOTE),
+            '"' => out.push(DATA_DQUOTE),
+            '`' => out.push(DATA_BACKTICK),
+            '\\' => out.push(crate::executor::markers::DATA_BACKSLASH),
+            '{' | '}' => {
+                out.push(CTLESC);
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// Consume a `$'...'` span starting at `chars[start] == '$'`, honoring
+/// backslash escapes; returns the index just past the closing quote.
+fn ansi_c_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 2;
+    let mut escaped = false;
+    while i < chars.len() {
+        let ch = chars[i];
+        i += 1;
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '\'' {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Consume a `'...'` span starting at `chars[start] == '\''`.
+fn single_quote_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        if chars[i] == '\'' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Consume a `$(...)` / `$((...))` unit starting at `chars[start] == '$'`
+/// (its body is a separate read unit at execution; never rewritten).
+fn paren_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    crate::lexer::skip_parenthesized_unit_corrected(chars, start + 1)
+}
+
+/// Consume a `` `...` `` unit starting at `chars[start] == '`'`.
+fn backtick_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '`' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Consume a `[...]` subscript starting at `chars[start] == '['`.
+fn subscript_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '\'' => i = single_quote_span_end(chars, i)?,
+            '"' => i = double_quote_span_end(chars, i)?,
+            '[' => {
+                depth += 1;
+                i += 1;
+            }
+            ']' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Consume a `"..."` span starting at `chars[start] == '"'` (units inside
+/// are skipped whole so a quote inside one cannot close the span early).
+fn double_quote_span_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '"' => return Some(i + 1),
+            '$' if chars.get(i + 1) == Some(&'(') => i = paren_unit_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                i = braced_unit_end(chars, i)?;
+            }
+            '`' => i = backtick_unit_end(chars, i)?,
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The index just past the `}` matching the `${` at `chars[start]`,
+/// skipping quoted spans and nested units as indivisible.
+fn braced_unit_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut i = start + 2;
+    let mut depth = 1usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '\'' => i = single_quote_span_end(chars, i)?,
+            '"' => i = double_quote_span_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'\'') => i = ansi_c_span_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'(') => i = paren_unit_end(chars, i)?,
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                depth += 1;
+                i += 2;
+            }
+            '`' => i = backtick_unit_end(chars, i)?,
+            '}' => {
+                depth -= 1;
+                i += 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BracedRegion {
+    /// Default / alternate / assignment / error word (DOLBRACE_WORD):
+    /// `$'...'` spans stay literal when extquote was off at read time.
+    Word,
+    /// Pattern / replacement / case-modification regions
+    /// (DOLBRACE_QUOTE / QUOTE2) and arithmetic regions: spans are
+    /// copied verbatim (translated regardless of extquote).
+    Verbatim,
+}
+
+/// Rewrite one `${...}` unit (starting at `chars[start] == '$'`) for a
+/// double-quoted word read while extquote was OFF: `$'...'` spans in
+/// WORD regions are carrier-encoded so expansion reproduces them
+/// literally; everything else — the name region, pattern and
+/// replacement regions, nested units' own regions — is classified and
+/// copied by the same walk, recursing into nested `${...}` units.
+/// Returns the rewritten text and the index just past the unit, or
+/// `None` when the unit is unbalanced or nothing needed rewriting.
+fn rewrite_braced_for_extquote_off(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let mut out = String::new();
+    out.push_str("${");
+    let mut changed = false;
+    let end = rewrite_braced_body(chars, start + 2, &mut out, &mut changed)?;
+    if !changed {
+        return None;
+    }
+    out.push('}');
+    Some((out, end))
+}
+
+/// Walk one `${...}` body from `start` (just past `${`) to its matching
+/// `}` (consumed, not emitted); returns the index just past it.
+fn rewrite_braced_body(
+    chars: &[char],
+    start: usize,
+    out: &mut String,
+    changed: &mut bool,
+) -> Option<usize> {
+    let mut i = start;
+    // Param region: prefixes (`!`, `#` length), the name (which may
+    // itself be a `$'...'` span or a nested expansion), and a subscript
+    // — copied verbatim up to the operator.
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '}' => return Some(i + 1),
+            '\\' => {
+                out.push(ch);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let end = ansi_c_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                let (text, end) = rewrite_braced_for_extquote_off(chars, i).unwrap_or_else(|| {
+                    let end = braced_unit_end(chars, i).unwrap_or(chars.len());
+                    (chars[i..end].iter().collect(), end)
+                });
+                out.push_str(&text);
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                let end = paren_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '`' => {
+                let end = backtick_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '\'' => {
+                let end = single_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '"' => {
+                let end = double_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '[' => {
+                let end = subscript_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            ':' if matches!(chars.get(i + 1), Some('-' | '=' | '+' | '?')) => {
+                out.push(':');
+                out.push(chars[i + 1]);
+                return rewrite_braced_region(chars, i + 2, out, changed, BracedRegion::Word);
+            }
+            '-' | '=' | '+' | '?' => {
+                out.push(ch);
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Word);
+            }
+            '#' | '%' | '/' | '^' | ',' => {
+                // Pattern-bearing operators (removal, patsub, case
+                // modification): the region decodes regardless.
+                out.push(ch);
+                if chars.get(i + 1) == Some(&ch) && ch != '/' {
+                    out.push(ch);
+                    i += 1;
+                }
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Verbatim);
+            }
+            ':' | '@' => {
+                // Substring offsets / transforms: no word region.
+                out.push(ch);
+                return rewrite_braced_region(chars, i + 1, out, changed, BracedRegion::Verbatim);
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Walk a post-operator region of one `${...}` body to its matching `}`
+/// (consumed, not emitted); returns the index just past it.
+fn rewrite_braced_region(
+    chars: &[char],
+    start: usize,
+    out: &mut String,
+    changed: &mut bool,
+    region: BracedRegion,
+) -> Option<usize> {
+    let mut i = start;
+    while i < chars.len() {
+        let ch = chars[i];
+        match ch {
+            '}' => return Some(i + 1),
+            '\\' => {
+                out.push(ch);
+                if let Some(&next) = chars.get(i + 1) {
+                    out.push(next);
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'\'') => {
+                let end = ansi_c_span_end(chars, i)?;
+                if region == BracedRegion::Word {
+                    encode_literal_ansi_c_span(&chars[i..end], out);
+                    *changed = true;
+                } else {
+                    out.extend(&chars[i..end]);
+                }
+                i = end;
+            }
+            '$' if chars.get(i + 1) == Some(&'{') => {
+                match rewrite_braced_for_extquote_off(chars, i) {
+                    Some((text, end)) => {
+                        out.push_str(&text);
+                        *changed = true;
+                        i = end;
+                    }
+                    None => {
+                        let end = braced_unit_end(chars, i)?;
+                        out.extend(&chars[i..end]);
+                        i = end;
+                    }
+                }
+            }
+            '$' if chars.get(i + 1) == Some(&'(') => {
+                let end = paren_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '`' => {
+                let end = backtick_unit_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '\'' => {
+                let end = single_quote_span_end(chars, i)?;
+                out.extend(&chars[i..end]);
+                i = end;
+            }
+            '"' => {
+                // A quoted span inside the region: in a WORD region the
+                // span's own `$'...'` spans share the region's verdict
+                // (the enclosing word's quoting already decided it);
+                // walk it instead of copying blind.
+                if region == BracedRegion::Word {
+                    out.push(ch);
+                    i += 1;
+                    let mut closed = false;
+                    while i < chars.len() {
+                        let inner = chars[i];
+                        match inner {
+                            '"' => {
+                                out.push(inner);
+                                i += 1;
+                                closed = true;
+                                break;
+                            }
+                            '\\' => {
+                                out.push(inner);
+                                if let Some(&next) = chars.get(i + 1) {
+                                    out.push(next);
+                                    i += 2;
+                                } else {
+                                    i += 1;
+                                }
+                            }
+                            '$' if chars.get(i + 1) == Some(&'\'') => {
+                                let end = ansi_c_span_end(chars, i)?;
+                                encode_literal_ansi_c_span(&chars[i..end], out);
+                                *changed = true;
+                                i = end;
+                            }
+                            '$' if chars.get(i + 1) == Some(&'{') => {
+                                match rewrite_braced_for_extquote_off(chars, i) {
+                                    Some((text, end)) => {
+                                        out.push_str(&text);
+                                        *changed = true;
+                                        i = end;
+                                    }
+                                    None => {
+                                        let end = braced_unit_end(chars, i)?;
+                                        out.extend(&chars[i..end]);
+                                        i = end;
+                                    }
+                                }
+                            }
+                            '$' if chars.get(i + 1) == Some(&'(') => {
+                                let end = paren_unit_end(chars, i)?;
+                                out.extend(&chars[i..end]);
+                                i = end;
+                            }
+                            '`' => {
+                                let end = backtick_unit_end(chars, i)?;
+                                out.extend(&chars[i..end]);
+                                i = end;
+                            }
+                            _ => {
+                                out.push(inner);
+                                i += 1;
+                            }
+                        }
+                    }
+                    if !closed {
+                        return None;
+                    }
+                } else {
+                    let end = double_quote_span_end(chars, i)?;
+                    out.extend(&chars[i..end]);
+                    i = end;
+                }
+            }
+            _ => {
+                out.push(ch);
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// The extquote-off braced rewrite for the copy functions: when the
+/// `${...}` unit at the head of `text` sits in a double-quoted word and
+/// the lex pin says extquote was OFF at read time, return the rewritten
+/// unit text and its byte length in `text`; otherwise `None` and the
+/// caller copies verbatim exactly as before (rubash#2772).
+fn extquote_off_braced_rewrite(text: &str, outer_double_quote: bool) -> Option<(String, usize)> {
+    if !outer_double_quote || lex_extquote_enabled() || !text.starts_with("${") {
+        return None;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let (rewritten, end) = rewrite_braced_for_extquote_off(&chars, 0)?;
+    let byte_len: usize = chars[..end].iter().map(|ch| ch.len_utf8()).sum();
+    Some((rewritten, byte_len))
+}
+
 /// Cursor form of `copy_braced_parameter_inner` (rest at the `$`). The
 /// `${...}` unit is copied verbatim; only the consumption accounting changes
 /// (bytes consumed instead of chars counted).
@@ -1482,6 +1948,14 @@ fn copy_braced_parameter_inner_cursor<'a>(
     outer_double_quote: bool,
     posix: bool,
 ) -> &'a str {
+    // rubash#2772: a double-quoted unit re-derived under a read-time
+    // extquote-off pin gets its WORD-region `$'...'` spans rewritten to
+    // literal carriers before the verbatim copy below can freeze the
+    // translated form in.
+    if let Some((rewritten, byte_len)) = extquote_off_braced_rewrite(rest, outer_double_quote) {
+        out.push_str(&rewritten);
+        return &rest[byte_len..];
+    }
     out.push('$');
     let rest = &rest[1..]; // past '$'
     if !rest.starts_with('{') {
@@ -2495,6 +2969,20 @@ fn copy_braced_parameter_inner(
     outer_double_quote: bool,
     posix: bool,
 ) {
+    // rubash#2772: same extquote-off rewrite as the cursor form (this
+    // entry sits just past the `$`; rebuild the unit text to consult it).
+    if outer_double_quote && !lex_extquote_enabled() && chars.peek() == Some(&'{') {
+        let remaining: String = chars.clone().collect();
+        let text = format!("${remaining}");
+        if let Some((rewritten, byte_len)) = extquote_off_braced_rewrite(&text, true) {
+            out.push_str(&rewritten);
+            let consume = text[..byte_len].chars().count().saturating_sub(1);
+            for _ in 0..consume {
+                chars.next();
+            }
+            return;
+        }
+    }
     out.push('$');
     if chars.peek() != Some(&'{') {
         return;

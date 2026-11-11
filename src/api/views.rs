@@ -237,9 +237,17 @@ impl<'a> StateViews<'a> {
         self.executor.positional_params()
     }
 
-    /// Replace the positional parameters (the `set --` path).
+    /// Replace the positional parameters. Hosts pass RAW data:
+    /// the engine entry-encodes each value into the storage domain
+    /// at this boundary (rubash#3105), so callers must not
+    /// pre-encode. (The shell's own `set --` path hands the shared
+    /// setter cooked words and does not pass through here.)
     pub fn set_positional(&mut self, args: Vec<String>) {
-        self.executor.set_positional_params(args);
+        self.executor.set_positional_params(
+            args.iter()
+                .map(|value| crate::executor::substitution_metadata::entry_encode_value_text(value))
+                .collect(),
+        );
     }
 
     /// Alias snapshot: (name, value) pairs, sorted by name.
@@ -318,9 +326,13 @@ impl VariablesView<'_> {
 
     /// Bind a scalar through the host write path (the designed form
     /// of `set_env`: the mirror write that also syncs the typed
-    /// scalar cell in place).
+    /// scalar cell in place). The value is RAW host data: entry-encode
+    /// it at this boundary (rubash#3207, the #3105 contract) so carrier
+    /// bytes survive finalization instead of being stripped as live
+    /// protocol.
     pub fn set(&mut self, name: &str, value: &str) {
-        self.executor.set_env(name, value);
+        let encoded = crate::executor::env_helpers::entry_encode_imported_env_value(name, value);
+        self.executor.set_env(name, &encoded);
     }
 
     /// Whole-value bind of an indexed array from typed cells,
@@ -330,13 +342,35 @@ impl VariablesView<'_> {
     /// execution (§7.6's rule). False on a refused bind (negative
     /// index, or the name is an associative array).
     pub fn set_array(&mut self, name: &str, cells: &[(i64, String)]) -> bool {
-        self.executor.view_set_indexed_array(name, cells)
+        // rubash#3207: each cell value is RAW host data — entry-encode
+        // at this boundary (fail-first: unencoded cells lost the
+        // carrier byte at finalization, like the scalar `set`).
+        let encoded: Vec<(i64, String)> = cells
+            .iter()
+            .map(|(index, value)| {
+                (
+                    *index,
+                    crate::executor::env_helpers::entry_encode_imported_env_value(name, value),
+                )
+            })
+            .collect();
+        self.executor.view_set_indexed_array(name, &encoded)
     }
 
     /// Whole-value bind of an associative array from typed cells;
     /// same contract as [`VariablesView::set_array`].
     pub fn set_assoc(&mut self, name: &str, cells: &[(String, String)]) -> bool {
-        self.executor.view_set_assoc_array(name, cells)
+        // rubash#3207: same entry-encoding as `set_array` (rubash#3207).
+        let encoded: Vec<(String, String)> = cells
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    crate::executor::env_helpers::entry_encode_imported_env_value(name, value),
+                )
+            })
+            .collect();
+        self.executor.view_set_assoc_array(name, &encoded)
     }
 
     /// Set or clear the exported attribute, through the same mark

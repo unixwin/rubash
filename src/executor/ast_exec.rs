@@ -57,6 +57,7 @@ impl Executor {
         self.unit_lex_locale
             .replace(Some(crate::locale::locale_name()));
         self.line_lex_locales.borrow_mut().clear();
+        self.line_lex_extquotes.borrow_mut().clear();
 
         // G-01: EXECUTION_LOCK is no longer held for the whole run.
         // EXECUTION_LOCK_DEPTH is now only the run-nesting marker (it
@@ -245,7 +246,7 @@ impl Executor {
     /// (`( :; ) 2>cap.txt > /missing` lands in cap.txt, rubash#940 R1).
     /// Any other IoError (body write errors, rubash#440 closed-output)
     /// keeps the direct stderr write so the reported bytes are identical.
-    fn report_io_error_routed(
+    pub(in crate::executor) fn report_io_error_routed(
         &mut self,
         command: &CommandNode,
         error: &std::io::Error,
@@ -961,6 +962,21 @@ impl Executor {
                             .borrow_mut()
                             .entry(line)
                             .or_insert_with(crate::locale::locale_name);
+                        // rubash#2772: same first-reach record for the
+                        // extquote state — the state GNU's parser applies
+                        // to this line's `$'...'` translation verdicts
+                        // (parse.y:4053's extended_quote gate is evaluated
+                        // when the line is READ, and the first command of
+                        // the line fixes it for the whole list).
+                        self.line_lex_extquotes
+                            .borrow_mut()
+                            .entry(line)
+                            .or_insert_with(|| {
+                                crate::builtins::shopt::option_enabled(
+                                    &self.shell_state.env_vars,
+                                    "extquote",
+                                )
+                            });
                     }
                 }
                 // GNU eval.c:181 (reader_loop/parse_and_execute): stdin_redir
@@ -2210,6 +2226,20 @@ impl Executor {
                     // SIGPIPE, reports the failed write with status 1 and
                     // keeps executing the list.
                     self.report_io_error_routed(command, &error)?;
+                    // rubash#2659: GNU execute_cmd.c:854-883 — the
+                    // group's OWN do_redirections failure is an ordinary
+                    // command failure: run_error_trap runs (under
+                    // was_error_trap, independent of errexit) before the
+                    // ERREXIT promotion below. The compound_redirect_failed
+                    // mark certifies the redirect-failure origin (the
+                    // prepare pass / with_command_input_redirects); an
+                    // IoError raised by the body itself carries no mark
+                    // and keeps the body-produced treatment. The fire
+                    // call's own gates keep inverted, and-or and
+                    // suppressed contexts exempt.
+                    if self.compound_redirect_failed.get() {
+                        self.maybe_run_error_trap(command)?;
+                    }
                     // rubash#2359: the group is fully handled here. Falling
                     // through to the simple-pipeline dispatch below
                     // re-dispatched the same group, and the re-dispatch's
