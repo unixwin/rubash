@@ -1440,7 +1440,16 @@ impl Executor {
                         &self.shell_state.env_vars,
                     ))
                 };
-                if let Err(error) = FileFd::open_readwrite_pair(path) {
+                // rubash#3268: from a deleted cwd the joined spelling is
+                // dead by construction — when the cwd anchor applies,
+                // its O_RDWR|O_CREAT verdict replaces the joined-path
+                // pair open's (see Executor::anchored_redirect_probe);
+                // every other state keeps the pair open below.
+                let probe_verdict = match self.anchored_redirect_probe(&target, true) {
+                    Some(verdict) => verdict,
+                    None => FileFd::open_readwrite_pair(path).map(|_| ()),
+                };
+                if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
                     // `{target}: {errno text}` shape — pass it through
                     // like the Input probe below instead of prefixing the
@@ -1499,7 +1508,16 @@ impl Executor {
                 // redir.c do_redirections). An existing FIFO validates
                 // through access(2) instead: ENOENT / EACCES surface with
                 // the same errno the open would have produced.
-                if let Err(error) = super::shell_options::probe_input_redirect_gate(&path) {
+                // rubash#3268: from a deleted cwd the joined spelling is
+                // dead by construction — when the cwd anchor applies,
+                // its verdict replaces the joined-path gate's (see
+                // Executor::anchored_redirect_probe); every other state
+                // keeps the gate below.
+                let probe_verdict = match self.anchored_redirect_probe(&target, false) {
+                    Some(verdict) => verdict,
+                    None => super::shell_options::probe_input_redirect_gate(&path),
+                };
+                if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
                     // `{target}: {errno text}` shape (same convention the
                     // ReadWrite probe above consumes).

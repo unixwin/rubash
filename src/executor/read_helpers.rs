@@ -477,9 +477,63 @@ impl StdinCharDecoder {
         !self.lookahead.is_empty()
     }
 
-    /// Pop the next completed unit, or `None` while `pending` is a
-    /// valid-but-incomplete UTF-8 prefix awaiting more bytes.
+    /// Pop the next completed unit, or `None` while the queued bytes
+    /// are a valid-but-incomplete UTF-8 prefix awaiting more bytes.
+    ///
+    /// In a multibyte locale the unit is GNU's read_mbchar consumption
+    /// (rubash#3294): a valid character, or an invalid sequence's
+    /// whole run — lead byte, continuation bytes, and the byte that
+    /// invalidated it — as ONE raw-byte unit, where the historical
+    /// decoder surfaced each byte of the run separately and a `-n`
+    /// budget therefore stopped inside it. A run whose fate is not
+    /// yet decided (a proper prefix of a sequence) still waits for
+    /// more bytes. Single-byte locales keep the historical
+    /// byte-at-a-time decoding below unchanged.
     pub(in crate::executor) fn next_unit(&mut self) -> Option<StdinUnit> {
+        if crate::locale::is_multi_byte() {
+            let mut avail = std::mem::take(&mut self.pending);
+            avail.extend(self.lookahead.drain(..));
+            if avail.is_empty() {
+                return None;
+            }
+            let decided = match std::str::from_utf8(&avail) {
+                Ok(text) => {
+                    let ch = text.chars().next().expect("avail is non-empty");
+                    Some((ch.len_utf8(), Some(ch)))
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if valid > 0 {
+                        let ch = std::str::from_utf8(&avail[..valid])
+                            .expect("valid prefix")
+                            .chars()
+                            .next()
+                            .expect("non-empty valid prefix");
+                        Some((ch.len_utf8(), Some(ch)))
+                    } else if error.error_len().is_some() {
+                        Some((decoded_unit_len(&avail, 0, true), None))
+                    } else {
+                        None
+                    }
+                }
+            };
+            return match decided {
+                None => {
+                    self.pending = avail;
+                    None
+                }
+                Some((len, ch)) => {
+                    let unit_bytes = avail[..len].to_vec();
+                    self.lookahead = avail[len..].iter().copied().collect();
+                    Some(match ch {
+                        Some(ch) => StdinUnit::Char(ch),
+                        None => StdinUnit::RawByte {
+                            text: substitution_metadata::bytes_to_shell_text(&unit_bytes),
+                        },
+                    })
+                }
+            };
+        }
         if !self.pending.is_empty() {
             match self.lookahead.front() {
                 Some(&next) if (next & 0xC0) == 0x80 => {
@@ -629,6 +683,397 @@ pub(in crate::executor) fn read_delimiter_match_len(
     text.starts_with(delimiter).then(|| delimiter.len_utf8())
 }
 
+/// The stream byte a `read` record scan terminates on. GNU
+/// builtins/read.def:385 takes the FIRST BYTE of the `-d` word and
+/// read.def:834 compares it against raw stream bytes, in every locale.
+/// In a byte locale `read_delimiter_char` already widened that byte to
+/// U+0000..=U+00FF, so the byte is the char itself; in a multibyte
+/// locale the delimiter is a character (rubash#1062) and the operative
+/// byte is the first byte of its UTF-8 encoding — the byte read_mbchar
+/// consumption keys on. (A byte-derived word that is not valid UTF-8,
+/// e.g. `-d $'\351'` inside a multibyte locale, is indistinguishable
+/// from the same widened char at this layer; the whole
+/// read_delimiter_char contract carries that conflation.)
+pub(in crate::executor) fn delimiter_stream_byte(delimiter: char, multi_byte: bool) -> u8 {
+    if multi_byte {
+        let mut buf = [0u8; 4];
+        delimiter.encode_utf8(&mut buf).as_bytes()[0]
+    } else {
+        delimiter as u8
+    }
+}
+
+/// Whether the byte-domain record scan (`scan_text_record_bytes`) must
+/// serve `text` for `delimiter` because the character-domain walkers
+/// cannot see the delimiter byte: the canonical storage encoder stores
+/// a whole valid UTF-8 chunk as ONE literal character, so a delimiter
+/// byte joined into a character (0xC3 followed by data byte 0xA9
+/// arrives as 'é') exists in none of the three testable forms
+/// (needle / single-byte marker / literal) and every text serve read
+/// to EOF, losing the record (rubash#3212). The gate is deliberately
+/// narrow so unaffected reads keep the historical walkers exactly:
+/// ASCII and newline delimiters never join (their bytes cannot occur
+/// inside a multibyte character); in a byte locale the scan engages
+/// only when a literal multibyte character is present (a split or a
+/// -n/-N budget cut can then land inside it); in a multibyte locale it
+/// engages when a literal character is or contains the delimiter's
+/// first byte in a position the character scan would not split at
+/// identically — the delimiter character itself counts, because a
+/// character split there leaves the character's tail bytes to the
+/// NEXT record (GNU consumed only the first byte), which only the
+/// mirror serve can observe.
+pub(in crate::executor) fn joined_delimiter_scan_applies(text: &str, delimiter: char) -> bool {
+    if (delimiter as u32) <= 0x7F {
+        return false;
+    }
+    if !crate::locale::is_multi_byte() {
+        // Byte locale: only a literal multibyte character can hide the
+        // delimiter byte or a budget cut; raw-byte marker pairs are
+        // single bytes the historical forms already match exactly.
+        return read_delimiter_single_form(delimiter).is_some()
+            && text.chars().any(|ch| {
+                (ch as u32) > 0x7F && !crate::executor::markers::is_marker_zone_char(ch)
+            });
+    }
+    let delim_byte = delimiter_stream_byte(delimiter, true);
+    let mut units = text.char_indices().peekable();
+    while let Some((_, ch)) = units.next() {
+        if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            // A raw-byte marker pair is one stream byte: the historical
+            // single-byte form matches it exactly when it is the
+            // delimiter byte, so the character scan is faithful there.
+            match units.next() {
+                Some((_, payload))
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST)
+                        .contains(&(payload as u32)) =>
+                {
+                    if (payload as u32 - RAW_BYTE_MARKER_FIRST) as u8 == delim_byte {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            // E400 + c stores the literal character c: judge it as a
+            // literal unit and skip its spelling.
+            if let Some((_, literal)) = units.next() {
+                let mut buf = [0u8; 4];
+                if literal
+                    .encode_utf8(&mut buf)
+                    .as_bytes()
+                    .contains(&delim_byte)
+                {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if ch == delimiter {
+            return true;
+        }
+        if (ch as u32) > 0x7F {
+            let mut buf = [0u8; 4];
+            if ch.encode_utf8(&mut buf).as_bytes().contains(&delim_byte) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// One unit of the decoded stream under GNU's consumption rules
+/// (builtins/read.def + read_mbchar): a byte locale consumes single
+/// bytes; a multibyte locale consumes a whole valid character, or the
+/// bytes of an invalid sequence up to and including the byte that
+/// invalidated it (a truncated tail is consumed as one unit, matching
+/// read_mbchar's EOF return). The invalid-sequence length is an
+/// approximation of glibc's mbrtowc walk — it can differ by one byte
+/// for some invalid shapes, which only moves a -n budget cut inside
+/// already-invalid data.
+/// Nominal UTF-8 sequence width of a lead byte under glibc's
+/// mbrtowc walk: only 0xC2..=0xF4 introduce a multibyte sequence
+/// (0xC0/0xC1 are overlong leads and stray continuation bytes are
+/// invalid on sight — each is a one-byte unit).
+pub(in crate::executor) fn utf8_lead_width(lead: u8) -> usize {
+    match lead {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => 1,
+    }
+}
+
+fn decoded_unit_len(bytes: &[u8], index: usize, multi_byte: bool) -> usize {
+    if !multi_byte {
+        return 1;
+    }
+    let lead = bytes[index];
+    if lead <= 0x7F {
+        return 1;
+    }
+    let width = utf8_lead_width(lead);
+    if width == 1 {
+        return 1;
+    }
+    let available = bytes.len() - index;
+    if available < width {
+        return available;
+    }
+    if std::str::from_utf8(&bytes[index..index + width]).is_ok() {
+        return width;
+    }
+    let mut consumed = 1;
+    while consumed < width && (bytes[index + consumed] & 0xC0) == 0x80 {
+        consumed += 1;
+    }
+    if consumed < width {
+        consumed += 1;
+    }
+    consumed
+}
+
+/// The product of a byte-domain record scan: the record and the
+/// unconsumed remainder, both re-encoded into canonical shell text,
+/// plus the two verdicts the text walkers report.
+pub(in crate::executor) struct ByteRecordScan {
+    pub record: String,
+    pub tail: String,
+    pub delimiter_found: bool,
+    pub limit_reached: bool,
+    /// Decoded-byte length of the record (the bytes before the
+    /// delimiter / budget cut in the scanned stream).
+    pub record_bytes: usize,
+    /// Decoded bytes consumed in total (record + delimiter, or the
+    /// record alone when the budget or the stream end stopped it).
+    pub consumed_bytes: usize,
+}
+
+/// Transport units of `text` as (text start, text end, decoded byte
+/// length) triples, mirroring `decode_raw_byte_markers` exactly: a
+/// literal char is its own UTF-8 bytes, a raw-byte marker pair is one
+/// byte, a literal-char escape is the escaped char's bytes, and an
+/// escaped literal U+E000 is its own bytes.
+fn text_unit_spans(text: &str) -> Vec<(usize, usize, usize)> {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut spans = Vec::with_capacity(chars.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        let (start, ch) = chars[i];
+        let (span, unit_bytes) = if ch == crate::executor::markers::LITERAL_CHAR_ESCAPE {
+            match chars.get(i + 1) {
+                Some((_, literal)) => (2, literal.len_utf8()),
+                None => (1, ch.len_utf8()),
+            }
+        } else if ch as u32 == RAW_BYTE_MARKER_ESCAPE {
+            match chars.get(i + 1) {
+                Some((_, next)) if *next as u32 == RAW_BYTE_MARKER_ESCAPE => (2, ch.len_utf8()),
+                Some((_, next))
+                    if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST).contains(&(*next as u32)) =>
+                {
+                    (2, 1)
+                }
+                _ => (1, ch.len_utf8()),
+            }
+        } else {
+            (1, ch.len_utf8())
+        };
+        let end = chars
+            .get(i + span)
+            .map(|(next_start, _)| *next_start)
+            .unwrap_or(text.len());
+        spans.push((start, end, unit_bytes));
+        i += span;
+    }
+    spans
+}
+
+/// Text position in `text` at which the decoded byte offset
+/// `byte_len` falls: the end of the transport unit that contains the
+/// byte, or the unit boundary itself when the offset lands on one.
+/// A byte offset in the middle of a literal character resolves to
+/// that character's end — the character arrived (and can only be
+/// served) whole.
+pub(in crate::executor) fn text_pos_for_byte_len(text: &str, byte_len: usize) -> usize {
+    if byte_len == 0 {
+        return 0;
+    }
+    let mut bytes = 0usize;
+    for (_, end, unit_bytes) in text_unit_spans(text) {
+        bytes += unit_bytes;
+        if bytes >= byte_len {
+            return end;
+        }
+    }
+    text.len()
+}
+
+/// The text position of the decoded byte offset `byte_len` when it
+/// lands exactly on a transport-unit boundary of `text`; None when
+/// the offset falls inside a unit (a byte-served record that splits
+/// a character — the remainder exists only in re-encoded form).
+pub(in crate::executor) fn text_pos_for_byte_len_exact(
+    text: &str,
+    byte_len: usize,
+) -> Option<usize> {
+    if byte_len == 0 {
+        return Some(0);
+    }
+    let mut bytes = 0usize;
+    for (_, end, unit_bytes) in text_unit_spans(text) {
+        bytes += unit_bytes;
+        if bytes == byte_len {
+            return Some(end);
+        }
+        if bytes > byte_len {
+            return None;
+        }
+    }
+    None
+}
+
+/// Whether a `-n`/`-N` serve over `text` must run in the byte domain
+/// because the character walkers' unit accounting diverges from
+/// read_mbchar: in a multibyte locale any raw byte (a raw-byte
+/// marker pair in the transport text) can join an invalid sequence
+/// whose bytes the walkers count one by one while GNU consumes the
+/// run as one unit (rubash#3294). Without a budget, or without raw
+/// bytes, the two domains agree unit for unit.
+pub(in crate::executor) fn byte_unit_scan_applies(text: &str, char_limit: Option<usize>) -> bool {
+    char_limit.is_some()
+        && crate::locale::is_multi_byte()
+        && text.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE)
+}
+
+/// Replay GNU's read loop over the DECODED BYTES of a text-domain
+/// serve (rubash#3212): the delimiter is its first byte
+/// (read.def:385) compared byte-by-byte (read.def:834) BEFORE the
+/// unit consumption that keeps a multibyte character's inner bytes
+/// from terminating the record (read_mbchar); a backslash escapes the
+/// following unit (the escaped unit's bytes are data even when its
+/// first byte is the delimiter; a backslash-newline pair vanishes and
+/// costs no budget); the -n/-N budget counts post-escape units
+/// (read.def:884-886 `nr++; if (nchars > 0 && nr >= nchars) break;`).
+/// Callers gate on `joined_delimiter_scan_applies`; the record is
+/// re-encoded whole with `bytes_to_shell_text`, so the text the
+/// assignment walkers receive is the canonical storage form the byte
+/// readers produce.
+pub(in crate::executor) fn scan_text_record_bytes(
+    text: &str,
+    delimiter: char,
+    char_limit: Option<usize>,
+    exact_char_limit: bool,
+    escape_aware: bool,
+    raw: bool,
+) -> ByteRecordScan {
+    let multi_byte = crate::locale::is_multi_byte();
+    let bytes = substitution_metadata::decode_raw_byte_markers(text.as_bytes());
+    let delim = delimiter_stream_byte(delimiter, multi_byte);
+    let mut index = 0usize;
+    let mut units = 0usize;
+    let mut escaped = false;
+    let (record_end, consumed, delimiter_found, limit_reached) = loop {
+        if index >= bytes.len() {
+            break (bytes.len(), bytes.len(), false, false);
+        }
+        let byte = bytes[index];
+        if !exact_char_limit && !escaped && !(escape_aware && byte == b'\\') && byte == delim {
+            break (index, index + 1, true, false);
+        }
+        let (len, counts) = if escaped {
+            escaped = false;
+            let len = decoded_unit_len(&bytes, index, multi_byte);
+            // An escaped newline is a line continuation: the pair
+            // vanishes and spends no budget (read.def pass_next).
+            (len, !(len == 1 && byte == b'\n'))
+        } else if !raw && byte == b'\\' {
+            escaped = true;
+            (1, false)
+        } else {
+            (decoded_unit_len(&bytes, index, multi_byte), true)
+        };
+        index += len;
+        if counts {
+            units += 1;
+        }
+        if char_limit.is_some_and(|limit| units >= limit) {
+            break (index, index, false, true);
+        }
+    };
+    ByteRecordScan {
+        record: substitution_metadata::bytes_to_shell_text(&bytes[..record_end]),
+        tail: substitution_metadata::bytes_to_shell_text(&bytes[consumed..]),
+        delimiter_found,
+        limit_reached,
+        record_bytes: record_end,
+        consumed_bytes: consumed,
+    }
+}
+
+/// Serve one record from a whole-text slurp (heredocs, here-strings,
+/// file and procsub slurps): the (record, eof_no_delimiter) pair the
+/// call sites used to derive from `slurped_record_eof_no_delimiter` +
+/// `trim_read_input`. When the delimiter byte is joined into a literal
+/// character of the text (rubash#3212) the character walkers cannot
+/// see it, so the byte-domain scan decides the record and the EOF
+/// verdict, and `trim_read_input` only normalizes the result (its
+/// delimiter split cannot fire on a record the scan already cut —
+/// every delimiter form's bytes contain the delimiter byte, whose
+/// first unescaped occurrence is where the scan stopped — and its
+/// budget truncation counts text units, which never exceed the scan's
+/// byte-domain units). All other inputs keep the historical pair.
+pub(in crate::executor) fn slurped_record(
+    input: String,
+    delimiter: char,
+    char_limit: Option<usize>,
+    exact_char_limit: bool,
+    escape_aware: bool,
+    raw: bool,
+) -> (String, bool) {
+    if joined_delimiter_scan_applies(&input, delimiter) {
+        let scan = scan_text_record_bytes(
+            &input,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+            escape_aware,
+            raw,
+        );
+        let eof_no_delimiter = !scan.delimiter_found && !scan.limit_reached;
+        return (
+            trim_read_input(
+                scan.record,
+                delimiter,
+                char_limit,
+                exact_char_limit,
+                escape_aware,
+                raw,
+            ),
+            eof_no_delimiter,
+        );
+    }
+    let eof_no_delimiter = slurped_record_eof_no_delimiter(
+        &input,
+        delimiter,
+        char_limit,
+        exact_char_limit,
+        escape_aware,
+        raw,
+    );
+    (
+        trim_read_input(
+            input,
+            delimiter,
+            char_limit,
+            exact_char_limit,
+            escape_aware,
+            raw,
+        ),
+        eof_no_delimiter,
+    )
+}
+
 /// True when `text` holds the delimiter in any transport form: the tagged
 /// marker pair (normalized records), the single-byte marker form a
 /// byte-locale delimiter takes (the delimiter char then stands for one
@@ -669,8 +1114,10 @@ pub(in crate::executor) fn record_contains_delimiter(
 /// a satisfied -n budget over delimiter-less input reported EOF, and a
 /// serve that never set the flag reported success at EOF. The unit model
 /// is the one read_function_stdin and truncate_read_post_escape use:
-/// post-escape characters, a raw-byte marker pair is one unit, and a
-/// backslash-newline continuation costs zero.
+/// post-escape characters, a raw-byte marker pair is one unit — grouped
+/// into one read_mbchar unit when consecutive pairs form an invalid
+/// multibyte sequence (rubash#3294) — and a backslash-newline
+/// continuation costs zero.
 pub(in crate::executor) fn slurped_record_eof_no_delimiter(
     input: &str,
     delimiter: char,
@@ -703,9 +1150,58 @@ pub(in crate::executor) fn slurped_record_eof_no_delimiter(
             // A marker pair is one raw byte: consumed as a whole, it is
             // the escaped character when an escape was pending and never
             // an escape introducer itself (as in read_function_stdin).
-            cursor += 2;
+            // In a multibyte locale the pair can also open an invalid
+            // sequence whose read_mbchar unit spans several raw bytes
+            // (rubash#3294): group the maximal run — this pair, the
+            // pairs after it, and, while the run is still an undecided
+            // prefix, the first byte of a following literal character
+            // (the invalidating byte read_mbchar consumes into the
+            // unit) — into the one unit it is. (When the unit overflows
+            // into that character, its remaining bytes are consumed
+            // with it here; GNU would count them as separate stray
+            // units, a difference that can only move a budget cut
+            // inside an already-invalid sequence.) Byte locales keep
+            // one byte per unit.
+            let was_escaped = escaped;
             escaped = false;
-            units += 1;
+            if crate::locale::is_multi_byte() {
+                let mut run: Vec<u8> = Vec::new();
+                let mut look = cursor;
+                while look < chars.len() {
+                    let (_, head) = chars[look];
+                    if head as u32 != RAW_BYTE_MARKER_ESCAPE {
+                        break;
+                    }
+                    match chars.get(look + 1) {
+                        Some(&(_, payload))
+                            if (RAW_BYTE_MARKER_FIRST..=RAW_BYTE_MARKER_LAST)
+                                .contains(&(payload as u32)) =>
+                        {
+                            run.push((payload as u32 - RAW_BYTE_MARKER_FIRST) as u8);
+                            look += 2;
+                        }
+                        _ => break,
+                    }
+                }
+                let mut unit_len = decoded_unit_len(&run, 0, true);
+                let mut spanned_literal = false;
+                if matches!(std::str::from_utf8(&run), Err(e) if e.error_len().is_none())
+                    && look < chars.len()
+                {
+                    unit_len = run.len() + 1;
+                    spanned_literal = true;
+                }
+                cursor += 2 * unit_len.min(run.len());
+                if spanned_literal {
+                    cursor += 1;
+                }
+                if !(was_escaped && unit_len == 1 && run.first() == Some(&b'\n')) {
+                    units += 1;
+                }
+            } else {
+                cursor += 2;
+                units += 1;
+            }
         } else {
             cursor += 1;
             if escaped {
@@ -1268,6 +1764,40 @@ fn trim_read_input_literal(
 /// raw-byte marker pair is one unit as in truncate_read_units
 /// (rubash#1328, rubash#714).
 fn truncate_read_post_escape(input: &str, limit: usize) -> String {
+    if input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE) {
+        // The record carries raw bytes: count in the decoded byte
+        // domain, where an escaped or plain unit is one read_mbchar
+        // consumption (rubash#3294) — the text walk below counts each
+        // raw-byte marker pair of an invalid sequence separately and
+        // can also split an escape pair at the sentinel. Inputs
+        // without raw bytes keep the text walk exactly.
+        let bytes = substitution_metadata::decode_raw_byte_markers(input.as_bytes());
+        let multi_byte = crate::locale::is_multi_byte();
+        let mut pos = 0usize;
+        let mut units = 0usize;
+        let mut escaped = false;
+        while pos < bytes.len() {
+            if units >= limit {
+                return substitution_metadata::bytes_to_shell_text(&bytes[..pos]);
+            }
+            let byte = bytes[pos];
+            if escaped {
+                let len = decoded_unit_len(&bytes, pos, multi_byte);
+                if !(len == 1 && byte == b'\n') {
+                    units += 1;
+                }
+                escaped = false;
+                pos += len;
+            } else if byte == b'\\' {
+                escaped = true;
+                pos += 1;
+            } else {
+                pos += decoded_unit_len(&bytes, pos, multi_byte);
+                units += 1;
+            }
+        }
+        return input.to_string();
+    }
     let mut units = 0usize;
     let mut chars = input.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
@@ -1308,6 +1838,23 @@ fn truncate_read_post_escape(input: &str, limit: usize) -> String {
 /// break;` — so in a multibyte locale the tagged pair is one character.
 /// This matches `read_split::logical_units`, the buffered splitter's walk.
 fn truncate_read_units(input: &str, limit: usize) -> String {
+    if input.chars().any(|ch| ch as u32 == RAW_BYTE_MARKER_ESCAPE) {
+        // The record carries raw bytes: the unit is one read_mbchar
+        // consumption over the decoded byte stream (rubash#3294), so
+        // an invalid sequence's marker pairs count once, not once per
+        // byte. Inputs without raw bytes keep the text walk exactly.
+        let bytes = substitution_metadata::decode_raw_byte_markers(input.as_bytes());
+        let mut pos = 0usize;
+        let mut units = 0usize;
+        while pos < bytes.len() && units < limit {
+            pos += decoded_unit_len(&bytes, pos, true);
+            units += 1;
+        }
+        if pos >= bytes.len() {
+            return input.to_string();
+        }
+        return substitution_metadata::bytes_to_shell_text(&bytes[..pos]);
+    }
     let mut units = 0usize;
     let mut chars = input.char_indices().peekable();
     while let Some((index, ch)) = chars.next() {
@@ -1380,10 +1927,12 @@ pub(in crate::executor) fn split_read_array_words(line: &str, ifs: Option<&str>)
         // splitting entirely — the whole line is one field, which
         // split_read_field_ranges already encodes for "" (rubash#1713).
         // Only an UNSET IFS takes the default whitespace split.
-        Some(ifs) => split_read_field_ranges(line, ifs, false)
-            .into_iter()
-            .map(|(start, end)| line[start..end].to_string())
-            .collect(),
+        // Value-level production (read_split::read_array_raw_values):
+        // in a single-byte locale the split belongs to the byte
+        // domain, where the ranges can fall inside a multibyte
+        // character and slicing this line would drop the empty
+        // fields (rubash#3191).
+        Some(ifs) => crate::executor::read_split::read_array_raw_values(line, ifs),
         None => line.split_whitespace().map(str::to_string).collect(),
     }
 }

@@ -248,6 +248,136 @@ fn fd_is_pin_source_pipe_alias(
         .any(|&source| pipe_identity(source) == Some(identity))
 }
 
+/// rubash#3268: the `cd` builtin's verbatim-fallback walk (GNU
+/// builtins/cd.def change_to_directory's tail: when the
+/// canonicalized chdir fails, cd chdirs the operand VERBATIM —
+/// relative to the process cwd inode, which an unlink cannot
+/// invalidate; step 9 of the POSIX cd algorithm). Under G-02 the
+/// shell process's cwd is not the session's, so the builtin borrows
+/// the session's cwd anchor for the walk: openat the operand against
+/// the anchor handle with O_DIRECTORY and name the landed directory
+/// physically. The two-state gate is the anchor family's own: the
+/// session cwd's path must no longer resolve TO THE DIRECTORY THE
+/// SESSION SITS IN (the family's identity verdict, below), and the
+/// anchor must name exactly that cwd. Answers Some(Ok(path)) with the landed
+/// directory's physical path, Some(Err) with the kernel's verdict
+/// when the gate held but the walk failed (that verdict is the one
+/// GNU's verbatim chdir reports), and None when the gate does not
+/// hold — the caller's own probe error then stands.
+///
+/// Free-standing (over the anchor cell + a cwd snapshot) so the cd
+/// call sites can lend it alongside the disjoint &mut borrows of the
+/// session's env table and cwd slot that execute_with_io takes.
+#[cfg(unix)]
+pub(in crate::executor) fn cd_target_via_cwd_anchor(
+    anchor: &std::cell::RefCell<Option<crate::shell::state::CwdAnchor>>,
+    cwd: &std::path::Path,
+    operand: &std::path::Path,
+) -> Option<std::io::Result<std::path::PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::AsRawFd;
+    let (anchor_fd, anchor_path, anchor_identity) = {
+        let anchor = anchor.borrow();
+        let anchor = anchor.as_ref()?;
+        if anchor.path != cwd {
+            return None;
+        }
+        // The identity the path must still name for the gate to stay
+        // closed: the anchor handle's own (dev, ino).
+        let identity = anchor
+            .dir
+            .metadata()
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()));
+        (anchor.dir.as_raw_fd(), anchor.path.clone(), identity)
+    };
+    // The gate is the family's identity verdict — rubash#3275's
+    // session_cwd_path_resolves, applied to this free-standing form
+    // over the anchor cell (no &self to ask): the path must no
+    // longer resolve to the very directory the session sits in. A
+    // directory deleted and RECREATED at the same spelling is a
+    // ghost: its metadata succeeds but the identity differs, and
+    // the walk below must still run against the anchor's inode.
+    // When the anchor's own identity is unreadable there is nothing
+    // to compare against, so the verdict falls back to the plain
+    // resolvability check — the same fallback the identity verdict
+    // itself takes when no anchor names the cwd.
+    let path_resolves = match anchor_identity {
+        Some((dev, ino)) => std::fs::metadata(cwd)
+            .is_ok_and(|meta| meta.is_dir() && meta.dev() == dev && meta.ino() == ino),
+        None => std::fs::metadata(cwd).is_ok_and(|meta| meta.is_dir()),
+    };
+    if path_resolves {
+        return None;
+    }
+    let operand = if operand.as_os_str().is_empty() {
+        std::path::Path::new(".")
+    } else {
+        operand
+    };
+    let c_operand =
+        std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str())).ok()?;
+    // SAFETY: anchor_fd is the anchor's open directory handle; the
+    // Arc<File> in ShellState keeps it alive for the whole call.
+    let fd = unsafe {
+        libc::openat(
+            anchor_fd,
+            c_operand.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Some(Err(std::io::Error::last_os_error()));
+    }
+    // The landed directory's physical name: the /proc magic link
+    // names it (with a " (deleted)" suffix when the landed directory
+    // is itself the unlinked one — its path spelling is still the
+    // session's name for it). Where the magic link cannot be read
+    // (no /proc), fold the operand onto the anchor's recorded path
+    // textually: a deleted directory holds no live names below it,
+    // so the only walks that can land are `.`/`..` chains and names
+    // in the surviving parent — exactly what the fold computes.
+    let landed = match std::fs::read_link(format!("/proc/self/fd/{fd}")) {
+        Ok(path) => {
+            let text = path.to_string_lossy();
+            match text.strip_suffix(" (deleted)") {
+                Some(stripped) => std::path::PathBuf::from(stripped),
+                None => path,
+            }
+        }
+        Err(_) => fold_anchor_operand(&anchor_path, operand),
+    };
+    // SAFETY: fd came from the openat above and is closed nowhere else.
+    unsafe {
+        libc::close(fd);
+    }
+    Some(Ok(landed))
+}
+
+/// Textual `anchor_path + operand` fold for cd_target_via_cwd_anchor's
+/// no-/proc fallback: `.` components drop, `..` pops one component,
+/// plain names push. The operand is relative (the caller gates it).
+#[cfg(unix)]
+fn fold_anchor_operand(
+    anchor_path: &std::path::Path,
+    operand: &std::path::Path,
+) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = anchor_path.to_path_buf();
+    for component in operand.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+            Component::RootDir => out = std::path::PathBuf::from("/"),
+            Component::Prefix(_) => {}
+        }
+    }
+    out
+}
+
 impl Executor {
     /// The simple-command execution lookup. Under a `command -p`
     /// re-dispatch (standard_path_scope set) the lookup walks the
@@ -2076,6 +2206,11 @@ impl Executor {
     /// - Path resolvable (the overwhelming common case): refresh the
     ///   ShellState cwd anchor if it does not already name this exact
     ///   directory inode, then stamp by path exactly as before.
+    ///   rubash#3275: "resolvable" here is the identity verdict of
+    ///   session_cwd_path_resolves — a path recreated around a
+    ///   stationary session (same spelling, different inode) counts
+    ///   as NOT resolvable and takes the anchor mode below, so the
+    ///   child is born in the session's dead inode, not the ghost.
     /// - Path NOT resolvable but the anchor names this cwd (the
     ///   directory was entered while it existed, then deleted): on
     ///   Unix, register a pre_exec fchdir onto the anchor handle —
@@ -2089,7 +2224,7 @@ impl Executor {
     ///   fallback the issue sanctions for the unanchored case.
     pub(in crate::executor) fn stamp_spawn_cwd(&self, process: &mut Command) {
         let cwd = self.shell_state.cwd.clone();
-        if self.refresh_cwd_anchor_for(&cwd) {
+        if self.session_cwd_path_resolves(&cwd) {
             process.current_dir(cwd);
             return;
         }
@@ -2132,9 +2267,17 @@ impl Executor {
     /// A directory that was deleted and RECREATED at the same path is
     /// a different inode: the (dev, ino) comparison re-opens the
     /// anchor so a later deletion anchors the new directory, not the
-    /// ghost. Called by the spawn stamp and by the cd funnels, so the
-    /// anchor is warm from the moment a directory is entered, before
-    /// any spawn observes it.
+    /// ghost.
+    ///
+    /// rubash#3275: this is the ADOPT refresh — its callers are the
+    /// cd funnels (through refresh_cwd_anchor), where the session HAS
+    /// moved and adopting the inode the path now names is the whole
+    /// point. The spawn stamp and the anchored read must NOT use it:
+    /// a session that never moved stays in its anchor's inode even
+    /// when the path is recreated around it, so those faces ask
+    /// session_cwd_path_resolves instead (the fallback there reaches
+    /// this refresh only when no anchor names the cwd and there is
+    /// nothing to compare against).
     pub(in crate::executor) fn refresh_cwd_anchor_for(&self, cwd: &std::path::Path) -> bool {
         #[cfg(unix)]
         {
@@ -2172,6 +2315,60 @@ impl Executor {
         }
     }
 
+    /// rubash#3275: does the cwd path still resolve TO THE DIRECTORY
+    /// THE SESSION SITS IN? The spawn stamp and the anchored read ask
+    /// this; unlike refresh_cwd_anchor_for it never re-opens the
+    /// anchor onto a different inode.
+    ///
+    /// GNU anchors the session in the inode, not the spelling: the
+    /// process cwd IS the directory (cd.def's chdir), and the
+    /// namespace may change around it without moving the session.
+    /// So while an anchor is held for this exact cwd value, the path
+    /// resolves for the session only if it still names the anchor's
+    /// very (dev, ino). A directory deleted and RECREATED at the same
+    /// path is a ghost: the comparison fails, the verdict is "does
+    /// not resolve", and the caller spends the anchor (fchdir /
+    /// openat) — the session's reads and children keep landing in
+    /// the dead inode, exactly as GNU's do, until a cd funnel adopts
+    /// the new directory through refresh_cwd_anchor_for.
+    ///
+    /// With no anchor naming this cwd there is no identity to
+    /// compare against (the cwd was never observed while resolvable),
+    /// so the verdict falls back to the plain refresh — resolvability
+    /// with adoption, the pre-#3275 behaviour for that case.
+    pub(in crate::executor) fn session_cwd_path_resolves(&self, cwd: &std::path::Path) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let held = {
+                let anchor = self.shell_state.cwd_anchor.borrow();
+                anchor.as_ref().and_then(|anchor| {
+                    if anchor.path == cwd {
+                        anchor
+                            .dir
+                            .metadata()
+                            .ok()
+                            .map(|meta| (meta.dev(), meta.ino()))
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(identity) = held {
+                return std::fs::metadata(cwd).is_ok_and(|meta| {
+                    meta.is_dir() && meta.dev() == identity.0 && meta.ino() == identity.1
+                });
+            }
+            self.refresh_cwd_anchor_for(cwd)
+        }
+        #[cfg(not(unix))]
+        {
+            // No inode anchor off Unix; resolvability is the only
+            // question the stamp can ask there.
+            self.refresh_cwd_anchor_for(cwd)
+        }
+    }
+
     /// rubash#3198: refresh the cwd anchor for the CURRENT session
     /// cwd (the cd funnels call this after a successful move, so the
     /// anchor exists even if the directory is deleted before the
@@ -2179,6 +2376,34 @@ impl Executor {
     pub(in crate::executor) fn refresh_cwd_anchor(&self) {
         let cwd = self.shell_state.cwd.clone();
         self.refresh_cwd_anchor_for(&cwd);
+    }
+
+    /// rubash#3268 (e): the anchor's raw fd when it names the CURRENT
+    /// cwd field — stamp_spawn_cwd's extraction, for the one spawn
+    /// face that builds a WhitelistedSpawn instead of a Command
+    /// (execute_background_ast_command): the fd rides the spec and
+    /// the spawner fchdirs the child into the inode when the field no
+    /// longer resolves. None when no anchor names the field — that
+    /// spawn then stays unstamped, as it was before this face had an
+    /// anchor route at all. The fd is borrowed from the anchor's
+    /// Arc<File>; the caller spends it inside the spawn call, while
+    /// the anchor lives in the session state.
+    #[cfg(unix)]
+    pub(in crate::executor) fn session_cwd_anchor_fd(&self) -> Option<std::os::unix::io::RawFd> {
+        let cwd = self.shell_state.cwd.clone();
+        // Ask the two-state question first, exactly as the stamp
+        // does: the ask lazily opens the anchor for a field that was
+        // never observed while it resolved.
+        let _ = self.session_cwd_path_resolves(&cwd);
+        let anchor = self.shell_state.cwd_anchor.borrow();
+        anchor.as_ref().and_then(|anchor| {
+            if anchor.path == cwd {
+                use std::os::unix::io::AsRawFd;
+                Some(anchor.dir.as_raw_fd())
+            } else {
+                None
+            }
+        })
     }
 
     /// rubash#3198: the in-process half of the cwd anchor. Spawned
@@ -2233,8 +2458,11 @@ impl Executor {
         use std::os::unix::io::{AsRawFd, FromRawFd};
         let cwd = self.shell_state.cwd.clone();
         // Same two-mode rule as the spawn stamp: the anchor is only
-        // spent on a cwd whose path no longer resolves.
-        if self.refresh_cwd_anchor_for(&cwd) {
+        // spent on a cwd whose path no longer resolves — where
+        // "resolves" carries the #3275 identity gate, so a path
+        // recreated around the stationary session counts as dead
+        // here too and the read walks the anchor's inode.
+        if self.session_cwd_path_resolves(&cwd) {
             return None;
         }
         let anchor_fd = {
@@ -2271,6 +2499,163 @@ impl Executor {
         use std::io::Read;
         let mut bytes = Vec::new();
         Some(file.read_to_end(&mut bytes).map(|_| bytes))
+    }
+
+    /// rubash#3268: the shared two-state gate of the cwd anchor's
+    /// in-process consumers beyond the read face: Some(anchor fd)
+    /// when the session cwd's path no longer resolves AND the anchor
+    /// names exactly that cwd — the same rule read_via_cwd_anchor
+    /// and stamp_spawn_cwd spend the anchor under, asked of the
+    /// same verdict: rubash#3275's session_cwd_path_resolves, so a
+    /// path recreated around the stationary session counts as dead
+    /// here too. (This gate and cd_target_via_cwd_anchor's check
+    /// were the merge-order remainder of the #3268 (c) face: both
+    /// converged onto the identity verdict in the merge round after
+    /// #3281 landed first.)
+    #[cfg(unix)]
+    fn anchor_fd_for_dead_cwd(&self) -> Option<std::os::unix::io::RawFd> {
+        use std::os::unix::io::AsRawFd;
+        let cwd = self.shell_state.cwd.clone();
+        if self.session_cwd_path_resolves(&cwd) {
+            return None;
+        }
+        let anchor = self.shell_state.cwd_anchor.borrow();
+        let anchor = anchor.as_ref()?;
+        if anchor.path != cwd {
+            return None;
+        }
+        Some(anchor.dir.as_raw_fd())
+    }
+
+    /// rubash#3268: open `operand` relative to the cwd anchor with
+    /// the caller's flags (O_CREAT consumers pass their mode). The
+    /// redirect opens are the face: GNU opens redirections in the
+    /// forked child (redir.c:237 do_redirections, reached from
+    /// execute_cmd.c's execute_disk_command), whose inherited cwd is
+    /// the directory inode — unlinked or not — while rubash opens
+    /// them in the shell process through the session-cwd STRING, so
+    /// the joined spelling died at its dead component. Some(result)
+    /// when the anchor applies: the openat verdict, success or
+    /// failure, is the operand's real verdict, exactly as the child
+    /// in the inode would see it. None when the plain path open
+    /// should run instead (live cwd, absolute operand handled by the
+    /// caller, no anchor).
+    #[cfg(unix)]
+    pub(in crate::executor) fn open_via_cwd_anchor(
+        &self,
+        operand: &std::path::Path,
+        flags: libc::c_int,
+        mode: libc::mode_t,
+    ) -> Option<std::io::Result<std::fs::File>> {
+        use std::os::unix::io::FromRawFd;
+        let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+        let operand = if operand.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            operand
+        };
+        let c_operand =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str()))
+                .ok()?;
+        // SAFETY: anchor_fd is the anchor's open directory handle;
+        // the Arc<File> in ShellState keeps it alive for the whole
+        // call, and openat with a relative path resolves against it
+        // without modifying any shared state. The variadic mode goes
+        // as c_uint: darwin's mode_t is u16, which a variadic call
+        // cannot take (E0617); where mode_t is already u32 the cast
+        // is the identity.
+        let fd = unsafe {
+            libc::openat(
+                anchor_fd,
+                c_operand.as_ptr(),
+                flags | libc::O_CLOEXEC,
+                mode as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Some(Err(std::io::Error::last_os_error()));
+        }
+        Some(Ok(unsafe { std::fs::File::from_raw_fd(fd) }))
+    }
+
+    /// rubash#3268: fstatat against the cwd anchor — the metadata
+    /// half of the two-state gate, for consumers that must CLASSIFY
+    /// an operand (the FIFO carve-outs) before any open. Some(result)
+    /// under the same rule as open_via_cwd_anchor.
+    #[cfg(unix)]
+    pub(in crate::executor) fn fstatat_via_cwd_anchor(
+        &self,
+        operand: &std::path::Path,
+    ) -> Option<std::io::Result<libc::stat>> {
+        let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+        let operand = if operand.as_os_str().is_empty() {
+            std::path::Path::new(".")
+        } else {
+            operand
+        };
+        let c_operand =
+            std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(operand.as_os_str()))
+                .ok()?;
+        // SAFETY: anchor_fd stays alive for the call (see
+        // open_via_cwd_anchor); fstatat with a relative path
+        // resolves against it and takes no descriptor.
+        let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+        let rc = unsafe { libc::fstatat(anchor_fd, c_operand.as_ptr(), &mut stat, 0) };
+        if rc != 0 {
+            return Some(Err(std::io::Error::last_os_error()));
+        }
+        Some(Ok(stat))
+    }
+
+    /// rubash#3268: the input-redirect consumer of the cwd anchor.
+    /// A probe (consume == false) keeps rubash#1820's rule on this
+    /// route too: it must not take a FIFO's rendezvous, so a FIFO
+    /// operand validates by faccessat and answers the inert /dev/null
+    /// stand-in, exactly like the joined-path FIFO arm in
+    /// open_input_redirect_impl; every other operand takes the one
+    /// real openat (a consume open of a FIFO blocks until a writer
+    /// arrives, as GNU's single open does).
+    #[cfg(unix)]
+    pub(in crate::executor) fn open_input_redirect_via_anchor(
+        &self,
+        operand: &std::path::Path,
+        consume: bool,
+    ) -> Option<std::io::Result<std::fs::File>> {
+        if !consume {
+            match self.fstatat_via_cwd_anchor(operand) {
+                Some(Err(error)) => return Some(Err(error)),
+                // Widened through u32 like fd_is_anonymous_pipe:
+                // st_mode and the S_IF* constants disagree in width
+                // across libc targets (bionic/darwin).
+                Some(Ok(stat))
+                    if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFIFO) =>
+                {
+                    let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+                    let operand = if operand.as_os_str().is_empty() {
+                        std::path::Path::new(".")
+                    } else {
+                        operand
+                    };
+                    let c_operand = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                        operand.as_os_str(),
+                    ))
+                    .ok()?;
+                    // SAFETY: anchor_fd stays alive for the call;
+                    // faccessat only validates, it takes no descriptor
+                    // and consumes no rendezvous.
+                    let rc =
+                        unsafe { libc::faccessat(anchor_fd, c_operand.as_ptr(), libc::R_OK, 0) };
+                    if rc != 0 {
+                        return Some(Err(std::io::Error::last_os_error()));
+                    }
+                    return Some(std::fs::File::open("/dev/null"));
+                }
+                Some(Ok(_)) => {}
+                None => return None,
+            }
+        }
+        self.open_via_cwd_anchor(operand, libc::O_RDONLY, 0)
     }
 
     #[cfg(unix)]

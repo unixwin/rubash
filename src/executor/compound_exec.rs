@@ -1904,6 +1904,15 @@ impl Executor {
             exe.as_os_str().len() + spawn_args.iter().map(|arg| arg.len() + 1).sum::<usize>();
         let (env_entries, state_temp) =
             self.spill_respawn_env_entries(env_map.into_iter().collect(), argv_bytes);
+        // rubash#3268 (e): when the session cwd no longer resolves,
+        // the spec's anchor fd lets the spawner fchdir the child into
+        // the session's inode (fd::spawn_whitelisted) instead of
+        // leaving it in this process's cwd. Borrowed from the anchor
+        // for the duration of the spawn call below.
+        #[cfg(unix)]
+        let cwd_anchor_fd = self.session_cwd_anchor_fd();
+        #[cfg(not(unix))]
+        let cwd_anchor_fd: Option<i32> = None;
         let spawn_result = crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
             program: exe.clone(),
             args: spawn_args,
@@ -1912,6 +1921,7 @@ impl Executor {
             extra_handles,
             // G-02: the respawned child starts in the session cwd.
             cwd: Some(self.shell_state.cwd.clone()),
+            cwd_anchor_fd,
             // rubash#2241: under job control the respawned async child
             // leads its own process group (GNU jobs.c:2390 make_child),
             // matching the pgrp the job table records for it below.

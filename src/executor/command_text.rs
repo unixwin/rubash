@@ -289,6 +289,22 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     }
 }
 
+/// rubash#3210: the process-substitution body seed line — the enclosing
+/// simple command's first-element end line (GNU execute_cmd.c:936
+/// `SET_LINE_NUMBER (command->value.Simple->line)`), which the fork
+/// inherits (subst.c:6362 `make_child`) and the child counts up from
+/// (evalstring.c:315). This is the value `set_current_line` already
+/// computes; spawn sites that pass `cmd.line` (the command's START
+/// line) under-report split first elements (d8: 1 instead of 2).
+/// Falls back to `cmd.line` when no stamp exists. Non-simple commands
+/// (compounds) return their start line here — GNU leaves those on the
+/// ambient line instead (execute_cmd.c:854), a separate residual family,
+/// so this helper must NOT be used to seed compound stdin procsubs
+/// beyond the start line it already returns.
+pub(in crate::executor) fn procsub_body_seed_line(cmd: &CommandNode) -> Option<usize> {
+    simple_command_first_word_end_line(cmd).or(cmd.line)
+}
+
 /// GNU print_cmd.c prints the command node's OWN redirection list. A
 /// redirect cloned into this node by an enclosing compound's splice
 /// (support_names::injected_group_redirect — the mark's own contract is
