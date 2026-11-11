@@ -114,19 +114,14 @@ impl Executor {
         // never re-enters the funnel, so the gate must be applied
         // here too). The decision is the shared `help_opt_requested`
         // scan; the text rides `builtin_cmd`, which carries the
-        // outer command's redirections.
+        // outer command's redirections. The dispatch itself is the
+        // shared `apply_builtin_help`, so the pre-option-scan
+        // prologue (rubash#3340: `builtin bind --help` still warns,
+        // `set +h; builtin hash --help` still refuses) is replayed
+        // here exactly as in the funnel.
         if let Some(row) = super::builtin_table::builtin_table_row(name) {
             if super::builtin_opt::help_opt_requested(row, &args[1..]) {
-                let mut stdout = Vec::new();
-                crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
-                self.write_buffered_builtin_output(&builtin_cmd, &stdout, &[])?;
-                self.exit_code = 2;
-                if row
-                    .flags
-                    .contains(super::builtin_table::BuiltinFlags::SPECIAL)
-                {
-                    self.special_builtin_failed.set(true);
-                }
+                self.apply_builtin_help(&builtin_cmd, row)?;
                 return Ok(());
             }
         }
