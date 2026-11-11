@@ -155,7 +155,7 @@ pub(crate) fn replace_process_image(
     let index = parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &diagnostic_prefix(env_vars),
         &mut clean_env,
         &mut login,
         &mut argv0,
@@ -511,6 +511,19 @@ where
     Ok(EXECUTION_SUCCESS)
 }
 
+/// The option-parse prolog for this file's two shape-only probes
+/// ([`status_is_option_parse_failure`] and [`command_operand_index`]):
+/// their diagnostics are written to `io::sink`, so the string is
+/// never observable — but it still derives from the single argv[0]
+/// carrier chain (`builtins::prefix`, rubash#3256) instead of
+/// restating a local literal, so this file carries no second voice
+/// if a probe's sink ever becomes a real stream. The getter reads
+/// the process environment, where the executor mirrors the current
+/// file/line carriers — the same getter the `kill` stdio face uses.
+fn sink_option_prefix() -> String {
+    crate::builtins::prefix::diagnostic_prefix(&|key: &str| std::env::var(key).ok())
+}
+
 /// Whether `status` — the return of an execute_with_io /
 /// execute_with_child_stdio call over the same `args` — is the
 /// option-parse failure face: parse_options rejected the options (or
@@ -532,7 +545,7 @@ pub(crate) fn status_is_option_parse_failure(args: &[String], status: i32) -> bo
         parse_options(
             args,
             &mut io::sink(),
-            "rubash: ",
+            &sink_option_prefix(),
             &mut clean_env,
             &mut login,
             &mut argv0,
@@ -550,7 +563,7 @@ pub(crate) fn command_operand_index(args: &[String]) -> Option<usize> {
     parse_options(
         args,
         &mut io::sink(),
-        "rubash: ",
+        &sink_option_prefix(),
         &mut clean_env,
         &mut login,
         &mut argv0,
