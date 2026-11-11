@@ -207,6 +207,61 @@ fn issue2796_control_cd_subdir_of_symlink_then_dotdot() {
 }
 
 #[test]
+fn issue2796_cd_absolute_spelling_through_nonexistent_dotdot_fails() {
+    // The PATH_CHECKEXISTS half of sh_canonpath (lib/sh/pathcanon.c):
+    // a component erased by a later `..` must still name an existing
+    // directory, or canon fails and change_to_directory adjudicates
+    // by the verbatim chdir — whose ENOENT is the verdict. The
+    // textual parent existing is NOT enough. GNU bash 5.3.20
+    // measured (script file): rc=1, the shell stays put, and the
+    // diagnostic names the operand as given.
+    let tree = make_tree("deadabs");
+    let script = format!(
+        "cd \"{r}\"; cd \"{r}/noexist-xyz/../a\"; echo \"rc=$?\"; pwd -L; echo \"PWD=$PWD\"\n",
+        r = tree.real
+    );
+    let (stdout, stderr, code) = run_script_in(&tree.base, &script);
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(
+        stdout,
+        format!("rc=1\n{r}\nPWD={r}\n", r = tree.real),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "cd: {}/noexist-xyz/../a: No such file or directory",
+            tree.real
+        )),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn issue2796_cd_relative_spelling_through_nonexistent_dotdot_fails() {
+    // Same face, relative spelling: the erased component is an
+    // operand component under the current directory, and the target
+    // beyond the `..` exists — only the existence check on the
+    // erased component can fail this cd. GNU bash 5.3.20 measured:
+    // rc=1, the shell stays put.
+    let tree = make_tree("deadrel");
+    let script = format!(
+        "cd \"{r}\"; cd noexist/../b/other; echo \"rc=$?\"; pwd -L; echo \"PWD=$PWD\"\n",
+        r = tree.real
+    );
+    let (stdout, stderr, code) = run_script_in(&tree.base, &script);
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(
+        stdout,
+        format!("rc=1\n{r}\nPWD={r}\n", r = tree.real),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cd: noexist/../b/other: No such file or directory"),
+        "stderr:\n{stderr}"
+    );
+}
+
+#[test]
 fn issue2796_control_cd_dot_in_symlink_dir_stays() {
     let tree = make_tree("ctrldot");
     let script = format!(
