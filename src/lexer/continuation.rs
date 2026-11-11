@@ -348,12 +348,94 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
     // inside a pattern list reserved words are word data — the region bit
     // keeps a pattern-position `case` from inflating case_depth (rubash#380).
     let mut case_pattern_region = false;
+    // rubash#2784: pattern-content witness (mirror of the skip.rs
+    // oracle's in skip_parenthesized_unit_corrected): a `)` arriving
+    // while a case preamble is unfinished closes the enclosing unit
+    // for the body parser (GNU parse_comsub, parse.y:4451) instead of
+    // being held as case syntax to EOF.
+    let mut case_pattern_seen = false;
+    // rubash#2789: pattern-content bookkeeping for the pop arm's
+    // reclassification predicate — the mirror of the parser arm's
+    // locals in dollar_command_substitution (same names, same
+    // meaning). The #2784 witness above only resets at clause
+    // terminators; this bookkeeping additionally tracks each
+    // pattern list separately (`|` reset, pattern-list opener,
+    // nested pattern parens), which is what the parser arm judges.
+    let mut case_pattern_content = false;
+    let mut case_pattern_paren_depth = 0usize;
+    let mut case_pattern_opener_available = true;
+    let mut case_pattern_region_seen = false;
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
         let top = stack.last().copied();
         if ch == '\n' {
             line += 1;
+        }
+        // rubash#2789: pre-update snapshot for the pop arm's
+        // reclassification predicate. The case-depth update below
+        // completes the subject/`in` words and disarms the region
+        // at a pattern `)`, so the pop arm judges by the values in
+        // force BEFORE this char's update — the same capture the
+        // parser arm takes in dollar_command_substitution.
+        let region_before = case_pattern_region;
+        let content_before = case_pattern_content;
+        let stage_before = case_in_stage;
+        let word_before = case_word.clone();
+        // Would the comment arms below consume this `#`? Comment
+        // text is never pattern content (the parser arm's comment
+        // arm continues before its bookkeeping; mirrored here).
+        let comment_consumes = ch == '#'
+            && comment_start
+            && match top {
+                None => true,
+                Some(d) => {
+                    (d.close == ')' || d.funsub)
+                        && !(d.close == ')' && d.report_open && !d.array_list)
+                }
+            };
+        // rubash#2789 bookkeeping advance (mirror of the parser
+        // arm's per-char match): track whether the armed pattern
+        // region has seen pattern content yet. Same gate as the
+        // case-depth update (operator context — the gate's own
+        // quote tracking). A `\` or backquote in the region falls
+        // to the catch-all, exactly the parser arm's escape and
+        // backquote arms setting content there.
+        if case_depth > 0 && region_before && close_char_operator_context(top) && !comment_consumes
+        {
+            match ch {
+                '(' => {
+                    // The pattern-list opener is available only as
+                    // the first content of a pattern; any other `(`
+                    // nests.
+                    if case_pattern_paren_depth == 0
+                        && !case_pattern_content
+                        && case_pattern_opener_available
+                    {
+                        case_pattern_opener_available = false;
+                    } else {
+                        case_pattern_paren_depth += 1;
+                        case_pattern_content = true;
+                    }
+                }
+                '|' if case_pattern_paren_depth == 0 => {
+                    // Pattern separator: the next pattern starts empty.
+                    case_pattern_content = false;
+                    case_pattern_opener_available = true;
+                }
+                ')' if case_pattern_paren_depth > 0 => {
+                    case_pattern_paren_depth -= 1;
+                }
+                '&' => {
+                    // `;&` is a clause terminator, not pattern content.
+                    if chars.get(i.wrapping_sub(1)) != Some(&';') {
+                        case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                c if c.is_whitespace() => {}
+                _ => case_pattern_content = true,
+            }
         }
         if close_char_operator_context(top) {
             update_command_substitution_case_depth_staged_chars(
@@ -370,6 +452,37 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
         } else if top.is_some_and(|d| d.close == '\'' || d.close == '"') {
             case_word.clear();
             case_word_boundary = false;
+        }
+        // rubash#2789: a freshly armed pattern region (at `in`, or
+        // re-armed at a clause terminator) starts with empty
+        // pattern bookkeeping; a disarmed region re-arms the reset
+        // (mirror of the parser arm's region_seen tracking).
+        if case_pattern_region {
+            if !case_pattern_region_seen {
+                case_pattern_content = false;
+                case_pattern_paren_depth = 0;
+                case_pattern_opener_available = true;
+                case_pattern_region_seen = true;
+            }
+        } else {
+            case_pattern_region_seen = false;
+        }
+        // rubash#2784 pattern-content witness advance (mirror of the
+        // skip.rs oracle's advance).
+        if case_depth == 0 {
+            case_pattern_seen = false;
+        } else if ch == ';'
+            && chars
+                .get(i + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+            && case_pattern_region
+        {
+            case_pattern_seen = false;
+        } else if case_in_stage == 3
+            && case_pattern_region
+            && (!case_word.is_empty() || (!ch.is_whitespace() && ch != ')'))
+        {
+            case_pattern_seen = true;
         }
         // perf19: heredoc body opacity (make_cmd.c:512 make_here_document
         // reads the body raw; parse.y:3120 gather_here_documents, and
@@ -418,10 +531,38 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                 continue;
             }
             // perf19: a `)` while a case clause is open is a PATTERN
-            // terminator (parse.y:1037), not this delimiter's closer.
+            // terminator (parse.y:1037), not this delimiter's closer —
+            // unless the case preamble is unfinished (rubash#2784: no
+            // `in` yet, or `in` with no pattern seen), where GNU's body
+            // parser owns the paren and it closes this delimiter.
+            let case_preamble_unfinished =
+                matches!(case_in_stage, 1 | 2) || (case_in_stage == 3 && !case_pattern_seen);
+            // rubash#2789: the reclassification predicate, judged by
+            // the pre-update snapshot (mirror of the parser arm's
+            // close conditions in dollar_command_substitution): the
+            // `)` cannot be a case token — the armed pattern region
+            // has no content yet, or it is glued to the `in` word,
+            // or glued to the case subject — so it closes this
+            // delimiter for the body parser (parse.y:4519-4521)
+            // instead of being held as case syntax to EOF. The
+            // per-pattern bookkeeping is what the #2784 witness
+            // cannot express: it stays set across a `|` separator
+            // and knows nothing of the pattern-list opener (stage
+            // 4), and it can be polluted by an OUTER case's pattern
+            // where the snapshot's `in`-glued arm still judges the
+            // inner preamble correctly. The detention boundary is
+            // unchanged: only a case opened INSIDE this delimiter
+            // (case_depth > case_depth_at_push) is judged at all.
+            let case_body_close = (region_before && !content_before)
+                || (word_before == "in" && stage_before == 2)
+                || (case_in_stage == 2 && !region_before && !word_before.is_empty());
             if ch == d.close
                 && !(d.funsub && !d.term_ready)
-                && (d.pattern_paren || !(d.close == ')' && case_depth > d.case_depth_at_push))
+                && (d.pattern_paren
+                    || !(d.close == ')'
+                        && case_depth > d.case_depth_at_push
+                        && !case_preamble_unfinished
+                        && !case_body_close))
             {
                 stack.pop();
                 // A closed subshell or brace group is a complete command:
@@ -865,6 +1006,47 @@ pub(crate) fn unclosed_input_close_char_posix(input: &str, posix: bool) -> Optio
                         i += 1;
                     }
                     _ => {}
+                }
+            }
+            '(' if top.is_none()
+                && super::parse_extended_glob()
+                && matches!(cur_word.chars().last(), Some('@' | '*' | '+' | '?' | '!'))
+                && !(cur_word == "!" && at_command) =>
+            {
+                // rubash#2680: with extended_glob live, a `(` directly
+                // after a word-final PATTERN_CHAR (syntax.h:92) is an
+                // extglob group opener: read_token_word hands the whole
+                // balanced group to parse_matched_pair
+                // (parse.y:5466-5489), so a CLOSED group is word text —
+                // and when the pair never closes, GNU's reader dies
+                // inside parse_matched_pair (parse.y:3901-3912) before
+                // the command list containing it executes anything.
+                // Claim the pending pair so the driver suppresses the
+                // whole opener line instead of streaming its earlier
+                // `;`-segments into execution. Exception: a word that
+                // is exactly `!` at command position is the negation
+                // keyword — its `(` is a subshell opener and keeps the
+                // generic arm below.
+                match super::skip::skip_extglob_group_chars(&chars, i) {
+                    Some(end) => {
+                        line += chars[i..end].iter().filter(|c| **c == '\n').count();
+                        i = end - 1;
+                    }
+                    None => {
+                        stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            arith: false,
+                        });
+                    }
                 }
             }
             '(' if top.is_none() => {
@@ -3643,6 +3825,12 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
     // `case WORD in' chain tracker (GNU special_case_tokens,
     // parse.y:3369-3386 + 3433-3441) — see the corrected case-depth update.
     let mut case_in_stage = 0u8;
+    // rubash#2784: pattern-content witness — mirror of the skip.rs
+    // oracle's (see skip_parenthesized_unit_corrected): no pattern
+    // seen since the current list was armed means a `)` closes this
+    // unit for the body parser instead of reading as case syntax
+    // (GNU parse_comsub, parse.y:4451).
+    let mut case_pattern_seen = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word.is_empty()` alone is wrong: `$`, quotes and other
@@ -3740,6 +3928,23 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
             &mut undecided,
             &mut case_pattern_region,
         );
+        // rubash#2784 pattern-content witness (mirror of the oracle's
+        // advance in skip.rs).
+        if case_depth == 0 {
+            case_pattern_seen = false;
+        } else if ch == ';'
+            && chars
+                .get(index + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+            && case_pattern_region
+        {
+            case_pattern_seen = false;
+        } else if case_in_stage == 3
+            && case_pattern_region
+            && (!word.is_empty() || (!ch.is_whitespace() && ch != ')'))
+        {
+            case_pattern_seen = true;
+        }
         match ch {
             '\'' => single = true,
             '"' => double = true,
@@ -3803,7 +4008,12 @@ fn skip_parenthesized_unit_corrected_ex(chars: &[char], open: usize) -> Option<(
                 }
             }
             '(' if case_depth == 0 => depth += 1,
-            ')' if case_depth == 0 => {
+            // rubash#2784: a `)` while a case preamble is unfinished
+            // closes this unit (mirror of the skip.rs oracle arm).
+            ')' if case_depth == 0
+                || matches!(case_in_stage, 1 | 2)
+                || (case_in_stage == 3 && !case_pattern_seen) =>
+            {
                 depth = depth.saturating_sub(1);
                 if depth == 0 {
                     return Some((index + 1, !undecided));
@@ -4521,6 +4731,40 @@ pub(crate) fn subscript_residuals_advance(
             state.command_position = false;
             continue;
         }
+        // rubash#2647 (mirror of the skip.rs oracle arm, rubash#3208):
+        // a `(` directly after a word-final PATTERN_CHAR (`@*+?!`,
+        // syntax.h:92) is an extglob group opener, never a subshell
+        // boundary: GNU read_token_word hands the whole balanced group
+        // to parse_matched_pair whenever extended_glob is live
+        // (parse.y:5466-5489), and with extglob off the `(` is a
+        // syntax-error token — in neither case does the text after it
+        // start a command position whose identifier could open a
+        // P_ARRAYSUB hunt (parse.y:5635-5643). Consume the balanced
+        // group exactly like the oracle — the body's `[`/`|`/`(` never
+        // feed token-level decisions; an unbalanced group is a
+        // `)`-shaped EOF owned by the generic close-char scan, so park
+        // at the `(` and commit no report. Exception: a word that is
+        // exactly `!` at command position is the negation keyword —
+        // its `(` really is a subshell opener, and a genuinely
+        // unclosed subscript inside (`!(a[1)`) still reports `]`.
+        if ch == '('
+            && matches!(state.word.chars().last(), Some('@' | '*' | '+' | '?' | '!'))
+            && !(state.word == "!" && state.command_position)
+        {
+            match super::skip::skip_extglob_group_chars(chars, index) {
+                Some(end) => {
+                    state.word.push('(');
+                    index = end;
+                    continue;
+                }
+                None => {
+                    return Some(park.take().unwrap_or(SubscriptResidualPark {
+                        pos: index,
+                        snapshot: state.clone(),
+                    }));
+                }
+            }
+        }
         if ch == '(' {
             // `name=(` opens a compound-assignment list; any other `(` is a
             // subshell/grouping whose body starts a fresh command position.
@@ -4637,6 +4881,18 @@ pub(crate) struct CloseCharResidualState {
     /// reserved words inside a pattern list are word data. Checkpointed
     /// alongside case_in_stage so a resumed scan matches the oracle.
     pub(crate) case_pattern_region: bool,
+    /// rubash#2784: pattern-content witness — checkpointed alongside
+    /// case_in_stage so a resumed scan matches the oracle.
+    pub(crate) case_pattern_seen: bool,
+    /// rubash#2789: pattern-content bookkeeping for the in-field
+    /// unclosed-case reclassification at the pop arm — the mirror of
+    /// the parser arm's four locals in `dollar_command_substitution`
+    /// (same names, same meaning), checkpointed alongside
+    /// case_in_stage so a resumed scan matches the oracle.
+    pub(crate) case_pattern_content: bool,
+    pub(crate) case_pattern_paren_depth: usize,
+    pub(crate) case_pattern_opener_available: bool,
+    pub(crate) case_pattern_region_seen: bool,
 }
 
 impl Default for CloseCharResidualState {
@@ -4654,6 +4910,11 @@ impl Default for CloseCharResidualState {
             current_word_boundary: true,
             case_in_stage: 0,
             case_pattern_region: false,
+            case_pattern_seen: false,
+            case_pattern_content: false,
+            case_pattern_paren_depth: 0,
+            case_pattern_opener_available: true,
+            case_pattern_region_seen: false,
         }
     }
 }
@@ -4755,6 +5016,64 @@ pub(crate) fn close_char_residuals_advance(
         // are consumed by the arms below after their `#` separator was
         // fed (harmless); quote content is cleared by the helper via the
         // single/double flags derived from the delimiter stack.
+        // rubash#2789: pre-update snapshot for the pop arm's
+        // reclassification predicate (mirror of the oracle's
+        // snapshot in unclosed_input_close_char_posix; a per-round
+        // local, NOT checkpointed — the four bookkeeping fields on
+        // the state are the checkpointed part).
+        let region_before = state.case_pattern_region;
+        let content_before = state.case_pattern_content;
+        let stage_before = state.case_in_stage;
+        let word_before = state.word.clone();
+        // Would the comment arms below consume this `#`? Comment
+        // text is never pattern content.
+        let comment_consumes = ch == '#'
+            && state.comment_start
+            && match top {
+                None => true,
+                Some(d) => {
+                    (d.close == ')' || d.funsub)
+                        && !(d.close == ')' && d.report_open && !d.array_list)
+                }
+            };
+        // rubash#2789 bookkeeping advance (mirror of the oracle's
+        // advance): track whether the armed pattern region has
+        // seen pattern content yet, gated like the case-depth
+        // update below.
+        if state.case_depth > 0
+            && region_before
+            && close_char_operator_context(top)
+            && !comment_consumes
+        {
+            match ch {
+                '(' => {
+                    if state.case_pattern_paren_depth == 0
+                        && !state.case_pattern_content
+                        && state.case_pattern_opener_available
+                    {
+                        state.case_pattern_opener_available = false;
+                    } else {
+                        state.case_pattern_paren_depth += 1;
+                        state.case_pattern_content = true;
+                    }
+                }
+                '|' if state.case_pattern_paren_depth == 0 => {
+                    state.case_pattern_content = false;
+                    state.case_pattern_opener_available = true;
+                }
+                ')' if state.case_pattern_paren_depth > 0 => {
+                    state.case_pattern_paren_depth -= 1;
+                }
+                '&' => {
+                    if chars.get(i.wrapping_sub(1)) != Some(&';') {
+                        state.case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                c if c.is_whitespace() => {}
+                _ => state.case_pattern_content = true,
+            }
+        }
         if close_char_operator_context(top) {
             update_command_substitution_case_depth_staged_chars(
                 chars,
@@ -4774,6 +5093,36 @@ pub(crate) fn close_char_residuals_advance(
             // W_QUOTED, never keywords).
             state.word.clear();
             state.word_boundary = false;
+        }
+        // rubash#2789: a freshly armed pattern region starts with
+        // empty pattern bookkeeping; a disarmed region re-arms the
+        // reset (mirror of the oracle's region_seen tracking).
+        if state.case_pattern_region {
+            if !state.case_pattern_region_seen {
+                state.case_pattern_content = false;
+                state.case_pattern_paren_depth = 0;
+                state.case_pattern_opener_available = true;
+                state.case_pattern_region_seen = true;
+            }
+        } else {
+            state.case_pattern_region_seen = false;
+        }
+        // rubash#2784 pattern-content witness advance (mirror of the
+        // oracle's advance in unclosed_input_close_char_posix).
+        if state.case_depth == 0 {
+            state.case_pattern_seen = false;
+        } else if ch == ';'
+            && chars
+                .get(i + 1)
+                .is_some_and(|next| *next == ';' || *next == '&')
+            && state.case_pattern_region
+        {
+            state.case_pattern_seen = false;
+        } else if state.case_in_stage == 3
+            && state.case_pattern_region
+            && (!state.word.is_empty() || (!ch.is_whitespace() && ch != ')'))
+        {
+            state.case_pattern_seen = true;
         }
         // perf19: heredoc body opacity. GNU make_cmd.c:512
         // `make_here_document` (driven by parse.y:3120
@@ -4836,10 +5185,25 @@ pub(crate) fn close_char_residuals_advance(
                 continue;
             }
             // perf19: a `)` while a case clause is open is a PATTERN
-            // terminator (parse.y:1037), not this delimiter's closer.
+            // terminator (parse.y:1037), not this delimiter's closer —
+            // unless the case preamble is unfinished (rubash#2784).
+            let case_preamble_unfinished = matches!(state.case_in_stage, 1 | 2)
+                || (state.case_in_stage == 3 && !state.case_pattern_seen);
+            // rubash#2789: the reclassification predicate, judged by
+            // the pre-update snapshot (mirror of the oracle's
+            // predicate): the `)` cannot be a case token, so it
+            // closes this delimiter for the body parser instead of
+            // being held as case syntax to EOF.
+            let case_body_close = (region_before && !content_before)
+                || (word_before == "in" && stage_before == 2)
+                || (state.case_in_stage == 2 && !region_before && !word_before.is_empty());
             if ch == d.close
                 && !(d.funsub && !d.term_ready)
-                && (d.pattern_paren || !(d.close == ')' && state.case_depth > d.case_depth_at_push))
+                && (d.pattern_paren
+                    || !(d.close == ')'
+                        && state.case_depth > d.case_depth_at_push
+                        && !case_preamble_unfinished
+                        && !case_body_close))
             {
                 state.stack.pop();
                 // A closed subshell or brace group is a complete command:
@@ -5297,6 +5661,43 @@ pub(crate) fn close_char_residuals_advance(
                         i += 1;
                     }
                     _ => {}
+                }
+            }
+            '(' if top.is_none()
+                && super::parse_extended_glob()
+                && matches!(
+                    state.cur_word.chars().last(),
+                    Some('@' | '*' | '+' | '?' | '!')
+                )
+                && !(state.cur_word == "!" && state.at_command) =>
+            {
+                // rubash#2680: mirror of the one-shot scan's extglob arm
+                // in unclosed_input_close_char_posix — a word-final
+                // PATTERN_CHAR's `(` under live extended_glob is a
+                // parse_matched_pair group (parse.y:5466-5489); closed
+                // it is word text, unclosed it is a pending `)` whose
+                // opener line the driver suppresses whole
+                // (parse.y:3901-3912).
+                match super::skip::skip_extglob_group_chars(&chars, i) {
+                    Some(end) => {
+                        state.line += chars[i..end].iter().filter(|c| **c == '\n').count();
+                        i = end - 1;
+                    }
+                    None => {
+                        state.stack.push(UnclosedDelim {
+                            close: ')',
+                            open_line: state.line,
+                            escapes: true,
+                            report_open: true,
+                            funsub: false,
+                            command: false,
+                            term_ready: false,
+                            case_depth_at_push: state.case_depth,
+                            array_list: false,
+                            pattern_paren: false,
+                            arith: false,
+                        });
+                    }
                 }
             }
             '(' if top.is_none() => {
@@ -6322,6 +6723,41 @@ mod close_char_residual_incremental_tests {
         assert_both_modes(&["echo \"${IFS+'bar", "}\" x"]);
         // Closed everything.
         assert_both_modes(&["echo a b", "c d"]);
+    }
+
+    #[test]
+    fn incremental_matches_full_unclosed_case_shapes() {
+        // rubash#2789: the reclassification predicate and its
+        // checkpointed bookkeeping — the staged state (including the
+        // four new fields) must equal the oracle's verdict at every
+        // line prefix, with and without parking.
+        // The pre-#3241 shapes (predicate leaves them to the #2784
+        // witness), glued and spaced, bare and double-quoted.
+        assert_both_modes(&["echo $(case x in)"]);
+        assert_both_modes(&["echo $(case x in )"]);
+        assert_both_modes(&["echo \"$(case x in)\""]);
+        assert_both_modes(&["echo $(case x)"]);
+        // The predicate's own coverage: pattern separator tail and
+        // outer-case pattern pollution. The pattern-list opener and
+        // clause-terminator shapes are agreement shapes only: the
+        // opener disarms the region (stage 4) in both machines, and
+        // a terminator re-arms it only at the next pattern, so both
+        // machines still hold those units.
+        assert_both_modes(&["echo $(case x in a|)"]);
+        assert_both_modes(&["echo $(case x in a| )"]);
+        assert_both_modes(&["echo $(case x in ()"]);
+        assert_both_modes(&["echo $(case x in ("]);
+        assert_both_modes(&["case a in a) echo $(case x in);; esac"]);
+        assert_both_modes(&["echo $(case x in a;;)"]);
+        // Split across lines: parking inside the case preamble must
+        // carry the bookkeeping to the pop arm intact.
+        assert_both_modes(&["echo $(case x in", "a|)"]);
+        assert_both_modes(&["echo $(case x in a|", ")"]);
+        // Controls: pattern content closed (still held), complete
+        // case (still closed by the unit's own close).
+        assert_both_modes(&["echo $(case x in a) echo x)"]);
+        assert_both_modes(&["echo $(case x in a|b) x;; esac)"]);
+        assert_both_modes(&["echo $(case x in esac)"]);
     }
 
     #[test]

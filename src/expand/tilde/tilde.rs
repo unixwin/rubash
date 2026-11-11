@@ -661,6 +661,114 @@ pub fn expand_assignment_tilde_value(
         .join(":")
 }
 
+/// The rewalk-safe twin of [`expand_assignment_value`], for callers
+/// that feed the tilde-expanded value through a SECOND expansion walk
+/// (the two-pass assignment expanders). GNU runs the tilde pass
+/// INSIDE the one word walk and joins the result as a quoted string
+/// (subst.c:11497-11512 expand_word_internal case '~' +
+/// subst.c:11862 add_quoted_string), so resolved tilde text is never
+/// rescanned for `$`, backticks or escapes. A two-pass rewrite that
+/// substitutes the resolved text into the string the walker then
+/// scans breaks that invariant — a `$x` inside $HOME was
+/// parameter-expanded a second time (rubash#2651). Here each
+/// segment's RESOLVED PREFIX is carrier-encoded as data
+/// ([`protect_assignment_tilde_result`]) while the segment's raw
+/// tail — the original text after the tilde prefix — stays live for
+/// the walker, the same split the word path makes with
+/// `tilde_prefix_split` + `expand_word(remainder)`.
+pub fn expand_assignment_value_protected(
+    value: &str,
+    env_vars: &HashMap<String, String>,
+) -> String {
+    let value = strip_assignment_quote_marker(value);
+    if !assignment_value_needs_tilde_expansion(value, true) {
+        return value.to_string();
+    }
+    assignment_tilde_segments(value)
+        .into_iter()
+        .map(|segment| expand_tilde_segment_protected(segment, env_vars))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn expand_tilde_segment_protected(segment: &str, env_vars: &HashMap<String, String>) -> String {
+    let Some(rest) = segment.strip_prefix('~') else {
+        return segment.to_string();
+    };
+
+    if rest.is_empty() || rest.starts_with('/') {
+        // Same $HOME glue as expand_tilde_segment (tilde.c:304-317):
+        // the resolved home is protected, the `/...` tail stays live.
+        return match tilde_home(env_vars) {
+            Some(home) => format!("{}{}", protect_assignment_tilde_result(&home), rest),
+            None => segment.to_string(),
+        };
+    }
+
+    // Special prefixes (`~+`, `~-`, `~N`): the expansion replaces the
+    // head (up to the first `/`); resolve the head alone so its tail
+    // keeps the original text's liveness.
+    if let Some(expanded) = special_tilde_expansion(segment, env_vars) {
+        return match expanded {
+            Some(_) => {
+                let (head, tail) = match segment.find('/') {
+                    Some(index) => (&segment[..index], &segment[index..]),
+                    None => (segment, ""),
+                };
+                match special_tilde_expansion(head, env_vars) {
+                    Some(Some(value)) => {
+                        format!("{}{}", protect_assignment_tilde_result(&value), tail)
+                    }
+                    _ => segment.to_string(),
+                }
+            }
+            None => segment.to_string(),
+        };
+    }
+
+    let (user, tail) = match rest.find('/') {
+        Some(index) => (&rest[..index], Some(&rest[index..])),
+        None => (rest, None),
+    };
+    match passwd_home_for_user(user, env_vars) {
+        Some(home) => format!(
+            "{}{}",
+            protect_assignment_tilde_result(&home),
+            tail.unwrap_or("")
+        ),
+        None => segment.to_string(),
+    }
+}
+
+/// Encode a resolved tilde prefix so a subsequent expansion walk
+/// treats every byte as data: `$`, backtick and backslash take the
+/// DATA carriers the walkers restore verbatim, quotes take the DATA
+/// quote carriers (a raw quote would flip the walker's quote state),
+/// and glob metacharacters take CTLESC, the glob layer's data mark,
+/// which the assignment pipeline's dequote strips like any quoted
+/// glob mark from the lexer. This is add_quoted_string's guarantee
+/// (subst.c:11862) expressed in the carrier set a rewalk honors;
+/// [`protect_tilde_prefix`] covers only the output-side subset
+/// (IFS + glob) because its prefix never re-enters a walker.
+fn protect_assignment_tilde_result(value: &str) -> String {
+    let mut output = String::with_capacity(value.len() + 4);
+    for ch in value.chars() {
+        match ch {
+            '$' => output.push(crate::executor::markers::DATA_DOLLAR),
+            '`' => output.push(crate::executor::markers::DATA_BACKTICK),
+            '\\' => output.push(crate::executor::markers::DATA_BACKSLASH),
+            '"' => output.push(crate::executor::markers::DATA_DQUOTE),
+            '\'' => output.push(crate::executor::markers::DATA_SQUOTE),
+            '*' | '?' | '[' => {
+                output.push(crate::executor::markers::CTLESC);
+                output.push(ch);
+            }
+            _ => output.push(ch),
+        }
+    }
+    output
+}
+
 pub(crate) fn expand_tilde_segment(segment: &str, env_vars: &HashMap<String, String>) -> String {
     let Some(rest) = segment.strip_prefix('~') else {
         return segment.to_string();

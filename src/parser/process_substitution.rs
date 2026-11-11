@@ -134,6 +134,27 @@ pub(super) fn process_substitutions_in_word_with_raw(
     substitutions
 }
 
+/// End index (just past the closer) of the `$`-introduced group whose
+/// `$` sits at `dollar` in `chars` — `$(`/`${`/`$[` — or None when the
+/// `$` introduces no group or the group never closes. GNU
+/// expand_word_internal consumes these units whole in its `$` arm
+/// (subst.c:10915 extract_arithmetic_subst for `$((`, the comsub and
+/// brace arms likewise), so a `<`/`>` inside one is data for the inner
+/// construct and never reaches the `<`/`>` process-substitution arms
+/// (subst.c:11365-11378) at this word's level. The balanced skip is
+/// the lexer's own parse_matched_pair walker (dollar_word_group_len),
+/// the same rules the P_ARITH span scan uses (rubash#2648:
+/// `$(( 4>(2+3) ? 1 : 32))` executed `2+3` as a command).
+fn dollar_group_end(chars: &[char], dollar: usize) -> Option<usize> {
+    let (open, close) = match chars.get(dollar + 1) {
+        Some('(') => ('(', ')'),
+        Some('{') => ('{', '}'),
+        Some('[') => ('[', ']'),
+        _ => return None,
+    };
+    crate::lexer::dollar_word_group_len(chars, dollar + 1, open, close)
+}
+
 /// Quote-aware extraction of every UNQUOTED `<(`/`>(` span at raw offset > 0
 /// (word-initial spans belong to the token-shape scan in
 /// process_substitutions_in_word_with_raw). The paren matcher honors the
@@ -167,6 +188,15 @@ fn embedded_process_substitutions_in_raw(raw: &str) -> Vec<ProcessSubstitution> 
             double = !double;
             index += 1;
             continue;
+        }
+        if !single && !double && ch == '$' {
+            // A `$(`/`${`/`$[` unit is opaque at this word's level
+            // (dollar_group_end): its interior belongs to the inner
+            // construct's own scan.
+            if let Some(end) = dollar_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
         }
         if !single
             && !double
@@ -296,6 +326,15 @@ pub(crate) fn verbatim_process_substitution_span(
             index += 1;
             continue;
         }
+        if !single && !double && ch == '$' {
+            // Same opacity rule as the extraction scan
+            // (dollar_group_end): a span inside a `$(`/`${`/`$[` unit
+            // belongs to the inner construct, not to this word.
+            if let Some(end) = dollar_group_end(&plain, index) {
+                index = end;
+                continue;
+            }
+        }
         if !single
             && !double
             && ch == want
@@ -355,6 +394,16 @@ pub(crate) fn raw_word_has_unquoted_process_substitution(raw: &str) -> bool {
             double = !double;
             index += 1;
             continue;
+        }
+        if !single && !double && ch == '$' {
+            // A `$(`/`${`/`$[` unit is opaque at this word's level
+            // (dollar_group_end): a `<(`/`>(` inside one — e.g. the
+            // comparison in `$(( 4>(2+3) ))` — is not this word's
+            // process substitution.
+            if let Some(end) = dollar_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
         }
         if !single && !double && matches!(ch, '<' | '>') && chars.get(index + 1) == Some(&'(') {
             return true;

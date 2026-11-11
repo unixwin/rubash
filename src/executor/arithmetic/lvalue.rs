@@ -357,10 +357,8 @@ impl ConditionalArithParser<'_> {
                                 // read reports it twice (`A[$k]` with k unset ->
                                 // `A[]: bad array subscript` x2), then the
                                 // element reads as 0.
-                                self.diags
-                                    .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
-                                self.diags
-                                    .push(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                                self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
+                                self.record_diag(ArithEvalDiag::BadSubscript(format!("{name}[]")));
                                 return Some(ParsedAssocSubscript::Key(String::new()));
                             }
                             // Nonempty bracket text resolving empty: the

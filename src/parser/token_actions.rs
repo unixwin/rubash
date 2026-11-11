@@ -237,13 +237,23 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
             if let Some((value, raw, next_i)) =
                 collect_adjacent_process_substitution_word(tokens, *i)
             {
-                push_synthetic_process_substitution_word(&mut state.current_cmd, &value, &raw);
+                push_synthetic_process_substitution_word(
+                    &mut state.current_cmd,
+                    &value,
+                    &raw,
+                    tokens[next_i].end_position,
+                );
                 *i = next_i;
             } else if state.current_cmd.words.is_empty() {
                 if let Some((value, raw, next_i)) =
                     collect_split_array_element_assignment_word(tokens, *i)
                 {
-                    push_synthetic_process_substitution_word(&mut state.current_cmd, &value, &raw);
+                    push_synthetic_process_substitution_word(
+                        &mut state.current_cmd,
+                        &value,
+                        &raw,
+                        tokens[next_i].end_position,
+                    );
                     *i = next_i;
                 } else {
                     push_command_word(&mut state.current_cmd, token);
@@ -273,6 +283,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             rhs
                         );
                         let word_index = state.current_cmd.words.len();
+                        note_time_prefix_first_element(
+                            &mut state.current_cmd,
+                            &token.value,
+                            &token.raw,
+                            &token.kind,
+                            token.end_position,
+                        );
                         state
                             .current_cmd
                             .word_metadata
@@ -426,6 +443,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                         &var_value,
                         &raw_assignment_value,
                         None,
+                        token.extglob_gate,
                     );
                     state.current_cmd.insert_assignment_with_raw(
                         var_name,
@@ -589,8 +607,16 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             value,
                             raw_assignment_value,
                             Some(word_index),
+                            token.extglob_gate,
                         );
                     }
+                    note_time_prefix_first_element(
+                        &mut state.current_cmd,
+                        &token.value,
+                        &token.raw,
+                        &token.kind,
+                        token.end_position,
+                    );
                     state
                         .current_cmd
                         .word_metadata
@@ -696,6 +722,13 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
                         state.current_cmd.redirect_in = Some(Box::new(redirect));
                     }
+                    // rubash#3053: procsub target correction — the
+                    // target token is the closing `)` (see
+                    // redirect_assign.rs for the model).
+                    correct_first_word_end_for_redirect_target(
+                        &mut state.current_cmd,
+                        &tokens[next_i],
+                    );
                     *i = next_i;
                 } else if let Some((mut process_substitution, next_i)) =
                     process_substitution_word_target(tokens, *i)
@@ -740,18 +773,47 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                             &mut state.current_cmd,
                             &value,
                             &raw,
+                            tokens[joined_i].end_position,
                         );
                         *i = joined_i;
                     } else {
-                        process_substitution.word_index = Some(state.current_cmd.words.len());
-                        let target = process_substitution.target.clone();
+                        // rubash#2802: every word intake pairs the word
+                        // with its metadata (push_command_word, the
+                        // compound-operand arm, the replace arm above) —
+                        // the words/word_metadata index alignment is the
+                        // invariant index-based consumers read by (the
+                        // respawn serializer in command_text.rs). This
+                        // arm pushed the word alone, so the serializer
+                        // matched no metadata for the procsub word (nor
+                        // for any word after it) and single-quoted it
+                        // as literal data: async/coproc respawns ran
+                        // `cat '<(echo via)'`. Assemble the word the
+                        // replace arm's way — span plus glued suffix,
+                        // one word (GNU parse.y:5305 read_token_word
+                        // builds the word in one pass) — with its
+                        // metadata, and consume the suffix tokens.
+                        let word_index = state.current_cmd.words.len();
+                        process_substitution.word_index = Some(word_index);
+                        let value = format!("{}{}", process_substitution.target, suffix);
+                        let raw = format!("{}{}", process_substitution.target, suffix_raw);
                         state
                             .current_cmd
                             .process_substitutions
                             .push(process_substitution);
-                        state.current_cmd.words.push(target);
+                        note_time_prefix_first_element(
+                            &mut state.current_cmd,
+                            &value,
+                            &raw,
+                            &TokenKind::Word,
+                            tokens[joined_i].end_position,
+                        );
+                        state
+                            .current_cmd
+                            .word_metadata
+                            .push(build_word_metadata(word_index, &value, &raw));
+                        state.current_cmd.words.push(value);
                         state.current_cmd.word_kinds.push(TokenKind::Word);
-                        *i = next_i;
+                        *i = joined_i;
                     }
                 } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                     let (dup_value, dup_raw) =
@@ -834,6 +896,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     redirect_node(&token.value, Some(2), &target, false, token.value == "2>|");
                 state.current_cmd.redirects.push(redirect.clone());
                 state.current_cmd.redirect_err = Some(Box::new(redirect));
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_target(tokens, *i, &mut state.current_cmd)
@@ -864,6 +927,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                 let redirect = redirect_node(&token.value, Some(2), &target, true, false);
                 state.current_cmd.redirects.push(redirect.clone());
                 state.current_cmd.redirect_err_append = Some(Box::new(redirect));
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if let Some(next_i) =
                 assign_redirect_err_append_target(tokens, *i, &mut state.current_cmd)
@@ -950,6 +1014,7 @@ pub(super) fn handle_token(tokens: &[Token], i: &mut usize, state: &mut ParseSta
                     process_substitution,
                     redirect_fd_var_prefix(tokens, *i),
                 );
+                correct_first_word_end_for_redirect_target(&mut state.current_cmd, &tokens[next_i]);
                 *i = next_i;
             } else if *i + 1 < tokens.len() && is_redirect_target_token(&tokens[*i + 1]) {
                 // GNU parse.y:664 `redirection: LESS_LESS_LESS WORD` — the
@@ -1501,8 +1566,19 @@ fn adjacent_word_token(token: &Token) -> bool {
     )
 }
 
-fn push_synthetic_process_substitution_word(cmd: &mut CommandNode, value: &str, raw: &str) {
-    let token = Token::new_with_raw(TokenKind::Word, value, raw, 0);
+fn push_synthetic_process_substitution_word(
+    cmd: &mut CommandNode,
+    value: &str,
+    raw: &str,
+    end_line: usize,
+) {
+    let mut token = Token::new_with_raw(TokenKind::Word, value, raw, 0);
+    // rubash#3053: the assembled word's end line is its last
+    // fragment's — push_command_word's first-element accounting
+    // (including the post-`time`-prefix candidate) reads it from
+    // the token, and the synthetic token has no source position of
+    // its own.
+    token.end_position = end_line;
     push_command_word(cmd, &token);
     if let Some(metadata) = cmd.word_metadata.last() {
         cmd.process_substitutions
@@ -1538,7 +1614,7 @@ fn process_substitution_is_adjacent_to_previous_word(tokens: &[Token], index: us
     adjacent_word_token(previous) && tokens[index].column == previous.column + previous.raw.len()
 }
 
-fn collect_process_substitution_suffix(
+pub(super) fn collect_process_substitution_suffix(
     tokens: &[Token],
     close_index: usize,
 ) -> (String, String, usize) {

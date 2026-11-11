@@ -257,7 +257,7 @@ impl Executor {
         // the respawn child's re-parse collapses every body onto the
         // prelude's own lines, so the recorded span is the only way
         // back to per-command definition lines. Each entry is `name=`
-        // plus comma-joined `line.end_line.logical_line` triples
+        // plus the comma-joined span list format_line_spans renders
         // (0 = None) in collect_command_line_spans traversal order;
         // the set rides the indexed-array codec like its siblings.
         let span_entries: Vec<String> = self
@@ -266,18 +266,7 @@ impl Executor {
             .map(|(name, body)| {
                 let mut spans = Vec::new();
                 crate::parser::collect_command_line_spans(&body.commands, &mut spans);
-                let rendered = spans
-                    .iter()
-                    .map(|span| {
-                        format!(
-                            "{}.{}.{}",
-                            span.line.unwrap_or(0),
-                            span.end_line.unwrap_or(0),
-                            span.logical_line.unwrap_or(0)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(",");
+                let rendered = format_line_spans(&spans);
                 format!("{name}={rendered}")
             })
             .collect();
@@ -301,28 +290,40 @@ fn parse_span_slot(text: &str) -> Option<Option<usize>> {
     }
 }
 
-/// rubash#2332: parse a comma-joined `line.end_line.logical_line`
-/// triple list (the encoding both span carriers share). Returns None
-/// when any triple is malformed — a span that cannot be parsed must
-/// never reach a re-seed. The empty string is an empty vector.
-fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
+/// rubash#2332: parse a comma-joined
+/// `line.end_line.logical_line.first_word_end_line` list (the
+/// encoding both span carriers share; the fourth field is
+/// rubash#3054). Returns None when any entry is malformed — a span
+/// that cannot be parsed must never reach a re-seed. The empty
+/// string is an empty vector. A three-field entry is the pre-#3054
+/// form and reads with no first-element stamp; parent and child are
+/// the same binary, so it can only arrive from a hand-built stamp,
+/// never from a live transport.
+fn parse_line_spans(text: &str) -> Option<Vec<crate::parser::CommandLineSpan>> {
     let mut spans = Vec::new();
     if !text.is_empty() {
-        for triple in text.split(',') {
-            let fields: Vec<&str> = triple.split('.').collect();
-            if fields.len() != 3 {
+        for entry in text.split(',') {
+            let fields: Vec<&str> = entry.split('.').collect();
+            if fields.len() != 3 && fields.len() != 4 {
                 return None;
             }
+            let first_word_end_line = if fields.len() == 4 {
+                parse_span_slot(fields[3])
+            } else {
+                Some(None)
+            };
             match (
                 parse_span_slot(fields[0]),
                 parse_span_slot(fields[1]),
                 parse_span_slot(fields[2]),
+                first_word_end_line,
             ) {
-                (Some(line), Some(end_line), Some(logical_line)) => {
+                (Some(line), Some(end_line), Some(logical_line), Some(first_word_end_line)) => {
                     spans.push(crate::parser::CommandLineSpan {
                         line,
                         end_line,
                         logical_line,
+                        first_word_end_line,
                     });
                 }
                 _ => return None,
@@ -332,17 +333,18 @@ fn parse_line_span_triples(text: &str) -> Option<Vec<crate::parser::CommandLineS
     Some(spans)
 }
 
-/// rubash#2332: format spans in the triple-list encoding
-/// parse_line_span_triples reads (None renders as 0).
-fn format_line_span_triples(spans: &[crate::parser::CommandLineSpan]) -> String {
+/// rubash#2332: format spans in the list encoding parse_line_spans
+/// reads (None renders as 0).
+fn format_line_spans(spans: &[crate::parser::CommandLineSpan]) -> String {
     spans
         .iter()
         .map(|span| {
             format!(
-                "{}.{}.{}",
+                "{}.{}.{}.{}",
                 span.line.unwrap_or(0),
                 span.end_line.unwrap_or(0),
-                span.logical_line.unwrap_or(0)
+                span.logical_line.unwrap_or(0),
+                span.first_word_end_line.unwrap_or(0)
             )
         })
         .collect::<Vec<_>>()
@@ -361,7 +363,7 @@ pub(in crate::executor) fn decode_function_line_spans(
         let Some((name, nodes)) = entry.split_once('=') else {
             continue;
         };
-        if let Some(spans) = parse_line_span_triples(nodes) {
+        if let Some(spans) = parse_line_spans(nodes) {
             map.insert(name.to_string(), spans);
         }
     }
@@ -371,15 +373,12 @@ pub(in crate::executor) fn decode_function_line_spans(
 /// rubash#2332: encode a __RUBASH_FORK_ROOT_SPANS stamp value —
 /// element 0 is the count of prelude function-definition commands
 /// ahead of the body in the child's `-c` source, element 1 the root
-/// body's span triples.
+/// body's span list.
 pub(in crate::executor) fn encode_root_line_spans(
     prelude_defs: usize,
     spans: &[crate::parser::CommandLineSpan],
 ) -> String {
-    format_indexed_array_values(vec![
-        prelude_defs.to_string(),
-        format_line_span_triples(spans),
-    ])
+    format_indexed_array_values(vec![prelude_defs.to_string(), format_line_spans(spans)])
 }
 
 /// rubash#2332: decode a __RUBASH_FORK_ROOT_SPANS stamp value into
@@ -391,7 +390,7 @@ pub(in crate::executor) fn decode_root_line_spans(
 ) -> Option<(usize, Vec<crate::parser::CommandLineSpan>)> {
     let values = array_values(value);
     let prelude_defs: usize = values.first()?.parse().ok()?;
-    let spans = parse_line_span_triples(values.get(1)?)?;
+    let spans = parse_line_spans(values.get(1)?)?;
     Some((prelude_defs, spans))
 }
 
@@ -1339,7 +1338,7 @@ impl Executor {
                     &mut process,
                     &program,
                 );
-                process.current_dir(&self.shell_state.cwd);
+                self.stamp_spawn_cwd(&mut process);
                 suppress_orphan_console(&mut process);
                 process.spawn().map(crate::fd::SpawnedChild::from)
             };
@@ -1905,6 +1904,15 @@ impl Executor {
             exe.as_os_str().len() + spawn_args.iter().map(|arg| arg.len() + 1).sum::<usize>();
         let (env_entries, state_temp) =
             self.spill_respawn_env_entries(env_map.into_iter().collect(), argv_bytes);
+        // rubash#3268 (e): when the session cwd no longer resolves,
+        // the spec's anchor fd lets the spawner fchdir the child into
+        // the session's inode (fd::spawn_whitelisted) instead of
+        // leaving it in this process's cwd. Borrowed from the anchor
+        // for the duration of the spawn call below.
+        #[cfg(unix)]
+        let cwd_anchor_fd = self.session_cwd_anchor_fd();
+        #[cfg(not(unix))]
+        let cwd_anchor_fd: Option<i32> = None;
         let spawn_result = crate::fd::spawn_whitelisted(&crate::fd::WhitelistedSpawn {
             program: exe.clone(),
             args: spawn_args,
@@ -1913,6 +1921,7 @@ impl Executor {
             extra_handles,
             // G-02: the respawned child starts in the session cwd.
             cwd: Some(self.shell_state.cwd.clone()),
+            cwd_anchor_fd,
             // rubash#2241: under job control the respawned async child
             // leads its own process group (GNU jobs.c:2390 make_child),
             // matching the pgrp the job table records for it below.
@@ -2312,14 +2321,34 @@ impl Executor {
         // command's own fd-1 redirects below still override this, and
         // `2>&1`-style dups copy it, matching the sequential dup2 ordering a
         // forked GNU child would apply on top of the inherited pipe.
+        // rubash#2660: the base stdio above starts from the PROCESS
+        // descriptors, but an enclosing compound command's
+        // redirections live in this executor's fd table — the flat
+        // body never touches the process's real descriptors. GNU's
+        // async child is a fork of the shell AS REDIRECTED
+        // (execute_cmd.c:2837 execute_connection '&' forks after the
+        // compound applied do_redirections to its own descriptors),
+        // so it is born holding the compound's bindings. Seed slots
+        // 1/2 from the live fd table — the same source a foreground
+        // spawn inherits from — before the capture override below:
+        // an explicit binding (e.g. `>/dev/null`) beats the capture
+        // pipe, exactly like GNU's ordering (the subshell's redirect
+        // rebinds the capture child's fd 1 before the body forks).
+        for slot in 1..=2u32 {
+            if let Some(seeded) = self.background_stdio_from_fd_table(slot) {
+                stdio[slot as usize] = seeded;
+            }
+        }
         let mut captured_pipe_writer = false;
-        if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
-            stdio[1] = BackgroundStdio::File(write);
-            // Registration is conservative: a later fd-1 redirect may drop
-            // the pipe for THIS child, but reaping it then only drains an
-            // empty pipe — never another child's bytes (the drain fires when
-            // the whole writer set is reaped).
-            captured_pipe_writer = true;
+        if matches!(stdio[1], BackgroundStdio::Inherit) {
+            if let Some(write) = crate::executor::shell_options::background_capture_write_end() {
+                stdio[1] = BackgroundStdio::File(write);
+                // Registration is conservative: a later fd-1 redirect may drop
+                // the pipe for THIS child, but reaping it then only drains an
+                // empty pipe — never another child's bytes (the drain fires when
+                // the whole writer set is reaped).
+                captured_pipe_writer = true;
+            }
         }
         // rubash#1862 bookkeeping for the FIFO deferral further down:
         // the stdio the child spawns with before any of the command's
@@ -2497,10 +2526,9 @@ impl Executor {
                         // child; this redirect stays in its source.
                         continue;
                     } else {
-                        match open_redirect_append(&self.session_path(shell_path_to_windows(
-                            &target,
-                            &self.shell_state.env_vars,
-                        ))) {
+                        match open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(&target)),
+                        ) {
                             Ok(file) => BackgroundStdio::File(file),
                             Err(_) => continue,
                         }
@@ -2508,8 +2536,7 @@ impl Executor {
                 }
                 RedirectKind::ReadWrite => {
                     let target = self.expand_redirect_target(redirect);
-                    let path = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
                     // rubash#1862: keep the parent's hands off FIFO
                     // opens uniformly, even though `<>` itself would
                     // not block — the open belongs to the child.
@@ -2602,6 +2629,44 @@ impl Executor {
         }
 
         (stdio, consumed, captured_pipe_writer)
+    }
+
+    /// rubash#2660: the async spawn's base for one stdio slot, read
+    /// from the executor's LIVE fd table — the bindings an enclosing
+    /// compound command's redirections installed (`( ... ) >/dev/null`,
+    /// `{ ...; } >file`, `exec >file`, a function's redirects). GNU's
+    /// async child forks from the shell holding exactly these
+    /// descriptors (execute_cmd.c:2837), so a file-backed binding
+    /// hands the child a duplicate of the same open file description
+    /// (shared offset, like dup2). Returns None to keep the caller's
+    /// default (process inherit) when the slot carries no spawnable
+    /// binding: unbound slots, the process-stdio markers naming the
+    /// slot itself, and the in-process channel endpoints
+    /// (process-substitution / pipe-channel writers), which a spawned
+    /// child cannot hold — the same shapes the foreground faces serve
+    /// in-process instead. A CLOSED slot maps to Null, matching this
+    /// resolver's own treatment of the command's `>&-` redirects.
+    fn background_stdio_from_fd_table(&self, fd: u32) -> Option<BackgroundStdio> {
+        use super::fd_table::FdWriteEndpoint;
+        if self.fd_table.is_closed(fd) {
+            return Some(BackgroundStdio::Null);
+        }
+        let dup_file = |handle: crate::fd::HANDLE| -> Option<BackgroundStdio> {
+            crate::fd::duplicate_handle(handle)
+                .ok()
+                .map(|dup| BackgroundStdio::File(crate::fd::handle_to_file(dup)))
+        };
+        match self.fd_table.write_endpoint(fd) {
+            Some(FdWriteEndpoint::File(file_fd)) => dup_file(file_fd.handle),
+            Some(FdWriteEndpoint::CoprocStdin { fd: file_fd, .. }) => dup_file(file_fd.handle),
+            // The slot was dup'd from the sibling stdio slot (e.g.
+            // `2>&1` at compound level): the marker names the process
+            // descriptor as bound at entry, so hand the child a
+            // duplicate of that live process descriptor.
+            Some(FdWriteEndpoint::Stdout) if fd != 1 => dup_file(1),
+            Some(FdWriteEndpoint::Stderr) if fd != 2 => dup_file(2),
+            _ => None,
+        }
     }
 
     /// True when a background redirect target resolves to an existing
@@ -4227,7 +4292,7 @@ impl Executor {
         // reach the parser's subshell gate.
         for (name, value) in &cmd.assignments {
             let result = self.expand_assignment_value_result_with_raw(name, value, None);
-            if !self.apply_shell_assignment(name, result.value) {
+            if !self.apply_shell_assignment(name, result.value, None) {
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -5604,7 +5669,7 @@ impl Executor {
                 child.pre_exec(crate::builtins::kill::child_pre_exec_unblock_sigpipe);
             }
             suppress_orphan_console(&mut child);
-            child.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut child);
             // rubash#2356: spill + apply the gathered respawn
             // environment (see the gather at the construction site).
             // A direct (foreign) child gathered nothing and keeps
@@ -5881,7 +5946,7 @@ impl Executor {
                         // `coproc ref` with ref_PID a nameref assigns through
                         // it and hits the resolved target's readonly check.
                         // err_readonly carries no builtin command segment.
-                        self.apply_shell_assignment(&pid_name, pid.to_string());
+                        self.apply_shell_assignment(&pid_name, pid.to_string(), None);
                     }
                     self.exit_code = 0;
                 }
@@ -6153,8 +6218,8 @@ impl Executor {
                     }
                 }
                 crate::parser::RedirectKind::Append => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let fd = redirect.fd.unwrap_or(1);
                     match fd {
@@ -6196,14 +6261,14 @@ impl Executor {
                     );
                     err_spec = CoprocFdSpec::File(shared);
                     err_touched = true;
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     out_path = Some(session_target.clone());
                     err_path = Some(session_target);
                 }
                 crate::parser::RedirectKind::CombinedAppend => {
-                    let session_target = self
-                        .session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+                    let session_target =
+                        self.session_path(self.redirect_target_filesystem_path(&target));
                     let file = open_redirect_append(&session_target)?;
                     let shared = file.try_clone()?;
                     replace_coproc_out_spec(
@@ -6770,7 +6835,15 @@ impl Executor {
                     {
                         return false;
                     }
-                    if case_pattern_has_extglob(&stripped) {
+                    // rubash#3224: the extglob route is taken only while
+                    // the LIVE gate is on — GNU execute_cmd.c:3736 matches
+                    // case patterns through strmatch with FNMATCH_EXTFLAG
+                    // evaluated from the live `extended_glob` (pathexp.h),
+                    // so with the gate off (e.g. a same-unit `shopt -u`
+                    // already executed) the operators are literal text
+                    // and the plain glob matcher below is the correct
+                    // route.
+                    if case_pattern_has_extglob(&stripped) && self.extglob_enabled() {
                         // Extglob staging needs the word chars immediately
                         // (no literal fast path in extglob_matches_at); seed
                         // the lazy cell here.

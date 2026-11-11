@@ -1126,8 +1126,8 @@ fn cli_shell_flag_name(flag: char) -> Option<&'static str> {
 /// jobs_m_flag) ends with jobs.c:4869 `change_flag ('m', job_control ? '-' :
 /// '+')`. Without a terminal to take a process group on, give_terminal_to /
 /// tcgetpgrp fail with ENOTTY, job_control stays 0, and two
-/// sys_error/internal_error lines are printed (jobs.c:4841 "cannot set
-/// terminal process group (%d)" and jobs.c:4856 "no job control in this
+/// sys_error/internal_error lines are printed (jobs.c:4844 "cannot set
+/// terminal process group (%d)" and jobs.c:4858 "no job control in this
 /// shell") before `m` is dropped from `$-`. Windows has no POSIX terminal
 /// process groups, so stderr-not-a-terminal is the honest port of that
 /// branch for the non-interactive `-m` arm below: the option is turned back
@@ -1182,9 +1182,11 @@ fn apply_startup_job_control(executor: &mut Executor) {
         .get_env("__RUBASH_SHELL_NAME")
         .or_else(|| executor.get_env("BASH_ARGV0"))
         .unwrap_or("bash");
+    // jobs.c:4844 prints shell_pgrp (jobs.c:4737 getpgid (0)), not
+    // the shell's pid (rubash#2774) — the shared helper owns the value.
     eprintln!(
         "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
-        std::process::id()
+        rubash::script_driver::shell_process_group_id()
     );
     eprintln!("{shell_name}: no job control in this shell");
 }
@@ -1584,12 +1586,25 @@ fn run_command_string_with_init(
     // frame for the run so the discard catches fold the same way
     // (rubash#2369: `bash -c 'echo ${BASH_SOURCE:=X}'` exits 1).
     let saved_frame = executor.enter_parse_and_execute_frame();
-    let status =
-        if script_uses_history(&command) || script_uses_aliases(&command, alias_live_at_start) {
-            run_script_with_history(executor, &command, None)
-        } else {
-            run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
-        };
+    let status = if script_uses_history(&command)
+        || script_uses_aliases(&command, alias_live_at_start)
+        || rubash::script_driver::script_may_toggle_verbose(&command)
+    {
+        run_script_with_history(executor, &command, None)
+    } else {
+        // rubash#2773: GNU reads a `-c` string line by line like any
+        // other input (flags.c:284 echo_input_at_read = verbose_flag;
+        // parse.y:2712 prints each line as read, under the flag state
+        // then in effect — verified against GNU bash 5.3.20: a
+        // mid-string `set +v` stops the echo, a mid-string `set -v`
+        // starts it). The scan above routed every string that may
+        // toggle the flag to the grouped reader, whose per-line read
+        // point samples the live state; on this fast path the entry
+        // state is the state at every line's read, so one boundary
+        // echo of the whole string is the same answer.
+        rubash::script_driver::echo_verbose_input_lines(executor, &command);
+        run_source_with_line_offset(executor, &command, interactive, line_offset, None, None)
+    };
     executor.exit_parse_and_execute_frame(saved_frame);
     executor.set_root_line_span_run_armed(false);
     // rubash#2928: a `-c` string has no second read after its last
@@ -1801,7 +1816,17 @@ fn run_script_file_with_init(
     // unit boundary to consult at.
     let uses_onecmd = script_may_set_onecmd(&contents)
         || executor.get_env("__RUBASH_SETOPT_onecmd").as_deref() == Some("1");
-    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd {
+    // rubash#2773: `set -v` echo is a READ-time effect (flags.c:284
+    // echo_input_at_read = verbose_flag; parse.y:2712 prints the line
+    // as read, under the flag state then in effect). A script that
+    // may toggle verbose mid-read — or one entered with the flag
+    // already on — needs the grouped reader's per-line read point;
+    // the whole-file fast path parses every line before any of them
+    // executes, so it can neither start echoing at a mid-script
+    // `set -v` nor stop at a `set +v`.
+    let uses_verbose = rubash::script_driver::script_may_toggle_verbose(&contents)
+        || executor.shell_option_enabled("verbose");
+    let status = if uses_hist || uses_alias || uses_parse_gates || uses_onecmd || uses_verbose {
         run_script_with_history(executor, &contents, None)
     } else {
         run_source(executor, &contents, interactive)
@@ -1836,7 +1861,15 @@ fn apply_init_interactive_defaults(executor: &mut Executor) {
     // word (niubash#660 — the unconditional set made an opted-out shell
     // record and save anyway).
     apply_interactive_history_defaults(executor);
-    executor.set_shell_option("histexpand", true);
+    // GNU shell.c:1839 init_interactive seeds histexp_flag from the
+    // invocation-time state (bashhist.c: the interactive default is
+    // HISTEXPAND_DEFAULT) — an explicit `+H` on the command line has
+    // already written the carrier by now and must survive the default
+    // (rubash#2733). Same set-if-unset shape as the history default
+    // in apply_interactive_history_defaults.
+    if executor.get_env("__RUBASH_SETOPT_histexpand").is_none() {
+        executor.set_shell_option("histexpand", true);
+    }
     if executor.get_env("__RUBASH_NO_EDITING").as_deref() == Some("1") {
         return;
     }
