@@ -36,7 +36,12 @@ fn test_builtin_cd_invokes_cd_builtin() {
     // path-domain work, not the Windows argv spelling.
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    let expected = dest_display.replacen("D:/", "/d/", 1).to_ascii_lowercase();
+    // #2631: only the drive-letter segment is normalized — the rest of
+    // the path keeps its on-disk spelling. The old
+    // `.to_ascii_lowercase()` lowercased the whole expectation, so a
+    // worktree path containing uppercase letters (e.g. `fix-B5`)
+    // false-redded against `pwd`'s real spelling `fix-B5`.
+    let expected = dest_display.replacen("D:/", "/d/", 1);
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
         format!("{expected}\n")
