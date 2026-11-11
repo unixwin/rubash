@@ -557,10 +557,33 @@ impl Executor {
                 (None, None, true) => CdErrSink::Null,
                 (None, None, false) => CdErrSink::Default(&mut stderr_default),
             };
+            // rubash#3268: lend the cd builtin the cwd anchor for
+            // its verbatim fallback (change_to_directory's tail).
+            // The closure borrows only the anchor cell plus a cwd
+            // snapshot — disjoint from the &mut borrows of the env
+            // table and the cwd slot passed alongside it.
+            let anchor_cwd = self.shell_state.cwd.clone();
+            let anchor_cell = &self.shell_state.cwd_anchor;
+            let anchor_resolver = |operand: &std::path::Path| {
+                #[cfg(unix)]
+                {
+                    super::external_inner::cd_target_via_cwd_anchor(
+                        anchor_cell,
+                        &anchor_cwd,
+                        operand,
+                    )
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (operand, anchor_cell, &anchor_cwd);
+                    None
+                }
+            };
             let status = crate::builtins::cd::execute_with_io(
                 cmd.words[1..].iter().map(String::as_str),
                 &mut self.shell_state.env_vars,
                 &mut self.shell_state.cwd,
+                Some(&anchor_resolver),
                 &mut stdout_sink,
                 &mut stderr_sink,
             )?;

@@ -1045,6 +1045,20 @@ pub struct Executor {
     /// commands inside the EXIT action DO take DEBUG firings —
     /// wearing the frozen command (rubash#2482 face a).
     exit_trap_running: bool,
+    /// Depth of `parse_and_execute` units carrying SEVAL_NOHIST that
+    /// reach the evaluator through execute_eval_source (the `eval`
+    /// builtin and the other string-unit funnels). GNU
+    /// builtins/evalstring.c:291-292 disables history remembering for
+    /// such a unit's duration (bashhist.c:297-302
+    /// bash_history_disable) and the parse_prologue unwind protect
+    /// restores it afterwards, so a `history -s` inside the unit
+    /// appends WITHOUT popping the last recorded line
+    /// (builtins/history.def:435-439 push_history gates the pop on
+    /// remember_on_history). Trap actions run under the same flag
+    /// (trap.c:494/1069/1195) but are tracked by their own
+    /// *_trap_running windows; history_exec consults both faces
+    /// (rubash#2824).
+    nohist_parse_depth: std::cell::Cell<u32>,
     /// rubash#2482 face b: the subshell_depth at which a pipeline
     /// stage's root `( )` element was dispatched (set by
     /// execute_compound_pipeline_stage on the stage clone, cleared
@@ -1179,14 +1193,6 @@ pub struct Executor {
     /// failed `builtin name=value` names the builtin, while a bare
     /// `name=value` command prints no command segment.
     assignment_command_name: Option<String>,
-    /// GNU builtins emit assignment diagnostics through builtin_error, which
-    /// honors the builtin's redirected stderr and ordering. Builtin callers
-    /// (getopts OPTARG/name binds) set buffer_assignment_diagnostics and drain
-    /// pending_assignment_diagnostics into their buffered stderr so a
-    /// preceding buffered diagnostic (e.g. `illegal option -- h`) keeps its
-    /// position relative to the bind error.
-    buffer_assignment_diagnostics: bool,
-    pending_assignment_diagnostics: Vec<u8>,
     /// GNU getopts.def dogetopts: binding the option character into an
     /// integer-attributed OPTIND (name == "OPTIND") whose value is not
     /// arithmetic (`?`/`:`) raises an evalexp error that abandons the
@@ -1712,6 +1718,19 @@ pub struct Executor {
     /// (error.c get_name_for_error with yy_input_name()=="command
     /// substitution") and a newline-terminated body reader.
     backtick_body_diagnostic: Cell<bool>,
+    /// An arithmetic-fallback command-substitution body is being
+    /// expanded RIGHT NOW — a `$((` span that failed GNU's
+    /// chk_arithsub and fell back to a command substitution
+    /// (subst.c:10841-10866 LPAREN arm -> comsub). Like a backtick
+    /// body it is parsed in the substituted child at execution time
+    /// (subst.c:7143 parse_and_execute), never read-parsed, so its
+    /// parse error is contained: `command substitution: line N:`
+    /// prefix, substitution empty, status 2, script continues
+    /// (rubash#2677). Only the containment decision points consult
+    /// this flag (see `comsub_body_parse_is_contained`); the
+    /// backtick-only reader semantics (newline termination, the
+    /// unclosed-input verdict) keep reading `backtick_body_diagnostic`.
+    arith_fallback_comsub_body: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending

@@ -1487,6 +1487,18 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
             })
         })
         .collect();
+    // rubash#3053: the strip above is the moment the timed command's
+    // first element becomes the node's first element — apply the
+    // candidate its intake recorded (the end line of the first word,
+    // assignment word, or redirection target after the prefix
+    // chain). A candidate exists only when every recorded element
+    // was the chain plus that one element, so applying it here —
+    // inside the fold, under the fold's own admission — leaves
+    // every non-folded node byte-identical.
+    if command.time_prefix_first_element_end_line != 0 {
+        command.first_word_end_line = Some(command.time_prefix_first_element_end_line);
+        command.time_prefix_first_element_end_line = 0;
+    }
     reclassify_leading_assignment_words(command);
     Some(TimePipelinePrefix {
         keyword,

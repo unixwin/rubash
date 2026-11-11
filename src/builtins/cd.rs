@@ -70,15 +70,30 @@ pub fn execute(
         args.iter().map(String::as_str),
         env_vars,
         &mut cwd,
+        None,
         &mut stdout,
         &mut stderr,
     )
 }
 
+/// rubash#3268: the executor's cwd-anchor route for cd's verbatim
+/// fallback, lent by the session call sites. GNU change_to_directory
+/// (builtins/cd.def:522) falls back to chdir'ing the operand VERBATIM
+/// when the canonicalized chdir fails — a walk relative to the
+/// process cwd INODE, which stays valid after the directory is
+/// unlinked. Under G-02 the session's inode handle is the cwd anchor;
+/// the resolver answers Some(Ok(physical path)) when the operand
+/// names a directory from that inode, Some(Err) with the kernel's
+/// verdict when the anchor applied but the walk failed, and None
+/// when the anchor does not apply (live cwd, no anchor, non-Unix) —
+/// the probe's own error then stands, exactly as before.
+pub(crate) type CwdAnchorResolver<'a> = &'a dyn Fn(&Path) -> Option<io::Result<PathBuf>>;
+
 pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut crate::shell::var_table::VarTable,
     cwd: &mut PathBuf,
+    anchor_resolver: Option<CwdAnchorResolver<'_>>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -210,31 +225,60 @@ where
     let physical = match probed {
         Ok(path) => path,
         Err(error) => {
-            // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
-            // reports the user-given path, not the Windows-converted path.
-            // general.c printable_filename: non-printing bytes render through
-            // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
-            // `dirname` here is the pre-substitution operand name kept in
-            // dirname_display (rubash#2221), not the attempted candidate.
-            let display_path = dirname_display
-                .as_deref()
-                .or(target.display.as_deref())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| target.path.to_string_lossy().to_string());
-            let display_path = if crate::executor::ansic_shouldquote(&display_path) {
-                crate::executor::ansic_quote(&display_path)
+            // rubash#3268: GNU's tail (builtins/cd.def
+            // change_to_directory, POSIX step 9): when the
+            // canonicalized chdir fails — and sh_canonpath's
+            // PATH_CHECKEXISTS makes it fail whenever a component of
+            // the joined spelling is gone, the deleted cwd itself
+            // included — cd chdirs the operand VERBATIM, relative to
+            // the cwd inode. Spend the anchor for that walk when the
+            // executor lent a resolver and the operand is relative
+            // (an absolute spelling keeps the string verdict: GNU's
+            // verbatim chdir of it dies at the same dead component).
+            // The anchor walk's own error is the verdict it reports —
+            // it is the error GNU's verbatim chdir raises.
+            let anchored = if target.path.is_absolute() {
+                None
             } else {
-                display_path
+                anchor_resolver.and_then(|resolve| resolve(&target.path))
             };
-            writeln!(
-                stderr,
-                "{}cd: {}: {}",
-                diagnostic_prefix(env_vars),
-                display_path,
-                crate::posix_errors::message(&error)
-            )?;
-            stderr.flush()?;
-            return Ok(EXECUTION_FAILURE);
+            match anchored {
+                // The anchor walk landed: this arm's value is the
+                // move's physical directory, and the shared tail
+                // below commits it exactly like the probed route.
+                Some(Ok(path)) => path,
+                verdict => {
+                    let error = match verdict {
+                        Some(Err(anchor_error)) => anchor_error,
+                        _ => error,
+                    };
+                    // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
+                    // reports the user-given path, not the Windows-converted path.
+                    // general.c printable_filename: non-printing bytes render through
+                    // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
+                    // `dirname` here is the pre-substitution operand name kept in
+                    // dirname_display (rubash#2221), not the attempted candidate.
+                    let display_path = dirname_display
+                        .as_deref()
+                        .or(target.display.as_deref())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| target.path.to_string_lossy().to_string());
+                    let display_path = if crate::executor::ansic_shouldquote(&display_path) {
+                        crate::executor::ansic_quote(&display_path)
+                    } else {
+                        display_path
+                    };
+                    writeln!(
+                        stderr,
+                        "{}cd: {}: {}",
+                        diagnostic_prefix(env_vars),
+                        display_path,
+                        crate::posix_errors::message(&error)
+                    )?;
+                    stderr.flush()?;
+                    return Ok(EXECUTION_FAILURE);
+                }
+            }
         }
     };
     // The move stands from here on — as with chdir, a readonly-bind
@@ -762,6 +806,7 @@ mod tests {
                 ["/"],
                 &mut env_vars,
                 &mut cwd_slot,
+                None,
                 &mut stdout,
                 &mut stderr
             )
@@ -774,6 +819,7 @@ mod tests {
                 ["/bin"],
                 &mut env_vars,
                 &mut cwd_slot,
+                None,
                 &mut stdout,
                 &mut stderr
             )

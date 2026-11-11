@@ -246,7 +246,7 @@ impl Executor {
     /// (`( :; ) 2>cap.txt > /missing` lands in cap.txt, rubash#940 R1).
     /// Any other IoError (body write errors, rubash#440 closed-output)
     /// keeps the direct stderr write so the reported bytes are identical.
-    fn report_io_error_routed(
+    pub(in crate::executor) fn report_io_error_routed(
         &mut self,
         command: &CommandNode,
         error: &std::io::Error,
@@ -2226,6 +2226,20 @@ impl Executor {
                     // SIGPIPE, reports the failed write with status 1 and
                     // keeps executing the list.
                     self.report_io_error_routed(command, &error)?;
+                    // rubash#2659: GNU execute_cmd.c:854-883 — the
+                    // group's OWN do_redirections failure is an ordinary
+                    // command failure: run_error_trap runs (under
+                    // was_error_trap, independent of errexit) before the
+                    // ERREXIT promotion below. The compound_redirect_failed
+                    // mark certifies the redirect-failure origin (the
+                    // prepare pass / with_command_input_redirects); an
+                    // IoError raised by the body itself carries no mark
+                    // and keeps the body-produced treatment. The fire
+                    // call's own gates keep inverted, and-or and
+                    // suppressed contexts exempt.
+                    if self.compound_redirect_failed.get() {
+                        self.maybe_run_error_trap(command)?;
+                    }
                     // rubash#2359: the group is fully handled here. Falling
                     // through to the simple-pipeline dispatch below
                     // re-dispatched the same group, and the re-dispatch's

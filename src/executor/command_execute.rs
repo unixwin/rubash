@@ -191,6 +191,52 @@ impl Executor {
                 }
                 return Err(self.errexit_exit(self.exit_code));
             }
+            // rubash#2659: GNU execute_cmd.c:854-883 — a compound
+            // command's OWN do_redirections failure is an ordinary
+            // command failure: run_error_trap under was_error_trap,
+            // then the ERREXIT jump (the simple-command twin sits at
+            // execute_cmd.c:993-1010). The compound wrappers propagate
+            // that failure as an IoError with the
+            // compound_redirect_failed mark set (prepare pass /
+            // with_command_input_redirects); unconverted, it bubbles
+            // to the ast_exec loop, whose IoError arm only reports it
+            // and whose Ok-path adjudication treats these compounds'
+            // status as body-produced — no ERR trap, no errexit.
+            // Convert it here, at the funnel that dispatched the
+            // compound: report the diagnostic once, record status 1,
+            // fire the ERR trap, and take the errexit exit when
+            // errexit is active. The fire call's own gates keep
+            // inverted, and-or and suppressed contexts exempt, and
+            // its fired-at-dispatch record keeps a caller's own look
+            // (the loop's, for the pass-through forms) from firing a
+            // second time. Unmarked IoErrors are body-stage failures
+            // and keep the passthrough below.
+            // rubash#1611 + PR #3269 review R1: inside a timed
+            // dispatch this conversion must NOT intercept at all.
+            // err_trap_fired_at_dispatch means "the ERR trap already
+            // fired at dispatch" (the #2117 suppression gate in
+            // maybe_run_error_trap) — setting it without firing, and
+            // converting the failure into an Ok completion, blocks
+            // the ast_exec time branch's own adjudication look, so
+            // the timed compound's redirect failure lost its ERR
+            // trap entirely (the timed branch of this conversion did
+            // exactly that when first written). Let the marked
+            // IoError propagate in its unconverted shape instead:
+            // the time branch reports it once (report_io_error_routed
+            // records status 1) and adjudicates ERR / errexit
+            // against the final status, exactly as the pre-#2659
+            // base did.
+            if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
+                if let Err(ExecuteError::IoError(error)) = &result {
+                    self.report_io_error_routed(cmd, error)?;
+                    self.exit_code = 1;
+                    self.maybe_run_error_trap(cmd)?;
+                    if self.errexit_enabled() && self.errexit_is_active() {
+                        return Err(self.errexit_exit(1));
+                    }
+                    return Ok(());
+                }
+            }
             return result;
         }
 
@@ -767,6 +813,16 @@ impl Executor {
                             .retain(|(name, _)| !name.starts_with("__RUBASH_PARSE"));
                         let mut fixed = function.as_ref().clone();
                         fixed.body = body;
+                        // rubash#3209: same definition-line restamp
+                        // as the parser path (bare `name()` only).
+                        if !fixed.keyword && fixed.has_parentheses {
+                            if let Some(definition_line) = cmd.line {
+                                crate::parser::restamp_function_body_first_command(
+                                    &mut fixed.body,
+                                    definition_line,
+                                );
+                            }
+                        }
                         fixed.unparsed_body_source = None;
                         fixed_cmd.function_command = Some(Box::new(fixed));
                         let fixed_function =

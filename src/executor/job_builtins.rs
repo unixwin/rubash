@@ -778,6 +778,24 @@ impl Executor {
                 .collect::<Vec<_>>();
             let mut wait_stderr: Vec<u8> = Vec::new();
             for pid in pids {
+                // GNU's bare wait is a scan/wait loop (jobs.c:2796-2867
+                // wait_for_background_pids): waitchld, driven from
+                // wait_for's blocking loop, records EVERY exited child,
+                // so a job whose death landed while an earlier job was
+                // being waited is seen DEAD when the scan reaches it and
+                // is never passed to wait_for_single_pid — the notified
+                // mark at jobs.c:3434-3437 belongs only to jobs the
+                // wait actually blocked on. The poll model's recording
+                // point is the observed refresh, so run it at the head
+                // of every pass iteration: a death the sweep records
+                // takes the completed arm of wait_for_background_pid
+                // (no wait-mark), while without the sweep it falls into
+                // the live arm as an instant reap and is marked there,
+                // consuming the last-asynchronous-pid job that
+                // mark_dead_jobs_as_notified exempts from the bare
+                // wait's force-mark (jobs.c:5196) and that
+                // settle_bare_wait exists to keep (rubash#2340).
+                self.refresh_background_jobs_observed()?;
                 // wait.def:238-245 wait_for_any_job + :328-331: a trapped
                 // signal interrupts the no-operand wait too, returning
                 // 128+sig.
@@ -1041,7 +1059,7 @@ impl Executor {
     /// bind_array_element does (assoc for a non-numeric key).
     fn bind_wait_variable(&mut self, name: &str, value: String, arrayref: bool) {
         let Some((base, subscript)) = parse_array_subscript(name) else {
-            self.apply_shell_assignment_command("wait", name, value);
+            self.apply_shell_assignment_command("wait", name, value, None);
             return;
         };
         let base = base.to_string();
@@ -1107,7 +1125,7 @@ impl Executor {
                 if self.raise_nounset_subscript_abort() {
                     return;
                 }
-                self.apply_shell_assignment_command("wait", name, value);
+                self.apply_shell_assignment_command("wait", name, value, None);
             }
         }
     }

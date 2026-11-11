@@ -191,17 +191,34 @@ impl Executor {
         self.parse_error_occurred = true;
     }
 
+    /// Whether a command-substitution body parse error is CONTAINED
+    /// in the substituted child — GNU parses the body in the child at
+    /// execution time (subst.c string_locale -> parse_and_execute) —
+    /// when the body is an old-style backtick substitution (ambient
+    /// `backtick_body_diagnostic`, issue #515) or an arithmetic
+    /// fallback (ambient `arith_fallback_comsub_body`, rubash#2677:
+    /// a `$((` span that failed chk_arithsub and fell back to a
+    /// command substitution, subst.c:10841-10866). A contained error
+    /// kills only the child — substitution empty, status 2, script
+    /// continues — while a plain `$(`-body error is a read-time
+    /// failure of the enclosing command and stays fatal.
+    pub(in crate::executor) fn comsub_body_parse_is_contained(&self) -> bool {
+        self.backtick_body_diagnostic.get() || self.arith_fallback_comsub_body.get()
+    }
+
     /// Latch a command-substitution body parse error. When the failing
     /// body is an old-style backtick substitution (ambient
-    /// `backtick_body_diagnostic`), the companion backtick latch records
-    /// the origin: GNU parses a backtick body in the substituted child at
-    /// execution time (subst.c string_locale -> parse_and_execute), so the
-    /// error kills only the child — substitution empty, status 2, script
-    /// continues (issue #515) — while a `$(`-body error is a read-time
-    /// failure of the enclosing command and stays fatal.
+    /// `backtick_body_diagnostic`) or an arithmetic fallback
+    /// (ambient `arith_fallback_comsub_body`, rubash#2677), the
+    /// companion backtick latch records the contained origin: GNU
+    /// parses such a body in the substituted child at execution time
+    /// (subst.c string_locale -> parse_and_execute), so the error
+    /// kills only the child — substitution empty, status 2, script
+    /// continues (issue #515) — while a `$(`-body error is a
+    /// read-time failure of the enclosing command and stays fatal.
     pub(in crate::executor) fn latch_command_substitution_parse_error(&self) {
         self.last_command_substitution_parse_error.set(true);
-        if self.backtick_body_diagnostic.get() {
+        if self.comsub_body_parse_is_contained() {
             self.last_command_substitution_parse_error_backtick
                 .set(true);
         }
@@ -298,9 +315,10 @@ impl Executor {
         // execute_command arm for top-level nodes): a node carrying the
         // EOF_COMPOUND marker reports `syntax error: unexpected end of
         // file from `X' command on line N' — the plain-marker arm below
-        // would misrender it as the near shape. Under the ambient backtick
-        // window the prefix is GNU's parse_and_execute child name (issue
-        // #515); otherwise the enclosing script's.
+        // would misrender it as the near shape. Under the ambient
+        // contained-child window (backtick, issue #515, or
+        // arith-fallback, rubash#2677) the prefix is GNU's
+        // parse_and_execute child name; otherwise the enclosing script's.
         if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_EOF_COMPOUND__") {
             let mut fields = spec.split(crate::executor::markers::PARSE_ERROR_FIELD_SEP);
             let compound_name = fields.next().unwrap_or("(");
@@ -312,7 +330,7 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(eof_line)
             } else {
                 self.parser_error_prefix_for_line(eof_line)
@@ -335,7 +353,8 @@ impl Executor {
         // delegate sites (a backtick body whose error is a malformed
         // conditional): render it like execute_command's COND arm —
         // each classifier message, then the near/EOF tail — under the
-        // ambient backtick child prefix when that window is live. The
+        // ambient contained-child prefix (backtick or arith-fallback)
+        // when that window is live. The
         // bare-message fallback below would drop the whole report
         // (`` `[[ a ==]]` ``, rubash#2751).
         if let Some(spec) = cmd.get_assignment("__RUBASH_PARSE_ERROR_COND__") {
@@ -348,7 +367,7 @@ impl Executor {
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
             let prefix_for = |this: &Self, line: usize| {
-                if this.backtick_body_diagnostic.get() {
+                if this.comsub_body_parse_is_contained() {
                     this.comsub_eof_error_diagnostic(line)
                 } else {
                     this.parser_error_prefix_for_line(line)
@@ -419,7 +438,7 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_else(|| cmd.line.unwrap_or(1));
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(line)
             } else {
                 self.parser_error_prefix_for_line(line)
@@ -447,7 +466,7 @@ impl Executor {
         // shape execute_command's EOF arm renders.
         if cmd.has_assignment("__RUBASH_PARSE_ERROR_EOF__") {
             let eof_line = cmd.line.map(|line| line + 1).unwrap_or(1);
-            let prefix = if self.backtick_body_diagnostic.get() {
+            let prefix = if self.comsub_body_parse_is_contained() {
                 self.comsub_eof_error_diagnostic(eof_line)
             } else {
                 self.parser_error_prefix_for_line(eof_line)
@@ -473,13 +492,14 @@ impl Executor {
         // CURRENT_LINE is the LAST line read, not the failure line
         // (rubash#390: `while :; do case x in\nesac) ...` reports the
         // `esac)' line, not the `done' line).
-        // A BACKTICK body's report renders under GNU's parse_and_execute
-        // child name (subst.c:7413 passes "command substitution" as whom;
-        // error.c:300-316 prefixes `name: command substitution: line N: `)
-        // — the enclosing script's prefix is the `$(`-body shape, where the
-        // outer parse owns the diagnostic (issue #515).
+        // A BACKTICK or arith-fallback body's report renders under GNU's
+        // parse_and_execute child name (subst.c:7413 passes "command
+        // substitution" as whom; error.c:300-316 prefixes `name: command
+        // substitution: line N: `) — the enclosing script's prefix is the
+        // `$(`-body shape, where the outer parse owns the diagnostic
+        // (issue #515, rubash#2677).
         let prefix = match cmd.line {
-            Some(line) if self.backtick_body_diagnostic.get() => {
+            Some(line) if self.comsub_body_parse_is_contained() => {
                 self.comsub_eof_error_diagnostic(line)
             }
             Some(line) => self.parser_error_prefix_for_line(line),
@@ -1752,7 +1772,11 @@ impl Executor {
                 // BASH_SOURCE stays the set-but-empty array (rubash#1306),
                 // but the stack still takes the $0 seed (see the IS_C
                 // branch above for why the seed must survive).
+                // rubash#3125: record the seed so the BASH_SOURCE
+                // views only ever pop a bottom entry that really is
+                // this seed.
                 self.shell_state.bash_source_stack = vec![source_value.clone()];
+                self.shell_state.bash_source_seed = Some(source_value.clone());
                 store_indexed_array_state(
                     &mut self.shell_state,
                     "BASH_SOURCE",
@@ -1760,7 +1784,10 @@ impl Executor {
                 );
                 return;
             }
+            // rubash#3125: record the seed alongside the stack
+            // (see the field doc on `bash_source_seed`).
             self.shell_state.bash_source_stack = vec![source_value.clone()];
+            self.shell_state.bash_source_seed = Some(source_value.clone());
             store_indexed_array_state(&mut self.shell_state, "BASH_SOURCE", vec![source_value]);
         }
     }
@@ -2823,20 +2850,16 @@ impl Executor {
         {
             return;
         }
-        // GNU set -v (verbose): every input line is echoed to stderr as it
-        // is READ (flags.c:284 echo_input_at_read = verbose_flag; the
-        // reader prints shell_input_line, y.tab.c:5071). The echo happens
-        // after the command that turned the flag on has run (its own line
-        // was already read), and trap execution suspends it (trap.c:1285-
-        // 1290 saves and clears echo_input_at_read around the action).
-        // This preamble is the read/execute boundary for command lines, so
-        // the verbose echo lives here (rubash#348); the rendered command
-        // text is the physical line for simple and pipeline commands
-        // (compound bodies re-enter through their per-command stages).
-        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "verbose") {
-            let echo_text = bash_command_source_text(cmd);
-            let _ = writeln!(std::io::stderr(), "{echo_text}");
-        }
+        // GNU set -v (verbose) echoes input lines as they are READ,
+        // never at execution time (flags.c:284 echo_input_at_read =
+        // verbose_flag; parse.y:2712 prints shell_input_line as the
+        // reader consumes it). That echo lives at the read points —
+        // script_driver::echo_verbose_input_lines, called from the
+        // grouped reader's per-line consumption and from the
+        // whole-string read units (rubash#2773). This preamble keeps
+        // only the $BASH_COMMAND bookkeeping below; an execution-time
+        // echo here rendered each command a second time (split at `;`,
+        // comments dropped, compound bodies re-rendered per stage).
         // GNU the_printed_command is produced by print_command
         // (print_cmd.c), which covers every command form — a `[[ ]]`
         // node must record `[[ -n $unset ]]`, not a word-list dump
@@ -3461,16 +3484,24 @@ impl Executor {
     /// migrate in Phase 4) and a diagnostic-free call never pays
     /// the ~7µs build cost (E4, Stage-2 ④ Phase 2).
     pub(crate) fn diagnostic_prolog(&self) -> super::builtin_diag::Prolog {
-        super::builtin_diag::Prolog {
-            interactive: self.invocation_interactive(),
-            shell_basename: Self::interactive_shell_basename(&self.shell_state.env_vars),
-            error_name: self.error_report_name(),
+        // `error_report_name` is `current_error_file_name` plus a
+        // fallback chain: compose the BASH_SOURCE view once and feed
+        // both fields from it (this handle is built per diagnostic
+        // flush, and the view composition is its dominant cost).
+        self.diagnostic_prolog_parts()
+            .build(&self.shell_state.env_vars)
+    }
+
+    /// The deferred form of `diagnostic_prolog` for the declare
+    /// family's in-context crossings (`builtin_diag::PrologParts`):
+    /// only the two fields that do not derive from the variable
+    /// table are composed here; the rest is composed at the
+    /// diagnostic site from the table, so a diagnostic-free
+    /// declare/local call pays nothing (E4).
+    pub(crate) fn diagnostic_prolog_parts(&self) -> super::builtin_diag::PrologParts {
+        super::builtin_diag::PrologParts::Executor {
             script_file: self.current_error_file_name(),
-            line: self
-                .shell_state
-                .env_vars
-                .get("__RUBASH_CURRENT_LINE")
-                .cloned(),
+            interactive: self.invocation_interactive(),
         }
     }
 
@@ -3510,11 +3541,15 @@ impl Executor {
     /// has no brand fallback, it ends at base_pathname(shell_name)
     /// and the literal "bash".
     pub(in crate::executor) fn error_report_name(&self) -> String {
-        if let Some(name) = self
-            .current_error_file_name()
-            .filter(|name| !name.is_empty())
-        {
-            return name;
+        self.error_report_name_with_file(&self.current_error_file_name())
+    }
+
+    /// `error_report_name` with the error file name already composed
+    /// (the caller may hold it — `diagnostic_prolog` feeds both of its
+    /// fields from one composition).
+    fn error_report_name_with_file(&self, file_name: &Option<String>) -> String {
+        if let Some(name) = file_name.as_ref().filter(|name| !name.is_empty()) {
+            return name.clone();
         }
         for key in [
             "BASH_ARGV0",
@@ -3624,6 +3659,24 @@ impl Executor {
     }
 
     pub(crate) fn parser_diagnostic_prefix(&self) -> String {
+        // rubash#2734: GNU parser_error's first branch (error.c:308-309):
+        // while the `interactive` global is set, the prolog is the error
+        // name alone — no input-name segment, no line segment — and the
+        // name is base_pathname (shell_name) (error.c:110-111).
+        // `__RUBASH_INTERACTIVE_FLAG_OFF` is this engine's encoding of
+        // GNU's zeroed `interactive` (the -i script route, startup and
+        // sourced files, and PROMPT_COMMAND all run with it set), so
+        // those routes fall through to the file/-c forms below; only
+        // current interactive input (piped -i, -i -c, the reader) takes
+        // this branch. The EVAL/TRAP/source context arms keep their
+        // existing order below it.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
             self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
@@ -3670,6 +3723,16 @@ impl Executor {
     /// parser_diagnostic_prefix: the ` line N` segment honors gnu_errfmt
     /// (`script:2: `, `script: -c:2: `, `script: eval:2: `).
     pub(crate) fn parser_error_prefix(&self) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
             self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
@@ -3793,6 +3856,17 @@ impl Executor {
     /// Parser/syntax-error diagnostic prefix for a specific line. Like
     /// parser_diagnostic_prefix but for a caller-supplied line number.
     pub fn parser_diagnostic_prefix_for_line(&self, line: usize) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone, ahead
+        // of the EVAL/source context arms below.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // error.c yy_input_name: inside `eval` the input stream name is
         // "eval" and overrides the -c tag (`bash: eval: line N:`).
@@ -3835,6 +3909,17 @@ impl Executor {
     /// parser_diagnostic_prefix_for_line (`script:2: `,
     /// `script: eval:2: `, `bash: -c:2: ` under gnu_errfmt).
     pub fn parser_error_prefix_for_line(&self, line: usize) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone, ahead
+        // of the TRAP/EVAL context arms below.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // GNU trap.c:496: a trap action parses under the input name
         // "trap" ("interrupt trap" for SIGINT), which parser_error

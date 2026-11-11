@@ -3,6 +3,8 @@ use crate::executor::markers::{DATA_DOLLAR, DATA_DOLLAR_STR};
 use crate::shell::var_table::VarTable;
 use std::io::IsTerminal;
 
+use super::external_inner::CpRoot;
+
 impl Executor {
     pub(in crate::executor) fn handle_external_file_builtins(
         &mut self,
@@ -511,12 +513,21 @@ impl Executor {
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
             operands += 1;
-            let path =
-                self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — a relative operand under a
+            // deleted session cwd walks from the cwd anchor's
+            // inode via mkdirat, so an escape to the parent
+            // creates there while a create aimed into the dead
+            // directory itself keeps the kernel's ENOENT; every
+            // other shape keeps the plain joined path.
+            let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             let result = if parents {
-                fs::create_dir_all(&path)
+                node.create_dir_all()
             } else {
-                fs::create_dir(&path)
+                node.create_dir()
             };
             if let Err(error) = result {
                 writeln!(
@@ -787,14 +798,17 @@ impl Executor {
         let mut ref_stamp: Option<(SystemTime, SystemTime)> = None;
         let mut ref_error: Option<String> = None;
         if let Some(reference) = &ref_file {
-            let target =
-                self.session_path(shell_path_to_windows(reference, &self.shell_state.env_vars));
-            match std::fs::metadata(&target) {
-                Ok(metadata) => {
-                    ref_stamp = Some((
-                        metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
-                        metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                    ));
+            // rubash#3276: the -r reference is a path operand of
+            // this command in everything but name — it resolves
+            // through the same root convergence as the operands
+            // below (cp_operand_root), so a reference in the dead
+            // directory's parent stats from the anchor inode.
+            let ref_native = shell_path_to_windows(reference, &self.shell_state.env_vars);
+            let ref_joined = self.session_path(ref_native.clone());
+            let ref_node = CpNode::at_root(self.cp_operand_root(&ref_native, &ref_joined));
+            match ref_node.stat() {
+                Ok(stat) => {
+                    ref_stamp = Some((stat.accessed, stat.modified));
                 }
                 Err(error) => {
                     ref_error = Some(format!(
@@ -842,8 +856,16 @@ impl Executor {
             (now, now)
         });
         for expanded in operands {
-            let target =
-                self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — the stamp and the create below
+            // walk from the cwd anchor's inode under a deleted
+            // session cwd, so `../f` stamps the real parent file
+            // while a create aimed into the dead directory itself
+            // keeps the kernel's ENOENT.
+            let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             let make_times = || {
                 let mut times = std::fs::FileTimes::new();
                 if stamp_accessed {
@@ -862,8 +884,7 @@ impl Executor {
             // files all take the stamp. stamp_existing_operand is
             // that shape; a missing operand keeps the create flow
             // below, classified by its NotFound error.
-            let stamped = stamp_existing_operand(
-                &target,
+            let stamped = node.stamp_existing(
                 stamp_accessed.then_some(stamp_atime),
                 stamp_modified.then_some(stamp_mtime),
                 &make_times,
@@ -875,9 +896,9 @@ impl Executor {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create_missing => {
                     Ok(())
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    File::create(&target).and_then(|file| file.set_times(make_times()))
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => node
+                    .create_empty()
+                    .and_then(|file| file.set_times(make_times())),
                 Err(error) => Err(error),
             };
             if let Err(error) = outcome {
@@ -941,6 +962,21 @@ fn touch_utimensat(
     atime: Option<SystemTime>,
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
+    touch_utimensat_at(libc::AT_FDCWD, target, atime, mtime)
+}
+
+/// The (dirfd, relative path) form of touch_utimensat: the same
+/// stamp resolved against an explicit directory handle instead of
+/// the process cwd (rubash#3276 — a CpNode's anchor root spends
+/// it, so a touch operand under a deleted session cwd is stamped
+/// by the same kernel walk GNU's forked touch child performs).
+#[cfg(unix)]
+fn touch_utimensat_at(
+    dir_fd: std::os::unix::io::RawFd,
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     // `libc::time_t` is deprecated on musl/ohos targets and the niubash
     // cross-target checks compile this crate with `-D warnings`
@@ -980,7 +1016,7 @@ fn touch_utimensat(
     let times = [to_timespec(atime), to_timespec(mtime)];
     let c_path = std::ffi::CString::new(target.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    let rc = unsafe { libc::utimensat(dir_fd, c_path.as_ptr(), times.as_ptr(), 0) };
     if rc == 0 {
         Ok(())
     } else {
@@ -1476,10 +1512,16 @@ impl Executor {
         }
 
         let destination_word = &effective[effective.len() - 1];
-        let destination = self.session_path(shell_path_to_windows(
-            destination_word,
-            &self.shell_state.env_vars,
-        ));
+        let destination_native =
+            shell_path_to_windows(destination_word, &self.shell_state.env_vars);
+        let destination_joined = self.session_path(destination_native.clone());
+        // rubash#3268 (d): every operand resolves its root ONCE,
+        // here at the entry — the joined path for a live cwd, the
+        // birth anchor for a deleted one — and the whole engine
+        // below consumes nodes under those roots, so no consumer
+        // re-derives a cwd-relative spelling from the dead inode.
+        let destination =
+            CpNode::at_root(self.cp_operand_root(&destination_native, &destination_joined));
 
         // GNU null-device semantics: coreutils copy.c opens the destination
         // and the write goes nowhere, so `cp FILE /dev/null` succeeds without
@@ -1518,26 +1560,25 @@ impl Executor {
                     .next()
                     .unwrap_or("null")
                     .to_string();
-                let target_path = if destination.is_dir() {
-                    destination.join(name)
+                let target_node = if destination.is_dir() {
+                    destination.child(std::ffi::OsStr::new(&name))
                 } else {
                     destination.clone()
                 };
-                if let Err(error) = File::create(&target_path) {
+                if let Err(error) = target_node.create_empty() {
                     status = 1;
                     let _ = writeln!(
                         stderr,
                         "cp: cannot create '{}': {}",
-                        target_path.display(),
+                        target_node.display_path().display(),
                         crate::posix_errors::message(&error)
                     );
                 }
                 continue;
             }
-            let source = self.session_path(shell_path_to_windows(
-                source_word,
-                &self.shell_state.env_vars,
-            ));
+            let source_native = shell_path_to_windows(source_word, &self.shell_state.env_vars);
+            let source_joined = self.session_path(source_native.clone());
+            let source = CpNode::at_root(self.cp_operand_root(&source_native, &source_joined));
 
             // GNU coreutils cp.c copy_internal: an operand whose final
             // component is `.` (`src/.`, `./`, `.`) names the directory's
@@ -1549,7 +1590,7 @@ impl Executor {
                 let trimmed = trimmed.trim_end_matches('/');
                 trimmed == "." || trimmed.ends_with("/.")
             };
-            let mut copy_units: Vec<(PathBuf, String)> = Vec::new();
+            let mut copy_units: Vec<(CpNode, String)> = Vec::new();
             if source_names_contents {
                 if let Err(error) = super::copy_source::require_directory_contents_source(&source) {
                     status = 1;
@@ -1580,8 +1621,8 @@ impl Executor {
                     continue;
                 }
                 if destination.is_dir() {
-                    let mut entries: Vec<_> = match fs::read_dir(&source) {
-                        Ok(read_dir) => read_dir.filter_map(Result::ok).collect(),
+                    let mut entries = match source.read_dir_nodes() {
+                        Ok(entries) => entries,
                         Err(error) => {
                             let _ = writeln!(
                                 stderr,
@@ -1593,12 +1634,12 @@ impl Executor {
                             continue;
                         }
                     };
-                    entries.sort_by_key(|entry| entry.file_name());
-                    for entry in entries {
-                        let name = entry.file_name().to_string_lossy().to_string();
+                    entries.sort_by_key(|(name, _)| name.clone());
+                    for (name, child) in entries {
+                        let name_text = name.to_string_lossy().to_string();
                         copy_units.push((
-                            entry.path(),
-                            format!("{}/{}", source_word.trim_end_matches('/'), name),
+                            child,
+                            format!("{}/{}", source_word.trim_end_matches('/'), name_text),
                         ));
                     }
                 } else {
@@ -1624,13 +1665,13 @@ impl Executor {
                                     .unwrap_or(&source_word)
                                     .to_string();
                                 (
-                                    destination.join(&leaf),
+                                    destination.child(std::ffi::OsStr::new(&leaf)),
                                     format!("{}/{}", destination_word.trim_end_matches('/'), leaf),
                                 )
                             } else {
                                 (destination.clone(), destination_word.clone())
                             };
-                            match fs::write(&target, &bytes) {
+                            match target.write_bytes(&bytes) {
                                 Ok(()) => {
                                     if verbose {
                                         let _ = writeln!(
@@ -1645,7 +1686,7 @@ impl Executor {
                                     let _ = writeln!(
                                         stderr,
                                         "cp: cannot create '{}': {}",
-                                        target.display(),
+                                        target.display_path().display(),
                                         crate::posix_errors::message(&error)
                                     );
                                     status = 1;
@@ -1678,7 +1719,7 @@ impl Executor {
                     // `/.` join is part of GNU's verbose target spelling.
                     let separator = if source_names_contents { "/./" } else { "/" };
                     (
-                        destination.join(name),
+                        destination.child(&name),
                         format!(
                             "{}{}{}",
                             destination_word.trim_end_matches('/'),
@@ -1723,7 +1764,7 @@ impl Executor {
                     }
                 }
                 if remove_dest {
-                    let _ = fs::remove_file(&target);
+                    let _ = target.remove_file();
                 }
                 if update_only && target.exists() && cp_source_not_newer(&source, &target) {
                     continue;
@@ -1762,7 +1803,7 @@ impl Executor {
                         let _ = writeln!(
                             stderr,
                             "cp: cannot create '{}': {}",
-                            target.display(),
+                            target.display_path().display(),
                             crate::posix_errors::message(&error)
                         );
                         status = 1;
@@ -1931,9 +1972,26 @@ impl Executor {
         // namespace's own `/` mapping (the payload root on Windows,
         // the filesystem root elsewhere).
         let root_target = self.session_path(shell_path_to_windows("/", &self.shell_state.env_vars));
+        // rubash#3276: the preserve-root guard's target root as a
+        // node — an anchor-rooted operand's verdict compares
+        // (dev, ino) against it, the identity the string
+        // canonicalize cannot reach through a dead component.
+        let root_native = shell_path_to_windows("/", &self.shell_state.env_vars);
+        let root_joined = self.session_path(root_native.clone());
+        let root_node = CpNode::at_root(self.cp_operand_root(&root_native, &root_joined));
         for expanded in operands {
             let target =
                 self.session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — under a deleted session cwd the
+            // guards and the removal below walk from the cwd
+            // anchor's inode, so `../f` unlinks the real parent
+            // file while a name inside the dead directory itself
+            // keeps the kernel's ENOENT.
+            let native = shell_path_to_windows(expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             // coreutils rm.c (niubash#534 wording residual): a recursive
             // removal whose operand's last component is `.` or `..` is
             // refused outright — `refusing to remove '.' or '..' directory:
@@ -1945,7 +2003,7 @@ impl Executor {
             // gives it, and without -r the operand still earns the plain
             // `Is a directory` refusal.
             if recursive && rm_operand_is_dot_or_dotdot(expanded) {
-                if fs::metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+                if node.stat().is_ok_and(|meta| meta.is_dir) {
                     status = 1;
                     writeln!(
                         &mut stderr,
@@ -1962,7 +2020,14 @@ impl Executor {
             // component is `.`/`..` (GNU's order — `/.`, `/tmp/..`
             // get the refusing line, not this one), so the guard
             // sees the bare-root spellings and root symlink shapes.
-            if recursive && preserve_root && rm_operand_resolves_to_root(&target, &root_target) {
+            if recursive
+                && preserve_root
+                && (if node.is_at_root() {
+                    rm_node_resolves_to_root(&node, &root_node)
+                } else {
+                    rm_operand_resolves_to_root(&target, &root_target)
+                })
+            {
                 status = 1;
                 let shown = rm_root_display_name(expanded);
                 if shown == "/" {
@@ -1982,8 +2047,8 @@ impl Executor {
                 )?;
                 continue;
             }
-            let result = match fs::symlink_metadata(&target) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+            let result = match node.symlink_stat() {
+                Ok(metadata) if metadata.is_symlink => {
                     // A symlink operand names the link itself; GNU
                     // unlinks it and never touches the target. Windows
                     // removes a DIRECTORY symlink with RemoveDirectory
@@ -1992,24 +2057,25 @@ impl Executor {
                     // on a link path is ENOTDIR, which -f then
                     // swallowed, leaving `rm -rf dirlink` a silent
                     // no-op (rubash#1847 boundary shape).
-                    if cfg!(windows) && target.is_dir() {
-                        fs::remove_dir(&target)
+                    if cfg!(windows) && node.is_dir() {
+                        node.remove_dir()
                     } else {
-                        fs::remove_file(&target)
+                        node.remove_file()
                     }
                 }
-                Ok(metadata) if metadata.is_dir() => {
+                Ok(metadata) if metadata.is_dir => {
                     if recursive {
-                        fs::remove_dir_all(&target)
+                        node.remove_dir_all()
                     } else if remove_empty_dir {
                         // gnulib remove.c reports a -d failure by the
                         // directory's contents, not by rmdir's errno:
                         // a non-empty directory is always "Directory
                         // not empty", while a bare rmdir on the root
                         // directory itself reports EBUSY (rubash#1847).
-                        fs::remove_dir(&target).map_err(|error| {
-                            if fs::read_dir(&target)
-                                .is_ok_and(|mut entries| entries.next().is_some())
+                        node.remove_dir().map_err(|error| {
+                            if node
+                                .read_dir_nodes()
+                                .is_ok_and(|entries| !entries.is_empty())
                             {
                                 io::Error::new(
                                     io::ErrorKind::DirectoryNotEmpty,
@@ -2028,7 +2094,7 @@ impl Executor {
                         continue;
                     }
                 }
-                Ok(_) => fs::remove_file(&target),
+                Ok(_) => node.remove_file(),
                 Err(error) => Err(error),
             };
             match result {
@@ -3614,6 +3680,27 @@ fn rm_operand_resolves_to_root(target: &std::path::Path, root: &std::path::Path)
     }
 }
 
+/// rm_operand_resolves_to_root's node form (rubash#3276), spent
+/// only for an anchor-rooted operand: the string canonicalize
+/// cannot walk through the dead component, so the verdict compares
+/// identities instead — the operand's followed (dev, ino) against
+/// the root node's, under the same symlink exclusion (a symlink
+/// operand names the link, never the root). The (0, 0) identity is
+/// the non-unix placeholder CpStat carries and never counts.
+fn rm_node_resolves_to_root(node: &CpNode, root: &CpNode) -> bool {
+    match node.symlink_stat() {
+        Ok(stat) if stat.is_symlink => return false,
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    match (node.stat(), root.stat()) {
+        (Ok(target), Ok(root)) => {
+            (target.dev, target.ino) != (0, 0) && (target.dev, target.ino) == (root.dev, root.ino)
+        }
+        _ => false,
+    }
+}
+
 /// The name the preserve-root diagnostic prints for an operand: the
 /// walked path (fts) collapses a leading run of three or more
 /// slashes to one, while a leading pair is preserved as its own
@@ -3681,7 +3768,11 @@ fn cp_confirm_overwrite(target_display: &str) -> bool {
 /// Windows), so the value must be reset explicitly; otherwise -u compares
 /// against the stale source time instead of the copy time.
 #[cfg(windows)]
-fn cp_set_modified_now(target: &std::path::Path) {
+fn cp_set_modified_now(target: &CpNode) {
+    // At roots are unix-only; a windows target is always a Plain
+    // node and its joined path is the name CreateFileW opens.
+    let target_buf = target.eff_path();
+    let target = target_buf.as_path();
     use std::ffi::c_void;
 
     const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
@@ -3746,23 +3837,20 @@ fn cp_set_modified_now(target: &std::path::Path) {
 }
 
 #[cfg(not(windows))]
-fn cp_set_modified_now(_target: &std::path::Path) {}
+fn cp_set_modified_now(_target: &CpNode) {}
 
 /// -u/--update: skip the copy when the source is not strictly newer than
 /// the destination. Missing metadata is not grounds for skipping.
-fn cp_source_not_newer(source: &std::path::Path, target: &std::path::Path) -> bool {
-    match (
-        fs::metadata(source).and_then(|meta| meta.modified()),
-        fs::metadata(target).and_then(|meta| meta.modified()),
-    ) {
-        (Ok(source_time), Ok(target_time)) => source_time <= target_time,
+fn cp_source_not_newer(source: &CpNode, target: &CpNode) -> bool {
+    match (source.stat(), target.stat()) {
+        (Ok(source_stat), Ok(target_stat)) => source_stat.modified <= target_stat.modified,
         _ => false,
     }
 }
 
 /// Per-invocation --preserve=links bookkeeping: source inode
-/// identity → the first destination it was copied to.
-type CpLinkMap = std::collections::HashMap<(u64, u64), std::path::PathBuf>;
+/// identity → the first destination node it was copied to.
+type CpLinkMap = std::collections::HashMap<(u64, u64), CpNode>;
 
 /// The identity two names of one file share: (device, inode) on
 /// unix, (volume serial, file index) on Windows. None where the
@@ -3789,30 +3877,912 @@ fn cp_inode_key(_source: &std::path::Path) -> Option<(u64, u64)> {
     None
 }
 
+/// rubash#3268 (d): the metadata the copy engine classifies by,
+/// read through a CpNode. On unix it is the fstatat result widened
+/// through u32 (st_mode and the S_IF* constants disagree in width
+/// across libc targets — the (c) face's rule); off unix only the
+/// std::fs::Metadata projections exist, and mode/dev/ino stay 0
+/// (their consumers are unix-only or path-based there).
+#[derive(Clone, Copy)]
+pub(in crate::executor) struct CpStat {
+    pub is_dir: bool,
+    pub is_symlink: bool,
+    pub mode: u32,
+    pub dev: u64,
+    pub ino: u64,
+    pub accessed: SystemTime,
+    pub modified: SystemTime,
+}
+
+fn cp_stat_from_metadata(metadata: &fs::Metadata) -> CpStat {
+    #[cfg(unix)]
+    let (mode, dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.mode(), metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (mode, dev, ino) = (0, 0, 0);
+    CpStat {
+        is_dir: metadata.is_dir(),
+        is_symlink: metadata.file_type().is_symlink(),
+        mode,
+        dev,
+        ino,
+        accessed: metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
+        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+    }
+}
+
+#[cfg(unix)]
+fn cp_stat_from_libc(st: &libc::stat) -> CpStat {
+    let mode = u32::from(st.st_mode);
+    CpStat {
+        is_dir: mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFDIR),
+        is_symlink: mode & u32::from(libc::S_IFMT) == u32::from(libc::S_IFLNK),
+        mode,
+        dev: st.st_dev as u64,
+        ino: st.st_ino as u64,
+        accessed: cp_stat_time(i64::from(st.st_atime), cp_stat_atime_nsec(st)),
+        modified: cp_stat_time(i64::from(st.st_mtime), cp_stat_mtime_nsec(st)),
+    }
+}
+
+#[cfg(unix)]
+fn cp_stat_time(sec: i64, nsec: i64) -> SystemTime {
+    let nsec = nsec.clamp(0, 999_999_999) as u32;
+    if sec >= 0 {
+        SystemTime::UNIX_EPOCH + std::time::Duration::new(sec as u64, nsec)
+    } else {
+        // Pre-epoch stamps: the nanosecond part counts back from the
+        // whole second, close enough for a class of files no copy in
+        // the test corpus carries.
+        SystemTime::UNIX_EPOCH - std::time::Duration::new(sec.unsigned_abs(), 0)
+    }
+}
+
+#[cfg(all(
+    unix,
+    any(target_os = "android", all(target_os = "linux", target_env = "gnu"))
+))]
+fn cp_stat_atime_nsec(st: &libc::stat) -> i64 {
+    // glibc and bionic both flatten the nanoseconds into their own
+    // field; its width follows the target's c_long (i32 on armv7).
+    i64::from(st.st_atime_nsec)
+}
+
+#[cfg(all(
+    unix,
+    any(target_os = "android", all(target_os = "linux", target_env = "gnu"))
+))]
+fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(all(unix, target_os = "linux", not(target_env = "gnu")))]
+fn cp_stat_atime_nsec(st: &libc::stat) -> i64 {
+    // musl's C header keeps the timespec pair, but the libc crate
+    // flattens the nanoseconds into their own field on every unix
+    // target; its width follows the target's c_long.
+    i64::from(st.st_atime_nsec)
+}
+
+#[cfg(all(unix, target_os = "linux", not(target_env = "gnu")))]
+fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "ios")))]
+fn cp_stat_atime_nsec(st: &libc::stat) -> i64 {
+    // Same flattening as the other arms: the libc crate exposes
+    // st_atime_nsec (c_long), not the C header's st_atimespec pair.
+    i64::from(st.st_atime_nsec)
+}
+
+#[cfg(all(unix, any(target_os = "macos", target_os = "ios")))]
+fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
+    i64::from(st.st_mtime_nsec)
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+))]
+fn cp_stat_atime_nsec(_st: &libc::stat) -> i64 {
+    0
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios"
+    ))
+))]
+fn cp_stat_mtime_nsec(_st: &libc::stat) -> i64 {
+    0
+}
+
+/// fstatat against an explicit (dirfd, relative path) pair — the
+/// metadata primitive every At-root node operation stands on.
+#[cfg(unix)]
+fn cp_fstatat(
+    fd: std::os::unix::io::RawFd,
+    rel: &std::path::Path,
+    follow: bool,
+) -> io::Result<libc::stat> {
+    let c_rel = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    // SAFETY: fd is the caller's open directory handle (the anchor's
+    // Arc<File> outlives the call through the CpNode's root clone);
+    // fstatat with a relative path resolves against it and takes no
+    // descriptor.
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    let flags = if follow { 0 } else { libc::AT_SYMLINK_NOFOLLOW };
+    let rc = unsafe { libc::fstatat(fd, c_rel.as_ptr(), &mut st, flags) };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(st)
+}
+
+/// openat against an explicit (dirfd, relative path) pair. The
+/// variadic mode goes as c_uint: darwin's mode_t is u16, which a
+/// variadic call cannot take (E0617 — the (c) face's lesson); where
+/// mode_t is already u32 the cast is the identity.
+#[cfg(unix)]
+fn cp_openat(
+    fd: std::os::unix::io::RawFd,
+    rel: &std::path::Path,
+    flags: libc::c_int,
+    mode: u32,
+) -> io::Result<File> {
+    use std::os::unix::io::FromRawFd;
+    let c_rel = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+    // SAFETY: see cp_fstatat; the returned descriptor is owned by
+    // the File constructed from it.
+    let raw = unsafe {
+        libc::openat(
+            fd,
+            c_rel.as_ptr(),
+            flags | libc::O_CLOEXEC,
+            mode as libc::c_uint,
+        )
+    };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(raw) })
+}
+
+/// rubash#3268 (d): one node of the emulated cp — a root resolved
+/// once at the external_cp entry (Executor::cp_operand_root) plus
+/// the descent below it. The engine programs only against nodes;
+/// each operation dispatches on the root kind: Plain performs the
+/// exact std::fs call the pre-face code performed on the joined
+/// path, At performs the *at-family call against the anchor handle,
+/// so the kernel walks the spelling from the session's inode. There
+/// is one engine and two root resolutions — the same shape as
+/// read_session_anchored's one function with two states.
+#[derive(Clone)]
+pub(in crate::executor) struct CpNode {
+    root: CpRoot,
+    /// Below the root for a Plain root ("" at the root itself); the
+    /// FULL anchor-relative path for an At root (the root's operand
+    /// rel, extended by descent).
+    rel: std::path::PathBuf,
+    /// The joined spelling — what diagnostics print. For an At node
+    /// this is spelling-only: it names what the session would have
+    /// printed, and is never opened (the display_path of an anchor
+    /// node below its root extends the root's spelling textually,
+    /// exactly the string the plain walk would have used).
+    display: std::path::PathBuf,
+}
+
+impl CpNode {
+    pub(in crate::executor) fn at_root(root: CpRoot) -> CpNode {
+        let (rel, display) = match &root {
+            CpRoot::Plain(path) => (std::path::PathBuf::new(), path.clone()),
+            #[cfg(unix)]
+            CpRoot::At { rel, spelling, .. } => (rel.clone(), spelling.clone()),
+        };
+        CpNode { root, rel, display }
+    }
+
+    pub(in crate::executor) fn child(&self, name: &std::ffi::OsStr) -> CpNode {
+        CpNode {
+            root: self.root.clone(),
+            rel: self.rel.join(name),
+            display: self.display.join(name),
+        }
+    }
+
+    pub(in crate::executor) fn display_path(&self) -> &std::path::Path {
+        &self.display
+    }
+
+    /// The joined path of a Plain node (root path + descent). Only
+    /// Plain arms call it; for an At node it returns the diagnostic
+    /// spelling, which no caller opens. The root itself returns its
+    /// path unjoined — joining an empty descent would append a
+    /// trailing slash, which stats a regular file as ENOTDIR.
+    fn eff_path(&self) -> std::path::PathBuf {
+        match &self.root {
+            CpRoot::Plain(path) => {
+                if self.rel.as_os_str().is_empty() {
+                    path.clone()
+                } else {
+                    path.join(&self.rel)
+                }
+            }
+            #[cfg(unix)]
+            CpRoot::At { .. } => self.display.clone(),
+        }
+    }
+
+    /// The anchor-relative path of an At node; an empty rel names
+    /// the anchor directory itself.
+    #[cfg(unix)]
+    fn at_rel(&self) -> std::path::PathBuf {
+        if self.rel.as_os_str().is_empty() {
+            std::path::PathBuf::from(".")
+        } else {
+            self.rel.clone()
+        }
+    }
+
+    fn is_plain(&self) -> bool {
+        matches!(self.root, CpRoot::Plain(_))
+    }
+
+    pub(in crate::executor) fn stat(&self) -> io::Result<CpStat> {
+        self.stat_follow(true)
+    }
+
+    pub(in crate::executor) fn symlink_stat(&self) -> io::Result<CpStat> {
+        self.stat_follow(false)
+    }
+
+    fn stat_follow(&self, follow: bool) -> io::Result<CpStat> {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                let metadata = if follow {
+                    fs::metadata(self.eff_path())?
+                } else {
+                    fs::symlink_metadata(self.eff_path())?
+                };
+                Ok(cp_stat_from_metadata(&metadata))
+            }
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let st = cp_fstatat(dir.as_raw_fd(), &self.at_rel(), follow)?;
+                Ok(cp_stat_from_libc(&st))
+            }
+        }
+    }
+
+    pub(in crate::executor) fn exists(&self) -> bool {
+        self.stat().is_ok()
+    }
+
+    pub(in crate::executor) fn is_dir(&self) -> bool {
+        self.stat().map(|st| st.is_dir).unwrap_or(false)
+    }
+
+    pub(in crate::executor) fn file_name(&self) -> Option<std::ffi::OsString> {
+        match &self.root {
+            CpRoot::Plain(_) => self.eff_path().file_name().map(|name| name.to_os_string()),
+            #[cfg(unix)]
+            CpRoot::At { .. } => match self.rel.components().next_back() {
+                Some(std::path::Component::Normal(name)) => Some(name.to_os_string()),
+                _ => None,
+            },
+        }
+    }
+
+    /// The node's directory entries as child nodes, in readdir
+    /// order (callers sort, as the pre-face code sorted DirEntry).
+    /// Entry-level read errors are skipped — the same disposition
+    /// the pre-face filter_map(Result::ok) gave both call sites.
+    pub(in crate::executor) fn read_dir_nodes(
+        &self,
+    ) -> io::Result<Vec<(std::ffi::OsString, CpNode)>> {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                let mut out = Vec::new();
+                for entry in fs::read_dir(self.eff_path())? {
+                    let Ok(entry) = entry else { continue };
+                    let name = entry.file_name();
+                    let child = self.child(&name);
+                    out.push((name, child));
+                }
+                Ok(out)
+            }
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::ffi::OsStringExt;
+                use std::os::unix::io::{AsRawFd, IntoRawFd};
+                let file = cp_openat(
+                    dir.as_raw_fd(),
+                    &self.at_rel(),
+                    libc::O_RDONLY | libc::O_DIRECTORY,
+                    0,
+                )?;
+                let raw = file.into_raw_fd();
+                // SAFETY: raw is a freshly opened directory
+                // descriptor; fdopendir takes ownership of it, and
+                // closedir below releases it (and the descriptor).
+                let dirp = unsafe { libc::fdopendir(raw) };
+                if dirp.is_null() {
+                    unsafe {
+                        libc::close(raw);
+                    }
+                    return Err(io::Error::last_os_error());
+                }
+                let mut out = Vec::new();
+                loop {
+                    // SAFETY: dirp is the live stream from the
+                    // fdopendir above; each returned dirent is
+                    // copied out (its name) before the next call.
+                    // A NULL return ends the walk — end of stream or
+                    // a read error, which the callers' skip-entry
+                    // disposition treats the same (the pre-face
+                    // filter_map form could not surface it either).
+                    let entry = unsafe { libc::readdir(dirp) };
+                    if entry.is_null() {
+                        break;
+                    }
+                    let name_c = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) };
+                    let bytes = name_c.to_bytes();
+                    if bytes == b"." || bytes == b".." {
+                        continue;
+                    }
+                    let name = std::ffi::OsString::from_vec(bytes.to_vec());
+                    let child = self.child(&name);
+                    out.push((name, child));
+                }
+                unsafe {
+                    libc::closedir(dirp);
+                }
+                Ok(out)
+            }
+        }
+    }
+
+    pub(in crate::executor) fn create_dir_all(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::create_dir_all(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let fd = dir.as_raw_fd();
+                let rel = self.at_rel();
+                // mkdirat answers one component chain per call only
+                // when its parents exist, so create_dir_all's walk
+                // goes cumulative-prefix by cumulative-prefix. `.`
+                // and `..` prefixes name existing directories and
+                // answer EEXIST; the fstatat confirm keeps the
+                // NotADirectory verdict a file in the chain earns.
+                let mut cumulative = std::path::PathBuf::new();
+                let mut stepped = false;
+                for component in rel.components() {
+                    use std::path::Component;
+                    match component {
+                        Component::RootDir | Component::Prefix(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "anchor-relative path turned absolute",
+                            ));
+                        }
+                        Component::CurDir | Component::ParentDir | Component::Normal(_) => {
+                            cumulative.push(component.as_os_str());
+                        }
+                    }
+                    stepped = true;
+                    let c_path = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                        cumulative.as_os_str(),
+                    ))
+                    .map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                    })?;
+                    // SAFETY: fd is the anchor handle (see
+                    // cp_fstatat); mkdirat takes no descriptor.
+                    let rc = unsafe { libc::mkdirat(fd, c_path.as_ptr(), 0o777 as libc::mode_t) };
+                    if rc == 0 {
+                        continue;
+                    }
+                    let error = io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::EEXIST) {
+                        return Err(error);
+                    }
+                    let st = cp_fstatat(fd, &cumulative, true)?;
+                    if u32::from(st.st_mode) & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
+                        return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+                    }
+                }
+                if !stepped {
+                    let st = cp_fstatat(fd, &rel, true)?;
+                    if u32::from(st.st_mode) & u32::from(libc::S_IFMT) != u32::from(libc::S_IFDIR) {
+                        return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether this node's root is the anchor-relative form
+    /// (rubash#3276: rm's preserve-root guard asks it to choose
+    /// between the node verdict and the pre-face string verdict).
+    pub(in crate::executor) fn is_at_root(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self.root, CpRoot::At { .. })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// fs::create_dir's node form (single level — mkdir without
+    /// -p; rubash#3276). The At arm is one mkdirat against the
+    /// anchor: a create aimed INTO the dead directory fails there
+    /// with the kernel's ENOENT, exactly the verdict GNU's forked
+    /// mkdir child gets from the inherited inode, while a `..`
+    /// escape creates in the real parent.
+    pub(in crate::executor) fn create_dir(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::create_dir(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; mkdirat takes no
+                // descriptor. The mode is fs::create_dir's own
+                // 0o777 (pre-umask), passed as mode_t exactly as
+                // mkdirat declares it (no variadic widening here).
+                let rc = unsafe {
+                    libc::mkdirat(dir.as_raw_fd(), c_rel.as_ptr(), 0o777 as libc::mode_t)
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// fs::remove_dir's node form (rmdir / rm -d; rubash#3276):
+    /// unlinkat with AT_REMOVEDIR against the anchor.
+    pub(in crate::executor) fn remove_dir(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::remove_dir(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; unlinkat takes no
+                // descriptor. AT_REMOVEDIR is rmdir's flag form.
+                let rc =
+                    unsafe { libc::unlinkat(dir.as_raw_fd(), c_rel.as_ptr(), libc::AT_REMOVEDIR) };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// fs::remove_dir_all's node form (rm -r; rubash#3276). The
+    /// Plain arm is std's own walk; the At arm restates it on
+    /// nodes: a symlink node unlinks itself (never followed), a
+    /// directory's children go first, then the directory itself.
+    /// Read-side entry failures propagate, as std's do; entry-level
+    /// read errors keep read_dir_nodes' skip disposition (the same
+    /// one the cp enumeration runs under).
+    pub(in crate::executor) fn remove_dir_all(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::remove_dir_all(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { .. } => {
+                let st = self.symlink_stat()?;
+                if st.is_symlink || !st.is_dir {
+                    return self.remove_file();
+                }
+                for (_, child) in self.read_dir_nodes()? {
+                    child.remove_dir_all()?;
+                }
+                self.remove_dir()
+            }
+        }
+    }
+
+    /// stamp_existing_operand's node form (touch; rubash#3276):
+    /// existence is classified by the node's own following stat,
+    /// then the stamp lands by utimensat — against AT_FDCWD with
+    /// the joined path for a Plain node (the pre-face call itself,
+    /// via stamp_existing_operand), against the anchor handle for
+    /// an At node, so an operand in the dead directory's parent
+    /// stamps where GNU's forked touch child stamps it.
+    pub(in crate::executor) fn stamp_existing(
+        &self,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+        make_times: &dyn Fn() -> std::fs::FileTimes,
+    ) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => stamp_existing_operand(&self.eff_path(), atime, mtime, make_times),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                #[cfg(unix)]
+                let _ = make_times;
+                self.stat()?;
+                touch_utimensat_at(dir.as_raw_fd(), &self.at_rel(), atime, mtime)
+            }
+        }
+    }
+
+    pub(in crate::executor) fn remove_file(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::remove_file(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; unlinkat takes no
+                // descriptor. Flags 0 = unlink a non-directory.
+                let rc = unsafe { libc::unlinkat(dir.as_raw_fd(), c_rel.as_ptr(), 0) };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(in crate::executor) fn open_read(&self) -> io::Result<File> {
+        match &self.root {
+            CpRoot::Plain(_) => File::open(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                cp_openat(dir.as_raw_fd(), &self.at_rel(), libc::O_RDONLY, 0)
+            }
+        }
+    }
+
+    fn open_write(&self) -> io::Result<File> {
+        match &self.root {
+            CpRoot::Plain(_) => File::options().write(true).open(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                cp_openat(dir.as_raw_fd(), &self.at_rel(), libc::O_WRONLY, 0)
+            }
+        }
+    }
+
+    /// File::create's node form (create-or-truncate, mode 0o666
+    /// before the umask).
+    pub(in crate::executor) fn create_empty(&self) -> io::Result<File> {
+        match &self.root {
+            CpRoot::Plain(_) => File::create(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                cp_openat(
+                    dir.as_raw_fd(),
+                    &self.at_rel(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o666,
+                )
+            }
+        }
+    }
+
+    /// fs::write's node form.
+    pub(in crate::executor) fn write_bytes(&self, bytes: &[u8]) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::write(self.eff_path(), bytes),
+            #[cfg(unix)]
+            CpRoot::At { .. } => {
+                use std::io::Write;
+                let mut file = self.create_empty()?;
+                file.write_all(bytes)
+            }
+        }
+    }
+
+    /// The (dirfd, relative path) pair a linkat call spends for
+    /// this node: an At node names its anchor; a Plain node names
+    /// AT_FDCWD with its joined path — absolute in every session
+    /// shape that can reach a mixed pair, where AT_FDCWD ignores
+    /// the descriptor and the path rules alone, exactly as
+    /// fs::hard_link would resolve it.
+    #[cfg(unix)]
+    fn linkat_pair(&self) -> (std::os::unix::io::RawFd, std::path::PathBuf) {
+        use std::os::unix::io::AsRawFd;
+        match &self.root {
+            CpRoot::At { dir, .. } => (dir.as_raw_fd(), self.at_rel()),
+            CpRoot::Plain(_) => (libc::AT_FDCWD, self.eff_path()),
+        }
+    }
+
+    /// Make `target` a hard link to this node (the --preserve=links
+    /// repeat landing). A Plain pair keeps fs::hard_link exactly;
+    /// any pair involving an At root goes through linkat.
+    pub(in crate::executor) fn hard_link_to(&self, target: &CpNode) -> io::Result<()> {
+        if self.is_plain() && target.is_plain() {
+            return fs::hard_link(self.eff_path(), target.eff_path());
+        }
+        self.hard_link_mixed(target)
+    }
+
+    #[cfg(unix)]
+    fn hard_link_mixed(&self, target: &CpNode) -> io::Result<()> {
+        let (source_fd, source_rel) = self.linkat_pair();
+        let (target_fd, target_rel) = target.linkat_pair();
+        let c_source = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+            source_rel.as_os_str(),
+        ))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+        let c_target = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+            target_rel.as_os_str(),
+        ))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))?;
+        // SAFETY: both fds are open directory handles or AT_FDCWD
+        // (see linkat_pair); linkat takes no ownership.
+        let rc = unsafe {
+            libc::linkat(
+                source_fd,
+                c_source.as_ptr(),
+                target_fd,
+                c_target.as_ptr(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn hard_link_mixed(&self, _target: &CpNode) -> io::Result<()> {
+        unreachable!("an At root exists only on unix")
+    }
+
+    /// Copy this node's bytes onto `target`, fs::copy's contract:
+    /// create-or-truncate with the source's permission bits, then
+    /// leave the destination carrying those bits. A Plain pair
+    /// keeps fs::copy itself; any pair involving an At root streams
+    /// through the two handles.
+    pub(in crate::executor) fn copy_bytes_to(&self, target: &CpNode) -> io::Result<()> {
+        if self.is_plain() && target.is_plain() {
+            return fs::copy(self.eff_path(), target.eff_path()).map(|_| ());
+        }
+        self.copy_bytes_mixed(target)
+    }
+
+    #[cfg(unix)]
+    fn copy_bytes_mixed(&self, target: &CpNode) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let mut source = self.open_read()?;
+        let source_mode = self.stat().map(|st| st.mode).unwrap_or(0o666);
+        let mut created = target.create_with_mode(source_mode & 0o7777)?;
+        io::copy(&mut source, &mut created)?;
+        let _ = created.set_permissions(fs::Permissions::from_mode(source_mode & 0o7777));
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn copy_bytes_mixed(&self, _target: &CpNode) -> io::Result<()> {
+        unreachable!("an At root exists only on unix")
+    }
+
+    /// Create-or-truncate for copy_bytes_mixed: std::fs::OpenOptions
+    /// with the mode for a Plain node, openat for an At node.
+    #[cfg(unix)]
+    fn create_with_mode(&self, mode: u32) -> io::Result<File> {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                use std::os::unix::fs::OpenOptionsExt;
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .mode(mode)
+                    .open(self.eff_path())
+            }
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                cp_openat(
+                    dir.as_raw_fd(),
+                    &self.at_rel(),
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    mode,
+                )
+            }
+        }
+    }
+
+    /// Follow this node one symlink hop, cp_copy_tree's canonicalize
+    /// step restated on nodes: a Plain node names the canonical
+    /// path; an At node reads the link text at the anchor and
+    /// re-roots — an absolute text names a fresh Plain root (the
+    /// kernel restarts its walk at /), a relative text resolves
+    /// against the link's own directory under the same anchor, with
+    /// the kernel performing the walk (the text is NOT normalized
+    /// here; `..` inside it is the kernel's business, from the
+    /// anchor inode). The depth cap in cp_copy_tree bounds chains
+    /// and cycles exactly as the canonicalize recursion's did.
+    pub(in crate::executor) fn resolve_link(&self) -> io::Result<CpNode> {
+        match &self.root {
+            CpRoot::Plain(_) => Ok(CpNode::at_root(CpRoot::Plain(fs::canonicalize(
+                self.eff_path(),
+            )?))),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::ffi::OsStringExt;
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                let mut buf = vec![0u8; 4096];
+                let text = loop {
+                    // SAFETY: dir is the anchor handle (see
+                    // cp_fstatat); readlinkat writes at most buf.len()
+                    // bytes and takes no descriptor.
+                    let n = unsafe {
+                        libc::readlinkat(
+                            dir.as_raw_fd(),
+                            c_rel.as_ptr(),
+                            buf.as_mut_ptr() as *mut libc::c_char,
+                            buf.len(),
+                        )
+                    };
+                    if n < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    if (n as usize) < buf.len() || buf.len() >= 65536 {
+                        buf.truncate(n as usize);
+                        break std::ffi::OsString::from_vec(buf);
+                    }
+                    buf.resize(buf.len() * 2, 0);
+                };
+                let text = std::path::PathBuf::from(text);
+                if text.is_absolute() {
+                    return Ok(CpNode::at_root(CpRoot::Plain(text)));
+                }
+                let mut node = self.clone();
+                let parent = self
+                    .rel
+                    .parent()
+                    .map(|parent| parent.to_path_buf())
+                    .unwrap_or_default();
+                node.rel = parent.join(&text);
+                Ok(node)
+            }
+        }
+    }
+
+    /// The (dev, inode) identity --preserve=links keys on: the
+    /// pre-face cp_inode_key for a Plain node; the fstatat pair for
+    /// an At node.
+    pub(in crate::executor) fn inode_key(&self) -> Option<(u64, u64)> {
+        match &self.root {
+            CpRoot::Plain(_) => cp_inode_key(&self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { .. } => self.stat().ok().map(|st| (st.dev, st.ino)),
+        }
+    }
+
+    /// cp_apply_preserved's timestamp half through handles (the
+    /// pre-face form tries a write handle, then a read one — a
+    /// directory target only ever takes the second).
+    pub(in crate::executor) fn set_file_times(
+        &self,
+        accessed: SystemTime,
+        modified: SystemTime,
+    ) -> io::Result<()> {
+        let times = std::fs::FileTimes::new()
+            .set_accessed(accessed)
+            .set_modified(modified);
+        if let Ok(file) = self.open_write() {
+            if file.set_times(times).is_ok() {
+                return Ok(());
+            }
+        }
+        let file = self.open_read()?;
+        file.set_times(times)
+    }
+
+    /// The mode half for a node whose peer is not Plain: fchmodat
+    /// for an At node, std::fs::set_permissions for a Plain node in
+    /// a mixed pair.
+    #[cfg(unix)]
+    pub(in crate::executor) fn set_mode_bits(&self, mode: u32) {
+        match &self.root {
+            CpRoot::Plain(_) => {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    fs::set_permissions(self.eff_path(), fs::Permissions::from_mode(mode & 0o7777));
+            }
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                if let Ok(c_rel) =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                {
+                    // SAFETY: see cp_fstatat; fchmodat takes no
+                    // descriptor. Flags 0 follows links, as chmod
+                    // does.
+                    unsafe {
+                        libc::fchmodat(
+                            dir.as_raw_fd(),
+                            c_rel.as_ptr(),
+                            (mode & 0o7777) as libc::mode_t,
+                            0,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Copy one regular file, honoring --preserve=links: a source inode
 /// already copied in this invocation links the new destination to
 /// the first copy instead of duplicating the bytes (the two
 /// destinations then share an inode, mode and times included —
 /// exactly GNU's result).
 fn cp_copy_file(
-    source: &std::path::Path,
-    target: &std::path::Path,
+    source: &CpNode,
+    target: &CpNode,
     preserve: CpPreserve,
     link_map: &mut CpLinkMap,
 ) -> io::Result<()> {
     if preserve.links {
-        if let Some(key) = cp_inode_key(source) {
+        if let Some(key) = source.inode_key() {
             if let Some(first) = link_map.get(&key) {
-                return fs::hard_link(first, target);
+                return first.hard_link_to(target);
             }
-            let copied = fs::copy(source, target).map(|_| ());
+            let copied = source.copy_bytes_to(target);
             if copied.is_ok() {
-                link_map.insert(key, target.to_path_buf());
+                link_map.insert(key, target.clone());
             }
             return copied;
         }
     }
-    fs::copy(source, target).map(|_| ())
+    source.copy_bytes_to(target)
 }
 
 /// cp -r: directories are created and walked in sorted entry order so the
@@ -3820,8 +4790,8 @@ fn cp_copy_file(
 /// (without -d); the depth cap turns a link cycle into an error instead of
 /// a stack overflow.
 fn cp_copy_tree(
-    source: &std::path::Path,
-    target: &std::path::Path,
+    source: &CpNode,
+    target: &CpNode,
     depth: usize,
     preserve: CpPreserve,
     link_map: &mut CpLinkMap,
@@ -3832,28 +4802,22 @@ fn cp_copy_tree(
             "too many levels of symbolic links",
         ));
     }
-    let metadata = fs::symlink_metadata(source)?;
-    if metadata.file_type().is_symlink() {
+    let metadata = source.symlink_stat()?;
+    if metadata.is_symlink {
         return cp_copy_tree(
-            &fs::canonicalize(source)?,
+            &source.resolve_link()?,
             target,
             depth + 1,
             preserve,
             link_map,
         );
     }
-    if metadata.is_dir() {
-        fs::create_dir_all(target)?;
-        let mut entries: Vec<_> = fs::read_dir(source)?.filter_map(Result::ok).collect();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            cp_copy_tree(
-                entry.path().as_path(),
-                &target.join(entry.file_name()),
-                depth + 1,
-                preserve,
-                link_map,
-            )?;
+    if metadata.is_dir {
+        target.create_dir_all()?;
+        let mut entries = source.read_dir_nodes()?;
+        entries.sort_by_key(|(name, _)| name.clone());
+        for (name, child) in entries {
+            cp_copy_tree(&child, &target.child(&name), depth + 1, preserve, link_map)?;
         }
         // GNU sets a copied directory's preserved attributes only after
         // its contents land, so child writes cannot clobber them.
@@ -3925,23 +4889,146 @@ fn cp_apply_preserve_list(
 /// attributes copy through the platform xattr store; Windows has no
 /// xattr namespace and no SELinux context, so the flags are accepted
 /// no-ops there (there is no GNU cp for Windows to diverge from).
-fn cp_apply_preserved_attributes(
-    source: &std::path::Path,
-    target: &std::path::Path,
-    preserve: CpPreserve,
-) {
+fn cp_apply_preserved_attributes(source: &CpNode, target: &CpNode, preserve: CpPreserve) {
     #[cfg(unix)]
     {
-        if preserve.xattr {
-            cp_copy_xattrs(source, target, false);
-        }
-        if preserve.context {
-            cp_copy_xattrs(source, target, true);
+        if source.is_plain() && target.is_plain() {
+            if preserve.xattr {
+                cp_copy_xattrs(&source.eff_path(), &target.eff_path(), false);
+            }
+            if preserve.context {
+                cp_copy_xattrs(&source.eff_path(), &target.eff_path(), true);
+            }
+        } else {
+            if preserve.xattr {
+                cp_copy_xattrs_nodes(source, target, false);
+            }
+            if preserve.context {
+                cp_copy_xattrs_nodes(source, target, true);
+            }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = (source, target, preserve);
+    }
+}
+
+/// The fd forms of the xattr shims below, for a node pair involving
+/// an At root (there is no path to name). macOS takes the extra
+/// position/options arguments here too.
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_list_fd(fd: libc::c_int, buf: *mut libc::c_char, size: usize) -> isize {
+    unsafe { libc::flistxattr(fd, buf, size, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_list_fd(fd: libc::c_int, buf: *mut libc::c_char, size: usize) -> isize {
+    unsafe { libc::flistxattr(fd, buf, size) }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_get_fd(
+    fd: libc::c_int,
+    name: *const libc::c_char,
+    value: *mut libc::c_void,
+    size: usize,
+) -> isize {
+    unsafe { libc::fgetxattr(fd, name, value, size, 0, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_get_fd(
+    fd: libc::c_int,
+    name: *const libc::c_char,
+    value: *mut libc::c_void,
+    size: usize,
+) -> isize {
+    unsafe { libc::fgetxattr(fd, name, value, size) }
+}
+
+#[cfg(all(unix, target_os = "macos"))]
+unsafe fn xattr_set_fd(
+    fd: libc::c_int,
+    name: *const libc::c_char,
+    value: *const libc::c_void,
+    size: usize,
+) -> libc::c_int {
+    unsafe { libc::fsetxattr(fd, name, value, size, 0, 0) }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+unsafe fn xattr_set_fd(
+    fd: libc::c_int,
+    name: *const libc::c_char,
+    value: *const libc::c_void,
+    size: usize,
+) -> libc::c_int {
+    unsafe { libc::fsetxattr(fd, name, value, size, 0) }
+}
+
+/// cp_copy_xattrs through the two nodes' handles — the same
+/// best-effort walk, for a pair involving an At root.
+#[cfg(unix)]
+fn cp_copy_xattrs_nodes(source: &CpNode, target: &CpNode, context_only: bool) {
+    use std::os::unix::io::AsRawFd;
+    let Ok(source_file) = source.open_read() else {
+        return;
+    };
+    let Ok(target_file) = target.open_read() else {
+        return;
+    };
+    let source_fd = source_file.as_raw_fd();
+    let target_fd = target_file.as_raw_fd();
+    let size = unsafe { xattr_list_fd(source_fd, std::ptr::null_mut(), 0) };
+    if size <= 0 {
+        return;
+    }
+    let mut names = vec![0u8; size as usize];
+    let size = unsafe {
+        xattr_list_fd(
+            source_fd,
+            names.as_mut_ptr() as *mut libc::c_char,
+            names.len(),
+        )
+    };
+    if size <= 0 {
+        return;
+    }
+    names.truncate(size as usize);
+    for name in names.split(|byte| *byte == 0) {
+        if name.is_empty() || (context_only && name != b"security.selinux") {
+            continue;
+        }
+        let Ok(name_c) = std::ffi::CString::new(name) else {
+            continue;
+        };
+        let value_size =
+            unsafe { xattr_get_fd(source_fd, name_c.as_ptr(), std::ptr::null_mut(), 0) };
+        if value_size < 0 {
+            continue;
+        }
+        let mut value = vec![0u8; value_size as usize];
+        let got = unsafe {
+            xattr_get_fd(
+                source_fd,
+                name_c.as_ptr(),
+                value.as_mut_ptr() as *mut libc::c_void,
+                value.len(),
+            )
+        };
+        if got < 0 {
+            continue;
+        }
+        value.truncate(got as usize);
+        unsafe {
+            xattr_set_fd(
+                target_fd,
+                name_c.as_ptr(),
+                value.as_ptr() as *const libc::c_void,
+                value.len(),
+            );
+        }
     }
 }
 
@@ -4071,7 +5158,31 @@ fn cp_copy_xattrs(source: &std::path::Path, target: &std::path::Path, context_on
 /// restrictive preserved mode cannot block the timestamp write on
 /// handle-based platforms; failures are ignored — preservation is
 /// best-effort exactly where GNU's is (unprivileged ownership).
-fn cp_apply_preserved(source: &std::path::Path, target: &std::path::Path, mode: bool, times: bool) {
+fn cp_apply_preserved(source: &CpNode, target: &CpNode, mode: bool, times: bool) {
+    if source.is_plain() && target.is_plain() {
+        cp_apply_preserved_paths(&source.eff_path(), &target.eff_path(), mode, times);
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let Ok(st) = source.stat() else {
+            return;
+        };
+        if times {
+            let _ = target.set_file_times(st.accessed, st.modified);
+        }
+        if mode {
+            target.set_mode_bits(st.mode);
+        }
+    }
+}
+
+fn cp_apply_preserved_paths(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    mode: bool,
+    times: bool,
+) {
     let Ok(meta) = fs::metadata(source) else {
         return;
     };
