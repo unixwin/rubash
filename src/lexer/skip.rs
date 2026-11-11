@@ -3158,6 +3158,39 @@ fn unclosed_array_subscript_walk(
                     }
                 }
             }
+            // A `(` directly after a word-final PATTERN_CHAR (`@*+?!`,
+            // syntax.h:90-92) is an extglob group opener, never a
+            // subshell boundary: GNU read_token_word hands the whole
+            // balanced group to parse_matched_pair whenever
+            // extended_glob is live (parse.y:5466-5489), and with
+            // extglob off the `(` is a syntax-error token — in neither
+            // case does the text after it start a command position
+            // whose identifier could open a P_ARRAYSUB hunt. The
+            // extglob arm above only fires while this walk's
+            // text-derived mirror is on; a `shopt -s extglob` that
+            // already executed in an earlier source group is invisible
+            // to it (scripts run group-by-group), so without the same
+            // consumption here `@(a[b)` misreports a `]` EOF
+            // (rubash#3208). Consume the balanced group exactly like
+            // the extglob arm — the body's `[`/`|`/`(` never feed
+            // token-level decisions; an unbalanced group is a
+            // `)`-shaped EOF owned by the generic close-char scan, so
+            // bail out to it. Exception: a word that is exactly `!` at
+            // command position is the negation keyword — its `(` really
+            // is a subshell opener, and a genuinely unclosed subscript
+            // inside (`!(a[1)`) still reports `]`.
+            if matches!(word.chars().last(), Some('@' | '*' | '+' | '?' | '!'))
+                && !(word == "!" && command_position)
+            {
+                match skip_extglob_group_chars(&chars, index) {
+                    Some(end) => {
+                        word.push('(');
+                        index = end;
+                        continue;
+                    }
+                    None => return None,
+                }
+            }
             // `name=(` opens a compound-assignment list; any other `(` is a
             // subshell/grouping whose body starts a fresh command position.
             if word.ends_with('=') {
