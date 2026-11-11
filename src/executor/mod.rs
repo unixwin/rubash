@@ -1045,6 +1045,20 @@ pub struct Executor {
     /// commands inside the EXIT action DO take DEBUG firings —
     /// wearing the frozen command (rubash#2482 face a).
     exit_trap_running: bool,
+    /// Depth of `parse_and_execute` units carrying SEVAL_NOHIST that
+    /// reach the evaluator through execute_eval_source (the `eval`
+    /// builtin and the other string-unit funnels). GNU
+    /// builtins/evalstring.c:291-292 disables history remembering for
+    /// such a unit's duration (bashhist.c:297-302
+    /// bash_history_disable) and the parse_prologue unwind protect
+    /// restores it afterwards, so a `history -s` inside the unit
+    /// appends WITHOUT popping the last recorded line
+    /// (builtins/history.def:435-439 push_history gates the pop on
+    /// remember_on_history). Trap actions run under the same flag
+    /// (trap.c:494/1069/1195) but are tracked by their own
+    /// *_trap_running windows; history_exec consults both faces
+    /// (rubash#2824).
+    nohist_parse_depth: std::cell::Cell<u32>,
     /// rubash#2482 face b: the subshell_depth at which a pipeline
     /// stage's root `( )` element was dispatched (set by
     /// execute_compound_pipeline_stage on the stage clone, cleared
