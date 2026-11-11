@@ -1971,12 +1971,24 @@ impl Executor {
         }
     }
 
+    /// The simulation's verdict for `name` by its RESOLVED element
+    /// name, after an evaluating fetch populated the subscript carry.
+    /// `None` when the fetch resolved nothing the simulation knows.
+    fn scan_sim_value_for_resolved(&self, name: &str) -> Option<ScanValue> {
+        let (base, key) = parse_array_subscript(name)?;
+        let expanded = crate::executor::expand_braced_indices::scan_carry_peek(key)?;
+        let resolved = format!("{base}[{expanded}]");
+        self.scan_sim_value(&resolved)
+    }
+
     /// Adjudicate one `:?` / `?` span (rubash#2595 / #2762). The
     /// verdict comes from the simulated walk or the pure probe
     /// wherever possible, so a command substitution inside the tested
     /// subscript is not executed by the scan; only an undecidable span
-    /// falls through to the evaluating fetch. In pure
-    /// (pipeline-admission) mode no span is ever
+    /// falls through to the evaluating fetch — whose resolution the
+    /// real expansion reuses through the subscript carry, so the
+    /// substitution still executes exactly once (subst.c:9777 single
+    /// fetch). In pure (pipeline-admission) mode no span is ever
     /// evaluated: an undecidable span is provisional.
     fn scan_question_is_error(&self, name: &str, require_non_empty: bool) -> QuestionOutcome {
         // A negative-literal subscript can carry the fetch's own `bad
@@ -2016,6 +2028,33 @@ impl Executor {
             return QuestionOutcome::ProvisionalPending;
         }
         let fetched = self.parameter_error_value(name);
+        // The fetch resolved the subscript (carry map): re-check the
+        // simulation by the RESOLVED name — an earlier `:=` may have
+        // bound exactly this element, and the fetched (pre-command)
+        // value would then be stale.
+        if let Some(sim) = self.scan_sim_value_for_resolved(name) {
+            return match sim {
+                ScanValue::Unset => QuestionOutcome::Error,
+                ScanValue::Set(value) => {
+                    if require_non_empty && value.is_empty() {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                ScanValue::SetUnknown => {
+                    if !require_non_empty {
+                        QuestionOutcome::NoError
+                    } else if fetched.as_deref().map(str::is_empty).unwrap_or(true) {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                // Unreachable: the simulation never reports Undecidable.
+                ScanValue::Undecidable => QuestionOutcome::NoError,
+            };
+        }
         let is_error = if require_non_empty {
             fetched.as_deref().map(str::is_empty).unwrap_or(true)
         } else {
