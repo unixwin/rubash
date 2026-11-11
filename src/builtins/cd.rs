@@ -75,16 +75,31 @@ pub fn execute(
         args.iter().map(String::as_str),
         env_vars,
         &mut cwd,
+        None,
         &mut logical_cwd,
         &mut stdout,
         &mut stderr,
     )
 }
 
+/// rubash#3268: the executor's cwd-anchor route for cd's verbatim
+/// fallback, lent by the session call sites. GNU change_to_directory
+/// (builtins/cd.def:522) falls back to chdir'ing the operand VERBATIM
+/// when the canonicalized chdir fails — a walk relative to the
+/// process cwd INODE, which stays valid after the directory is
+/// unlinked. Under G-02 the session's inode handle is the cwd anchor;
+/// the resolver answers Some(Ok(physical path)) when the operand
+/// names a directory from that inode, Some(Err) with the kernel's
+/// verdict when the anchor applied but the walk failed, and None
+/// when the anchor does not apply (live cwd, no anchor, non-Unix) —
+/// the probe's own error then stands, exactly as before.
+pub(crate) type CwdAnchorResolver<'a> = &'a dyn Fn(&Path) -> Option<io::Result<PathBuf>>;
+
 pub(crate) fn execute_with_io<'a, I, W, E>(
     args: I,
     env_vars: &mut crate::shell::var_table::VarTable,
     cwd: &mut PathBuf,
+    anchor_resolver: Option<CwdAnchorResolver<'_>>,
     logical_cwd: &mut Option<String>,
     stdout: &mut W,
     stderr: &mut E,
@@ -344,31 +359,70 @@ where
     } = match probed {
         Ok(move_outcome) => move_outcome,
         Err(error) => {
-            // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
-            // reports the user-given path, not the Windows-converted path.
-            // general.c printable_filename: non-printing bytes render through
-            // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
-            // `dirname` here is the pre-substitution operand name kept in
-            // dirname_display (rubash#2221), not the attempted candidate.
-            let display_path = dirname_display
-                .as_deref()
-                .or(target.display.as_deref())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| target.path.to_string_lossy().to_string());
-            let display_path = if crate::executor::ansic_shouldquote(&display_path) {
-                crate::executor::ansic_quote(&display_path)
+            // rubash#3268: GNU's tail (builtins/cd.def
+            // change_to_directory, POSIX step 9): when the
+            // canonicalized chdir fails — and sh_canonpath's
+            // PATH_CHECKEXISTS makes it fail whenever a component of
+            // the joined spelling is gone, the deleted cwd itself
+            // included — cd chdirs the operand VERBATIM, relative to
+            // the cwd inode. Spend the anchor for that walk when the
+            // executor lent a resolver and the operand is relative
+            // (an absolute spelling keeps the string verdict: GNU's
+            // verbatim chdir of it dies at the same dead component).
+            // The anchor walk's own error is the verdict it reports —
+            // it is the error GNU's verbatim chdir raises.
+            let anchored = if target.path.is_absolute() {
+                None
             } else {
-                display_path
+                anchor_resolver.and_then(|resolve| resolve(&target.path))
             };
-            writeln!(
-                stderr,
-                "{}cd: {}: {}",
-                diagnostic_prefix(env_vars),
-                display_path,
-                crate::posix_errors::message(&error)
-            )?;
-            stderr.flush()?;
-            return Ok(EXECUTION_FAILURE);
+            match anchored {
+                // The anchor walk landed: the move's physical
+                // directory is the walked path, and the value bindpwd
+                // binds is the physical form — the same binding the
+                // verbatim-chdir fallback above produces, since the
+                // anchor walk IS that chdir performed through the
+                // cwd inode (review-3249 resolution R8: master's
+                // anchor arm returned the bare path when `probed`
+                // was a plain path result; with the ported Move
+                // struct it must construct the whole move).
+                Some(Ok(path)) => Move {
+                    pwd_value: shell_pwd_display_path(&path.to_string_lossy()),
+                    physical: path,
+                    stayed_deleted_dot: None,
+                },
+                verdict => {
+                    let error = match verdict {
+                        Some(Err(anchor_error)) => anchor_error,
+                        _ => error,
+                    };
+                    // GNU builtins/cd.def:427: builtin_error("%s: %s", printable_filename(dirname), strerror(e))
+                    // reports the user-given path, not the Windows-converted path.
+                    // general.c printable_filename: non-printing bytes render through
+                    // ansic_quote ($'5\247@3\231+\306S8\237\242\352\263' in unicode3.sub).
+                    // `dirname` here is the pre-substitution operand name kept in
+                    // dirname_display (rubash#2221), not the attempted candidate.
+                    let display_path = dirname_display
+                        .as_deref()
+                        .or(target.display.as_deref())
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| target.path.to_string_lossy().to_string());
+                    let display_path = if crate::executor::ansic_shouldquote(&display_path) {
+                        crate::executor::ansic_quote(&display_path)
+                    } else {
+                        display_path
+                    };
+                    writeln!(
+                        stderr,
+                        "{}cd: {}: {}",
+                        diagnostic_prefix(env_vars),
+                        display_path,
+                        crate::posix_errors::message(&error)
+                    )?;
+                    stderr.flush()?;
+                    return Ok(EXECUTION_FAILURE);
+                }
+            }
         }
     };
     // The canon-failed `cd .` in a deleted cwd owes the getcwd
@@ -734,6 +788,60 @@ fn resolve_cdpath(
     None
 }
 
+/// The directory-search resolution `pushd` inherits from `cd_builtin`:
+/// GNU `pushd_builtin` routes its Dir operand through `cd_builtin`
+/// (builtins/pushd.def:296-302), so the CDPATH loop (cd.def:353-388)
+/// and the cdable_vars fallback (cd.def, LCD_DOVARS) are pushd's own
+/// resolution too, in cd's order — CDPATH first, then the plain
+/// operand, then cdable_vars. This wrapper runs the same two private
+/// stages `execute_with_io` runs, over a Target built the way
+/// `resolve_target` builds a plain operand, so pushd shares the one
+/// funnel instead of carrying a second CDPATH implementation
+/// (rubash#3196).
+pub(crate) enum SearchResolution {
+    /// A CDPATH unit produced the directory: `candidate` is the found
+    /// display spelling (the unit joined with the operand); `announce`
+    /// is cd's PrintPath::CdPath verdict — a hit through a NON-empty
+    /// unit echoes the found directory, an empty-unit (cwd) hit is
+    /// silent.
+    CdPath { candidate: String, announce: bool },
+    /// cdable_vars produced the directory: `value` is the variable's
+    /// raw value, which cd echoes verbatim on success.
+    CdableVars { value: String },
+}
+
+pub(crate) fn resolve_search_operand(
+    operand: &str,
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> Option<SearchResolution> {
+    let target = Target {
+        path: filesystem_path_for_display(operand, env_vars),
+        display: Some(PathBuf::from(operand)),
+        print: PrintPath::Never,
+    };
+    if let Some(found) = resolve_cdpath(&target, env_vars, cwd) {
+        return Some(SearchResolution::CdPath {
+            candidate: found
+                .display
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            announce: found.print == PrintPath::CdPath,
+        });
+    }
+    if let Some(found) = resolve_cdable_vars(&target, env_vars, cwd) {
+        return Some(SearchResolution::CdableVars {
+            value: found
+                .display
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        });
+    }
+    None
+}
+
 fn resolve_cdable_vars(
     target: &Target,
     env_vars: &HashMap<String, String>,
@@ -852,6 +960,7 @@ mod tests {
                 ["/"],
                 &mut env_vars,
                 &mut cwd_slot,
+                None,
                 &mut logical_slot,
                 &mut stdout,
                 &mut stderr
@@ -865,6 +974,7 @@ mod tests {
                 ["/bin"],
                 &mut env_vars,
                 &mut cwd_slot,
+                None,
                 &mut logical_slot,
                 &mut stdout,
                 &mut stderr

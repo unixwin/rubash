@@ -409,63 +409,192 @@ pub(crate) fn delimiter_seq_ending_at(
     None
 }
 
-/// Escape state for non-raw `read` delimiter matching (GNU
-/// builtins/read.def: without -r, a backslash consumes the next
-/// character as an escaped literal — zread/read_mbchar — and an escaped
-/// character can never terminate the record; that includes the
-/// delimiter `\` itself, which only -r makes matchable). Byte-oriented
-/// readers feed each byte through `suppresses_match` before testing
-/// the delimiter: the backslash byte itself and every byte of the
-/// escaped character report "suppressed" (rubash#1300).
-pub(crate) struct ReadEscapeTracker {
-    enabled: bool,
-    escaped_char_bytes_left: usize,
-    escape_pending: bool,
+/// What one fed byte means for the record a byte-oriented reader is
+/// accumulating (the caller has already appended the byte to its
+/// accumulation buffer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FdScanAction {
+    /// The byte is record data; keep scanning.
+    Data,
+    /// The byte is record data and completes the `-n`/`-N` budget:
+    /// stop here (the byte stays in the record).
+    DataLimit,
+    /// The byte terminates the record as the delimiter: stop here and
+    /// drop `drop` bytes from the tail of the accumulation (the
+    /// delimiter is consumed but never returned).
+    Delimiter { drop: usize },
 }
 
-impl ReadEscapeTracker {
-    pub(crate) fn new(enabled: bool) -> Self {
-        ReadEscapeTracker {
-            enabled,
-            escaped_char_bytes_left: 0,
-            escape_pending: false,
+/// Incremental replay of GNU's read loop (builtins/read.def) over a
+/// raw byte stream, shared by the fd_table byte readers (in-memory
+/// scan, byte-wise file reader, buffered file reader).
+///
+/// The loop's unit is one read_mbchar consumption: in a multibyte
+/// locale a whole valid character, or the bytes of an invalid
+/// sequence up to and including the byte that invalidated it (a
+/// truncated tail is one unit); in a byte locale every byte is a
+/// unit. The delimiter is tested ONLY at a unit start, before the
+/// unit is consumed (read.def:834 compares the stream byte against
+/// the FIRST byte of the `-d` word) — a multibyte character's inner
+/// bytes never terminate a record, but when an invalid sequence is
+/// invalidated BY the delimiter byte, read_mbchar's pushback
+/// (delim_ind) makes that byte a unit start of its own, so it
+/// terminates after all. The previous sequence match
+/// (`delimiter_seq_ending_at` over the whole UTF-8 encoding) consumed
+/// the continuation byte into the delimiter in a multibyte locale:
+/// for stream `a C3 A9 b C3 A9` with `-d é` the second record lost
+/// its leading 0xA9 (rubash#3291); it remains the rule in byte
+/// locales, where the sequence forms are how the delimiter word's
+/// bytes can appear (rubash#1062/#2662).
+///
+/// The `-n`/`-N` budget counts POST-ESCAPE units (rubash#1328) at
+/// unit COMPLETION (read.def:884-886 `nr++` after read_mbchar): an
+/// escape pair costs one unit, a backslash-newline continuation zero,
+/// and the budget never stops inside a character — the earlier
+/// lead-byte accounting stopped after a multibyte character's first
+/// byte (rubash#3294). Escape state follows the read.def order at a
+/// unit start: an escaped unit is data (never a terminator), a
+/// backslash is the escape introducer (never a terminator without
+/// -r; rubash#1300), only then does the delimiter compare run.
+pub(crate) struct FdRecordScan {
+    /// Multibyte mode: the delimiter's first stream byte
+    /// (read_helpers::delimiter_stream_byte). None selects the
+    /// byte-locale sequence forms.
+    first_byte: Option<u8>,
+    seqs: ReadDelimiterSeqs,
+    char_limit: Option<usize>,
+    exact: bool,
+    raw: bool,
+    /// Post-escape unit count (the -n/-N budget).
+    chars: usize,
+    /// The next unit is an escaped character (a backslash unit start
+    /// was just consumed).
+    escaped: bool,
+    /// Continuation bytes still expected for the in-progress unit;
+    /// zero means the next byte starts a unit.
+    unit_left: usize,
+    /// First byte of the in-progress unit (its identity for the
+    /// post-escape count: an escaped newline costs zero).
+    unit_first: u8,
+    /// The in-progress unit is an escaped character.
+    unit_escaped: bool,
+}
+
+impl FdRecordScan {
+    pub(crate) fn new(delimiter: char, char_limit: Option<usize>, exact: bool, raw: bool) -> Self {
+        let multi_byte = crate::locale::is_multi_byte();
+        FdRecordScan {
+            first_byte: multi_byte
+                .then(|| super::read_helpers::delimiter_stream_byte(delimiter, true)),
+            seqs: read_delimiter_seqs(delimiter),
+            char_limit,
+            exact,
+            raw,
+            chars: 0,
+            escaped: false,
+            unit_left: 0,
+            unit_first: 0,
+            unit_escaped: false,
         }
     }
 
-    /// True when a delimiter match ending at `byte` must be ignored
-    /// because the byte is an escape introducer or part of an escaped
-    /// character. The byte is consumed either way.
-    pub(crate) fn suppresses_match(&mut self, byte: u8) -> bool {
-        if !self.enabled {
-            return false;
+    /// Length of a delimiter sequence ending at `end` (exclusive) in
+    /// the caller's accumulation, in byte-locale sequence mode; the
+    /// caller computes it after appending the current byte. Always
+    /// None in multibyte first-byte mode.
+    pub(crate) fn sequence_ending_at(&self, bytes: &[u8], end: usize) -> Option<usize> {
+        if self.first_byte.is_some() {
+            return None;
         }
-        if self.escaped_char_bytes_left > 0 {
-            self.escaped_char_bytes_left -= 1;
-            return true;
-        }
-        if self.escape_pending {
-            self.escape_pending = false;
-            self.escaped_char_bytes_left = utf8_first_byte_len(byte).saturating_sub(1);
-            return true;
-        }
-        if byte == b'\\' {
-            self.escape_pending = true;
-            return true;
-        }
-        false
+        delimiter_seq_ending_at(&self.seqs, bytes, end)
     }
-}
 
-/// Byte length of the UTF-8 character a leading byte introduces
-/// (invalid leading bytes count as one byte, matching the
-/// non-continuation-byte character accounting the readers use).
-fn utf8_first_byte_len(byte: u8) -> usize {
-    match byte {
-        0x00..=0x7F => 1,
-        0xC0..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF7 => 4,
-        _ => 1,
+    /// Begin the unit whose first byte is `byte`; returns its action
+    /// when the unit completes on this same byte (width one).
+    fn begin_unit(&mut self, byte: u8, escaped: bool) -> Option<FdScanAction> {
+        self.unit_first = byte;
+        self.unit_escaped = escaped;
+        let width = if self.first_byte.is_some() {
+            super::read_helpers::utf8_lead_width(byte)
+        } else {
+            1
+        };
+        self.unit_left = width - 1;
+        if self.unit_left == 0 {
+            Some(self.complete_unit())
+        } else {
+            None
+        }
+    }
+
+    /// Count the just-completed unit (post-escape rules) and report
+    /// whether the budget stops the record at this byte.
+    fn complete_unit(&mut self) -> FdScanAction {
+        if self.unit_escaped {
+            if self.unit_first != b'\n' {
+                self.chars += 1;
+            }
+        } else {
+            self.chars += 1;
+        }
+        if self.char_limit.is_some_and(|limit| self.chars >= limit) {
+            FdScanAction::DataLimit
+        } else {
+            FdScanAction::Data
+        }
+    }
+
+    /// Feed one byte (already appended to the caller's accumulation).
+    /// `seq_end` is the caller's `sequence_ending_at` result for this
+    /// byte (byte-locale mode only).
+    pub(crate) fn on_byte(&mut self, byte: u8, seq_end: Option<usize>) -> FdScanAction {
+        if self.unit_left > 0 {
+            // Inside a unit: continuation bytes are data. A
+            // non-continuation byte invalidates the sequence —
+            // read_mbchar consumes it into the unit, EXCEPT the
+            // delimiter byte, which is pushed back and terminates
+            // the record as the next unit start (delim_ind).
+            if (byte & 0xC0) == 0x80 {
+                self.unit_left -= 1;
+                if self.unit_left == 0 {
+                    return self.complete_unit();
+                }
+                return FdScanAction::Data;
+            }
+            if !self.exact && self.first_byte == Some(byte) {
+                let _ = self.complete_unit();
+                return FdScanAction::Delimiter { drop: 1 };
+            }
+            self.unit_left = 0;
+            return self.complete_unit();
+        }
+        // Unit start. An escaped unit is data, never a terminator.
+        if self.escaped {
+            self.escaped = false;
+            if let Some(action) = self.begin_unit(byte, true) {
+                return action;
+            }
+            return FdScanAction::Data;
+        }
+        // A backslash introduces an escape (never a terminator).
+        if !self.raw && byte == b'\\' {
+            self.escaped = true;
+            return FdScanAction::Data;
+        }
+        // The delimiter compare (read.def:834), before consumption.
+        if !self.exact {
+            if let Some(delim) = self.first_byte {
+                if byte == delim {
+                    return FdScanAction::Delimiter { drop: 1 };
+                }
+            } else if let Some(len) = seq_end {
+                return FdScanAction::Delimiter { drop: len };
+            }
+        }
+        if let Some(action) = self.begin_unit(byte, false) {
+            return action;
+        }
+        FdScanAction::Data
     }
 }
 
@@ -982,55 +1111,36 @@ impl FdTable {
         // One scan of a byte window, returning (consumed, delimiter
         // found, delimiter length, char limit reached, payload length).
         // Runs once on the full remaining slice and, on a timing timeout,
-        // once more on the in-time prefix.
+        // once more on the in-time prefix. The scan itself is the shared
+        // FdRecordScan replay of the GNU read loop (unit consumption,
+        // first-byte delimiter compare, post-escape budget).
         let scan = |slice: &[u8]| -> (usize, bool, usize, bool, usize) {
-            let seqs = read_delimiter_seqs(delimiter);
+            let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
             let mut consumed = 0;
-            let mut chars = 0;
             let mut delimiter_found = false;
             let mut delimiter_len = 0usize;
             let mut limit_reached = false;
-            let mut escapes = ReadEscapeTracker::new(escape_aware && !exact);
-            // Post-escape counting state (rubash#1328), shared with the
-            // other readers: an unquoted backslash itself is not a stored
-            // character; the character it quotes completes one unit (zero
-            // for a newline continuation), and a delimiter byte ending an
-            // escape pair is data, not a terminator.
-            let mut escaped = false;
+            let mut result_len = 0usize;
             for (index, byte) in slice.iter().copied().enumerate() {
-                let lead = byte & 0xc0 != 0x80;
-                let was_escaped = escaped;
-                if lead {
-                    if escaped {
-                        if byte != b'\n' {
-                            chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && byte == b'\\' {
-                        escaped = true;
-                    } else {
-                        chars += 1;
-                    }
-                }
+                let seq_end = scan.sequence_ending_at(slice, index + 1);
                 consumed = index + 1;
-                let suppressed = escapes.suppresses_match(byte);
-                if !exact && !suppressed {
-                    if let Some(len) = delimiter_seq_ending_at(&seqs, slice, consumed) {
+                match scan.on_byte(byte, seq_end) {
+                    FdScanAction::Data => {
+                        result_len = index + 1;
+                    }
+                    FdScanAction::DataLimit => {
+                        result_len = index + 1;
+                        limit_reached = true;
+                        break;
+                    }
+                    FdScanAction::Delimiter { drop } => {
+                        result_len = index + 1 - drop;
                         delimiter_found = true;
-                        delimiter_len = len;
+                        delimiter_len = drop;
                         break;
                     }
                 }
-                if char_limit.is_some_and(|limit| chars >= limit) {
-                    limit_reached = true;
-                    break;
-                }
             }
-            let result_len = if delimiter_found {
-                consumed - delimiter_len
-            } else {
-                consumed
-            };
             (
                 consumed,
                 delimiter_found,
@@ -1158,14 +1268,13 @@ impl FdTable {
             );
         }
         let mut result = Vec::new();
-        let mut chars = 0usize;
         let mut consumed = false;
         let mut delimiter_found = false;
         let mut limit_reached = false;
-        // Post-escape counting state (rubash#1328), as in read_bytes.
-        let mut escaped = false;
-        let seqs = read_delimiter_seqs(delimiter);
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
+        // The shared FdRecordScan replay of the GNU read loop (unit
+        // consumption, first-byte delimiter compare, post-escape
+        // budget), as in read_bytes.
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
         loop {
             // read.def check_read_timeout + shtimer_select: each byte read
             // is bounded by the remaining deadline.
@@ -1197,35 +1306,20 @@ impl FdTable {
                 }
             };
             consumed = true;
-            let lead = byte & 0xc0 != 0x80;
-            let was_escaped = escaped;
-            if lead {
-                if escaped {
-                    if byte != b'\n' {
-                        chars += 1;
-                    }
-                    escaped = false;
-                } else if !raw && byte == b'\\' {
-                    escaped = true;
-                } else {
-                    chars += 1;
-                }
-            }
             result.push(byte);
-            let suppressed = escapes.suppresses_match(byte);
-            if !exact && !suppressed {
-                // The delimiter is consumed but not returned: when the
-                // accumulated bytes end with one of its sequences, drop
-                // the sequence back off the record (rubash#1062).
-                if let Some(len) = delimiter_seq_ending_at(&seqs, &result, result.len()) {
-                    result.truncate(result.len() - len);
+            let seq_end = scan.sequence_ending_at(&result, result.len());
+            match scan.on_byte(byte, seq_end) {
+                FdScanAction::Data => {}
+                FdScanAction::DataLimit => {
+                    limit_reached = true;
+                    break;
+                }
+                FdScanAction::Delimiter { drop } => {
+                    // The delimiter is consumed but not returned.
+                    result.truncate(result.len() - drop);
                     delimiter_found = true;
                     break;
                 }
-            }
-            if char_limit.is_some_and(|limit| chars >= limit) {
-                limit_reached = true;
-                break;
             }
         }
         // EOF with zero bytes read must surface as None — `read` at EOF
@@ -1248,8 +1342,9 @@ impl FdTable {
     /// read 8 KiB chunks, scan for the delimiter / char limit, then seek
     /// the shared handle back to the consumed boundary — zreadc + zsyncfd
     /// parity (read.def:737, :940). Byte accounting matches the byte-wise
-    /// loop exactly (delimiter consumed but not returned in non-exact
-    /// mode; chars counted on non-continuation bytes).
+    /// loop exactly (the shared FdRecordScan replay: delimiter consumed
+    /// but not returned in non-exact mode; the budget counts completed
+    /// read_mbchar units).
     fn read_file_bytes_buffered(
         &mut self,
         file: Rc<FileFd>,
@@ -1262,18 +1357,15 @@ impl FdTable {
         let Ok(origin) = crate::fd::file_position(file.handle) else {
             return None;
         };
-        let seqs = read_delimiter_seqs(delimiter);
-        let mut escapes = ReadEscapeTracker::new(escape_aware);
         let mut buffer: Vec<u8> = Vec::new();
         let mut result: Vec<u8> = Vec::new();
-        let mut chars = 0usize;
         let mut consumed = false;
         let mut delimiter_found = false;
         let mut limit_reached = false;
         let mut rewind: Option<u64> = None;
-        // Post-escape counting state (rubash#1328), as in read_bytes;
+        // The shared FdRecordScan replay of the GNU read loop;
         // persists across chunk boundaries.
-        let mut escaped = false;
+        let mut scan = FdRecordScan::new(delimiter, char_limit, exact, raw);
         'chunks: loop {
             let scanned_from = buffer.len();
             match crate::fd::read_some(file.handle, 8192) {
@@ -1284,37 +1376,24 @@ impl FdTable {
             for (index, &byte) in buffer[scanned_from..].iter().enumerate() {
                 let absolute = scanned_from + index;
                 consumed = true;
-                let lead = byte & 0xc0 != 0x80;
-                let was_escaped = escaped;
-                if lead {
-                    if escaped {
-                        if byte != b'\n' {
-                            chars += 1;
-                        }
-                        escaped = false;
-                    } else if !raw && byte == b'\\' {
-                        escaped = true;
-                    } else {
-                        chars += 1;
-                    }
-                }
                 result.push(byte);
-                let suppressed = escapes.suppresses_match(byte);
-                if !exact && !suppressed {
-                    if let Some(len) = delimiter_seq_ending_at(&seqs, &result, result.len()) {
+                let seq_end = scan.sequence_ending_at(&result, result.len());
+                match scan.on_byte(byte, seq_end) {
+                    FdScanAction::Data => {}
+                    FdScanAction::DataLimit => {
+                        limit_reached = true;
+                        rewind = Some(origin + (absolute as u64) + 1);
+                        break 'chunks;
+                    }
+                    FdScanAction::Delimiter { drop } => {
                         // Delimiter consumed but not returned; everything
                         // after its end position is prefetched data to
                         // rewind over.
-                        result.truncate(result.len() - len);
+                        result.truncate(result.len() - drop);
                         delimiter_found = true;
                         rewind = Some(origin + (absolute as u64) + 1);
                         break 'chunks;
                     }
-                }
-                if char_limit.is_some_and(|limit| chars >= limit) {
-                    limit_reached = true;
-                    rewind = Some(origin + (absolute as u64) + 1);
-                    break 'chunks;
                 }
             }
         }

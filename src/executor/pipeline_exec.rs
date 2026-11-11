@@ -2251,7 +2251,7 @@ impl Executor {
         // nameref resolution) so followup commands see it, then restore the
         // caller's binding when the group ends.
         let saved_value = self.shell_state.variables.get(name).cloned();
-        let _ = self.apply_shell_assignment_command("read", name, value.to_string());
+        let _ = self.apply_shell_assignment_command("read", name, value.to_string(), None);
         self.exit_code = status;
         let result = self
             .execute_pipeline_stage(command, "", false, false)
@@ -2735,7 +2735,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(consumers[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -3497,7 +3497,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -3784,7 +3784,7 @@ impl Executor {
             // (heredoc bodies have no handle to pin); the parent-side
             // dups live until this stage's spawn resolves.
             let parent_side_dups = self.attach_ambient_text_delivery(commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -4174,7 +4174,7 @@ impl Executor {
             // sibling paths.
             self.attach_ambient_fd_pins(command, &mut process);
             let parent_side_dups = self.attach_ambient_text_delivery(command, &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             let spawned = process.spawn();
             for dup in parent_side_dups {
@@ -5072,7 +5072,7 @@ impl Executor {
             // dups live until this stage's spawn resolves.
             let parent_side_dups =
                 self.attach_ambient_text_delivery(&commands[index], &mut process);
-            process.current_dir(&self.shell_state.cwd);
+            self.stamp_spawn_cwd(&mut process);
             suppress_orphan_console(&mut process);
             // rubash#2836 slice 4: under job control every stage joins
             // one process group before exec (jobs.c:2390-2391 child
@@ -6092,6 +6092,7 @@ impl Executor {
                 // the error branch (DISCARD) — the pipeline is abandoned
                 // with status 1 and the session keeps reading.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     1
                 } else {
                     self.expansion_fatal_status()
@@ -6130,6 +6131,7 @@ impl Executor {
             self.write_default_stderr(line.as_bytes())?;
             let code = if status == Self::FATAL_PARAMETER_EXPANSION_STATUS {
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     1
                 } else {
                     self.expansion_fatal_status()

@@ -44,6 +44,21 @@ pub struct BindXRunOutcome {
     /// unconditionally when it is 124 (bashline.c:4701-4706 comment);
     /// hosts that always repaint after a widget can ignore it.
     pub status: i32,
+    /// niubash#977: true when this run was unwound by an UNTRAPPED
+    /// SIGINT — the foreground job died by SIGINT and the list
+    /// threw to the top-level reader, discarding the rest of the
+    /// command (GNU jobs.c:3316 waitchld ADDINTERRUPT). The
+    /// verdict is recorded by the engine at the unit's
+    /// unwind-capture point (the Q6 arm B unit signal-discard
+    /// record, noted where the source driver classifies the
+    /// unwind); `status` alone cannot carry it, because a discard
+    /// and an ordinary failure share statuses. A trapped SIGINT
+    /// (the trap runs and the list continues) and an ignored one
+    /// (a no-op) both leave this false, as does normal completion
+    /// and an `exit` jump. Hosts discard the edit line when it is
+    /// true (and settle `$?` from the status per their own
+    /// contract).
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -639,7 +654,16 @@ impl Executor {
         self.set_env("READLINE_POINT", &point.to_string());
         self.set_env("READLINE_MARK", &mark.to_string());
 
+        // niubash#977: this route is the run's driver — no grouped
+        // driver or Session outcome will consume the unit
+        // signal-discard record for it, so take (clear) any stale
+        // record before the run, and take THIS run's record after
+        // it. The record itself is noted at the unwind-capture
+        // point inside the source driver, where the unwind is
+        // classified; nothing is inferred from the status here.
+        let _ = self.take_unit_signal_discard();
         let status = crate::script_driver::run_source(self, command, false);
+        let interrupted = self.take_unit_signal_discard();
 
         let length = read_back_line_length(self);
         let out_line = self.get_env("READLINE_LINE").map(str::to_owned);
@@ -653,6 +677,7 @@ impl Executor {
             point: clamp(self.get_env("READLINE_POINT")),
             mark: clamp(self.get_env("READLINE_MARK")),
             status,
+            interrupted,
         };
 
         // unbind_readline_variables (bashline.c:4573-4581): the variables
@@ -926,6 +951,7 @@ mod tests {
         // unbound (unbind_readline_variables, bashline.c:4573).
         let outcome = executor.run_bind_x_command("COPIED=$READLINE_LINE", "hello", 2, 0);
         assert_eq!(outcome.status, 0);
+        assert!(!outcome.interrupted);
         assert_eq!(outcome.line.as_deref(), Some("hello"));
         // Unchanged READLINE_LINE reads back identical; the editor keeps
         // its own buffer (maybe_make_readline_line is a no-op then).
@@ -1045,6 +1071,9 @@ mod tests {
         let mut executor = Executor::new();
         let outcome = executor.run_bind_x_command("exit 3", "line", 0, 0);
         assert_eq!(outcome.status, 3);
+        // An `exit` jump is an exit classification, not a signal
+        // discard (niubash#977).
+        assert!(!outcome.interrupted);
     }
 
     #[test]

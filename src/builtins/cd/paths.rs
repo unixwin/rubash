@@ -185,7 +185,7 @@ pub(super) fn logical_canon_erased_components_exist(
 /// `/`); three or more slashes collapse to one. On Windows this prefix
 /// is the UNC root (rubash#1415). The component-wise normalizers cannot
 /// represent it, so re-apply it from the raw combined text.
-pub(super) fn preserve_leading_double_slash(raw: &str, normalized: &str) -> String {
+pub(crate) fn preserve_leading_double_slash(raw: &str, normalized: &str) -> String {
     let exactly_two = raw.starts_with("//") && !raw.starts_with("///");
     if exactly_two && normalized.starts_with('/') && !normalized.starts_with("//") {
         format!("/{normalized}")
