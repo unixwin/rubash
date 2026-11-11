@@ -1041,7 +1041,7 @@ impl Executor {
     /// bind_array_element does (assoc for a non-numeric key).
     fn bind_wait_variable(&mut self, name: &str, value: String, arrayref: bool) {
         let Some((base, subscript)) = parse_array_subscript(name) else {
-            self.apply_shell_assignment_command("wait", name, value);
+            self.apply_shell_assignment_command("wait", name, value, None);
             return;
         };
         let base = base.to_string();
@@ -1107,7 +1107,7 @@ impl Executor {
                 if self.raise_nounset_subscript_abort() {
                     return;
                 }
-                self.apply_shell_assignment_command("wait", name, value);
+                self.apply_shell_assignment_command("wait", name, value, None);
             }
         }
     }

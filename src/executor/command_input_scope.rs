@@ -945,9 +945,10 @@ impl Executor {
                     // the compound forever. The timed collection below
                     // is the spawn-failure fallback (its recorded
                     // schedule served #1141 before a live pipe could).
-                    if let Some(file_fd) =
-                        self.spawn_input_process_substitution_child(&source, cmd.line)
-                    {
+                    if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                        &source,
+                        super::command_text::procsub_body_seed_line(cmd),
+                    ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
                             self.shell_state.env_vars.get(FUNCTION_STDIN).cloned();
@@ -1356,6 +1357,57 @@ impl Executor {
             if self.redirect_failglob_aborted() {
                 return Err(ExecuteError::ExpansionFailure(1));
             }
+            // rubash#2635: an explicit redirector at/above the
+            // RLIMIT_NOFILE soft limit fails at this list position —
+            // GNU's redir_open runs first, then the dup2 onto the
+            // redirector fails EBADF (redir.c r_input_direction /
+            // redir.c:1215). Close forms are exempt; a dup's
+            // diagnostic names the source fd. A target that cannot
+            // be opened at all keeps the arm's own errno below.
+            if !matches!(redirect.kind, crate::parser::RedirectKind::CloseInput)
+                && self.redirect_fd_over_limit(fd)
+            {
+                let gate_name = match redirect.kind {
+                    crate::parser::RedirectKind::DuplicateInput => {
+                        redirect_target_fd_and_move(&target)
+                            .and_then(|(source_fd, _)| (source_fd != fd).then_some(source_fd))
+                    }
+                    crate::parser::RedirectKind::Input | crate::parser::RedirectKind::ReadWrite => {
+                        Some(fd)
+                    }
+                    _ => None,
+                };
+                if let Some(name_fd) = gate_name {
+                    let mut gate_fires = true;
+                    match redirect.kind {
+                        crate::parser::RedirectKind::Input => {
+                            let path = self.session_path(shell_path_to_windows(
+                                &target,
+                                &self.shell_state.env_vars,
+                            ));
+                            gate_fires = FileFd::open_read(path).is_ok();
+                        }
+                        crate::parser::RedirectKind::ReadWrite => {
+                            if !target.starts_with("/dev/")
+                                && !crate::special_paths::is_net_redirect_target(&target)
+                            {
+                                let path = self.session_path(shell_path_to_windows(
+                                    &target,
+                                    &self.shell_state.env_vars,
+                                ));
+                                let _ = FileFd::open_readwrite_pair(path);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if gate_fires {
+                        return Err(ExecuteError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("{name_fd}: Bad file descriptor"),
+                        )));
+                    }
+                }
+            }
             self.save_compound_numbered_input_fd(saved, fd);
             match redirect.kind {
                 // `{ cmd; } N<&-` / `N>&-` — scoped close (redir.c
@@ -1420,8 +1472,10 @@ impl Executor {
                 // (subst.c:6362) binds the forked body's pipe read end
                 // on the target fd; the collected form below is the
                 // spawn-failure fallback.
-                if let Some(file_fd) = self.spawn_input_process_substitution_child(source, cmd.line)
-                {
+                if let Some(file_fd) = self.spawn_input_process_substitution_child(
+                    source,
+                    super::command_text::procsub_body_seed_line(cmd),
+                ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
                         self.set_fd_readwrite_file(fd, &target, true)
@@ -1758,6 +1812,58 @@ impl Executor {
             // at the expansion; abort the compound before any fd binding.
             if self.redirect_failglob_aborted() {
                 return Err(ExecuteError::ExpansionFailure(1));
+            }
+            // rubash#2635: an explicit redirector at/above the
+            // RLIMIT_NOFILE soft limit fails at this list position —
+            // GNU's redir_open runs first (mirrored below so the
+            // target file is created), then the dup2 onto the
+            // redirector fails EBADF (redir.c r_output_direction /
+            // redir.c:1215). Close forms are exempt; a dup's
+            // diagnostic names the source fd.
+            if !matches!(redirect.kind, crate::parser::RedirectKind::CloseOutput)
+                && self.redirect_fd_over_limit(fd)
+            {
+                let gate_name = match redirect.kind {
+                    crate::parser::RedirectKind::DuplicateOutput => {
+                        redirect_target_fd_and_move(&target)
+                            .and_then(|(source_fd, _)| (source_fd != fd).then_some(source_fd))
+                    }
+                    crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+                    | crate::parser::RedirectKind::CombinedOutput
+                    | crate::parser::RedirectKind::CombinedAppend => Some(fd),
+                    _ => None,
+                };
+                if let Some(name_fd) = gate_name {
+                    match redirect.kind {
+                        crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::CombinedAppend => {
+                            if !is_null_device(&target) {
+                                let _ = open_redirect_append(&self.session_path(
+                                    shell_path_to_windows(&target, &self.shell_state.env_vars),
+                                ));
+                            }
+                        }
+                        crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::ClobberOutput
+                        | crate::parser::RedirectKind::CombinedOutput
+                        | crate::parser::RedirectKind::CombinedAppend => {
+                            if !is_null_device(&target) {
+                                crate::executor::shell_options::probe_output_redirect(
+                                    self,
+                                    &target,
+                                    redirect.clobber,
+                                )?;
+                            }
+                        }
+                        _ => {}
+                    }
+                    return Err(ExecuteError::IoError(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("{name_fd}: Bad file descriptor"),
+                    )));
+                }
             }
 
             // See injected_redirect_fd_is_bound (redirection.rs): a redirect
@@ -2683,6 +2789,43 @@ impl Executor {
             .ok()?;
             return Some(FileFd::from_file(file, path));
         }
+        // rubash#3268: from a deleted cwd the joined spelling's
+        // metadata and open both die at the dead component — when
+        // the cwd anchor applies for the relative operand, the
+        // classification comes from the anchor's fstatat and the
+        // bind's one open from openat, so a stream source keeps the
+        // live-descriptor bind (shared offset, FIFO rendezvous)
+        // instead of dropping to the text mirror. A target the
+        // anchor walk cannot stat keeps the plain decline — the
+        // validation probe (compound_stdin_open_failure) owns its
+        // diagnostic. The FileFd carries the joined path as its
+        // name, like the plain arm below.
+        #[cfg(unix)]
+        if !target.is_empty() {
+            let fs_operand = self.redirect_target_filesystem_path(&target);
+            if fs_operand.is_relative() {
+                if let Some(stat_result) = self.fstatat_via_cwd_anchor(&fs_operand) {
+                    let is_stream = stat_result.is_ok_and(|stat| {
+                        // Widened through u32: st_mode and the S_IF*
+                        // constants disagree in width across libc
+                        // targets (bionic/darwin).
+                        let kind = u32::from(stat.st_mode) & u32::from(libc::S_IFMT);
+                        kind == u32::from(libc::S_IFREG)
+                            || kind == u32::from(libc::S_IFDIR)
+                            || kind == u32::from(libc::S_IFIFO)
+                            || kind == u32::from(libc::S_IFCHR)
+                            || kind == u32::from(libc::S_IFBLK)
+                    });
+                    if !is_stream {
+                        return None;
+                    }
+                    return self
+                        .open_via_cwd_anchor(&fs_operand, libc::O_RDONLY, 0)
+                        .and_then(|result| result.ok())
+                        .map(|file| FileFd::from_file(file, path));
+                }
+            }
+        }
         if !std::fs::metadata(&path)
             .map(|meta| Self::compound_fd0_stream_source(&meta))
             .unwrap_or(false)
@@ -2853,7 +2996,18 @@ impl Executor {
         // bind) needs, and blocks until a writer appears in its own
         // right. An existing FIFO validates through access(2) instead
         // (probe_input_redirect_gate), with the same errno surface.
-        let probe_error = if redirect.kind == crate::parser::RedirectKind::ReadWrite {
+        // rubash#3268: from a deleted cwd the joined spelling is dead
+        // by construction — when the cwd anchor applies, its verdict
+        // replaces every joined-path probe below (see
+        // Executor::anchored_redirect_probe); the empty-target arm
+        // above already returned, so the anchor's empty-word guard is
+        // never what decides here.
+        let probe_error = if let Some(verdict) = self.anchored_redirect_probe(
+            &target,
+            redirect.kind == crate::parser::RedirectKind::ReadWrite,
+        ) {
+            verdict.err()
+        } else if redirect.kind == crate::parser::RedirectKind::ReadWrite {
             OpenOptions::new()
                 .read(true)
                 .write(true)
