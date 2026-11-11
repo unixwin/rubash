@@ -3880,23 +3880,27 @@ fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
 
 #[cfg(all(unix, target_os = "linux", not(target_env = "gnu")))]
 fn cp_stat_atime_nsec(st: &libc::stat) -> i64 {
-    // musl keeps the timespec pair.
-    st.st_atim.tv_nsec as i64
+    // musl's C header keeps the timespec pair, but the libc crate
+    // flattens the nanoseconds into their own field on every unix
+    // target; its width follows the target's c_long.
+    i64::from(st.st_atime_nsec)
 }
 
 #[cfg(all(unix, target_os = "linux", not(target_env = "gnu")))]
 fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
-    st.st_mtim.tv_nsec as i64
+    i64::from(st.st_mtime_nsec)
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "ios")))]
 fn cp_stat_atime_nsec(st: &libc::stat) -> i64 {
-    st.st_atimespec.tv_nsec
+    // Same flattening as the other arms: the libc crate exposes
+    // st_atime_nsec (c_long), not the C header's st_atimespec pair.
+    i64::from(st.st_atime_nsec)
 }
 
 #[cfg(all(unix, any(target_os = "macos", target_os = "ios")))]
 fn cp_stat_mtime_nsec(st: &libc::stat) -> i64 {
-    st.st_mtimespec.tv_nsec
+    i64::from(st.st_mtime_nsec)
 }
 
 #[cfg(all(
