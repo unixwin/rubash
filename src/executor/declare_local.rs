@@ -253,38 +253,49 @@ impl Executor {
                 }
             }
         }
-        let names: Vec<&str> = args
-            .iter()
-            .filter(|arg| !arg.starts_with('-') && !arg.starts_with('+'))
-            .map(String::as_str)
-            .collect();
+        // rubash#3338: every letter scan in this face reads the
+        // OPTION REGION only, and the names are the operand tail
+        // behind it (skipping the `--` delimiter when the region
+        // ended there). GNU's scan stops at the first non-option
+        // word (builtins/bashgetopt.c:77-84), so a `-p` behind an
+        // operand is a function NAME to look up — the old whole-list
+        // scans read it as the print flag and `declare -f x -p`
+        // silently succeeded where GNU fails the missing name.
+        let region_end = super::builtin_opt::option_region_end(args, true);
+        let region = &args[..region_end];
+        let operands_start = if args.get(region_end).map(String::as_str) == Some("--") {
+            region_end + 1
+        } else {
+            region_end
+        };
+        let names: Vec<&str> = args[operands_start..].iter().map(String::as_str).collect();
         // GNU declare.def: the -p flag may arrive inside a cluster
         // (`declare -pf NAME`), so test for a `p` in any `-` option word,
         // exactly like the `print` scan below — an exact "-p" match left
         // `declare -pf NOPE` silent (rubash#1327). Bare `-f`/`-F` without
         // -p stays silent on both shells.
-        let print_not_found = args
+        let print_not_found = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
-        let function_names_only = args
+        let function_names_only = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('F'));
-        let function_definition_mode = args
+        let function_definition_mode = region
             .iter()
             .any(|arg| (arg.starts_with('-') || arg.starts_with('+')) && arg.contains('f'));
-        let set_export = args
+        let set_export = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('x'));
-        let clear_export = args
+        let clear_export = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('x'));
         let set_export_attribute = set_export && function_definition_mode;
         let clear_export_attribute = clear_export && function_definition_mode;
         let exported_only = set_export;
-        let readonly = args
+        let readonly = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('r'));
-        let clear_readonly = args
+        let clear_readonly = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('r'));
         // GNU declare.def declares -t on functions: set/clear the trace
@@ -297,13 +308,13 @@ impl Executor {
         // in its own cluster (`declare -f -t NAME', rubash#217) — requiring
         // `f' and `t' in the same cluster made the separated form fall
         // through to the display branch and print the body.
-        let set_trace = args
+        let set_trace = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('t'));
-        let clear_trace = args
+        let clear_trace = region
             .iter()
             .any(|arg| arg.starts_with('+') && arg.contains('t'));
-        let print = args
+        let print = region
             .iter()
             .any(|arg| arg.starts_with('-') && arg.contains('p'));
         let exported_functions = marked_env_names(&self.shell_state.env_vars, EXPORTED_FUNCTIONS);
@@ -530,24 +541,21 @@ impl Executor {
         if plain {
             return Ok(args.to_vec());
         }
-        // Whether the operand list carries `-A` (set form); an unmarked
-        // variable declared with -A takes the assoc element rules.
-        let mut parse_options = true;
-        let assoc_hint = args.iter().any(|arg| {
-            if parse_options && arg == "--" {
-                parse_options = false;
-                return false;
-            }
-            parse_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('A')
-        });
-        let mut parse_array_options = true;
-        let array_hint = args.iter().any(|arg| {
-            if parse_array_options && arg == "--" {
-                parse_array_options = false;
-                return false;
-            }
-            parse_array_options && arg.starts_with('-') && arg != "-" && arg[1..].contains('a')
-        });
+        // Whether the invocation carries `-A`/`-a` (set form) in its
+        // OPTION REGION; an unmarked variable declared with -A takes
+        // the assoc element rules. rubash#3338: the hints read the
+        // region only — behind the first operand (or `--`) the word
+        // is a name in GNU (internal_getopt stops there,
+        // builtins/bashgetopt.c:77-84), and the old whole-list scan
+        // let `declare y='(1 2)' -A` convert the quoted scalar into
+        // an associative bind where GNU keeps the literal string.
+        let region_end = super::builtin_opt::option_region_end(args, true);
+        let assoc_hint = args[..region_end]
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg[1..].contains('A'));
+        let array_hint = args[..region_end]
+            .iter()
+            .any(|arg| arg.starts_with('-') && arg[1..].contains('a'));
         // GNU declare.def:660+ processes operands SEQUENTIALLY — an earlier
         // `a=$x` operand is bound before `d='($a)'` expands, so the deferred
         // compound expansion below must see the assignments of operands

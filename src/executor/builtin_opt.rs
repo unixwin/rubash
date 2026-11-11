@@ -373,6 +373,40 @@ pub(super) fn is_option_word(word: &[u8], plus: bool) -> bool {
     word[0] == b'-' || (plus && word[0] == b'+')
 }
 
+/// The length of the option region at the head of `words`: the
+/// maximal prefix of option words. `internal_getopt` stops the
+/// scan before the first non-option word (`bashgetopt.c:77-84`),
+/// before `--` (consumed as the delimiter), and before `--help`
+/// (GETOPT_HELP ends the scan with the word itself left in
+/// `loptend`); the region ends at the same three boundaries, so
+/// `words[..option_region_end(words, plus)]` is exactly the set of
+/// words a GNU scan reads option letters from, and every word from
+/// the returned index on is an operand (plus the `--` delimiter
+/// itself when the region ended there).
+///
+/// Every declare-family scan that reads option letters off the raw
+/// word list — instead of driving the machine above — must bound
+/// itself to this prefix: a word like `-i` behind an operand is a
+/// NAME in GNU, and a scan that roams past the first operand
+/// misreads it as an option (rubash#3338). The family specs
+/// (declare's `+acfgilnprtuxAFGI`, unset's `fnv`) are flag-only —
+/// no option takes an argument — so no word inside the region
+/// consumes a following word, and a pure prefix computation is
+/// the whole rule.
+pub(super) fn option_region_end(words: &[String], plus: bool) -> usize {
+    let mut end = 0;
+    for word in words {
+        if word == "--" || word == "--help" {
+            break;
+        }
+        if !is_option_word(word.as_bytes(), plus) {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
 /// Capacity of the stack parse buffer (`parse_spec_into`): the
 /// longest spec in the builtin table (`complete`'s) carries 25
 /// pairs, so 64 leaves wide headroom; the table-walk test in this
@@ -837,6 +871,28 @@ mod tests {
         let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::End]);
         assert_eq!(opt.operands(), ["-"]);
+    }
+
+    #[test]
+    fn issue3338_option_region_end_stops_like_internal_getopt() {
+        // The region is the maximal option-word prefix: it ends
+        // before the first operand, before `--`, and before
+        // `--help` (bashgetopt.c:77-84) — the same boundaries the
+        // machine above stops at, for scans that read letters off
+        // the raw word list instead of driving the machine.
+        assert_eq!(option_region_end(&words(&[]), true), 0);
+        assert_eq!(option_region_end(&words(&["x", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-i", "x", "-p"]), true), 1);
+        assert_eq!(option_region_end(&words(&["-i", "--", "-p"]), true), 1);
+        assert_eq!(option_region_end(&words(&["-i", "--help"]), true), 1);
+        assert_eq!(option_region_end(&words(&["--help", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-", "-i"]), true), 0);
+        assert_eq!(option_region_end(&words(&["-p", "-i"]), true), 2);
+        // Plus mode admits `+` words into the region; without it a
+        // `+` word is the first operand.
+        assert_eq!(option_region_end(&words(&["+x", "-i"]), true), 2);
+        assert_eq!(option_region_end(&words(&["+x", "-i"]), false), 0);
+        assert_eq!(option_region_end(&words(&["-f", "-v"]), false), 2);
     }
 
     #[test]
