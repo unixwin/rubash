@@ -78,7 +78,21 @@ thread_local! {
     static EXPAND_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-const MAX_EXPAND_DEPTH: usize = 50;
+// Expansion-depth fuse (rubash#2685): the walker recurses once per nested
+// `$((` / `${` / `$(` level, so this cap bounds input-nesting depth, not
+// value-driven recursion (values are spliced, never re-walked). GNU bash
+// 5.3 has no fixed cap and is correct to 12000 levels (SIGSEGV at 16000);
+// the old value 50 failed real input at 52 levels, so it was recalibrated
+// from measurement, not raised blindly. Debug peak RSS of the shell on
+// nested `$((` input (Simular box, guard raised, 2026-11-10): ~42MiB at
+// 1000 levels, ~337MiB at 5000, ~1.17GiB at 10000, ~2.5GiB at 15000, and
+// OOM-killed (SIGKILL) at 20000 — the cost grows roughly quadratically
+// with depth, so the binding constraint is machine RAM, not the 512MiB
+// `rubash-main` thread stack. 1000 keeps worst-case debug memory in the
+// tens of MiB while giving 2x headroom over the 500 levels GNU parity
+// requires, 10x below the lowest measured-safe depth (10000) and 20x
+// below the kill boundary.
+const MAX_EXPAND_DEPTH: usize = 1000;
 
 /// Whether the embedded-parameter walker is past its recursion limit: at the
 /// limit it returns the (masked) word unchanged, so fast paths that bypass
