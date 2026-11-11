@@ -513,12 +513,21 @@ impl Executor {
             // the whole chain (on the Android/Termux host it surfaced as
             // a bogus EROFS instead).
             operands += 1;
-            let path =
-                self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — a relative operand under a
+            // deleted session cwd walks from the cwd anchor's
+            // inode via mkdirat, so an escape to the parent
+            // creates there while a create aimed into the dead
+            // directory itself keeps the kernel's ENOENT; every
+            // other shape keeps the plain joined path.
+            let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             let result = if parents {
-                fs::create_dir_all(&path)
+                node.create_dir_all()
             } else {
-                fs::create_dir(&path)
+                node.create_dir()
             };
             if let Err(error) = result {
                 writeln!(
@@ -789,14 +798,17 @@ impl Executor {
         let mut ref_stamp: Option<(SystemTime, SystemTime)> = None;
         let mut ref_error: Option<String> = None;
         if let Some(reference) = &ref_file {
-            let target =
-                self.session_path(shell_path_to_windows(reference, &self.shell_state.env_vars));
-            match std::fs::metadata(&target) {
-                Ok(metadata) => {
-                    ref_stamp = Some((
-                        metadata.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
-                        metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-                    ));
+            // rubash#3276: the -r reference is a path operand of
+            // this command in everything but name — it resolves
+            // through the same root convergence as the operands
+            // below (cp_operand_root), so a reference in the dead
+            // directory's parent stats from the anchor inode.
+            let ref_native = shell_path_to_windows(reference, &self.shell_state.env_vars);
+            let ref_joined = self.session_path(ref_native.clone());
+            let ref_node = CpNode::at_root(self.cp_operand_root(&ref_native, &ref_joined));
+            match ref_node.stat() {
+                Ok(stat) => {
+                    ref_stamp = Some((stat.accessed, stat.modified));
                 }
                 Err(error) => {
                     ref_error = Some(format!(
@@ -844,8 +856,16 @@ impl Executor {
             (now, now)
         });
         for expanded in operands {
-            let target =
-                self.session_path(shell_path_to_windows(&expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — the stamp and the create below
+            // walk from the cwd anchor's inode under a deleted
+            // session cwd, so `../f` stamps the real parent file
+            // while a create aimed into the dead directory itself
+            // keeps the kernel's ENOENT.
+            let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             let make_times = || {
                 let mut times = std::fs::FileTimes::new();
                 if stamp_accessed {
@@ -864,8 +884,7 @@ impl Executor {
             // files all take the stamp. stamp_existing_operand is
             // that shape; a missing operand keeps the create flow
             // below, classified by its NotFound error.
-            let stamped = stamp_existing_operand(
-                &target,
+            let stamped = node.stamp_existing(
                 stamp_accessed.then_some(stamp_atime),
                 stamp_modified.then_some(stamp_mtime),
                 &make_times,
@@ -877,9 +896,9 @@ impl Executor {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound && !create_missing => {
                     Ok(())
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    File::create(&target).and_then(|file| file.set_times(make_times()))
-                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => node
+                    .create_empty()
+                    .and_then(|file| file.set_times(make_times())),
                 Err(error) => Err(error),
             };
             if let Err(error) = outcome {
@@ -943,6 +962,21 @@ fn touch_utimensat(
     atime: Option<SystemTime>,
     mtime: Option<SystemTime>,
 ) -> std::io::Result<()> {
+    touch_utimensat_at(libc::AT_FDCWD, target, atime, mtime)
+}
+
+/// The (dirfd, relative path) form of touch_utimensat: the same
+/// stamp resolved against an explicit directory handle instead of
+/// the process cwd (rubash#3276 — a CpNode's anchor root spends
+/// it, so a touch operand under a deleted session cwd is stamped
+/// by the same kernel walk GNU's forked touch child performs).
+#[cfg(unix)]
+fn touch_utimensat_at(
+    dir_fd: std::os::unix::io::RawFd,
+    target: &std::path::Path,
+    atime: Option<SystemTime>,
+    mtime: Option<SystemTime>,
+) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     // `libc::time_t` is deprecated on musl/ohos targets and the niubash
     // cross-target checks compile this crate with `-D warnings`
@@ -982,7 +1016,7 @@ fn touch_utimensat(
     let times = [to_timespec(atime), to_timespec(mtime)];
     let c_path = std::ffi::CString::new(target.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+    let rc = unsafe { libc::utimensat(dir_fd, c_path.as_ptr(), times.as_ptr(), 0) };
     if rc == 0 {
         Ok(())
     } else {
@@ -1938,9 +1972,26 @@ impl Executor {
         // namespace's own `/` mapping (the payload root on Windows,
         // the filesystem root elsewhere).
         let root_target = self.session_path(shell_path_to_windows("/", &self.shell_state.env_vars));
+        // rubash#3276: the preserve-root guard's target root as a
+        // node — an anchor-rooted operand's verdict compares
+        // (dev, ino) against it, the identity the string
+        // canonicalize cannot reach through a dead component.
+        let root_native = shell_path_to_windows("/", &self.shell_state.env_vars);
+        let root_joined = self.session_path(root_native.clone());
+        let root_node = CpNode::at_root(self.cp_operand_root(&root_native, &root_joined));
         for expanded in operands {
             let target =
                 self.session_path(shell_path_to_windows(expanded, &self.shell_state.env_vars));
+            // rubash#3276: the operand root resolves ONCE here,
+            // through the same convergence as emulated cp
+            // (cp_operand_root) — under a deleted session cwd the
+            // guards and the removal below walk from the cwd
+            // anchor's inode, so `../f` unlinks the real parent
+            // file while a name inside the dead directory itself
+            // keeps the kernel's ENOENT.
+            let native = shell_path_to_windows(expanded, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             // coreutils rm.c (niubash#534 wording residual): a recursive
             // removal whose operand's last component is `.` or `..` is
             // refused outright — `refusing to remove '.' or '..' directory:
@@ -1952,7 +2003,7 @@ impl Executor {
             // gives it, and without -r the operand still earns the plain
             // `Is a directory` refusal.
             if recursive && rm_operand_is_dot_or_dotdot(expanded) {
-                if fs::metadata(&target).is_ok_and(|meta| meta.is_dir()) {
+                if node.stat().is_ok_and(|meta| meta.is_dir) {
                     status = 1;
                     writeln!(
                         &mut stderr,
@@ -1969,7 +2020,14 @@ impl Executor {
             // component is `.`/`..` (GNU's order — `/.`, `/tmp/..`
             // get the refusing line, not this one), so the guard
             // sees the bare-root spellings and root symlink shapes.
-            if recursive && preserve_root && rm_operand_resolves_to_root(&target, &root_target) {
+            if recursive
+                && preserve_root
+                && (if node.is_at_root() {
+                    rm_node_resolves_to_root(&node, &root_node)
+                } else {
+                    rm_operand_resolves_to_root(&target, &root_target)
+                })
+            {
                 status = 1;
                 let shown = rm_root_display_name(expanded);
                 if shown == "/" {
@@ -1989,8 +2047,8 @@ impl Executor {
                 )?;
                 continue;
             }
-            let result = match fs::symlink_metadata(&target) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
+            let result = match node.symlink_stat() {
+                Ok(metadata) if metadata.is_symlink => {
                     // A symlink operand names the link itself; GNU
                     // unlinks it and never touches the target. Windows
                     // removes a DIRECTORY symlink with RemoveDirectory
@@ -1999,24 +2057,25 @@ impl Executor {
                     // on a link path is ENOTDIR, which -f then
                     // swallowed, leaving `rm -rf dirlink` a silent
                     // no-op (rubash#1847 boundary shape).
-                    if cfg!(windows) && target.is_dir() {
-                        fs::remove_dir(&target)
+                    if cfg!(windows) && node.is_dir() {
+                        node.remove_dir()
                     } else {
-                        fs::remove_file(&target)
+                        node.remove_file()
                     }
                 }
-                Ok(metadata) if metadata.is_dir() => {
+                Ok(metadata) if metadata.is_dir => {
                     if recursive {
-                        fs::remove_dir_all(&target)
+                        node.remove_dir_all()
                     } else if remove_empty_dir {
                         // gnulib remove.c reports a -d failure by the
                         // directory's contents, not by rmdir's errno:
                         // a non-empty directory is always "Directory
                         // not empty", while a bare rmdir on the root
                         // directory itself reports EBUSY (rubash#1847).
-                        fs::remove_dir(&target).map_err(|error| {
-                            if fs::read_dir(&target)
-                                .is_ok_and(|mut entries| entries.next().is_some())
+                        node.remove_dir().map_err(|error| {
+                            if node
+                                .read_dir_nodes()
+                                .is_ok_and(|entries| !entries.is_empty())
                             {
                                 io::Error::new(
                                     io::ErrorKind::DirectoryNotEmpty,
@@ -2035,7 +2094,7 @@ impl Executor {
                         continue;
                     }
                 }
-                Ok(_) => fs::remove_file(&target),
+                Ok(_) => node.remove_file(),
                 Err(error) => Err(error),
             };
             match result {
@@ -3621,6 +3680,27 @@ fn rm_operand_resolves_to_root(target: &std::path::Path, root: &std::path::Path)
     }
 }
 
+/// rm_operand_resolves_to_root's node form (rubash#3276), spent
+/// only for an anchor-rooted operand: the string canonicalize
+/// cannot walk through the dead component, so the verdict compares
+/// identities instead — the operand's followed (dev, ino) against
+/// the root node's, under the same symlink exclusion (a symlink
+/// operand names the link, never the root). The (0, 0) identity is
+/// the non-unix placeholder CpStat carries and never counts.
+fn rm_node_resolves_to_root(node: &CpNode, root: &CpNode) -> bool {
+    match node.symlink_stat() {
+        Ok(stat) if stat.is_symlink => return false,
+        Ok(_) => {}
+        Err(_) => return false,
+    }
+    match (node.stat(), root.stat()) {
+        (Ok(target), Ok(root)) => {
+            (target.dev, target.ino) != (0, 0) && (target.dev, target.ino) == (root.dev, root.ino)
+        }
+        _ => false,
+    }
+}
+
 /// The name the preserve-root diagnostic prints for an operand: the
 /// walked path (fts) collapses a leading run of three or more
 /// slashes to one, while a leading pair is preserved as its own
@@ -4235,6 +4315,129 @@ impl CpNode {
                     }
                 }
                 Ok(())
+            }
+        }
+    }
+
+    /// Whether this node's root is the anchor-relative form
+    /// (rubash#3276: rm's preserve-root guard asks it to choose
+    /// between the node verdict and the pre-face string verdict).
+    pub(in crate::executor) fn is_at_root(&self) -> bool {
+        #[cfg(unix)]
+        {
+            matches!(self.root, CpRoot::At { .. })
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+
+    /// fs::create_dir's node form (single level — mkdir without
+    /// -p; rubash#3276). The At arm is one mkdirat against the
+    /// anchor: a create aimed INTO the dead directory fails there
+    /// with the kernel's ENOENT, exactly the verdict GNU's forked
+    /// mkdir child gets from the inherited inode, while a `..`
+    /// escape creates in the real parent.
+    pub(in crate::executor) fn create_dir(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::create_dir(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; mkdirat takes no
+                // descriptor. The mode is fs::create_dir's own
+                // 0o777 (pre-umask), passed as mode_t exactly as
+                // mkdirat declares it (no variadic widening here).
+                let rc = unsafe {
+                    libc::mkdirat(dir.as_raw_fd(), c_rel.as_ptr(), 0o777 as libc::mode_t)
+                };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// fs::remove_dir's node form (rmdir / rm -d; rubash#3276):
+    /// unlinkat with AT_REMOVEDIR against the anchor.
+    pub(in crate::executor) fn remove_dir(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::remove_dir(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                let rel = self.at_rel();
+                let c_rel =
+                    std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(rel.as_os_str()))
+                        .map_err(|_| {
+                            io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte")
+                        })?;
+                // SAFETY: see cp_fstatat; unlinkat takes no
+                // descriptor. AT_REMOVEDIR is rmdir's flag form.
+                let rc =
+                    unsafe { libc::unlinkat(dir.as_raw_fd(), c_rel.as_ptr(), libc::AT_REMOVEDIR) };
+                if rc != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// fs::remove_dir_all's node form (rm -r; rubash#3276). The
+    /// Plain arm is std's own walk; the At arm restates it on
+    /// nodes: a symlink node unlinks itself (never followed), a
+    /// directory's children go first, then the directory itself.
+    /// Read-side entry failures propagate, as std's do; entry-level
+    /// read errors keep read_dir_nodes' skip disposition (the same
+    /// one the cp enumeration runs under).
+    pub(in crate::executor) fn remove_dir_all(&self) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => fs::remove_dir_all(self.eff_path()),
+            #[cfg(unix)]
+            CpRoot::At { .. } => {
+                let st = self.symlink_stat()?;
+                if st.is_symlink || !st.is_dir {
+                    return self.remove_file();
+                }
+                for (_, child) in self.read_dir_nodes()? {
+                    child.remove_dir_all()?;
+                }
+                self.remove_dir()
+            }
+        }
+    }
+
+    /// stamp_existing_operand's node form (touch; rubash#3276):
+    /// existence is classified by the node's own following stat,
+    /// then the stamp lands by utimensat — against AT_FDCWD with
+    /// the joined path for a Plain node (the pre-face call itself,
+    /// via stamp_existing_operand), against the anchor handle for
+    /// an At node, so an operand in the dead directory's parent
+    /// stamps where GNU's forked touch child stamps it.
+    pub(in crate::executor) fn stamp_existing(
+        &self,
+        atime: Option<SystemTime>,
+        mtime: Option<SystemTime>,
+        make_times: &dyn Fn() -> std::fs::FileTimes,
+    ) -> io::Result<()> {
+        match &self.root {
+            CpRoot::Plain(_) => stamp_existing_operand(&self.eff_path(), atime, mtime, make_times),
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                #[cfg(unix)]
+                let _ = make_times;
+                self.stat()?;
+                touch_utimensat_at(dir.as_raw_fd(), &self.at_rel(), atime, mtime)
             }
         }
     }
