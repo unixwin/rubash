@@ -1998,10 +1998,26 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
-        if declare_has_function_option(&cmd.words[1..]) {
+        // rubash#3344: the -f diversion must not pre-empt the shared
+        // --help gate (builtins/common.h:29-41 CHECK_HELPOPT /
+        // CASE_HELPOPT; declare.def:362 CASE_HELPOPT in the getopt
+        // loop, before any function/variable branch — `-f` only sets
+        // att_function in the flags). The plain path reaches the gate
+        // in execute_prepared_command first, but the `command`
+        // re-dispatch path carries no gate, so `command declare -f
+        // --help` fell into the function face, which treats `--help`
+        // as a function name to look up (rc 1, no help). Consult the
+        // same shared predicate here and fall through to the core,
+        // whose BuiltinOpt scan owns the help emission (EX_USAGE).
+        // This is the gate/diversion ordering, not a `-f` special
+        // case: the decision is the shared gate's, and the core
+        // still renders the help under the invoked name.
+        let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
+        let help_requested = builtin_table_row(command_name)
+            .is_some_and(|row| super::builtin_opt::help_opt_requested(row, &cmd.words[1..]));
+        if declare_has_function_option(&cmd.words[1..]) && !help_requested {
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
-            let command_name = cmd.words.first().map(String::as_str).unwrap_or("declare");
             self.exit_code = self.execute_declare_functions(
                 command_name,
                 &cmd.words[1..],
