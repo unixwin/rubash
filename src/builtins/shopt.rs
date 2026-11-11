@@ -82,13 +82,14 @@ pub fn execute(
 /// env cells the executor keeps (the executor path builds its
 /// own via `Executor::diagnostic_prolog`).
 fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    // The name cells derive from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791): GNU's chain ends at
+    // base_pathname(shell_name) / PROGRAM, never at a brand literal.
+    let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: env_vars
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
+        error_name: crate::builtins::prefix::fallback_error_name(&get),
         script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
         line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
     }
@@ -813,19 +814,13 @@ fn write_readonly_diagnostic(
     env_vars: &crate::shell::var_table::VarTable,
     diagnostic: &str,
 ) {
-    let prefix = match (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        (Some(script), Some(line)) => {
-            if option_enabled(env_vars, "gnu_errfmt") {
-                format!("{script}:{line}: ")
-            } else {
-                format!("{script}: line {line}: ")
-            }
-        }
-        _ => "bash: ".to_string(),
-    };
+    // Every arm derives from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791); the old no-pair arm's literal
+    // "bash: " discarded a present script/line arm.
+    let prefix = crate::builtins::prefix::readonly_error_prefix(
+        &|key: &str| env_vars.get(key).cloned(),
+        option_enabled(env_vars, "gnu_errfmt"),
+    );
     diag.sink().write_str(&format!("{prefix}{diagnostic}\n"));
 }
 

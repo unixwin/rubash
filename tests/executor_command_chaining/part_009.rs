@@ -32,6 +32,44 @@ fn test_bash_argc_and_argv_track_function_arguments() {
     let _cwd_guard = CwdGuard::take();
     let output_path = "target/rubash-bash-argc-argv-stack-output.txt";
     let _ = fs::remove_file(output_path);
+    // #2631: BASH_ARGC/BASH_ARGV only track function arguments under
+    // extdebug — GNU fills them via push_args, which execute_cmd.c gates on
+    // debugging_mode. The old pin omitted the extdebug premise and expected
+    // the filled values unconditionally; the product matches GNU in both
+    // states (see the no-extdebug sibling pin below).
+    let input = format!(
+        "shopt -s extdebug; \
+         outer() {{ inner c; }}; \
+         inner() {{ \
+             printf 'argc:%s:%s argv:%s:%s\\n' \"${{BASH_ARGC[0]}}\" \"${{BASH_ARGC[1]}}\" \"${{BASH_ARGV[0]}}\" \"${{BASH_ARGV[1]}}\" > {output_path}; \
+             printf '<%s>\\n' \"${{BASH_ARGV[@]}}\" >> {output_path}; \
+         }}; \
+         outer a b"
+    );
+    let tokens = tokenize(&input);
+    let ast = parse(&tokens);
+    let mut executor = Executor::new();
+
+    let result = executor.execute_ast(&ast);
+
+    assert!(result.is_ok());
+    assert_eq!(executor.last_exit_code(), 0);
+    assert_eq!(
+        fs::read_to_string(output_path).unwrap(),
+        "argc:1:2 argv:c:b\n<c>\n<b>\n<a>\n"
+    );
+    let _ = fs::remove_file(output_path);
+}
+
+#[test]
+fn test_bash_argc_and_argv_are_empty_without_extdebug() {
+    let _cwd_guard = CwdGuard::take();
+    let output_path = "target/rubash-bash-argc-argv-noextdebug-output.txt";
+    let _ = fs::remove_file(output_path);
+    // #2631: without extdebug GNU never calls push_args for function frames
+    // (execute_cmd.c gates it on debugging_mode), so inside a function
+    // BASH_ARGC/BASH_ARGV stay empty — measured on GNU 5.3.20 as
+    // "argc:: argv::" plus a single "<>" from the empty BASH_ARGV expansion.
     let input = format!(
         "outer() {{ inner c; }}; \
          inner() {{ \
@@ -50,7 +88,7 @@ fn test_bash_argc_and_argv_track_function_arguments() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(
         fs::read_to_string(output_path).unwrap(),
-        "argc:1:2 argv:c:b\n<c>\n<b>\n<a>\n"
+        "argc:: argv::\n<>\n"
     );
     let _ = fs::remove_file(output_path);
 }

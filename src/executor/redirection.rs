@@ -1440,7 +1440,16 @@ impl Executor {
                         &self.shell_state.env_vars,
                     ))
                 };
-                if let Err(error) = FileFd::open_readwrite_pair(path) {
+                // rubash#3268: from a deleted cwd the joined spelling is
+                // dead by construction — when the cwd anchor applies,
+                // its O_RDWR|O_CREAT verdict replaces the joined-path
+                // pair open's (see Executor::anchored_redirect_probe);
+                // every other state keeps the pair open below.
+                let probe_verdict = match self.anchored_redirect_probe(&target, true) {
+                    Some(verdict) => verdict,
+                    None => FileFd::open_readwrite_pair(path).map(|_| ()),
+                };
+                if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
                     // `{target}: {errno text}` shape — pass it through
                     // like the Input probe below instead of prefixing the
@@ -1499,7 +1508,16 @@ impl Executor {
                 // redir.c do_redirections). An existing FIFO validates
                 // through access(2) instead: ENOENT / EACCES surface with
                 // the same errno the open would have produced.
-                if let Err(error) = super::shell_options::probe_input_redirect_gate(&path) {
+                // rubash#3268: from a deleted cwd the joined spelling is
+                // dead by construction — when the cwd anchor applies,
+                // its verdict replaces the joined-path gate's (see
+                // Executor::anchored_redirect_probe); every other state
+                // keeps the gate below.
+                let probe_verdict = match self.anchored_redirect_probe(&target, false) {
+                    Some(verdict) => verdict,
+                    None => super::shell_options::probe_input_redirect_gate(&path),
+                };
+                if let Err(error) = probe_verdict {
                     // posix_errors::path_error already renders the
                     // `{target}: {errno text}` shape (same convention the
                     // ReadWrite probe above consumes).
@@ -1749,7 +1767,7 @@ impl Executor {
         message: &[u8],
     ) -> Option<usize> {
         use crate::parser::RedirectKind;
-        cmd.redirects.iter().position(|redirect| {
+        let by_target = cmd.redirects.iter().position(|redirect| {
             let opens_path = match redirect.kind {
                 RedirectKind::Input | RedirectKind::DuplicateInput => {
                     redirect.fd.is_none_or(|fd| fd == 0)
@@ -1778,6 +1796,43 @@ impl Executor {
                 text.strip_prefix(prefix.as_str())
                     .is_some_and(|rest| rest.starts_with(&head))
             })
+        });
+        if by_target.is_some() {
+            return by_target;
+        }
+        // rubash#2635: a redirector-limit failure is rendered with the
+        // FD NUMBER, not a target path (`16: Bad file descriptor` —
+        // file arms name the redirector, dup arms name the source,
+        // redir.c:149-176), so the target-head match above can never
+        // locate it. Locate it by the number instead: the first entry
+        // whose effective redirector equals the named number (file
+        // arms), or whose dup source does (dup arms).
+        let text = std::str::from_utf8(message).ok()?;
+        let rest = text.strip_prefix(self.error_prefix().as_str())?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() || !rest[digits.len()..].starts_with(": Bad file descriptor") {
+            return None;
+        }
+        let named: u32 = digits.parse().ok()?;
+        cmd.redirects.iter().position(|redirect| {
+            let effective = redirect
+                .fd
+                .unwrap_or(if redirect.is_input_side() { 0 } else { 1 });
+            match redirect.kind {
+                RedirectKind::Output
+                | RedirectKind::Append
+                | RedirectKind::ClobberOutput
+                | RedirectKind::CombinedOutput
+                | RedirectKind::CombinedAppend
+                | RedirectKind::ReadWrite
+                | RedirectKind::Input => effective == named,
+                RedirectKind::DuplicateOutput | RedirectKind::DuplicateInput => {
+                    let target = self.expand_redirect_target(redirect);
+                    redirect_target_fd_and_move(&target)
+                        .is_some_and(|(source_fd, _)| source_fd == named && source_fd != effective)
+                }
+                _ => false,
+            }
         })
     }
 
@@ -2407,6 +2462,14 @@ impl Executor {
                         redirect_target_fd_and_move(&target)
                     {
                         if source_fd != fd {
+                            // rubash#2635: the input-side twin of the
+                            // DuplicateOutput limit gate — dup2 onto a
+                            // redirector at/above the soft limit fails
+                            // EBADF naming the source (redir.c:1215).
+                            if self.redirect_fd_over_limit(fd) {
+                                self.limit_gate_fail(state, source_fd)?;
+                                return Ok(true);
+                            }
                             let bound = self.list_dup_model(state, source_fd);
                             state.list_binds.insert(fd, bound);
                             if fd >= 3 {
@@ -2473,14 +2536,16 @@ impl Executor {
                         state.redirect_failed = true;
                         return Ok(true);
                     }
-                    if redirect_target_is_ambiguous(
+                    if (redirect_target_is_ambiguous(
                         &redirect.target_metadata.raw,
                         &target,
                         crate::builtins::shopt::option_enabled(
                             &self.shell_state.env_vars,
                             "extglob",
                         ),
-                    ) && !self.redirect_target_resolved_single_glob_match(redirect)
+                    ) || self.redirect_target_resolved_multi_field(redirect))
+                        && !self.redirect_target_resolved_single_glob_match(redirect)
+                        && !self.redirect_target_resolved_single_field(redirect)
                     {
                         self.write_ambiguous_redirect_diagnostic(
                             state,
@@ -2611,6 +2676,19 @@ impl Executor {
                     if state.redirect_failed {
                         return Ok(true);
                     }
+                    // rubash#2635: the open above is GNU's redir_open
+                    // (the target file now exists); the step that
+                    // fails for a redirector at/above the RLIMIT_NOFILE
+                    // soft limit is the dup2 onto it (redir.c
+                    // r_output_direction: "dup2 failed? must be fd
+                    // limit issue"), and redirection_error
+                    // (redir.c:149-176) renders the redirector with
+                    // that EBADF through the fd-2 binding established
+                    // so far.
+                    if self.redirect_fd_over_limit(fd) {
+                        self.limit_gate_fail(state, fd)?;
+                        return Ok(true);
+                    }
                 }
                 crate::parser::RedirectKind::CombinedOutput
                 | crate::parser::RedirectKind::CombinedAppend => {
@@ -2655,6 +2733,18 @@ impl Executor {
                         if source_fd == target_fd {
                             state.saw_output_redirect = true;
                             continue;
+                        }
+                        // rubash#2635: dup2 (redir_fd, redirector)
+                        // (redir.c:1215) fails EBADF when the
+                        // redirector is at/above the RLIMIT_NOFILE soft
+                        // limit; the diagnostic names the SOURCE word
+                        // either way (the same text a closed source
+                        // produces), so the limit verdict is
+                        // indistinguishable from — and replaces — the
+                        // source resolution below.
+                        if self.redirect_fd_over_limit(target_fd) {
+                            self.limit_gate_fail(state, source_fd)?;
+                            return Ok(true);
                         }
                         // rubash#2562: resolve the source AT THIS
                         // POSITION — this list's own bindings count,
@@ -3239,6 +3329,42 @@ impl Executor {
             }
         }
         state.saw_output_redirect = true;
+        Ok(())
+    }
+
+    /// rubash#2635: record a redirector-limit failure (an explicit
+    /// redirector at/above the RLIMIT_NOFILE soft limit — GNU's dup2
+    /// onto it fails EBADF after redir_open created the target,
+    /// redir.c r_output_direction / redir.c:1215) through this walk's
+    /// own failure protocol, exactly like a failed open: a via-error
+    /// state records first_open_error so the walk exits through the
+    /// ExecuteError::IoError channel and the top-level handler
+    /// renders the diagnostic ONCE (an eager write here let the
+    /// compound bind report the same failure a second time on the
+    /// function route, the rubash#1844 shape); a muted speculative
+    /// state records silently; any other state writes the diagnostic
+    /// through the fd-2 binding established so far. `name_fd` is the
+    /// redirector for file arms and the SOURCE fd for dup arms
+    /// (redirection_error names the dup's source word either way).
+    fn limit_gate_fail(
+        &mut self,
+        state: &mut OutputFdState,
+        name_fd: u32,
+    ) -> Result<(), ExecuteError> {
+        if state.open_failure_via_error {
+            let mut slot = state.first_open_error.borrow_mut();
+            if slot.is_none() {
+                let error = std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{name_fd}: Bad file descriptor"),
+                );
+                *slot = Some((error.kind(), error.to_string()));
+            }
+        } else if !state.diagnostics_muted {
+            self.write_bad_fd_redirect_diagnostic(state, &name_fd.to_string())?;
+        }
+        self.exit_code = 1;
+        state.redirect_failed = true;
         Ok(())
     }
 

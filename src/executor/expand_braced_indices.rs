@@ -379,7 +379,23 @@ impl Executor {
     /// env_vars. Called by the mutable parameter expansion path after
     /// `expand_braced_indexed_parameter` or `array_element_parameter_value`
     /// returns.
+    ///
+    /// The deferred `&self` subscript evaluation records its
+    /// evaluation-order events (rubash#3246: a failed nameref bind,
+    /// rubash#3078: a locale bind) in the shared ArithEvalEvent log,
+    /// but no arithmetic entry ever drains them — the subscript is
+    /// memoized, so the mutable entry never re-evaluates it. Drain
+    /// them here, at the same boundary where the evaluation's writes
+    /// land, with no command label: GNU array_expand_index runs with
+    /// this_command_name NULL (arrayfunc.c:1374-1378), so
+    /// expansion-context diagnostics carry none. The drain runs even
+    /// when the write queue is empty — a failed bind writes nothing —
+    /// and it can only see expansion-context events: the four call
+    /// sites are word-expansion/command boundaries, never inside an
+    /// arithmetic entry's clear-to-drain window, so no entry-owned
+    /// event can be in the log here.
     pub(in crate::executor) fn apply_pending_subscript_writes(&mut self) {
+        self.drain_arith_eval_events(None);
         let writes = PENDING_SUBSCRIPT_WRITES.with(|w| std::mem::take(&mut *w.borrow_mut()));
         for (name, value) in writes {
             if self.shell_state.env_vars.get(&name) != Some(&value) {
