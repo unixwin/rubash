@@ -183,6 +183,25 @@ pub struct ShellState {
     /// respawn's adopted field), because no later moment can recover
     /// that inode once the path is gone.
     pub(crate) cwd_anchor: RefCell<Option<CwdAnchor>>,
+    /// GNU's `the_current_working_directory` (builtins/common.c:589):
+    /// the shell's LOGICAL cwd, a value of its own, distinct from both
+    /// the physical `cwd` field above (the getcwd truth) and the $PWD
+    /// variable in `env_vars` (a bind target a user assignment can
+    /// desynchronize). GNU keeps exactly one such string: `cd` in
+    /// logical mode sets it from sh_canonpath's textual canonicalization
+    /// (builtins/cd.def change_to_directory), `pwd -L` prints it
+    /// verbatim (cd.def pwd_builtin), and startup adopts an inherited
+    /// $PWD into it when the value names the current directory
+    /// (variables.c:907 set_pwd). rubash used to re-derive this value
+    /// from $PWD on every read, which lost it whenever the variable was
+    /// reassigned, unset, non-canonical, or pointed at a directory the
+    /// physical field no longer named (rubash#2796/#2797/#2799). The
+    /// cd family and the startup funnel maintain this field; other
+    /// movers (pushd/popd) do not, so readers must confirm it still
+    /// names `cwd` before trusting it and fall back to the derived
+    /// value when it does not. `None` until a session funnel seeds it.
+    /// Like `cwd`, it rides the Clone fork boundary.
+    pub(crate) logical_cwd: Option<String>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
     /// duplicate segments until the next canonical render folds them. This is
@@ -1024,6 +1043,7 @@ impl Clone for ShellState {
             env_vars: self.env_vars.clone(),
             cwd: self.cwd.clone(),
             cwd_anchor: RefCell::new(self.cwd_anchor.borrow().clone()),
+            logical_cwd: self.logical_cwd.clone(),
             array_compact_budget: self.array_compact_budget.clone(),
             invocation_interactive: self.invocation_interactive,
             invocation_login: self.invocation_login,

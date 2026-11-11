@@ -347,6 +347,64 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
     }
 }
 
+/// Whether this builtin call carries `--help` in option position —
+/// the one shared CHECK_HELPOPT / CASE_HELPOPT decision for every
+/// builtin (rubash#2753).
+///
+/// GNU has no per-builtin help logic: `internal_getopt`
+/// (`builtins/bashgetopt.c:61-192`) returns `GETOPT_HELP` when it
+/// meets the `--help` word during the option scan, and the
+/// `Grammar` / `NoScan` builtins test the first word with
+/// `CHECK_HELPOPT` (`builtins/common.h:29-36`). This helper replays
+/// exactly that decision from the declaration-table row, so a caller
+/// (the dispatch gate) does not re-implement any builtin's parser:
+///
+/// * `help_entry == false` rows (`:`, `true`, `false`, `echo`,
+///   `test`, `[`, `env`) never take the help path — `--help` is an
+///   operand or ignored there (oracle-probed; see builtin_table.rs).
+/// * `Grammar` / `NoScan` rows follow `CHECK_HELPOPT`: only a first
+///   word of exactly `--help` counts (`kill -l --help` lists signals;
+///   `let x=1 --help` evaluates both words).
+/// * `Getopt` rows drive a throwaway `BuiltinOpt` over the words
+///   with the diagnostics sunk into a scratch buffer: the scan is
+///   the same machine the migrated handlers run, so option
+///   arguments are consumed exactly as GNU consumes them (`read -p
+///   --help` takes `--help` as the prompt, `wait -p --help` as the
+///   variable name — neither is a help request), an invalid option
+///   or a missing argument before `--help` ends the scan in error
+///   (GNU's loop returns `EX_USAGE` there and never reaches the
+///   help word), and `--` or the first operand ends it cleanly.
+/// * `local` is the one `Getopt` row whose `.def` does NOT run the
+///   getopt loop unconditionally: `local_builtin`
+///   (builtins/declare.def:126-141) catches a straight first-word
+///   `--help` itself and otherwise refuses outside a function
+///   before any scanning, so `local -p --help` at top level is the
+///   context error, not help. It therefore takes the first-word
+///   rule like a `CHECK_HELPOPT` row.
+pub(crate) fn help_opt_requested(row: &BuiltinRow, words: &[String]) -> bool {
+    if !row.help_entry {
+        return false;
+    }
+    match row.opt_spec {
+        OptSpec::Grammar | OptSpec::NoScan => words.first().map(String::as_str) == Some("--help"),
+        OptSpec::Getopt(_) => {
+            if row.name == "local" {
+                return words.first().map(String::as_str) == Some("--help");
+            }
+            let mut sink = Vec::new();
+            let mut diag = Diag::new(row, &mut sink);
+            let mut opt = BuiltinOpt::new(row, words, &mut diag, false);
+            loop {
+                match opt.next() {
+                    OptEvent::Help => return true,
+                    OptEvent::End => return false,
+                    OptEvent::Opt(_) | OptEvent::OptArg(_, _) => {}
+                }
+            }
+        }
+    }
+}
+
 /// Render one option byte for a diagnostic string. The byte comes
 /// from user argv, so it can be a UTF-8 continuation byte (>= 0x80)
 /// and must never be widened with `as char` — that Latin-1 widening
@@ -837,6 +895,41 @@ mod tests {
         let mut opt = BuiltinOpt::new(cd_row(), &w, &mut diag, false);
         assert_eq!(drain(&mut opt), [OptEvent::End]);
         assert_eq!(opt.operands(), ["-"]);
+    }
+
+    #[test]
+    fn help_opt_requested_positions() {
+        let row = |name: &str| builtin_table_row(name).unwrap();
+        // First word and after a no-arg option: help.
+        assert!(help_opt_requested(row("cd"), &words(&["--help"])));
+        assert!(help_opt_requested(row("cd"), &words(&["-L", "--help"])));
+        assert!(help_opt_requested(row("wait"), &words(&["-n", "--help"])));
+        // After an operand or after `--`: an operand, not help.
+        assert!(!help_opt_requested(row("cd"), &words(&["dir", "--help"])));
+        assert!(!help_opt_requested(row("cd"), &words(&["--", "--help"])));
+        // A required-argument option consumes the word, even `--help`
+        // (`wait -p var`, `read -p prompt`, `printf -v var`).
+        assert!(!help_opt_requested(row("wait"), &words(&["-p", "--help"])));
+        assert!(!help_opt_requested(row("read"), &words(&["-p", "--help"])));
+        assert!(help_opt_requested(
+            row("read"),
+            &words(&["-p", "prompt", "--help"])
+        ));
+        // An invalid option before the word ends the scan in error.
+        assert!(!help_opt_requested(row("cd"), &words(&["-Z", "--help"])));
+        // Grammar rows (kill/let): CHECK_HELPOPT first word only.
+        assert!(help_opt_requested(row("kill"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("kill"), &words(&["-l", "--help"])));
+        assert!(!help_opt_requested(row("let"), &words(&["x=1", "--help"])));
+        // `local`: first word only (declare.def:126-141) — a later
+        // `--help` belongs to the context check, not the help path.
+        assert!(help_opt_requested(row("local"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("local"), &words(&["-p", "--help"])));
+        // help_entry == false rows never take the help path.
+        assert!(!help_opt_requested(row("echo"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("test"), &words(&["--help"])));
+        assert!(!help_opt_requested(row(":"), &words(&["--help"])));
+        assert!(!help_opt_requested(row("true"), &words(&["--help"])));
     }
 
     #[test]
