@@ -3832,6 +3832,16 @@ impl Executor {
         // `break` was treated as in-loop and aborted the rest of the script
         // (arith-for.tests: `for ((j=;;))` with `j=` empty RHS). Match GNU.
         self.shell_state.loop_depth -= 1;
+        // rubash#3287: a fatal arithmetic expansion error raised while
+        // evaluating a `for (( ))` header (a nested `$(( 1/0 ))` in
+        // init/test/update) must be consumed HERE, by the same compound
+        // consumer the case/loop-word paths already use — a plain
+        // evaluation failure (e.g. `for (( i=1/0; ...))`) sets no flag
+        // so the call is a no-op and the status stays 1, while a nested
+        // fatal yields the DISCARD (rest of line abandoned, script
+        // continues on the next line) and clears both flags. Without
+        // this the stale fatal flag poisoned the NEXT command.
+        self.abandon_on_arithmetic_expansion_error()?;
         Ok(())
     }
 
