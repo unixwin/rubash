@@ -215,8 +215,13 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command(name, &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: record the as-written join when the walk
+            // itself produced this program (see
+            // recorded_resolution_spelling in executor::path).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                name,
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
@@ -378,8 +383,12 @@ impl Executor {
         if let Some(program) =
             crate::executor::path::find_user_command("tput", &self.shell_state.env_vars)
         {
-            let display = super::execution_misc::shell_display_path(
-                &program.to_string_lossy().replace('\\', "/"),
+            // rubash#2696: same recorded-spelling rule as the plain
+            // record sites (see recorded_resolution_spelling).
+            let display = crate::executor::path::recorded_resolution_spelling(
+                "tput",
+                &program,
+                &self.shell_state.env_vars,
             );
             crate::builtins::hash::record_command_resolution(
                 &mut self.shell_state.env_vars,
@@ -2141,7 +2150,7 @@ impl Executor {
                     return Ok(true);
                 }
                 let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                    &self.session_path(self.redirect_target_filesystem_path(&target)),
                 )?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
@@ -2407,10 +2416,11 @@ impl Executor {
                 // so a relative operand must anchor at the session cwd
                 // itself; procsub carrier paths are absolute and pass
                 // through unchanged.
-                let win = self.session_path(crate::executor::path::windows_operand_file_path(
+                let native = crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
-                ));
+                );
+                let win = self.session_path(native.clone());
                 // rubash#1903: a WinuxCmd fifo marker operand is the
                 // read side of the named-pipe rendezvous, not a file
                 // holding the marker bytes — WinuxCmd's own cat
@@ -2447,9 +2457,15 @@ impl Executor {
                 }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
+                // rubash#3198: the plain read goes through the cwd
+                // anchor (read_session_anchored) — this face runs
+                // in-process, so without it a relative operand that
+                // escapes a DELETED session cwd via `..` dies on the
+                // joined path string where a spawned cat (fchdir'd
+                // onto the anchor inode) reads it fine.
                 let read = match self.procsub_stream_take(&win) {
                     Some(bytes) => Ok(bytes),
-                    None => fs::read(&win),
+                    None => self.read_session_anchored(&native, &win),
                 };
                 match read {
                     Ok(bytes) => output.extend(bytes),
@@ -4447,17 +4463,28 @@ impl Executor {
         }
         let mut mode: Option<&str> = None;
         let mut files: Vec<String> = Vec::new();
+        // getopt_long semantics (coreutils chmod): the FIRST `--`
+        // ends option scanning wherever it appears — before the mode,
+        // between operands, or after the mode (rubash#3106). Every
+        // later word is an operand: the first is the mode, the rest
+        // are files, and a second `--` is an ordinary file name.
+        let mut options_done = false;
         for arg in &cmd.words[1..] {
+            if !options_done && arg == "--" {
+                options_done = true;
+                continue;
+            }
             if mode.is_none() {
-                if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c" | "--") || arg.starts_with("--")
-                {
-                    continue;
-                }
-                if arg.starts_with('-')
-                    && arg.len() > 1
-                    && arg[1..].chars().all(|ch| "fRvc".contains(ch))
-                {
-                    continue;
+                if !options_done {
+                    if matches!(arg.as_str(), "-f" | "-R" | "-v" | "-c") || arg.starts_with("--") {
+                        continue;
+                    }
+                    if arg.starts_with('-')
+                        && arg.len() > 1
+                        && arg[1..].chars().all(|ch| "fRvc".contains(ch))
+                    {
+                        continue;
+                    }
                 }
                 mode = Some(arg);
                 continue;
@@ -4653,6 +4680,15 @@ fn chmod_declines(words: &[String]) -> bool {
     for word in words {
         let arg = word.as_str();
         if mode.is_some() {
+            // The first `--` is the option terminator even after the
+            // mode (getopt_long, rubash#3106): it is not a file, so
+            // `chmod 600 --` keeps files == 0 and declines to the real
+            // binary's missing-operand diagnostic. A second `--` is
+            // an ordinary file operand.
+            if arg == "--" && !after_terminator {
+                after_terminator = true;
+                continue;
+            }
             files += 1;
             continue;
         }

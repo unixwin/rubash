@@ -88,12 +88,32 @@ src/executor/command_substitution_pipelines.rs::as_bytes\(\)\[[0-9]+\] as char
 src/executor/conditional.rs::is_shell_name_char\(bytes\[name_start - 1\] as char\)
 src/executor/conditional.rs::is_shell_name_start\(bytes\[name_start\] as char\)
 src/executor/declare_local.rs::is_shell_name_(start|char)\(c as char\)
+# declare_local.rs: `Opt(c)` only fires for a byte found in the row's
+# spec ("+acfgilnprtuxAFGI", all ASCII), so the widened byte is ASCII
+# by construction, never a UTF-8 continuation byte. (The `optopt`
+# half of the same scan is NOT allowlisted: it comes from user argv
+# and is rendered lossy, see declare_option_scan.)
+src/executor/declare_local.rs::Opt\(c\) => letters\.push\(\(c as char
+# declare_local.rs: `scan_flag_only_spec` (the byte-scan twin of the
+# machine path above) pushes `c` only after `letter_bytes.contains(&c)`
+# succeeds, where `letter_bytes` is the same row spec's letter bytes
+# (static Getopt literal, all ASCII), so the widened byte is ASCII by
+# construction, never a UTF-8 continuation byte. (The `optopt` half of
+# the same scan is NOT allowlisted: it comes from user argv and is
+# rendered lossy via String::from_utf8_lossy, see scan_flag_only_spec.)
+src/executor/declare_local.rs::letters\.push\(\(c as char, sign == b'-'\)\)
 src/executor/execution_misc.rs::(as_bytes\(\)\[0\] as char|out\.push\(byte as char\)|b'0' \+ .*as char)
 src/executor/init.rs::bytes\[0\] as char
 src/executor/parameter_case.rs::\} as char\);
 src/executor/parameter_core.rs::bytes\[index\] as char
 src/executor/path.rs::(as_bytes\(\)|bytes)\[[0-9]+\] as char
 src/executor/pipeline_exec.rs::\|byte\| byte as char
+# read_split.rs: `byte_domain_text` (#2819) widens `*byte` only after the
+# `if *byte < 0x80` guard directly above (the else branch routes >= 0x80
+# bytes to `encode_raw_byte_marker`), so the widened byte is ASCII by
+# construction — never a UTF-8 continuation byte. The widened char is
+# collected into storage text, never passed to a predicate.
+src/executor/read_split.rs::\(\*byte as char\)\.to_string\(\)
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
 # windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
 # (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the

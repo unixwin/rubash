@@ -78,17 +78,18 @@ where
                 'P' => mode = Mode::Physical,
                 other => {
                     // rubash#705 R7.4: GNU's get_name_for_error shape —
-                    // `<script>: line N:` in script mode, `bash: line N:`
-                    // under -c, bare `bash:` with neither. The old
-                    // hardcoded `rubash: pwd:` prefix was the
-                    // mixed-branding holdout on this path.
-                    let prefix = match (
-                        env_vars.get("__RUBASH_SCRIPT_NAME"),
-                        env_vars.get("__RUBASH_CURRENT_LINE"),
-                    ) {
-                        (Some(script), Some(line)) => format!("{script}: line {line}: "),
-                        _ => "bash: ".to_string(),
-                    };
+                    // `<script>: line N:` in script mode, the argv[0]
+                    // name with its line under -c, the bare argv[0]-
+                    // derived name with neither (error.c:90-120 via
+                    // builtins/common.c:83-96). The fallback derives
+                    // from the single argv[0] carrier chain
+                    // (builtins::prefix, rubash#2791); the old
+                    // hard-coded `"bash: "` arm discarded a present
+                    // script/line arm and named every renamed shell
+                    // "bash".
+                    let prefix = crate::builtins::prefix::diagnostic_prefix(&|key: &str| {
+                        env_vars.get(key).cloned()
+                    });
                     writeln!(stderr, "{prefix}pwd: -{other}: invalid option")?;
                     writeln!(stderr, "pwd: usage: pwd [-LP]")?;
                     return Ok(EX_USAGE);
@@ -98,6 +99,20 @@ where
     }
 
     let Some(directory) = current_directory(mode, env_vars, cwd)? else {
+        // rubash#3268 (e): the session cwd is the unknown birth state
+        // (empty field: born in a deleted directory, the birth getcwd
+        // failed, no cd has succeeded since). GNU's pwd has no cached
+        // string to print there either, so it calls
+        // get_working_directory("pwd"), which prints this line and
+        // fails (builtins/cd.def pwd_builtin -> builtins/common.c:592,
+        // errstr general.c:70) — nothing on stdout, status 1. The
+        // errno text is the birth failure's own: a deleted directory
+        // fails getcwd with ENOENT (measured against GNU bash 5.3).
+        writeln!(
+            stderr,
+            "pwd: error retrieving current directory: \
+             getcwd: cannot access parent directories: No such file or directory"
+        )?;
         return Ok(EXECUTION_FAILURE);
     };
 
@@ -118,6 +133,15 @@ fn current_directory(
     // G-02: the physical truth is the session cwd field, not the
     // process cwd.
     let physical = cwd.to_path_buf();
+    // rubash#3268 (e): the empty field is the unknown birth state —
+    // there is no directory to display (GNU fails in
+    // get_working_directory; see the caller's diagnostic). Returning
+    // the empty string here would print a blank line with status 0,
+    // the same shape of lie as the "/" fabrication this state
+    // replaced.
+    if physical.as_os_str().is_empty() {
+        return Ok(None);
+    }
 
     if mode == Mode::Logical {
         if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {

@@ -384,6 +384,16 @@ pub(crate) enum HashRecord {
     /// tests pin tput as the unique Separate row and pin the route's
     /// definition + both call sites.
     Separate,
+    /// Recorded by the fast-path dispatch faces themselves
+    /// (execution_misc::record_fastpath_command_resolution) under the
+    /// same guards as the layer's block — sleep / dirname / basename
+    /// answer simple commands in-process, so the resolution GNU's
+    /// locate would have hashed is recorded at the answering face
+    /// (rubash#2736). The timed faces of sleep are semantic models,
+    /// not dispatch (KD-4), and record nothing; the basename comsub
+    /// word arm likewise answers inside a substitution and records
+    /// nothing.
+    Fastpath,
 }
 
 /// What a slash-prefixed form of the name does (audit §6.3 R5: the
@@ -684,7 +694,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
-        hash_record: HashRecord::No,
+        hash_record: HashRecord::Fastpath,
         slash_forms: &[],
         sync_ref: "WinuxCmd sleep NUMBER[SUFFIX]...; GNU coreutils 9.4 sleep",
         doc_id: "builtins.md#fastpath-list",
@@ -699,7 +709,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
-        hash_record: HashRecord::No,
+        hash_record: HashRecord::Fastpath,
         slash_forms: &[],
         sync_ref: "WinuxCmd dirname OPTION table; GNU coreutils 9.4 dirname",
         doc_id: "builtins.md#fastpath-list",
@@ -717,7 +727,7 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
         cfg: CfgGate::AllPlatforms,
-        hash_record: HashRecord::No,
+        hash_record: HashRecord::Fastpath,
         slash_forms: &[],
         sync_ref: "WinuxCmd basename OPTION table; GNU coreutils 9.4 basename",
         doc_id: "builtins.md#fastpath-list",
@@ -1796,6 +1806,7 @@ mod registry_consistency {
     const SRC_DISPATCH_LATE: &str = include_str!("command_dispatch_late.rs");
     const SRC_NO_ALIAS: &str = include_str!("command_no_alias.rs");
     const SRC_NO_ALIAS_LATE: &str = include_str!("command_no_alias_late.rs");
+    const SRC_EXECUTION_MISC: &str = include_str!("execution_misc.rs");
     const SRC_EXTERNAL_FILE: &str = include_str!("external_file_builtins.rs");
     const SRC_EXTERNAL_INNER: &str = include_str!("external_inner.rs");
     const SRC_PIPELINE: &str = include_str!("pipeline_exec.rs");
@@ -2152,6 +2163,54 @@ mod registry_consistency {
             SRC_PIPELINE.matches("record_tput_resolution(").count(),
             1,
             "the PipelineStage arm's call"
+        );
+    }
+
+    #[test]
+    fn fastpath_hash_record_route_is_pinned() {
+        // rubash#2736: the Fastpath rows record through
+        // execution_misc::record_fastpath_command_resolution, called
+        // from exactly the faces that answer the name in-process
+        // (sleep's SimpPrimary arm; dirname/basename's SimpLate and
+        // CmdLate arms). The timed models and the comsub word arm
+        // record nothing.
+        let fastpath: Vec<&str> = COMMAND_REGISTRY
+            .iter()
+            .filter(|r| r.hash_record == HashRecord::Fastpath)
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(fastpath, vec!["sleep", "dirname", "basename"]);
+        assert_eq!(
+            SRC_EXECUTION_MISC
+                .matches("fn record_fastpath_command_resolution")
+                .count(),
+            1,
+            "the Fastpath route's definition"
+        );
+        assert_eq!(
+            SRC_EXECUTION_MISC
+                .matches("record_fastpath_command_resolution(")
+                .count(),
+            1,
+            "definition only; no internal callers"
+        );
+        assert_eq!(
+            SRC_DISPATCH_PRIMARY
+                .matches("record_fastpath_command_resolution(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            SRC_DISPATCH_LATE
+                .matches("record_fastpath_command_resolution(")
+                .count(),
+            2
+        );
+        assert_eq!(
+            SRC_NO_ALIAS_LATE
+                .matches("record_fastpath_command_resolution(")
+                .count(),
+            2
         );
     }
 

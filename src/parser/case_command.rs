@@ -463,21 +463,26 @@ pub(super) fn parse_case_command(
         let body_start = i;
         let (body_end, stray_close) = case_body_end(tokens, i);
         if let Some(stray) = stray_close {
-            // The body scan ran into the next clause's pattern close
-            // with no valid terminator in between (rubash#1656): GNU
-            // parse.y:1237-1256 case_clause_sequence admits only
+            // The body scan ran into a token the clause grammar cannot
+            // admit with no valid terminator in between (rubash#1656):
+            // GNU parse.y:1237-1256 case_clause_sequence admits only
             // SEMI_SEMI/SEMI_AND/SEMI_SEMI_AND or ESAC after a clause's
-            // compound_list, so this is a syntax error at that `)',
+            // compound_list, so this is a syntax error at that token,
             // reported via the same channel as rubash#1641 above.
             // Verified against GNU bash 5.3.20 (rc 2) for both spelled
             // seeds `a) echo A;\;& b) ...' and `a) echo A;\;\& b) ...'.
+            // The offender is usually the next clause's pattern close
+            // `)', but a list operator at command position inside the
+            // body trips the grammar earlier and is named instead
+            // (rubash#3031: `1) a;| 2) ...' names the `|').
             let mut command = CommandNode::new();
             command.line = tokens.get(start).map(|token| token.position);
             command.logical_line = tokens.get(start).map(|token| token.logical_line);
             command.insert_assignment(
                 "__RUBASH_PARSE_ERROR_NEAR__".to_string(),
                 format!(
-                    "){}{}",
+                    "{}{}{}",
+                    case_offender_text(&tokens[stray]),
                     crate::executor::markers::PARSE_ERROR_FIELD_SEP,
                     tokens[stray].position
                 ),
@@ -973,6 +978,17 @@ pub(super) fn collect_extglob_pattern_from_bang(tokens: &[Token], i: &mut usize)
 pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Option<usize>) {
     let mut stack = Vec::new();
     let mut paren_depth = 0usize;
+    // rubash#3031: whether the walk sits at a command position of the
+    // clause's compound_list (parse.y:1262) — at body start, or just
+    // after a top-level separator/joiner. A list operator met there has
+    // no command on its left, so it cannot continue the grammar: it is
+    // the token GNU's yyerror names (`case i in 1) a;| 2) ...' names
+    // the `|', not the next clause's pattern close the stray-`)` walk
+    // below used to reach). Tracked only at the flat level: nested
+    // compounds ride `stack`, subshell parens ride `paren_depth`, and
+    // the token that OPENED such a construct already counts as the
+    // command a following joiner continues.
+    let mut at_command_start = true;
     while index < tokens.len() {
         if stack.is_empty()
             && (is_case_terminator(tokens, index)
@@ -996,6 +1012,21 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Optio
             break;
         }
 
+        let flat = stack.is_empty() && paren_depth == 0;
+        if flat
+            && at_command_start
+            && matches!(
+                tokens[index].kind,
+                TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Background
+            )
+        {
+            return (index, Some(index));
+        }
+
         if tokens[index].kind == TokenKind::Keyword && is_unquoted_operator(&tokens[index], ")") {
             if paren_depth == 0 && stack.is_empty() {
                 return (index, Some(index));
@@ -1005,6 +1036,22 @@ pub(super) fn case_body_end(tokens: &[Token], mut index: usize) -> (usize, Optio
             && is_unquoted_operator(&tokens[index], "(")
         {
             paren_depth += 1;
+        }
+
+        if flat {
+            // Separators and joiners alike leave the list expecting a
+            // command (a joiner with no following command is the same
+            // error one token later); every other token is command
+            // material and ends the position.
+            at_command_start = matches!(
+                tokens[index].kind,
+                TokenKind::Semicolon
+                    | TokenKind::And
+                    | TokenKind::Or
+                    | TokenKind::Pipe
+                    | TokenKind::PipeErr
+                    | TokenKind::Background
+            );
         }
 
         update_compound_boundary_stack(tokens, index, &mut stack);

@@ -18,6 +18,13 @@ impl Executor {
         let result = self.execute_command_with_procsub_scope(cmd, procsub_fd_base);
         self.close_command_scoped_procsub_input_fds_from(procsub_fd_base);
         self.drain_deferred_varredir_closes(varredir_close_base);
+        // rubash#3107: the dynamic associative variables' owner tables
+        // (aliases, hashed_filenames) mutate without a mirror write, so
+        // a materialized typed cell goes stale at this boundary;
+        // reconcile it from the owner before the verifier below (and
+        // before any later read trusts the cell). See
+        // Executor::sync_dynamic_assoc_cells.
+        self.sync_dynamic_assoc_cells();
         // Debug-only systemic regression net for the typed-cell ↔ mirror
         // invariant: after every command boundary every fresh (undirty)
         // structured array cell must still equal its mirror projection.
@@ -46,6 +53,7 @@ impl Executor {
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
         self.redirect_target_single_glob_match.borrow_mut().clear();
+        self.redirect_target_had_transport.borrow_mut().clear();
         self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand
@@ -279,6 +287,7 @@ impl Executor {
                 {
                     self.shell_state.arithmetic_expansion_error.set(false);
                     if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         self.exit_code = 1;
                         return Err(ExecuteError::ExpansionFailure(1));
                     }
@@ -295,6 +304,7 @@ impl Executor {
         if self.shell_state.arithmetic_nounset_error.replace(false) {
             self.shell_state.arithmetic_expansion_error.set(false);
             if self.expansion_error_is_interactive_discard() {
+                self.note_unit_expansion_error_discard();
                 self.exit_code = 1;
                 return Err(ExecuteError::ExpansionFailure(1));
             }
@@ -507,8 +517,9 @@ impl Executor {
         // owns its fd_var redirects itself (execute_stdio_only_exec_redirect
         // applies them in list order with persistent semantics), so it is
         // excluded here.
+        let fd_var_walk_undoable = self.redirect_walk_is_undoable(&cmd);
         if cmd.words.first().map(String::as_str) != Some("exec")
-            && self.apply_dynamic_fd_var_redirects(&cmd, true)?
+            && self.apply_dynamic_fd_var_redirects(&cmd, true, fd_var_walk_undoable)?
         {
             // rubash#2125: the applier rendered the diagnostic and set
             // status 1, but the failure never becomes an IoError at the
@@ -756,6 +767,16 @@ impl Executor {
                             .retain(|(name, _)| !name.starts_with("__RUBASH_PARSE"));
                         let mut fixed = function.as_ref().clone();
                         fixed.body = body;
+                        // rubash#3209: same definition-line restamp
+                        // as the parser path (bare `name()` only).
+                        if !fixed.keyword && fixed.has_parentheses {
+                            if let Some(definition_line) = cmd.line {
+                                crate::parser::restamp_function_body_first_command(
+                                    &mut fixed.body,
+                                    definition_line,
+                                );
+                            }
+                        }
                         fixed.unparsed_body_source = None;
                         fixed_cmd.function_command = Some(Box::new(fixed));
                         let fixed_function =
@@ -1231,14 +1252,28 @@ impl Executor {
             return Err(ExecuteError::ExitCode(2));
         }
 
-        // Bash must parse extglob syntax while the extglob option is
-        // enabled.  A pathname such as `@(name)` in a simple command is
-        // therefore a syntax error when the option is off; treating it as a
-        // literal silently accepts malformed scripts.  Conditional RHS
-        // patterns are handled separately and intentionally remain eligible
-        // for Bash's conditional-pattern semantics.
+        // GNU adjudicates extglob legality at READ time: parse.y:5466
+        // read_token_word consumes a `(` group as pattern text only
+        // while the read-time `extended_glob` is on, and a group met
+        // with the gate off fails the parse itself. At execution the
+        // pattern text is inert data — pathname expansion and strmatch
+        // consult the LIVE flag (pathexp.c unquoted_glob_pattern_p;
+        // pathexp.h FNMATCH_EXTFLAG), so a group that WAS consumed as
+        // a pattern at read time degrades to literal text/matching
+        // when a same-unit `shopt -u extglob` has already executed
+        // (rubash#3224) and must not be vetoed here. The diagnostic
+        // below therefore belongs only to patterns whose producing
+        // pass did not consume them as patterns
+        // (ExtglobPattern::read_gate_on == false): for those, treating
+        // the word as a literal would silently accept a script GNU
+        // rejects at read time. Conditional RHS patterns are handled
+        // separately and intentionally remain eligible for Bash's
+        // conditional-pattern semantics.
         if !crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extglob")
-            && !cmd.extglob_patterns.is_empty()
+            && cmd
+                .extglob_patterns
+                .iter()
+                .any(|pattern| !pattern.read_gate_on)
             && cmd.conditional_command.is_none()
             && cmd.case_command.is_none()
         {
@@ -1593,6 +1628,7 @@ impl Executor {
         // (DISCARD) — the command is abandoned with status 1 and the
         // session keeps reading, whatever the target dispatches to.
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             // rubash#439: expansion error, not a failed command — no ERR trap.
             self.command_expansion_failed.set(true);
@@ -1702,6 +1738,27 @@ impl Executor {
             })
     }
 
+    /// rubash#2615: whether THIS command's own do_redirections walk
+    /// runs with RX_UNDOABLE, so its fixed entries' undo saves occupy
+    /// descriptor slots while the walk evolves (redir.c:243). GNU's
+    /// in-process dispatch (builtins, functions, exec —
+    /// execute_builtin_or_function, execute_cmd.c:5606) and the
+    /// compound prologue (execute_cmd.c:854) are undoable; the fork
+    /// child's walks are RX_ACTIVE only (execute_disk_command,
+    /// execute_cmd.c:5522; the subshell's own list,
+    /// execute_cmd.c:1761). A subshell-headed node therefore walks
+    /// active even though its body later runs in a child executor,
+    /// and a compound node without a simple word walks undoable.
+    pub(in crate::executor) fn redirect_walk_is_undoable(&mut self, cmd: &CommandNode) -> bool {
+        if cmd.subshell_command.is_some() {
+            return false;
+        }
+        if cmd.words.is_empty() {
+            return true;
+        }
+        self.heredoc_error_command_runs_in_main_shell(cmd)
+    }
+
     /// True when the command carrying a failing heredoc would dispatch to
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
@@ -1758,6 +1815,7 @@ impl Executor {
                 // abandoned with status 1 and the session keeps reading;
                 // the FORCE_EOF branch below is noninteractive only.
                 if self.expansion_error_is_interactive_discard() {
+                    self.note_unit_expansion_error_discard();
                     self.exit_code = 1;
                     // rubash#439: expansion error, not a failed command.
                     self.command_expansion_failed.set(true);
