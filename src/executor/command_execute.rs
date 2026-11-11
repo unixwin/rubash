@@ -211,18 +211,26 @@ impl Executor {
             // (the loop's, for the pass-through forms) from firing a
             // second time. Unmarked IoErrors are body-stage failures
             // and keep the passthrough below.
-            // rubash#1611: inside a timed dispatch the time branch
-            // adjudicates once — record the conversion for it instead
-            // of firing.
-            if self.compound_redirect_failed.get() {
+            // rubash#1611 + PR #3269 review R1: inside a timed
+            // dispatch this conversion must NOT intercept at all.
+            // err_trap_fired_at_dispatch means "the ERR trap already
+            // fired at dispatch" (the #2117 suppression gate in
+            // maybe_run_error_trap) — setting it without firing, and
+            // converting the failure into an Ok completion, blocks
+            // the ast_exec time branch's own adjudication look, so
+            // the timed compound's redirect failure lost its ERR
+            // trap entirely (the timed branch of this conversion did
+            // exactly that when first written). Let the marked
+            // IoError propagate in its unconverted shape instead:
+            // the time branch reports it once (report_io_error_routed
+            // records status 1) and adjudicates ERR / errexit
+            // against the final status, exactly as the pre-#2659
+            // base did.
+            if self.timed_dispatch_depth.get() == 0 && self.compound_redirect_failed.get() {
                 if let Err(ExecuteError::IoError(error)) = &result {
                     self.report_io_error_routed(cmd, error)?;
                     self.exit_code = 1;
-                    if self.timed_dispatch_depth.get() == 0 {
-                        self.maybe_run_error_trap(cmd)?;
-                    } else {
-                        self.err_trap_fired_at_dispatch.set(true);
-                    }
+                    self.maybe_run_error_trap(cmd)?;
                     if self.errexit_enabled() && self.errexit_is_active() {
                         return Err(self.errexit_exit(1));
                     }

@@ -752,9 +752,20 @@ impl Executor {
     /// the [[ ]] / (( )) forms complete as before and keep their
     /// existing loop-side adjudication. The fire call's own gates
     /// keep inverted, and-or and suppressed contexts exempt.
-    /// rubash#1611: inside a timed dispatch the time branch
-    /// adjudicates once — record the conversion for it instead of
-    /// firing.
+    /// rubash#1611 + PR #3269 review R1: inside a timed dispatch
+    /// the site does NOT adjudicate at all — no fire, and above all
+    /// no err_trap_fired_at_dispatch record: that flag means "the
+    /// ERR trap already fired at dispatch" (the #2117 suppression
+    /// gate in maybe_run_error_trap), so recording it without
+    /// firing suppresses the ast_exec time branch's own
+    /// adjudication look and the timed compound loses its ERR trap
+    /// (the timed branch of this adjudication did exactly that when
+    /// first written). The absorbed completion — diagnostic
+    /// printed, status 1, Ok — is already the shape the time branch
+    /// adjudicates from, so only the failure mark is noted (the
+    /// #846 inversion suppression reads it) and the branch decides
+    /// ERR and errexit against the final status, as the pre-#2659
+    /// base did.
     fn adjudicate_absorbed_compound_redirect_failure(
         &mut self,
         cmd: &CommandNode,
@@ -769,11 +780,10 @@ impl Executor {
             return Ok(false);
         }
         self.note_compound_redirect_failure();
-        if self.timed_dispatch_depth.get() == 0 {
-            self.maybe_run_error_trap(cmd)?;
-        } else {
-            self.err_trap_fired_at_dispatch.set(true);
+        if self.timed_dispatch_depth.get() > 0 {
+            return Ok(false);
         }
+        self.maybe_run_error_trap(cmd)?;
         Ok(self.errexit_enabled() && self.errexit_is_active())
     }
 
