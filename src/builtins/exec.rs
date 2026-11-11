@@ -427,9 +427,13 @@ where
                 } else {
                     cwd.join(&candidate)
                 };
-                let metadata = std::fs::metadata(&candidate)
-                    .or_else(|_| std::fs::metadata(cwd.join(command)))
-                    .ok();
+                let (metadata, probe_error) = match std::fs::metadata(&candidate) {
+                    Ok(metadata) => (Some(metadata), None),
+                    Err(_) => match std::fs::metadata(cwd.join(command)) {
+                        Ok(metadata) => (Some(metadata), None),
+                        Err(error) => (None, Some(error)),
+                    },
+                };
                 match metadata {
                     None => {
                         // exec.def:166-168 full_pathname: the failing path is
@@ -444,6 +448,22 @@ where
                             format!("{}/{}", cwd.to_string_lossy().replace('\\', "/"), command)
                                 .replace("/./", "/")
                         };
+                        // A regular file as a path component fails the
+                        // probe ENOTDIR; GNU's file_error classification
+                        // (execute_cmd.c:6126-6159) reports that errno
+                        // with EX_NOEXEC, not the ENOENT wording
+                        // (rubash#3182).
+                        if probe_error
+                            .is_some_and(|error| error.raw_os_error() == Some(libc::ENOTDIR))
+                        {
+                            writeln!(
+                                stderr,
+                                "{}{}: Not a directory",
+                                diagnostic_prefix(env_vars),
+                                full
+                            )?;
+                            return Ok(EX_NOEXEC);
+                        }
                         writeln!(
                             stderr,
                             "{}{}: No such file or directory",
