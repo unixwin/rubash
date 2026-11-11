@@ -3360,7 +3360,11 @@ impl Executor {
             // targets are entry-bound already (never created), and
             // closed targets (`>&-`) create nothing.
             if !is_closed_redirect_target(&expanded) && redirect_target_fd(&expanded).is_none() {
-                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+                self.create_redirect_output_prepared_for(
+                    Some(redirect),
+                    &expanded,
+                    redirect.clobber,
+                )?;
             }
         }
         Ok(())
@@ -3397,7 +3401,11 @@ impl Executor {
                 && !is_closed_redirect_target(&expanded)
                 && !is_null_device(&expanded)
             {
-                self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+                self.create_redirect_output_prepared_for(
+                    Some(redirect),
+                    &expanded,
+                    redirect.clobber,
+                )?;
             }
         }
         Ok(())
@@ -3448,7 +3456,11 @@ impl Executor {
                     && !is_closed_redirect_target(&expanded)
                     && redirect_target_fd(&expanded).is_none()
                 {
-                    self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+                    self.create_redirect_output_prepared_for(
+                        Some(redirect),
+                        &expanded,
+                        redirect.clobber,
+                    )?;
                 }
                 let target = self.anchor_compound_redirect_target(&expanded);
                 let append_redirect = Redirect {
@@ -3540,7 +3552,11 @@ impl Executor {
                     && redirect_target_fd(&expanded).is_none()
                     && !is_null_device(&expanded)
                 {
-                    self.create_redirect_output_prepared(&expanded, redirect.clobber)?;
+                    self.create_redirect_output_prepared_for(
+                        Some(redirect),
+                        &expanded,
+                        redirect.clobber,
+                    )?;
                 }
                 let target = self.anchor_compound_redirect_target(&expanded);
                 let append_redirect = Redirect {
@@ -3915,11 +3931,11 @@ impl Executor {
                         // append arms folded raw-byte pairs via
                         // redirect_target_filesystem_path; the walk
                         // keeps that conversion.
-                        open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(&target)),
-                        )?
+                        open_redirect_append(&self.session_path(
+                            self.redirect_target_filesystem_path_for(redirect, &target),
+                        ))?
                     } else {
-                        self.create_redirect_output(&target, redirect.clobber)?
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?
                     };
                     // rubash#2635: the open above is GNU's redir_open
                     // (the target now exists); the dup2 onto a
@@ -3939,11 +3955,15 @@ impl Executor {
                     }
                     let file =
                         if matches!(redirect.kind, crate::parser::RedirectKind::CombinedAppend) {
-                            open_redirect_append(
-                                &self.session_path(self.redirect_target_filesystem_path(&target)),
-                            )?
+                            open_redirect_append(&self.session_path(
+                                self.redirect_target_filesystem_path_for(redirect, &target),
+                            ))?
                         } else {
-                            self.create_redirect_output(&target, redirect.clobber)?
+                            self.create_redirect_output_for(
+                                Some(redirect),
+                                &target,
+                                redirect.clobber,
+                            )?
                         };
                     let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(target));
                     bindings.insert(1, binding.clone());
@@ -3978,11 +3998,15 @@ impl Executor {
                     if fd == 1 {
                         let path = target.strip_prefix('&').unwrap_or(&target).to_string();
                         let file = if redirect.append {
-                            open_redirect_append(
-                                &self.session_path(self.redirect_target_filesystem_path(&path)),
-                            )?
+                            open_redirect_append(&self.session_path(
+                                self.redirect_target_filesystem_path_for(redirect, &path),
+                            ))?
                         } else {
-                            self.create_redirect_output(&path, redirect.clobber)?
+                            self.create_redirect_output_for(
+                                Some(redirect),
+                                &path,
+                                redirect.clobber,
+                            )?
                         };
                         let binding = ExecSpawnBinding::File(std::rc::Rc::new(file), Some(path));
                         bindings.insert(1, binding.clone());
@@ -7887,7 +7911,7 @@ impl Executor {
             // itself never runs.
             match redirect.kind {
                 crate::parser::RedirectKind::Output => {
-                    self.create_redirect_output(&target, redirect.clobber)?;
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 }
                 crate::parser::RedirectKind::Append => {
                     open_redirect_append(
