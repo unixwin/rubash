@@ -86,28 +86,14 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output_ordered(cmd, stdout, stderr, false)
-    }
-
-    /// printf variant (rubash#1134): GNU emits printf's diagnostics
-    /// unbuffered while its output flushes at builtin exit, so the
-    /// stderr buffer is routed before the stdout buffer.
-    pub(in crate::executor) fn write_buffered_builtin_output_stderr_first(
-        &mut self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-        stderr: &[u8],
-    ) -> Result<(), ExecuteError> {
-        self.write_buffered_builtin_output_ordered(cmd, stdout, stderr, true)
-    }
-
-    fn write_buffered_builtin_output_ordered(
-        &mut self,
-        cmd: &CommandNode,
-        stdout: &[u8],
-        stderr: &[u8],
-        stderr_first: bool,
-    ) -> Result<(), ExecuteError> {
+        // rubash#3324: the old printf-only stderr-first variant is
+        // gone — GNU line-buffers stdout (shell.c:1921-1922), so a
+        // builtin's diagnostics interleave with its output in
+        // production order, and printf routes its ordered log
+        // (write_buffered_builtin_output_chunks) instead. The pair
+        // route below keeps its plain stdout-then-stderr fallback
+        // for builtins whose two buffers have no cross-stream order
+        // to preserve.
         // Silent-builtin short-circuit (perf): `shift` and friends succeed
         // with empty stdout/stderr buffers on the hot path. GNU runs such a
         // builtin's writes through its redirected descriptors, but a zero-
@@ -177,12 +163,8 @@ impl Executor {
         // marker-free and non-UTF-8 slices pass through untouched.
         let stdout = decode_raw_byte_marker_bytes(stdout);
         let stderr = decode_raw_byte_marker_bytes(stderr);
-        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, stderr_first, false)? {
+        if self.route_builtin_buffered_output_ordered(cmd, &stdout, &stderr, false)? {
             return Ok(());
-        }
-        if stderr_first {
-            self.write_buffered_stderr_block(cmd, &stderr)?;
-            return self.write_buffered_stdout_block(cmd, &stdout);
         }
         self.write_buffered_stdout_block(cmd, &stdout)?;
         self.write_buffered_stderr_block(cmd, &stderr)
