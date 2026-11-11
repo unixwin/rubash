@@ -3659,6 +3659,24 @@ impl Executor {
     }
 
     pub(crate) fn parser_diagnostic_prefix(&self) -> String {
+        // rubash#2734: GNU parser_error's first branch (error.c:308-309):
+        // while the `interactive` global is set, the prolog is the error
+        // name alone — no input-name segment, no line segment — and the
+        // name is base_pathname (shell_name) (error.c:110-111).
+        // `__RUBASH_INTERACTIVE_FLAG_OFF` is this engine's encoding of
+        // GNU's zeroed `interactive` (the -i script route, startup and
+        // sourced files, and PROMPT_COMMAND all run with it set), so
+        // those routes fall through to the file/-c forms below; only
+        // current interactive input (piped -i, -i -c, the reader) takes
+        // this branch. The EVAL/TRAP/source context arms keep their
+        // existing order below it.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
             self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
@@ -3705,6 +3723,16 @@ impl Executor {
     /// parser_diagnostic_prefix: the ` line N` segment honors gnu_errfmt
     /// (`script:2: `, `script: -c:2: `, `script: eval:2: `).
     pub(crate) fn parser_error_prefix(&self) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         if let (Some(script), Some(line)) = (
             self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME"),
@@ -3828,6 +3856,17 @@ impl Executor {
     /// Parser/syntax-error diagnostic prefix for a specific line. Like
     /// parser_diagnostic_prefix but for a caller-supplied line number.
     pub fn parser_diagnostic_prefix_for_line(&self, line: usize) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone, ahead
+        // of the EVAL/source context arms below.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // error.c yy_input_name: inside `eval` the input stream name is
         // "eval" and overrides the -c tag (`bash: eval: line N:`).
@@ -3870,6 +3909,17 @@ impl Executor {
     /// parser_diagnostic_prefix_for_line (`script:2: `,
     /// `script: eval:2: `, `bash: -c:2: ` under gnu_errfmt).
     pub fn parser_error_prefix_for_line(&self, line: usize) -> String {
+        // rubash#2734: parser_error's interactive first branch
+        // (error.c:308-309) — see parser_diagnostic_prefix. Current
+        // interactive input reports the shell basename alone, ahead
+        // of the TRAP/EVAL context arms below.
+        if self.invocation_interactive() && self.get_env("__RUBASH_INTERACTIVE_FLAG_OFF").is_none()
+        {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
         let is_c = self.shell_state.env_vars.contains_key("__RUBASH_IS_C");
         // GNU trap.c:496: a trap action parses under the input name
         // "trap" ("interrupt trap" for SIGINT), which parser_error
