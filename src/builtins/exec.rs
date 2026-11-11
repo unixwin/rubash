@@ -452,9 +452,13 @@ where
                         // probe ENOTDIR; GNU's file_error classification
                         // (execute_cmd.c:6126-6159) reports that errno
                         // with EX_NOEXEC, not the ENOENT wording
-                        // (rubash#3182).
+                        // (rubash#3182). The kind comparison is the
+                        // portable form of the errno test: std maps
+                        // ENOTDIR to NotADirectory on unix, and the
+                        // shared code must not name the unix-only libc
+                        // crate (Windows E0433).
                         if probe_error
-                            .is_some_and(|error| error.raw_os_error() == Some(libc::ENOTDIR))
+                            .is_some_and(|error| error.kind() == io::ErrorKind::NotADirectory)
                         {
                             writeln!(
                                 stderr,

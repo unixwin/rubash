@@ -5993,8 +5993,11 @@ pub(crate) fn slash_command_execve_error_message(
             // fails ENOTDIR and GNU's classification (the execve errno
             // via file_error, execute_cmd.c:6126-6159) is
             // "Not a directory" with 126, not 127 (`zz/x` with `zz` a
-            // plain file, rubash#3182).
-            if probe_error.is_some_and(|error| error.raw_os_error() == Some(libc::ENOTDIR)) {
+            // plain file, rubash#3182). The kind comparison is the
+            // portable form of the errno test: std maps ENOTDIR to
+            // NotADirectory on unix, and the shared code must not
+            // name the unix-only libc crate (Windows E0433).
+            if probe_error.is_some_and(|error| error.kind() == std::io::ErrorKind::NotADirectory) {
                 Some(("Not a directory", 126))
             } else {
                 Some(("No such file or directory", 127))
