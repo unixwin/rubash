@@ -431,6 +431,52 @@ impl Executor {
         Ok(true)
     }
 
+    /// rubash#3333 — GNU coreutils mkdir.c `make_ancestors`:
+    /// `mkdir -p` creates the operand component by component, and
+    /// on failure the diagnostic names the operand text truncated
+    /// after the first failing component (`a/b` with `a` a file
+    /// reports 'a'; `a/./b` and `a//b` keep their literal
+    /// separators). Each prefix resolves through the same
+    /// operand-root convergence as the whole operand (the #3276
+    /// cwd-anchor route for a deleted session cwd), and a
+    /// single-level `create_dir` per prefix keeps the At arm's
+    /// mkdirat semantics. An EEXIST answer gets a follow-up stat:
+    /// a directory continues the walk, a non-directory is
+    /// ENOTDIR, and a stat failure (dangling symlink) keeps
+    /// GNU's EEXIST. An empty operand has no component to fail
+    /// on: GNU reports '' ENOENT.
+    fn mkdir_create_parents(&self, operand: &str) -> Result<(), (io::Error, String)> {
+        if operand.is_empty() {
+            return Err((io::Error::from_raw_os_error(libc::ENOENT), String::new()));
+        }
+        // An operand of only slashes ("/", "//") names the root
+        // itself: one prefix, the whole operand.
+        let mut prefixes = mkdir_parent_prefixes(operand);
+        if prefixes.is_empty() {
+            prefixes.push(operand);
+        }
+        for prefix in prefixes {
+            let native = shell_path_to_windows(prefix, &self.shell_state.env_vars);
+            let joined = self.session_path(native.clone());
+            let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
+            match node.create_dir() {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match node.stat() {
+                    Ok(stat) if stat.is_dir => {}
+                    Ok(_) => {
+                        return Err((
+                            io::Error::from_raw_os_error(libc::ENOTDIR),
+                            prefix.to_string(),
+                        ));
+                    }
+                    Err(_) => return Err((error, prefix.to_string())),
+                },
+                Err(error) => return Err((error, prefix.to_string())),
+            }
+        }
+        Ok(())
+    }
+
     fn external_mkdir(&mut self, cmd: &CommandNode) -> Result<bool, ExecuteError> {
         // rubash#1636 narrowing (2026-10-27 ruling): the parse below
         // implements -p/--parents exactly; every other option shape
@@ -524,16 +570,31 @@ impl Executor {
             let native = shell_path_to_windows(&expanded, &self.shell_state.env_vars);
             let joined = self.session_path(native.clone());
             let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
-            let result = if parents {
-                node.create_dir_all()
+            // rubash#3333: -p walks the operand component by
+            // component (GNU coreutils mkdir.c make_ancestors) and
+            // the diagnostic names the operand text truncated
+            // after the first failing component — `a/b` with `a`
+            // a file reports 'a', not the whole operand. The
+            // single-level arm keeps reporting the operand itself.
+            let result: Result<(), (io::Error, String)> = if parents {
+                self.mkdir_create_parents(expanded)
+            } else if expanded.is_empty() {
+                // GNU mkdir("") fails ENOENT; the raw create_dir
+                // below would answer EEXIST against the session
+                // cwd itself.
+                Err((
+                    io::Error::from_raw_os_error(libc::ENOENT),
+                    expanded.to_string(),
+                ))
             } else {
                 node.create_dir()
+                    .map_err(|error| (error, expanded.to_string()))
             };
-            if let Err(error) = result {
+            if let Err((error, name)) = result {
                 writeln!(
                     stderr,
                     "mkdir: cannot create directory '{}': {}",
-                    expanded,
+                    name,
                     crate::posix_errors::message(&error)
                 )?;
                 failed = true;
@@ -3334,6 +3395,35 @@ fn rm_declines(words: &[String]) -> bool {
 /// flag position" (before the `--` terminator): -m/--mode in every
 /// form, -v/--verbose, -Z/--context, bundles carrying them, unknown
 /// options, and the --help/--version info requests.
+/// The operand text truncated after each of its components, in
+/// order: `a/b` -> ["a", "a/b"], `./a/b` -> [".", "./a",
+/// "./a/b"], `a/./b` -> ["a", "a/.", "a/./b"], `a//b` ->
+/// ["a", "a//b"]. The literal separators survive — GNU names the
+/// failing component in the operand's own spelling (rubash#3333).
+/// An operand of only slashes, or the empty string, yields no
+/// prefix. Slicing is safe: cuts land on '/' bytes, which are
+/// ASCII and never inside a multi-byte UTF-8 sequence.
+fn mkdir_parent_prefixes(operand: &str) -> Vec<&str> {
+    let bytes = operand.as_bytes();
+    let mut prefixes = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i] == b'/' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let mut j = i;
+        while j < bytes.len() && bytes[j] != b'/' {
+            j += 1;
+        }
+        prefixes.push(&operand[..j]);
+        i = j;
+    }
+    prefixes
+}
+
 fn mkdir_declines(words: &[String]) -> bool {
     let mut no_more_flags = false;
     for word in words {
