@@ -1,17 +1,20 @@
 use super::*;
 
 pub(in crate::executor) fn unset_args_need_builtin_diagnostics(args: &[String]) -> bool {
+    // GNU builtins/set.def unset_builtin scans with internal_getopt,
+    // which stops at the first operand (builtins/bashgetopt.c:77-84):
+    // only the option region can carry -f/-v or an unknown option
+    // letter. Reuse the shared option_region_end definition (rubash
+    // #3338/#3342) instead of a hand scan — a word past the first
+    // operand is a NAME, never an option. (The hand scan also read
+    // `--help` as unknown option letters; the region ends before it,
+    // and the executor route's lib call still dispatches help there,
+    // so the outcome is unchanged.)
+    let region = &args[..super::builtin_opt::option_region_end(args, false)];
     let mut functions = false;
     let mut variables = false;
 
-    for arg in args {
-        if arg == "--" || arg == "-" {
-            break;
-        }
-        if !arg.starts_with('-') {
-            break;
-        }
-
+    for arg in region {
         for option in arg[1..].chars() {
             match option {
                 'f' => functions = true,
