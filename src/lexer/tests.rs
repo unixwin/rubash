@@ -293,6 +293,56 @@ fn case_pattern_paren_does_not_close_command_substitution() {
 }
 
 #[test]
+fn unclosed_case_body_paren_closes_command_substitution() {
+    // rubash#2789: at the close-char gate, a `)` that no case token
+    // can own — the pattern region is still empty, or the paren is
+    // glued to `in` / to the case subject — closes the command
+    // substitution for the body parser (parse.y:4451 parse_comsub
+    // takes the whole unit; parse.y:4519-4521 raises the grammar
+    // error there) instead of being held as case syntax until EOF
+    // turns it into an incomplete-input diagnostic. Until #3241 only
+    // the glued forms escaped the detention; the gate predicate now
+    // also covers the shapes the pattern-content witness cannot
+    // tell apart (separator tail, an outer case's pattern polluting
+    // the witness). Asserted on the gate oracle itself; the
+    // staged twin's agreement at every line prefix is pinned by
+    // close_char_residual_incremental_tests. (The composite
+    // has_unclosed_input_syntax additionally consults the comsub
+    // residual family — a separate surface with its own verdicts.)
+    let gate = |src: &str| super::continuation::unclosed_input_close_char_posix(src, false);
+    for src in [
+        "echo $(case x in)",
+        "echo $(case x in )",
+        "echo \"$(case x in)\"",
+        "echo $(case x)",
+        "echo $(case x in a|)",
+        "echo $(case x in a| )",
+        "case a in a) echo $(case x in);; esac",
+    ] {
+        assert!(
+            gate(src).is_none(),
+            "gate should release the unit to the body parser: {src}"
+        );
+    }
+    // Controls: pattern content present, or a complete case — the
+    // detention boundary does not move.
+    assert!(gate("echo $(case x in a) echo x)").is_some());
+    // Two shapes the mirror predicate does NOT cover, in either
+    // machine: the pattern-list opener disarms the pattern region
+    // (stage 4), so no close condition can judge the `)` after it
+    // (and a trailing opener leaves the unit open); and a clause
+    // terminator re-arms the region only when the next clause's
+    // pattern begins, so a `)` immediately after `;;` finds no
+    // armed region. Both stay held here exactly as the parser arm
+    // leaves them.
+    assert!(gate("echo $(case x in ()").is_some());
+    assert!(gate("echo $(case x in (").is_some());
+    assert!(gate("echo $(case x in a;;)").is_some());
+    assert!(gate("echo $(case x in a|b) x;; esac)").is_none());
+    assert!(gate("echo $(case x in esac)").is_none());
+}
+
+#[test]
 fn nested_heredoc_in_command_substitution_is_collected_before_next_command() {
     let tokens = tokenize("echo $(cat <<EOF)\nfoo\nbar\nEOF\necho after");
     let substitution = tokens
