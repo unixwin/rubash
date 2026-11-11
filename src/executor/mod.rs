@@ -658,6 +658,17 @@ pub struct Executor {
     /// fact per group (the pending itself is consumed inside
     /// run_source_impl and never reached the classification).
     unit_signal_discard: bool,
+    /// rubash#2794: the unit's terminal word-expansion error was
+    /// adjudicated an interactive DISCARD — the FATAL class
+    /// (`${var:?}`, nounset unbound, bad @-transform) took
+    /// subst.c:10416-10418's error branch at its raise point
+    /// instead of the fatal FORCE_EOF branch. The raise points
+    /// note it where the adjudication is made
+    /// (`note_unit_expansion_error_discard`); the driver layer
+    /// takes it per unit like `unit_signal_discard`, so the run
+    /// classification can carry the discard fact the fate alone
+    /// (status 1, Completed) cannot express.
+    unit_expansion_error_discard: bool,
     /// rubash#2233, generalized by rubash#2346: set by the signal
     /// dispatch when an untrapped terminating signal is delivered on a
     /// path GNU settles through termsig_handler (sig.c:590): the termsig
@@ -1168,14 +1179,6 @@ pub struct Executor {
     /// failed `builtin name=value` names the builtin, while a bare
     /// `name=value` command prints no command segment.
     assignment_command_name: Option<String>,
-    /// GNU builtins emit assignment diagnostics through builtin_error, which
-    /// honors the builtin's redirected stderr and ordering. Builtin callers
-    /// (getopts OPTARG/name binds) set buffer_assignment_diagnostics and drain
-    /// pending_assignment_diagnostics into their buffered stderr so a
-    /// preceding buffered diagnostic (e.g. `illegal option -- h`) keeps its
-    /// position relative to the bind error.
-    buffer_assignment_diagnostics: bool,
-    pending_assignment_diagnostics: Vec<u8>,
     /// GNU getopts.def dogetopts: binding the option character into an
     /// integer-attributed OPTIND (name == "OPTIND") whose value is not
     /// arithmetic (`?`/`:`) raises an evalexp error that abandons the
@@ -1546,6 +1549,14 @@ pub struct Executor {
     /// came from that upfront lex (not from a later eval-time lex) and is
     /// eligible for the read-time re-derivation.
     unit_lex_locale: std::cell::RefCell<Option<String>>,
+    /// rubash#2772: extquote state in effect when each SOURCE LINE was
+    /// first reached at reader level — the state GNU's parser applies to
+    /// that line's `$'...'` translation verdicts (parse.y:4053 translates
+    /// a span inside a `${}` body only when `extended_quote` held at the
+    /// moment the line was read, for word-region spans in double quotes).
+    /// Same recording discipline as `line_lex_locales`; consumed by the
+    /// word re-derivation in command_prepare.
+    line_lex_extquotes: std::cell::RefCell<HashMap<usize, bool>>,
     /// GNU `line_number` ambient: at top level it advances to each
     /// command's parse-end line; inside a pre-parsed body it freezes at
     /// the enclosing command's established line (execute_cmd.c — only
@@ -1693,6 +1704,19 @@ pub struct Executor {
     /// (error.c get_name_for_error with yy_input_name()=="command
     /// substitution") and a newline-terminated body reader.
     backtick_body_diagnostic: Cell<bool>,
+    /// An arithmetic-fallback command-substitution body is being
+    /// expanded RIGHT NOW — a `$((` span that failed GNU's
+    /// chk_arithsub and fell back to a command substitution
+    /// (subst.c:10841-10866 LPAREN arm -> comsub). Like a backtick
+    /// body it is parsed in the substituted child at execution time
+    /// (subst.c:7143 parse_and_execute), never read-parsed, so its
+    /// parse error is contained: `command substitution: line N:`
+    /// prefix, substitution empty, status 2, script continues
+    /// (rubash#2677). Only the containment decision points consult
+    /// this flag (see `comsub_body_parse_is_contained`); the
+    /// backtick-only reader semantics (newline termination, the
+    /// unclosed-input verdict) keep reading `backtick_body_diagnostic`.
+    arith_fallback_comsub_body: Cell<bool>,
     /// GNU error.c:324-327 (parser_error): when exit_immediately_on_error
     /// is set at diagnostic time the shell prints only the FIRST line of a
     /// syntax-error report and immediately exit_shell(2)s — the offending
@@ -1857,6 +1881,18 @@ pub struct Executor {
     /// branches, failglob pattern) leaves the gate's existing behavior
     /// untouched, so an unquoted `$var` that word-splits stays ambiguous.
     redirect_target_single_glob_match: RefCell<HashSet<String>>,
+    /// The transport fact the folded target string cannot carry: keys
+    /// are folded redirect-target strings whose literal expansion
+    /// carried raw-byte transport (a stored E000 pair or E400 escape).
+    /// A folded byte char (e.g. U+009C for byte 0x9C) is
+    /// indistinguishable from a genuine char of the same code point,
+    /// so the output open funnels consult this set — cleared at each
+    /// execute_command entry like redirect_target_memo — to decide
+    /// whether the target's byte chars emit raw bytes or the name
+    /// takes the plain UTF-8 funnel. Only the literal arms of
+    /// expand_redirect_operand_fields set it; glob matches, procsub
+    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
+    redirect_target_had_transport: RefCell<HashSet<String>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.

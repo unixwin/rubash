@@ -397,6 +397,16 @@ pub struct GroupedRunClassification {
     /// DISCARD arm); it does not by itself decide the session —
     /// the errexit verdict on the interrupted status does.
     pub signal_discard: bool,
+    /// rubash#2794: the terminal group ended in an
+    /// expansion-error discard — a FATAL-class word-expansion
+    /// error (`${var:?}`, nounset unbound, bad @-transform) the
+    /// executor adjudicated an interactive DISCARD at its raise
+    /// point (subst.c:10416-10418's error branch) instead of
+    /// the fatal FORCE_EOF branch. Recorded per group like
+    /// `signal_discard`; like it, the discard abandons the
+    /// rest of the line without deciding the session — the
+    /// errexit verdict on status 1 does.
+    pub expansion_error_discard: bool,
 }
 
 /// Same grouped run as [`run_script_with_history_at_line_offset`], also
@@ -565,6 +575,9 @@ fn run_script_grouped_at_line_offset(
     // the run (a terminal discard group stops nothing, but the
     // classification must still report it).
     let mut terminal_discard = false;
+    // rubash#2794: the same carry for the expansion-error
+    // discard fact.
+    let mut terminal_expansion_discard = false;
     while index < raw_lines.len() {
         // One gather implementation for every grouped reader (the `source`
         // builtin shares it via read_next_source_group). The gather loop
@@ -578,7 +591,7 @@ fn run_script_grouped_at_line_offset(
         // driver's exec text re-joins the group's line texts (and history
         // expansion may rewrite them), so run_history_group's parse keeps
         // its own scan.
-        let Some((pending, start_line, group, mut feeder_tokens, _gather_info)) =
+        let Some((pending, start_line, group, mut feeder_tokens, gather_info)) =
             read_next_source_group(executor, &raw_lines, &mut index)
         else {
             break;
@@ -597,6 +610,7 @@ fn run_script_grouped_at_line_offset(
                 // as the terminal one (Q6 arm B approximation
                 // (iii), resolved).
                 terminal_discard = false;
+                terminal_expansion_discard = false;
                 continue;
             }
             failglob_discard_until = None;
@@ -646,6 +660,7 @@ fn run_script_grouped_at_line_offset(
             redirect_cmd,
             false,
             feeder_tokens.take(),
+            Some(gather_info.entry_extended_glob),
         );
         if executor.evalerror_failglob_pending.get() {
             failglob_discard_until = Some(group_last_line);
@@ -673,6 +688,10 @@ fn run_script_grouped_at_line_offset(
         // below is exactly what separates the two.
         let discarded = executor.take_unit_signal_discard();
         terminal_discard = discarded;
+        // rubash#2794: the same per-group take for the
+        // expansion-error discard record the raise points noted.
+        let expansion_discarded = executor.take_unit_expansion_error_discard();
+        terminal_expansion_discard = expansion_discarded;
         // GNU execute_cmd.c:652-656: `! CMD` gains CMD_IGNORE_RETURN under
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
@@ -699,6 +718,7 @@ fn run_script_grouped_at_line_offset(
                     None
                 },
                 signal_discard: discarded,
+                expansion_error_discard: expansion_discarded,
             };
             // DE-06 (design 9.3; PLAN row 12): a parse error is
             // ending this run — a selected `parse-error` filter
@@ -789,6 +809,7 @@ fn run_script_grouped_at_line_offset(
         GroupedRunClassification {
             last_inverted: executor.last_command_inverted(),
             signal_discard: terminal_discard,
+            expansion_error_discard: terminal_expansion_discard,
             ..GroupedRunClassification::default()
         },
     )
@@ -804,6 +825,17 @@ pub(crate) struct GroupGatherInfo {
     /// the #1940 Fix A certified skip when its own batch expansion of
     /// the group is byte-identical to this text.
     pub certified_expanded: Option<String>,
+    /// rubash#3205: the process-global extglob parse gate captured
+    /// when this group's gather STARTED. A group whose text flips
+    /// the gate leaves the global at the group-END value (the gather
+    /// feeder lands the flip at the group's own unit boundary), so
+    /// a caller that re-lexes the group text must first pin the
+    /// gate back to this entry value: GNU reads the whole unit
+    /// under the gate in effect when the unit started
+    /// (parse.y:5466 read_token_word consults the read-time
+    /// extended_glob per token), never under a state the unit
+    /// itself creates.
+    pub entry_extended_glob: bool,
     /// The gather loop ran out of input without a complete break: the
     /// accumulated text is known-incomplete from the collector's own
     /// incremental state (its machines' last verdict, or a heredoc /
@@ -996,12 +1028,14 @@ impl ParkShadow {
 ///     group takes run_source_with_line_offset's unclosed-diagnostics
 ///     re-lex);
 ///   - the feeder performed no EFFECTIVE extglob toggle
-///     (`extglob_toggled`): the fresh re-lex replays shopt flips starting
-///     from the group-END global gate, so on a flipping group its
-///     pre-flip lines see a different gate than the streaming feed did —
-///     refusing reuse preserves today's re-lex behavior byte for byte
-///     (parse.y:5466 gates pattern chars per token; tokens snapshot the
-///     gate they were lexed under, `Token::extglob_gate`).
+///     (`extglob_toggled`): the fresh re-lex of a flipping group is
+///     pinned to the group-ENTRY gate (GroupGatherInfo's
+///     `entry_extended_glob`, captured before the gather ran), so
+///     refusing reuse keeps one well-tested path for flipping
+///     groups instead of depending on the streaming feed and the
+///     re-lex producing byte-identical streams (parse.y:5466 gates
+///     pattern chars per token; tokens snapshot the gate they were
+///     lexed under, `Token::extglob_gate`).
 /// The trailing line-break separator the feeder emits per committed
 /// logical line is left in place; the caller pops it with the same rule
 /// `tokenize_comsub_body_with_origin` applies to the fresh stream.
@@ -1027,6 +1061,12 @@ pub(crate) fn read_next_source_group(
     let mut group: Vec<(String, bool)> = Vec::new();
     let start_line = *index + 1;
     let posix = executor.get_env("__RUBASH_POSIX_MODE").as_deref() == Some("1");
+    // rubash#3205: the extglob parse gate at this group's entry,
+    // captured before the gather's feeder can land any of the
+    // group's own flips at its unit boundaries. Callers that
+    // re-lex the group text pin the gate to this value (see
+    // GroupGatherInfo::entry_extended_glob).
+    let entry_extended_glob = crate::lexer::parse_extended_glob();
     let aliases_live =
         executor.alias_expansion_enabled() && !executor.shell_state.aliases.is_empty();
     // rubash#1961: the feeder now runs in BOTH arms. The alias-live arm
@@ -1077,6 +1117,8 @@ pub(crate) fn read_next_source_group(
     // holds because the streaming expander only ever appends committed
     // output (it never revises text it already released).
     let mut text_scans = GroupTextScans::new(posix);
+    text_scans.extglob_seed =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
     // perf21 battery fusion: heredoc-body lines live in the pending mirror
     // but not in the feeder's logical-line mirror, so a group that saw any
     // must keep advancing the battery's quotes/comsub machines itself.
@@ -1399,6 +1441,7 @@ pub(crate) fn read_next_source_group(
     let mut info = GroupGatherInfo {
         certified_expanded: None,
         known_incomplete: !broke_complete,
+        entry_extended_glob,
     };
     let feeder_tokens = match scan {
         Some(mut scan)
@@ -1638,6 +1681,11 @@ struct GroupTextScans {
     /// Exact char mirror of the accumulated `pending` group text.
     chars: Vec<char>,
     posix: bool,
+    /// rubash#3229: the reader's executed `extended_glob` state when
+    /// this gather started; seeds the extglob-group arm of
+    /// `needs_more` (whose in-text `shopt` mirror cannot see `shopt`
+    /// lines that were earlier, already-executed groups).
+    extglob_seed: bool,
     quotes: Option<ScanCheckpoint<crate::lexer::QuotesResidualState>>,
     comsub: Option<ScanCheckpoint<crate::lexer::ComsubResidualState>>,
     balanced: Option<ScanCheckpoint<crate::lexer::BalancedResidualState>>,
@@ -1652,6 +1700,7 @@ impl GroupTextScans {
         Self {
             chars: Vec::new(),
             posix,
+            extglob_seed: false,
             quotes: Some(ScanCheckpoint {
                 resume: 0,
                 snapshot: crate::lexer::QuotesResidualState::default(),
@@ -1728,6 +1777,15 @@ impl GroupTextScans {
             return true;
         }
         if self.advance_close_char() {
+            return true;
+        }
+        // rubash#3229: an unclosed extglob pattern group
+        // (parse.y:5466-5489) — word-internal, so no parked machine
+        // above can see it (the word tokenizer folds the group into
+        // the word). A fresh probe over the pending text instead; the
+        // scan's operator-byte fast reject keeps it at memchr speed
+        // for the groups that carry no group opener.
+        if crate::lexer::unclosed_extglob_group_line(pending, self.extglob_seed).is_some() {
             return true;
         }
         // parse.y:5379-5384: trailing unquoted backslash keeps the line
@@ -1892,6 +1950,7 @@ fn run_history_group(
     redirect_cmd: Option<&CommandNode>,
     interactive: bool,
     feeder_tokens: Option<Vec<Token>>,
+    entry_extended_glob: Option<bool>,
 ) -> i32 {
     let history_on = executor.get_env("__RUBASH_SETOPT_history").as_deref() == Some("1");
     let histexpand_on = executor.get_env("__RUBASH_SETOPT_histexpand").as_deref() == Some("1");
@@ -2141,18 +2200,42 @@ fn run_history_group(
             None,
             tokens,
         ),
-        None => run_source_with_line_offset(
-            executor,
-            &exec_text,
-            interactive,
-            start_line.saturating_sub(1),
-            redirect_cmd,
-            if exec_text == pre_alias_text {
-                None
-            } else {
-                Some(pre_alias_text.as_str())
-            },
-        ),
+        None => {
+            // rubash#3205: a fresh re-lex of a gathered group must
+            // start from the gate captured at the group's entry, not
+            // the group-end global the gather left behind (the
+            // gather feeder landed the group's own shopt flips at
+            // the group's unit boundaries). Pin the gate for the
+            // duration of the run and restore the caller's value
+            // afterwards: what the gate is after the group is
+            // execution's own business (the shopt builtins that
+            // actually ran set it), exactly as before this pin.
+            // Callers that did not gather through
+            // read_next_source_group pass None — their text was
+            // never pre-scanned, so the live gate already is the
+            // entry state.
+            let saved_extended_glob = entry_extended_glob.map(|entry| {
+                let saved = crate::lexer::parse_extended_glob();
+                crate::lexer::set_parse_extended_glob(entry);
+                saved
+            });
+            let status = run_source_with_line_offset(
+                executor,
+                &exec_text,
+                interactive,
+                start_line.saturating_sub(1),
+                redirect_cmd,
+                if exec_text == pre_alias_text {
+                    None
+                } else {
+                    Some(pre_alias_text.as_str())
+                },
+            );
+            if let Some(saved) = saved_extended_glob {
+                crate::lexer::set_parse_extended_glob(saved);
+            }
+            status
+        }
     };
     executor
         .shell_state
@@ -2586,6 +2669,13 @@ fn token_walk_verdict(source: &str) -> TokenWalkVerdict {
 /// stack and trailing-connector answer across appended lines.
 pub fn stdin_source_text_needs_more(source: &str, posix: bool) -> bool {
     if crate::lexer::has_unclosed_input_syntax_posix(source, posix) {
+        return true;
+    }
+    // rubash#3229: an unclosed extglob pattern group keeps the reader
+    // open (parse.y:5466-5489). Seeded closed here — `shopt` lines
+    // inside the text itself open the scan's mirror; the parked
+    // gather (GroupTextScans) seeds it with the executed state.
+    if crate::lexer::unclosed_extglob_group_line(source, false).is_some() {
         return true;
     }
     // parse.y:5379-5384: trailing unquoted backslash keeps the physical line
@@ -3949,12 +4039,70 @@ fn run_source_impl(
         suppress_unclosed_diagnostic,
         !source_run_prior,
     );
+    // rubash#2680: a unit that ended in a parse error has that error's
+    // status as its own $? — GNU's reader abandons the unit with the
+    // parse failure's status (parse_and_execute's yyparse failure,
+    // evalstring.c:584-600). The parser's own error path already
+    // records it, but the unclosed-diagnostics route only RETURNS its
+    // status (2, or 1 for the array-list family) without recording
+    // it, so a grouped reader's parse-abort adjudication — which
+    // reads last_exit_code — inherited the PREVIOUS unit's status
+    // and a script whose last group died in the route exited with a
+    // stale code (0 after a successful `shopt`). Record the unit's
+    // status whenever the parse-error latch is still standing.
+    if executor.parse_error_pending() {
+        executor.set_last_exit_code(status);
+    }
     executor.source_run_active.set(source_run_prior);
     status
 }
 
 #[allow(clippy::too_many_arguments)]
+/// rubash#2783: park the executing reader unit's source text (and its
+/// line offset) on the executor's shell state for the unit's extent,
+/// restoring the enclosing unit's value afterwards. GNU echoes the
+/// enclosing input line for a command-substitution body's syntax
+/// error (parse.y:6814 print_offending_line over shell_input_line);
+/// rubash parses the body at expansion time, so the body reporter
+/// reads the physical line out of this cell instead. Nested units
+/// (a sourced file inside this one) shadow the cell for their own
+/// extent and hand the enclosing text back on exit. The split into a
+/// wrapper exists because the body returns from many points: every
+/// one of them funnels back through here.
 fn run_source_impl_inner(
+    executor: &mut Executor,
+    input: &str,
+    interactive: bool,
+    line_offset: usize,
+    redirect_cmd: Option<&CommandNode>,
+    diagnostic_text: Option<&str>,
+    pre_lexed: Option<Vec<Token>>,
+    suppress_unclosed_diagnostic: bool,
+    root_span_outermost: bool,
+) -> i32 {
+    let saved_unit_source = executor
+        .shell_state
+        .reader_unit_source
+        .replace(Some((std::rc::Rc::from(input), line_offset)));
+    let result = run_source_impl_inner_body(
+        executor,
+        input,
+        interactive,
+        line_offset,
+        redirect_cmd,
+        diagnostic_text,
+        pre_lexed,
+        suppress_unclosed_diagnostic,
+        root_span_outermost,
+    );
+    executor
+        .shell_state
+        .reader_unit_source
+        .replace(saved_unit_source);
+    result
+}
+
+fn run_source_impl_inner_body(
     executor: &mut Executor,
     input: &str,
     interactive: bool,
@@ -4031,6 +4179,7 @@ fn run_source_impl_inner(
                     Some(open_line + line_offset),
                 );
             }
+            executor.set_last_exit_code(2);
             return 2;
         }
     }
@@ -4058,12 +4207,29 @@ fn run_source_impl_inner(
     // instead of failing and the parser is NOT the authority. The
     // verification only pays on inputs the scanner flagged (and never on
     // heredoc inputs, which the gate already excludes).
-    if pre_lexed.is_none()
+    // rubash#3229: an unclosed extglob pattern group is a
+    // read_token_word matched-pair EOF (parse.y:5466-5489 ->
+    // parse.y:3901-3912) that no existing gate arm can see — the `(`
+    // is word-internal, so the close-char scan opens no frame for it,
+    // and the tokenizer folds the group into the word silently (a
+    // pre-lexed group therefore skips the gate below on the perf19
+    // certification even though its text was never pair-scanned). The
+    // dedicated scan is seeded with the EXECUTED gate state: in a
+    // grouped run the `shopt` line is an earlier group, so the group
+    // text alone cannot show the gate live.
+    let extglob_live =
+        crate::builtins::shopt::option_enabled(&executor.shell_state.env_vars, "extglob");
+    let extglob_eof_line = if interactive {
+        None
+    } else {
+        crate::lexer::unclosed_extglob_group_line(input, extglob_live)
+    };
+    let unclosed_route = pre_lexed.is_none()
         && !interactive
         && crate::lexer::has_unclosed_input_syntax_posix(input, parse_posix)
         && !input.contains("<<")
-        && !command_paren_verdict_disproved_by_parser(input, parse_posix)
-    {
+        && !command_paren_verdict_disproved_by_parser(input, parse_posix);
+    if unclosed_route || (extglob_eof_line.is_some() && !input.contains("<<")) {
         // GNU parse.y:5635-5643 read_token_word + parse_matched_pair
         // (parse.y:3906-3912): an unclosed array subscript `[` reports
         // `unexpected EOF while looking for matching `]'' at the line the
@@ -4075,7 +4241,7 @@ fn run_source_impl_inner(
         // closer char and report line are the QUOTE's (`a["x]=15` reports
         // `"' at the `"` line, not `]' at the `[` line).
         if let Some((open_line, closer, construct_line, inside_compassign)) =
-            crate::lexer::unclosed_array_subscript_eof(input)
+            crate::lexer::unclosed_array_subscript_eof_seeded(input, extglob_live)
         {
             let source = input.trim_end_matches('\n');
             // The prefix of COMPLETE commands stops at the `[` construct's
@@ -4119,9 +4285,12 @@ fn run_source_impl_inner(
             // error.c:324-327 forces exit status 2 whenever errexit is live
             // at the parser_error (rubash#306).
             if inside_compassign && executor.errexit_live_at_diagnostic() {
+                executor.set_last_exit_code(2);
                 return 2;
             }
-            return if inside_compassign { 1 } else { 2 };
+            let status = if inside_compassign { 1 } else { 2 };
+            executor.set_last_exit_code(status);
+            return status;
         }
         // rubash#543: an unterminated `$[` legacy-arithmetic construct is the
         // parse_matched_pair grouping scan opened by read_token_word's
@@ -4175,6 +4344,65 @@ fn run_source_impl_inner(
                 );
             }
             executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
+            return 2;
+        }
+        // rubash#3229: an unclosed extglob pattern group — GNU
+        // read_token_word's parse_matched_pair scan (parse.y:5466-5489)
+        // reaches EOF and reports the pair's closer at the line the
+        // group opened (parse.y:3901-3912) with exit status 2. The
+        // word read bails, so nothing on the group's line runs, while
+        // complete commands before it already executed (the prefix
+        // model every arm of this route follows).
+        if let Some(open_line) = extglob_eof_line {
+            let source = input.trim_end_matches('\n');
+            let prefix = if open_line > 1 {
+                source
+                    .lines()
+                    .take(open_line - 1)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                String::new()
+            };
+            // Same #1589 retreat as the close-char section below: when
+            // the group's line sits inside a keyword compound that is
+            // itself unclosed at EOF (`case ab in` above the pattern
+            // line), GNU's reader died inside the compound — none of
+            // it ran — so the prefix must retreat to the compound's
+            // opening line instead of running the header standalone
+            // (which would print the compound's own EOF diagnostic
+            // ahead of the group's).
+            let prefix = match unclosed_compound_open_line(&prefix) {
+                Some(open) if open > 1 => {
+                    prefix.lines().take(open - 1).collect::<Vec<_>>().join("\n")
+                }
+                Some(_) => String::new(),
+                None => prefix,
+            };
+            if !prefix.trim().is_empty() {
+                let _ = run_source_prefix_diagnostic_owned(
+                    executor,
+                    &prefix,
+                    interactive,
+                    line_offset,
+                    redirect_cmd,
+                    diagnostic_text,
+                );
+            }
+            executor.mark_parse_error();
+            unclosed_report!(
+                "{}unexpected EOF while looking for matching `)'",
+                executor.parser_error_prefix_for_line(open_line + line_offset)
+            );
+            if !suppress_unclosed_diagnostic {
+                executor.record_run_diagnostic(
+                    "unexpected EOF while looking for matching `)'".to_string(),
+                    Some(open_line + line_offset),
+                );
+            }
+            executor.errexit_live_at_diagnostic();
+            executor.set_last_exit_code(2);
             return 2;
         }
         // GNU's incremental reader executes complete input lines before the
@@ -4283,6 +4511,7 @@ fn run_source_impl_inner(
                             unclosed_report!("{prefix}`{offending}'");
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // rubash#390 q1: a `((` at command position is NOT a
@@ -4317,6 +4546,7 @@ fn run_source_impl_inner(
                             );
                         }
                         executor.errexit_live_at_diagnostic();
+                        executor.set_last_exit_code(2);
                         return 2;
                     }
                     // Class B: the group closed but the next char was not
@@ -4339,8 +4569,10 @@ fn run_source_impl_inner(
                             );
                         }
                         if executor.errexit_live_at_diagnostic() {
+                            executor.set_last_exit_code(2);
                             return 2;
                         }
+                        executor.set_last_exit_code(1);
                         return 1;
                     }
                     unclosed_report!(
@@ -4372,9 +4604,11 @@ fn run_source_impl_inner(
                 // but error.c:324-327 forces exit status 2 whenever
                 // errexit is live at the parser_error (rubash#306).
                 if array_list && executor.errexit_live_at_diagnostic() {
+                    executor.set_last_exit_code(2);
                     return 2;
                 }
                 if array_list {
+                    executor.set_last_exit_code(1);
                     return 1;
                 }
             }
@@ -4388,6 +4622,7 @@ fn run_source_impl_inner(
                 }
             }
         }
+        executor.set_last_exit_code(2);
         return 2;
     }
 
@@ -4462,6 +4697,22 @@ fn run_source_impl_inner(
             parse_posix,
             line,
         );
+    }
+    // rubash#2789: GNU validates substitution bodies when the
+    // enclosing command is READ (parse.y:4451 parse_comsub), so a
+    // body grammar failure is this unit's first read error and kills
+    // it before anything executes — see
+    // Executor::screen_comsub_bodies_at_read. It runs ahead of the
+    // unit voiding below for the same reason (a top-level marker
+    // later in the unit is an error GNU's reader never reaches).
+    // Interactive readers keep their own per-line error reporting
+    // and discard shape; diagnostic-owned prefix runs
+    // (suppress_unclosed_diagnostic) keep their caller's single
+    // report and unchanged behavior.
+    if !interactive && !suppress_unclosed_diagnostic {
+        if let Some(status) = executor.screen_comsub_bodies_at_read(&ast.commands) {
+            return status;
+        }
     }
     if let Some(cmd) = redirect_cmd {
         if let Err(error) = executor.apply_inherited_command_output_redirects(cmd, &mut ast) {
@@ -5282,6 +5533,7 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         None,
                         true,
                         None,
+                        None,
                     )
                 } else {
                     run_source_with_line_offset(
@@ -5488,7 +5740,19 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     st.cursor = 0;
                     accept_line!(&line);
                 }
-                eof = true;
+                // rubash#3051: a byte-level ^D on an empty buffer is the
+                // parse.y handle_eof_input_unit EOF — run the same job
+                // check as the piped path's Ok(0) arm. On deferral keep
+                // reading (the next EOF is immediate: the deferral
+                // pinned this/last to Exit). A nonempty buffer is the
+                // accept-line shape, not a true EOF, so it still folds.
+                if st.buffer.is_empty() && executor.invocation_interactive() {
+                    if !executor.defer_interactive_eof_for_jobs() {
+                        eof = true;
+                    }
+                } else {
+                    eof = true;
+                }
             } else if let Some(src_abs) = operate_next {
                 preload_operate_and_get_next(executor, &mut st, src_abs);
             }
@@ -5621,13 +5885,18 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                     group.clear();
                     st = EditState::default();
                 } else if eof_now {
+                    // Whether this EOF is a terminal hangup (pty master
+                    // closed): GNU's termsig settlement preempts the fold,
+                    // so a hangup never consults the job table
+                    // (rubash#2233) — only a genuine ^D defers.
+                    let mut hangup = false;
                     if read_dead {
                         // The terminal itself ended the input (pty
                         // master closed / read error): classify a
                         // pending untrapped SIGHUP before folding,
                         // exactly like the cooked path's Ok(0)/Err
                         // arms (rubash#2233).
-                        let hangup = executor.poll_untrapped_hangup()
+                        hangup = executor.poll_untrapped_hangup()
                             || (tty_fd_shows_hangup()
                                 && executor.poll_untrapped_hangup_settled(HANGUP_SETTLE_BUDGET));
                         if !hangup && executor.invocation_interactive() {
@@ -5647,7 +5916,20 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                         st.cursor = 0;
                         accept_line!(&line);
                     }
-                    eof = true;
+                    // rubash#3051: a genuine ^D on an empty buffer is
+                    // the parse.y handle_eof_input_unit EOF — same job
+                    // check as the piped path's Ok(0) arm. On
+                    // deferral keep reading (the next EOF is
+                    // immediate: the deferral pinned this/last to
+                    // Exit). A hangup EOF and the accept-line shape
+                    // still fold at once.
+                    if !hangup && st.buffer.is_empty() && executor.invocation_interactive() {
+                        if !executor.defer_interactive_eof_for_jobs() {
+                            eof = true;
+                        }
+                    } else {
+                        eof = true;
+                    }
                 } else if let Some(src_abs) = operate_next {
                     preload_operate_and_get_next(executor, &mut st, src_abs);
                 }
@@ -5817,7 +6099,24 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
             }
             match apply_edit_char(executor, &mut st, c) {
                 EditOutcome::None => {}
-                EditOutcome::Eof => eof = true,
+                EditOutcome::Eof => {
+                    // rubash#3051: a ^D byte in a cooked line is the
+                    // same parse.y handle_eof_input_unit EOF as the
+                    // tty branches — echo the synthesized `exit`
+                    // (builtins/exit.def:59-62, before the check) and
+                    // run the same job check as the Ok(0) arm. On
+                    // deferral drop the rest of this batched line and
+                    // keep reading; the next EOF is immediate because
+                    // the deferral pinned this/last to Exit.
+                    if executor.invocation_interactive() {
+                        let login = executor.invocation_login();
+                        eprintln!("{}", if login { "logout" } else { "exit" });
+                        if executor.defer_interactive_eof_for_jobs() {
+                            break;
+                        }
+                    }
+                    eof = true;
+                }
                 EditOutcome::Accept {
                     line,
                     operate_and_get_next,

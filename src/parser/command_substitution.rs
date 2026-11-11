@@ -1,5 +1,86 @@
 use super::{parse, CommandSubstitutionNode};
 
+/// rubash#2789: the read-time screen's extraction entry — the same
+/// scan as `command_substitutions_in_word`, but the opener search
+/// replays the word's lexical state (parse.y:5305 read_token_word):
+/// an opener inside single quotes or behind a backslash is literal
+/// text, never a substitution, while openers inside double quotes
+/// stay live. The plain scan above cannot tell (it fires on any
+/// `$`+`(` byte pair), which would let the read-time screen kill
+/// legal units like `echo '$(a |)'` or `echo \$(a |)`. Openers that
+/// ARE live are handed to the same span extractors, whose own quote
+/// tracking consumes the body, so quoted spans inside a live body
+/// are never re-judged by this outer state machine.
+pub(super) fn command_substitutions_in_word_live(word: &str) -> Vec<CommandSubstitutionNode> {
+    if !word.contains('$') && !word.contains('`') {
+        return Vec::new();
+    }
+
+    let chars = word.chars().collect::<Vec<_>>();
+    let mut substitutions = Vec::new();
+    let mut index = 0;
+    let mut single = false;
+    let mut double = false;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        if escaped {
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\\' if !single => {
+                escaped = true;
+                index += 1;
+            }
+            '\'' if !double => {
+                single = !single;
+                index += 1;
+            }
+            '"' if !single => {
+                double = !double;
+                index += 1;
+            }
+            '`' if !single => {
+                if let Some((substitution, next_index)) =
+                    backtick_command_substitution(&chars, index)
+                {
+                    substitutions.push(substitution);
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+            }
+            '$' if !single
+                && chars.get(index + 1) == Some(&'(')
+                && chars.get(index + 2) != Some(&'(') =>
+            {
+                if let Some((substitution, next_index)) = dollar_command_substitution(&chars, index)
+                {
+                    substitutions.push(substitution);
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+            }
+            '$' if !single && chars.get(index + 1) == Some(&'{') => {
+                if let Some((substitution, next_index)) = braced_command_substitution(&chars, index)
+                {
+                    substitutions.push(substitution);
+                    index = next_index;
+                } else {
+                    index += 1;
+                }
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    substitutions
+}
+
 pub(super) fn command_substitutions_in_word(word: &str) -> Vec<CommandSubstitutionNode> {
     // Provably-empty admission (rubash#117 whitelist discipline): every
     // production this scan can find requires the trigger byte below, so its
@@ -66,6 +147,20 @@ fn dollar_command_substitution(
     // (rubash#380): see update_command_substitution_case_depth.
     let mut case_in_stage = 0u8;
     let mut case_pattern_region = false;
+    // rubash#2789: pattern-content bookkeeping for the in-field
+    // unclosed-case reclassification at the `)` arm below. While the
+    // pattern region is armed, a `)` that arrives with NO pattern
+    // content yet seen cannot be a pattern closer (there is no
+    // pattern to close), so it closes the substitution itself
+    // (parse.y:4519-4521: `)` is the substitution's shell_eof_token)
+    // and the truncated body (`case x in`) reaches the body parser,
+    // whose grammar verdict the read-time screen reports — instead of
+    // the extractor scanning off the end of the word and classifying
+    // the shape as an unclosed EOF.
+    let mut case_pattern_content = false;
+    let mut case_pattern_paren_depth = 0usize;
+    let mut case_pattern_opener_available = true;
+    let mut case_pattern_region_seen = false;
     // GNU read_token (parse.y:3630-3643): `#` introduces a comment only at
     // a token boundary — after whitespace, a separator (`;&|()<>`), or at
     // the start. `word_boundary`/`word.is_empty()` are wrong: `$`, quotes
@@ -91,6 +186,11 @@ fn dollar_command_substitution(
         }
         if ch == '\\' && !single {
             escaped = true;
+            // An escaped character inside an armed pattern region is
+            // pattern content (rubash#2789 bookkeeping).
+            if case_depth > 0 && case_pattern_region && !double {
+                case_pattern_content = true;
+            }
             token_boundary = false;
             index += 1;
             continue;
@@ -113,6 +213,11 @@ fn dollar_command_substitution(
             continue;
         }
         if ch == '`' && !single {
+            // A backquote unit inside an armed pattern region is
+            // pattern content (rubash#2789 bookkeeping).
+            if case_depth > 0 && case_pattern_region && !double {
+                case_pattern_content = true;
+            }
             if let Some((_, next_index)) = backtick_command_substitution(chars, index) {
                 index = next_index;
                 token_boundary = false;
@@ -168,6 +273,48 @@ fn dollar_command_substitution(
                 continue;
             }
         }
+        // rubash#2789 bookkeeping (see the state declarations above):
+        // track whether the armed pattern region has seen pattern
+        // content yet. The captures are the pre-update values the
+        // close arm below judges by.
+        let region_before = case_pattern_region;
+        let content_before = case_pattern_content;
+        let stage_before = case_in_stage;
+        let word_before = word.clone();
+        if case_depth > 0 && region_before && !single && !double {
+            match ch {
+                '(' => {
+                    // The pattern-list opener is available only as the
+                    // first content of a pattern; any other `(` nests.
+                    if case_pattern_paren_depth == 0
+                        && !case_pattern_content
+                        && case_pattern_opener_available
+                    {
+                        case_pattern_opener_available = false;
+                    } else {
+                        case_pattern_paren_depth += 1;
+                        case_pattern_content = true;
+                    }
+                }
+                '|' if case_pattern_paren_depth == 0 => {
+                    // Pattern separator: the next pattern starts empty.
+                    case_pattern_content = false;
+                    case_pattern_opener_available = true;
+                }
+                ')' if case_pattern_paren_depth > 0 => {
+                    case_pattern_paren_depth -= 1;
+                }
+                '&' => {
+                    // `;&` is a clause terminator, not pattern content.
+                    if chars.get(index.wrapping_sub(1)) != Some(&';') {
+                        case_pattern_content = true;
+                    }
+                }
+                ';' => {}
+                c if c.is_whitespace() => {}
+                _ => case_pattern_content = true,
+            }
+        }
         update_command_substitution_case_depth(
             &chars,
             index,
@@ -181,6 +328,28 @@ fn dollar_command_substitution(
             &mut case_in_stage,
             &mut case_pattern_region,
         );
+        // rubash#2789: a `)` that cannot close anything inside the
+        // case — no pattern content in the armed region (the pattern
+        // never started, e.g. right after `in` or after a `;;`), the
+        // `)` glued to the `in` word itself, or the `)` glued to the
+        // case subject — closes the substitution at the substitution's
+        // own depth (parse.y:4519-4521), yielding the truncated body
+        // for the body parser's grammar verdict. Pattern closers
+        // (content seen), nested-paren closers and quoted `)` never
+        // reach this arm.
+        let case_close_candidate = ch == ')' && !single && !double && depth == 1 && case_depth > 0;
+        if case_close_candidate
+            && ((region_before && !content_before)
+                || (word_before == "in" && stage_before == 2)
+                || (case_in_stage == 2 && !region_before && !word_before.is_empty()))
+        {
+            let text = chars[start..=index].iter().collect();
+            let source = chars[start + 2..index].iter().collect();
+            return Some((
+                command_substitution_node(text, source, false, false, false),
+                index + 1,
+            ));
+        }
         match ch {
             '\'' if !double => single = !single,
             '"' if !single => double = !double,
@@ -204,6 +373,19 @@ fn dollar_command_substitution(
         if !single && !double {
             token_boundary =
                 ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '(' | ')' | '<' | '>');
+        }
+        // rubash#2789: a freshly armed pattern region (at `in`, or
+        // re-armed at a clause terminator) starts with empty pattern
+        // bookkeeping; a disarmed region re-arms the reset.
+        if case_pattern_region {
+            if !case_pattern_region_seen {
+                case_pattern_content = false;
+                case_pattern_paren_depth = 0;
+                case_pattern_opener_available = true;
+                case_pattern_region_seen = true;
+            }
+        } else {
+            case_pattern_region_seen = false;
         }
         index += 1;
     }

@@ -348,6 +348,17 @@ impl Executor {
                         } else {
                             raw
                         };
+                        // rubash#3085: a `$'...'` span is decoded and
+                        // sh_single_quote'd before the arith pass (the
+                        // generic arm below documents the GNU anchors), so
+                        // evalexp receives `'x y'`, never the raw spelling.
+                        let requoted;
+                        let raw = if raw.contains("$'") {
+                            requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                            requoted.as_str()
+                        } else {
+                            raw
+                        };
                         eval_text = self.expand_arithmetic_special_parameters(raw);
                         eval_text.as_str()
                     }
@@ -608,6 +619,18 @@ impl Executor {
                         // (rubash#1510). NoCell leaves no structured cell,
                         // so the helper no-ops there.
                         self.note_typed_cell_synced(name);
+                        // rubash#3097: the element bind completed here.
+                        // A bare element statement dispatches to THIS
+                        // executor, never through apply_shell_assignment,
+                        // so the locale funnel note lives at this store:
+                        // GNU's assignment driver runs
+                        // stupidly_hack_special_variables after
+                        // assign_array_element (subst.c:8169) and
+                        // sv_locale (variables.c:6272) reads the NEW
+                        // scalar projection (get_string_value,
+                        // variables.c:2495: element 0 / the "0" key).
+                        // One bind, one note, recorded nowhere else.
+                        self.note_locale_assignment(name);
                         self.exit_code = 0;
                         return true;
                     }
@@ -713,6 +736,10 @@ impl Executor {
             // The canonical render above synced the cell from the same
             // entry list it folded into the mirror (rubash#1510).
             self.note_typed_cell_synced(name);
+            // rubash#3097: same funnel note as the fast-append arm
+            // above — the element bind completed at this store
+            // (subst.c:8169 -> variables.c:6272).
+            self.note_locale_assignment(name);
             self.exit_code = 0;
             return true;
         }
@@ -782,6 +809,24 @@ impl Executor {
                     let raw = if raw.contains("$\"") {
                         decoded_locale = super::arithmetic::decode_locale_quote_spans(raw);
                         decoded_locale.as_str()
+                    } else {
+                        raw
+                    };
+                    // rubash#3085: a `$'...'` span in the raw subscript is
+                    // ANSI-C decoded and sh_single_quote'd before the arith
+                    // pass — GNU's assignment word is cooked at parse time
+                    // (read_token_word's `$'` arm: ansiexpand, then
+                    // sh_single_quote re-quote; the runtime arith form is
+                    // expand_string_dollar_quote, subst.c:4133), so evalexp
+                    // receives `'x y'` and even `'1'` fails as a quoted
+                    // literal, while expansions inside the span still run
+                    // under the arith pass below (`$'$(echo 1+2)'` tokens
+                    // `'1+2'`). Without this the raw `$'...'` spelling
+                    // reached evalexp and its `$` leaked into the token.
+                    let requoted;
+                    let raw = if raw.contains("$'") {
+                        requoted = super::arithmetic::requote_arith_span_token_text(raw);
+                        requoted.as_str()
                     } else {
                         raw
                     };
@@ -1198,6 +1243,12 @@ impl Executor {
             .map(|(index, element)| (index as i64, element.trim().parse::<i32>().unwrap_or(0)))
             .collect();
         }
+        // rubash#3097: every indexed store arm above (in-place append,
+        // budgeted overwrite, canonical rebuild) converges here with
+        // the element bind complete — the funnel note lives at this
+        // single convergence, one bind, one note (subst.c:8169 ->
+        // variables.c:6272), reading the NEW projection.
+        self.note_locale_assignment(name);
         self.exit_code = 0;
         true
     }

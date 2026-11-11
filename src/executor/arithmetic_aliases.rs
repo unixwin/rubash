@@ -261,33 +261,6 @@ impl Executor {
         self.report_arithmetic_error_with_label("let", expression, true);
     }
 
-    // GNU expr.c assignments route through bind_variable; an invalid
-    // nameref-cell value fails via sh_invalidid with this_command_name as
-    // the label (`((`, `let`), or no label inside $(( )) expansion.
-    pub(in crate::executor) fn report_arithmetic_nameref_error(
-        &mut self,
-        label: Option<&str>,
-    ) -> bool {
-        let Some(value) = self
-            .shell_state
-            .env_vars
-            .remove("__RUBASH_ARITH_NAMEREF_ERROR")
-        else {
-            return false;
-        };
-        match label {
-            Some(label) => self.arith_diag(&format!(
-                "{}{label}: `{value}': not a valid identifier\n",
-                self.diagnostic_prefix()
-            )),
-            None => self.arith_diag(&format!(
-                "{}`{value}': not a valid identifier\n",
-                self.diagnostic_prefix()
-            )),
-        }
-        true
-    }
-
     pub(in crate::executor) fn report_conditional_arithmetic_error(&self, expression: &str) {
         if self.report_subscript_eval_failure() {
             return;
@@ -354,11 +327,11 @@ impl Executor {
         }
         self.shell_state.arithmetic_readonly_error.set(false);
         let eval_result = self.eval_arithmetic_command_value(raw_expression.unwrap_or(expression));
-        // An invalid nameref-cell assignment inside `((` fails the command
-        // with status 1 even though the expression itself evaluated.
-        if self.report_arithmetic_nameref_error(Some("((")) {
-            return 1;
-        }
+        // rubash#3246: a failed nameref bind is non-fatal (GNU
+        // expr.c:331-354 — no longjmp on the NULL bind): the diagnostic
+        // already drained in evaluation order inside the evaluation
+        // above, and the status is the expression value below — the
+        // old post-hoc reporter that forced status 1 here is gone.
         match eval_result {
             Some(0) => 1,
             Some(_) => 0,
@@ -578,9 +551,11 @@ impl Executor {
                 self.report_let_arithmetic_error(&expression);
                 return 1;
             }
-            if self.report_arithmetic_nameref_error(Some("let")) {
-                return 1;
-            }
+            // rubash#3246: a failed nameref bind is non-fatal — the
+            // diagnostic already drained in evaluation order inside
+            // the evaluation above, and later operands still evaluate
+            // (GNU let.def:102 evalexp keeps going); the status is the
+            // last operand's value below.
             index += 1;
         }
         match value {

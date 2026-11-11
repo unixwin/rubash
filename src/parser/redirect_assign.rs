@@ -25,6 +25,12 @@ pub(super) fn assign_redirect_out_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
             command.redirect_in = Some(Box::new(redirect));
         }
+        // rubash#3053: a process-substitution target is a redirect
+        // target like any other — GNU captures the stamp when the
+        // redirection element reduces, after the whole `<(...)` /
+        // `>(...)` span was read, so the correction token is the
+        // closing `)` the collector stopped on (tokens[next_i]).
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -34,6 +40,7 @@ pub(super) fn assign_redirect_out_target(
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
         assign_output_redirect(command, &tokens[index].value, &target, None, None);
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -54,18 +61,30 @@ pub(super) fn assign_redirect_out_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.redirect_out = Some(Box::new(redirect));
         }
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
     if let Some((mut process_substitution, next_i)) =
         output_process_substitution_word_target(tokens, index)
     {
-        process_substitution.word_index = Some(command.words.len());
-        let target = process_substitution.target.clone();
+        // rubash#2802: pair the word with its metadata and assemble
+        // its glued suffix, exactly like the input form's intake arm
+        // (token_actions.rs) — a word pushed without metadata broke
+        // the words/word_metadata index alignment and the respawn
+        // serializer single-quoted the span as literal data.
+        let (suffix, suffix_raw, joined_i) = collect_process_substitution_suffix(tokens, next_i);
+        let word_index = command.words.len();
+        process_substitution.word_index = Some(word_index);
+        let value = format!("{}{}", process_substitution.target, suffix);
+        let raw = format!("{}{}", process_substitution.target, suffix_raw);
         command.process_substitutions.push(process_substitution);
-        command.words.push(target);
+        command
+            .word_metadata
+            .push(build_word_metadata(word_index, &value, &raw));
+        command.words.push(value);
         command.word_kinds.push(TokenKind::Word);
-        return Some(next_i);
+        return Some(joined_i);
     }
 
     let target = redirect_target_token(tokens, index)?;
@@ -113,6 +132,7 @@ pub(super) fn assign_append_target(
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
         assign_append_redirect(command, &tokens[index].value, &target, None, None);
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -131,6 +151,7 @@ pub(super) fn assign_append_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.append = Some(Box::new(redirect));
         }
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 

@@ -1,6 +1,9 @@
 use super::{
     ARRAY_VARS, ASSOC_VARS, EXECUTION_FAILURE, EXECUTION_SUCCESS, NAMEREF_VARS, READONLY_VARS,
 };
+use crate::executor::builtin_diag::{Diag, DiagKind, Prolog};
+use crate::executor::builtin_opt::{BuiltinOpt, OptEvent};
+use crate::executor::builtin_table::builtin_table_row;
 use std::io::{self, Write};
 
 /// GNU shell.h:76 `EX_UTILERROR = 263` — a Posix special builtin utility error
@@ -22,39 +25,106 @@ struct UnsetOptions {
     nameref: bool,
 }
 
+/// The lib-level `Diag` prolog, mirroring the declare layer's
+/// `PrologParts::Lib` composition: the same env cells the deleted
+/// local `diagnostic_prefix` read.
+fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    Prolog {
+        interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
+        shell_basename: env_vars
+            .get("__RUBASH_SHELL_NAME")
+            .cloned()
+            .unwrap_or_else(|| "rubash".to_string()),
+        error_name: "rubash".to_string(),
+        script_file: env_vars
+            .get("__RUBASH_SCRIPT_NAME")
+            .cloned()
+            .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+        line: env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned()
+            .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
+    }
+}
+
 /// Execute `unset` with arguments after the command name.
 pub fn unset(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) -> io::Result<i32> {
+    let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    unset_with_stderr(args.iter().map(String::as_str), env_vars, &mut stderr)
+    unset_with_stderr(
+        args.iter().map(String::as_str),
+        env_vars,
+        &mut stdout,
+        &mut stderr,
+    )
 }
 
 pub(crate) fn unset_with_stderr<'a, I, W>(
     args: I,
     env_vars: &mut crate::shell::var_table::VarTable,
-    stderr: &mut W,
+    stdout: &mut W,
+    stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
 ) -> io::Result<i32>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
 {
-    let args: Vec<&str> = args.into_iter().collect();
-    let (options, first_name) = match parse_unset_options(&args, env_vars, stderr)? {
-        Ok(parsed) => parsed,
-        Err(status) => return Ok(status),
+    // The Diag is built here, over the caller's stderr (the same
+    // shape as setattr's with_io fns): the executor passes this
+    // command's own buffered stderr, so a diagnostic lands in the
+    // command's redirection (A3-R1, rubash#2707).
+    let row = builtin_table_row("unset").expect("unset row exists");
+    let mut diag = Diag::new(row, stderr);
+    let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+    // GNU set.def unset_builtin scans with internal_getopt over
+    // "fnv" (the row's spec); the single BuiltinOpt machine replaces
+    // the hand scan here (Stage-2 ④ Phase 4). An invalid option
+    // returns EX_USAGE_ORIG (258, set.def:855) — NOT the Diag's
+    // EX_USAGE (2): the machine records the error, but the status
+    // this builtin returns is the .def's own.
+    let mut options = UnsetOptions::default();
+    let operands: Vec<&str> = {
+        let mut opt = BuiltinOpt::new(row, &args, &mut diag, false);
+        loop {
+            match opt.next() {
+                OptEvent::Help => {
+                    // GNU set.def CASE_HELPOPT: the long help goes to
+                    // stdout with the .def's EX_USAGE (258).
+                    crate::builtins::help::print_builtin_help(row.name, stdout)?;
+                    return Ok(EX_USAGE_ORIG);
+                }
+                OptEvent::End => break,
+                OptEvent::Opt(c) => match c {
+                    b'f' => options.functions = true,
+                    b'v' => options.variables = true,
+                    b'n' => options.nameref = true,
+                    _ => {}
+                },
+                OptEvent::OptArg(_, _) => {}
+            }
+        }
+        let operands: Vec<&str> = opt.operands().iter().map(String::as_str).collect();
+        drop(opt);
+        if diag.status() != 0 {
+            diag.usage();
+            diag.flush_with(|| diag_prolog(env_vars));
+            // GNU set.def:855 returns EX_USAGE (258 > EX_SHERRBASE).
+            return Ok(EX_USAGE_ORIG);
+        }
+        operands
     };
 
     if options.functions && options.variables {
-        writeln!(
-            stderr,
-            "{}unset: cannot simultaneously unset a function and a variable",
-            diagnostic_prefix(env_vars)
-        )?;
+        diag.free(format_args!(
+            "cannot simultaneously unset a function and a variable"
+        ));
+        diag.flush_with(|| diag_prolog(env_vars));
         return Ok(EXECUTION_FAILURE);
     }
 
     let mut status = EXECUTION_SUCCESS;
-    for name in &args[first_name..] {
-        let name_status = unset_name(name, options, env_vars, stderr)?;
+    for name in &operands {
+        let name_status = unset_name(name, options, env_vars, &mut diag)?;
         if name_status != EXECUTION_SUCCESS {
             // Preserve error statuses > EX_SHERRBASE (256) so the executor can
             // set special_builtin_failed; fall back to EXECUTION_FAILURE.
@@ -66,63 +136,16 @@ where
         }
     }
 
+    diag.flush_with(|| diag_prolog(env_vars));
     Ok(status)
 }
 
-fn parse_unset_options<W>(
-    args: &[&str],
-    env_vars: &crate::shell::var_table::VarTable,
-    stderr: &mut W,
-) -> io::Result<Result<(UnsetOptions, usize), i32>>
-where
-    W: Write,
-{
-    let mut options = UnsetOptions::default();
-    let mut index = 0;
-
-    while let Some(arg) = args.get(index) {
-        if *arg == "--" {
-            return Ok(Ok((options, index + 1)));
-        }
-
-        if !arg.starts_with('-') || *arg == "-" {
-            break;
-        }
-
-        for option in arg[1..].chars() {
-            match option {
-                'f' => options.functions = true,
-                'v' => options.variables = true,
-                'n' => options.nameref = true,
-                other => {
-                    writeln!(
-                        stderr,
-                        "{}unset: -{}: invalid option",
-                        diagnostic_prefix(env_vars),
-                        other
-                    )?;
-                    writeln!(stderr, "unset: usage: unset [-f] [-v] [-n] [name ...]")?;
-                    // GNU set.def:855 returns EX_USAGE (258 > EX_SHERRBASE).
-                    return Ok(Err(EX_USAGE_ORIG));
-                }
-            }
-        }
-
-        index += 1;
-    }
-
-    Ok(Ok((options, index)))
-}
-
-fn unset_name<W>(
+fn unset_name(
     name: &str,
     options: UnsetOptions,
     env_vars: &mut crate::shell::var_table::VarTable,
-    stderr: &mut W,
-) -> io::Result<i32>
-where
-    W: Write,
-{
+    diag: &mut Diag,
+) -> io::Result<i32> {
     if options.functions {
         return Ok(EXECUTION_SUCCESS);
     }
@@ -140,11 +163,7 @@ where
         if !declared || is_array {
             return Ok(EXECUTION_SUCCESS);
         }
-        writeln!(
-            stderr,
-            "{}unset: {base}: not an array variable",
-            diagnostic_prefix(env_vars)
-        )?;
+        diag.free(format_args!("{base}: not an array variable"));
         return Ok(EXECUTION_FAILURE);
     }
 
@@ -157,14 +176,7 @@ where
         if !options.variables {
             return Ok(EXECUTION_SUCCESS);
         }
-        // Single write: GNU emits the prologue + message as one stderr
-        // record; splitting the write lets a concurrent stdout flush (e.g.
-        // under WSL-interop combined capture) tear the prefix off the line.
-        let diagnostic = format!(
-            "{}unset: `{name}': not a valid identifier\n",
-            diagnostic_prefix(env_vars)
-        );
-        stderr.write_all(diagnostic.as_bytes())?;
+        diag.error(DiagKind::InvalidId(name.to_string()));
         // GNU set.def:917-918 increments posix_utility_error → EX_UTILERROR.
         return Ok(EX_UTILERROR);
     }
@@ -192,21 +204,15 @@ where
     };
 
     if is_unsettable_bash_variable(unset_name) {
-        writeln!(
-            stderr,
-            "{}unset: {unset_name}: cannot unset",
-            diagnostic_prefix(env_vars)
-        )?;
+        diag.free(format_args!("{unset_name}: cannot unset"));
         // GNU set.def:930-931 increments posix_utility_error → EX_UTILERROR.
         return Ok(EX_UTILERROR);
     }
 
     if is_marked_variable(env_vars, READONLY_VARS, unset_name) {
-        writeln!(
-            stderr,
-            "{}unset: {unset_name}: cannot unset: readonly variable",
-            diagnostic_prefix(env_vars)
-        )?;
+        diag.free(format_args!(
+            "{unset_name}: cannot unset: readonly variable"
+        ));
         // GNU set.def:965-966 increments posix_utility_error → EX_UTILERROR.
         return Ok(EX_UTILERROR);
     }
@@ -290,15 +296,4 @@ fn parse_unset_subscript(name: &str) -> Option<(&str, &str)> {
 
 fn is_unsettable_bash_variable(name: &str) -> bool {
     matches!(name, "BASH_LINENO" | "BASH_SOURCE")
-}
-
-fn diagnostic_prefix(env_vars: &crate::shell::var_table::VarTable) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        return format!("{script}: line {line}: ");
-    }
-
-    "rubash: ".to_string()
 }

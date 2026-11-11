@@ -1041,7 +1041,7 @@ impl Executor {
     /// bind_array_element does (assoc for a non-numeric key).
     fn bind_wait_variable(&mut self, name: &str, value: String, arrayref: bool) {
         let Some((base, subscript)) = parse_array_subscript(name) else {
-            self.apply_shell_assignment_command("wait", name, value);
+            self.apply_shell_assignment_command("wait", name, value, None);
             return;
         };
         let base = base.to_string();
@@ -1107,7 +1107,7 @@ impl Executor {
                 if self.raise_nounset_subscript_abort() {
                     return;
                 }
-                self.apply_shell_assignment_command("wait", name, value);
+                self.apply_shell_assignment_command("wait", name, value, None);
             }
         }
     }
@@ -4916,17 +4916,19 @@ impl Executor {
                 self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                 return Ok(2); // EX_USAGE
             }
-            // Register the compspec for every name (complete.def:480-485).
+            // Register the compspec (complete.def:480-485): the loop
+            // runs over `wl ? wl : list` — with -D/-E/-I present the
+            // single pseudo word REPLACES the operand list, so the
+            // operands never land in the regular table (rubash#2719).
             let spec = crate::builtins::complete::Compspec::from_parsed(&parsed);
             if let Some(pseudo) = pseudo {
-                self.shell_state
-                    .completion_specs
-                    .insert(pseudo, spec.clone());
-            }
-            for target in &parsed.operands {
-                self.shell_state
-                    .completion_specs
-                    .insert(target, spec.clone());
+                self.shell_state.completion_specs.insert(pseudo, spec);
+            } else {
+                for target in &parsed.operands {
+                    self.shell_state
+                        .completion_specs
+                        .insert(target, spec.clone());
+                }
             }
             self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
             return Ok(0);
@@ -4973,7 +4975,7 @@ impl Executor {
             // rest of this attempt. Outside it always errors.
             if parsed.operands.is_empty() && pseudo.is_none() {
                 if self.shell_state.line_completion_depth == 0
-                    || self.shell_state.pcomp_curcs.is_none()
+                    || self.shell_state.pcomp_curcs.borrow().is_none()
                 {
                     writeln!(
                         stderr,
@@ -4982,11 +4984,16 @@ impl Executor {
                     self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
                     return Ok(1); // EXECUTION_FAILURE
                 }
-                let curcmd = self.shell_state.pcomp_curcmd.clone().unwrap_or_default();
+                let curcmd = self
+                    .shell_state
+                    .pcomp_curcmd
+                    .borrow()
+                    .clone()
+                    .unwrap_or_default();
                 if parsed.on_options == 0 && parsed.off_options == 0 {
                     // complete.def:870-874 print_compopts (pcomp_curcmd,
                     // cs, 1) → stdout.
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_ref() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow().as_ref() {
                         crate::builtins::complete::print_compopts_line(&curcmd, cs, &mut stdout)?;
                     }
                 } else {
@@ -4998,7 +5005,7 @@ impl Executor {
                     // after generation, pcomplete.c gen_progcomp_
                     // completions), so the fallback decisions and the
                     // insert policy see the mutated bits (rubash#2572).
-                    if let Some(cs) = self.shell_state.pcomp_curcs.as_mut() {
+                    if let Some(cs) = self.shell_state.pcomp_curcs.borrow_mut().as_mut() {
                         cs.options |= parsed.on_options;
                         cs.options &= !parsed.off_options;
                     }
@@ -5021,7 +5028,14 @@ impl Executor {
                 .into_iter()
                 .map(|(magic, flag)| (flag, magic, flag))
                 .collect();
-            for (report_name, diag_name, key) in pseudo_ref.into_iter().chain(operand_refs) {
+            // `wl ? wl : list` (complete.def:893): with a pseudo flag
+            // present the operands are NOT visited at all (rubash#2719).
+            let targets: Vec<(&str, &str, &str)> = if pseudo_ref.is_empty() {
+                operand_refs
+            } else {
+                pseudo_ref
+            };
+            for (report_name, diag_name, key) in targets {
                 match self.shell_state.completion_specs.get_mut(key) {
                     None => {
                         // complete.def:896-898 progcomp_search miss.
@@ -5431,33 +5445,75 @@ impl Executor {
         );
         let (words, cur_idx, cur_word) =
             (split.words.clone(), split.cur_idx, split.cur_word.clone());
-        let spec = crate::builtins::complete::resolve_compspec(
+        let wordbreaks = crate::builtins::complete::comp_wordbreaks(&self.shell_state.env_vars);
+        let (spec, rebuilt) = crate::builtins::complete::resolve_compspec_with_rebuild(
             &self.shell_state.completion_specs,
             &words,
             cur_idx,
             &self.shell_state.aliases,
             crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "progcomp_alias"),
-        )
-        .cloned()?;
+            &split.segment_line,
+            split.segment_point,
+            &wordbreaks,
+        )?;
+        let spec = spec.clone();
         if spec.funcname.is_none() && spec.command.is_none() && spec.words.is_none() {
             return None;
         }
-        let (cmd_name, prev_word, bind_words, cword): (String, String, Vec<String>, i64) =
-            if words.is_empty() {
-                ("_EmptycmD_".to_string(), String::new(), Vec::new(), -1)
+        // rubash#2610: when an alias hop governed, GNU restarts the
+        // lookup on the rebuilt line, so the generators bind the
+        // REBUILT word list (build_arg_list's $1/$3 come from it) and
+        // the rebuilt line text/point (bind_compfunc_variables).
+        let (cmd_name, prev_word, bind_words, cword, bind_line, bind_point): (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            String,
+            usize,
+        ) = if words.is_empty() {
+            (
+                "_EmptycmD_".to_string(),
+                String::new(),
+                Vec::new(),
+                -1,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        } else if let Some(rebuilt) = rebuilt {
+            let new_cword = cur_idx + (rebuilt.words.len() - words.len());
+            let prev = if new_cword >= 1 {
+                rebuilt
+                    .words
+                    .get(new_cword - 1)
+                    .cloned()
+                    .unwrap_or_default()
             } else {
-                let prev = if cur_idx >= 1 {
-                    words.get(cur_idx - 1).cloned().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                (
-                    words.first().cloned().unwrap_or_default(),
-                    prev,
-                    words.clone(),
-                    cur_idx as i64,
-                )
+                String::new()
             };
+            (
+                rebuilt.words.first().cloned().unwrap_or_default(),
+                prev,
+                rebuilt.words,
+                new_cword as i64,
+                rebuilt.line,
+                rebuilt.point,
+            )
+        } else {
+            let prev = if cur_idx >= 1 {
+                words.get(cur_idx - 1).cloned().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            (
+                words.first().cloned().unwrap_or_default(),
+                prev,
+                words.clone(),
+                cur_idx as i64,
+                split.segment_line.clone(),
+                split.segment_point,
+            )
+        };
         let mut dynamic = crate::builtins::complete::CompgenDynamic::default();
         // pcomplete.c:1520-1531 gen_progcomp_completions: the governing
         // compspec's COPY becomes `pcomp_curcs` (with `pcomp_curcmd` =
@@ -5467,17 +5523,17 @@ impl Executor {
         // restored afterwards (nesting-safe). A `compopt` executed by the
         // completion function reads and mutates this copy
         // (complete.def:866-886).
-        let saved_curcs = self.shell_state.pcomp_curcs.take();
-        let saved_curcmd = self.shell_state.pcomp_curcmd.take();
-        self.shell_state.pcomp_curcs = Some(spec.clone());
-        self.shell_state.pcomp_curcmd = Some(cmd_name.clone());
+        let saved_curcs = self.shell_state.pcomp_curcs.borrow_mut().take();
+        let saved_curcmd = self.shell_state.pcomp_curcmd.borrow_mut().take();
+        *self.shell_state.pcomp_curcs.borrow_mut() = Some(spec.clone());
+        *self.shell_state.pcomp_curcmd.borrow_mut() = Some(cmd_name.clone());
         // rubash#1799: same PIPESTATUS cell rule as the compgen arm.
         dynamic.pipestatus = self.pipestatus_listing();
         if let Some(funcname) = spec.funcname.as_deref() {
             dynamic.function_candidates = self.run_completion_function_live(
                 funcname,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5488,8 +5544,8 @@ impl Executor {
         if let Some(command) = spec.command.as_deref() {
             dynamic.command_candidates = self.run_completion_command_live(
                 command,
-                &split.segment_line,
-                split.segment_point,
+                &bind_line,
+                bind_point,
                 &bind_words,
                 cword,
                 &cmd_name,
@@ -5521,12 +5577,12 @@ impl Executor {
         // restore discards it — GNU's `*foundp |= cs->options` fold.
         // The registry spec itself is never mutated by a live
         // completion (the mutation lives on the per-attempt copy).
-        if let Some(current) = &self.shell_state.pcomp_curcs {
+        if let Some(current) = self.shell_state.pcomp_curcs.borrow().as_ref() {
             dynamic.options_override = Some(current.options);
         }
         // pcomplete.c:1530-1531: restore the enclosing completion context.
-        self.shell_state.pcomp_curcs = saved_curcs;
-        self.shell_state.pcomp_curcmd = saved_curcmd;
+        *self.shell_state.pcomp_curcs.borrow_mut() = saved_curcs;
+        *self.shell_state.pcomp_curcmd.borrow_mut() = saved_curcmd;
         Some(dynamic)
     }
 

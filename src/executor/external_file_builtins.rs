@@ -2150,7 +2150,7 @@ impl Executor {
                     return Ok(true);
                 }
                 let mut file = open_redirect_append(
-                    &self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars)),
+                    &self.session_path(self.redirect_target_filesystem_path(&target)),
                 )?;
                 file.write_all(&output)?;
                 self.exit_code = 0;
@@ -2416,10 +2416,11 @@ impl Executor {
                 // so a relative operand must anchor at the session cwd
                 // itself; procsub carrier paths are absolute and pass
                 // through unchanged.
-                let win = self.session_path(crate::executor::path::windows_operand_file_path(
+                let native = crate::executor::path::windows_operand_file_path(
                     shell_path_to_windows(&target, &self.shell_state.env_vars),
                     &self.shell_state.env_vars,
-                ));
+                );
+                let win = self.session_path(native.clone());
                 // rubash#1903: a WinuxCmd fifo marker operand is the
                 // read side of the named-pipe rendezvous, not a file
                 // holding the marker bytes — WinuxCmd's own cat
@@ -2456,9 +2457,15 @@ impl Executor {
                 }
                 // `<(cmd)` carrier path: the word names a draining stream —
                 // serve the shared remainder (subst.c:7143).
+                // rubash#3198: the plain read goes through the cwd
+                // anchor (read_session_anchored) — this face runs
+                // in-process, so without it a relative operand that
+                // escapes a DELETED session cwd via `..` dies on the
+                // joined path string where a spawned cat (fchdir'd
+                // onto the anchor inode) reads it fine.
                 let read = match self.procsub_stream_take(&win) {
                     Some(bytes) => Ok(bytes),
-                    None => fs::read(&win),
+                    None => self.read_session_anchored(&native, &win),
                 };
                 match read {
                     Ok(bytes) => output.extend(bytes),
