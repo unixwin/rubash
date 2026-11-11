@@ -40,7 +40,19 @@ impl Executor {
         let mut function = function;
         let mut body_alias_expanded = false;
         if let Some((source, base_line)) = function.unparsed_body_source.clone() {
-            if let Some(body) = self.retry_function_body_with_aliases(&source, base_line) {
+            if let Some(mut body) = self.retry_function_body_with_aliases(&source, base_line) {
+                // rubash#3209: the retried body never passed the
+                // function parser, so apply the definition-line
+                // restamp it would have received there (bare `name()`
+                // definitions only).
+                if !function.keyword && function.has_parentheses {
+                    if let Some(definition_line) = cmd.line {
+                        crate::parser::restamp_function_body_first_command(
+                            &mut body,
+                            definition_line,
+                        );
+                    }
+                }
                 function_storage = FunctionCommand {
                     body,
                     unparsed_body_source: None,

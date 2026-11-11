@@ -431,6 +431,7 @@ impl Executor {
                     let line = format!("{}{}: {}\n", self.diagnostic_prefix(), name, message);
                     let _ = self.write_diagnostic_fd2(line.as_bytes());
                     self.exit_code = if self.expansion_error_is_interactive_discard() {
+                        self.note_unit_expansion_error_discard();
                         1
                     } else {
                         self.expansion_fatal_status()
@@ -1188,6 +1189,7 @@ impl Executor {
             return None;
         }
         if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             self.exit_code = 1;
             self.command_expansion_failed.set(true);
             return Some(Err(ExecuteError::ExpansionFailure(1)));
@@ -1582,7 +1584,7 @@ impl Executor {
             // Mirror the per-eval boundary: a successful eval clears the
             // stale evalerror record and leaves no diagnostics.
             let _ = crate::executor::arithmetic::take_arith_eval_error();
-            let _ = crate::executor::arithmetic::take_arith_eval_diags();
+            crate::executor::arithmetic::clear_arith_eval_events();
             self.xtrace_conditional_term(op, left, Some(right));
             // A literal can never queue an arithmetic write, but keep the
             // boundary identical to the full path (the take-walk is empty).
@@ -1676,6 +1678,7 @@ impl Executor {
         );
         let _ = self.write_diagnostic_fd2(line.as_bytes());
         self.exit_code = if self.expansion_error_is_interactive_discard() {
+            self.note_unit_expansion_error_discard();
             1
         } else {
             self.expansion_fatal_status()
@@ -2636,7 +2639,18 @@ fn regexp_error_reason(pattern: &str) -> &'static str {
 
 fn append_literal_glob_text(output: &mut String, text: &str) {
     for ch in text.chars() {
-        if matches!(ch, '*' | '?' | '[' | '\\') {
+        // GNU pathexp.c:212 quote_string_for_globbing backslash-escapes
+        // every quoted character in pathexp.c:164 glob_char_p's set;
+        // under EXTENDED_GLOB that set includes the group-grammar
+        // characters `(`, `|`, `)` alongside the plain glob operators.
+        // A quoted paren or pipe that reached the pattern bare would be
+        // read by the extglob scanner as group structure (opening,
+        // closing, or splitting the group), so `@("a(b")` never matched
+        // (rubash#3231). The matchers' `\` arms (and the group scanners'
+        // escape skips, lib/glob/sm_loop.c:676 PATSCAN) treat `\(`,
+        // `\)`, `\|` as the literal characters, in both the extglob and
+        // the plain pattern matcher.
+        if matches!(ch, '*' | '?' | '[' | '\\' | '(' | ')' | '|') {
             output.push('\\');
         }
         output.push(ch);

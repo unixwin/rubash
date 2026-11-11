@@ -25,6 +25,12 @@ pub(super) fn assign_redirect_out_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(0) == 0 {
             command.redirect_in = Some(Box::new(redirect));
         }
+        // rubash#3053: a process-substitution target is a redirect
+        // target like any other — GNU captures the stamp when the
+        // redirection element reduces, after the whole `<(...)` /
+        // `>(...)` span was read, so the correction token is the
+        // closing `)` the collector stopped on (tokens[next_i]).
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -34,6 +40,7 @@ pub(super) fn assign_redirect_out_target(
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
         assign_output_redirect(command, &tokens[index].value, &target, None, None);
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -54,6 +61,7 @@ pub(super) fn assign_redirect_out_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.redirect_out = Some(Box::new(redirect));
         }
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -124,6 +132,7 @@ pub(super) fn assign_append_target(
         let target = process_substitution.target.clone();
         command.process_substitutions.push(process_substitution);
         assign_append_redirect(command, &tokens[index].value, &target, None, None);
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 
@@ -142,6 +151,7 @@ pub(super) fn assign_append_target(
         if redirect.fd_var.is_none() && redirect.fd.unwrap_or(1) == 1 {
             command.append = Some(Box::new(redirect));
         }
+        correct_first_word_end_for_redirect_target(command, &tokens[next_i]);
         return Some(next_i);
     }
 

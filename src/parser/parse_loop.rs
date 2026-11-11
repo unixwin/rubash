@@ -1487,6 +1487,18 @@ fn time_prefix_from_command(command: &mut CommandNode) -> Option<TimePipelinePre
             })
         })
         .collect();
+    // rubash#3053: the strip above is the moment the timed command's
+    // first element becomes the node's first element — apply the
+    // candidate its intake recorded (the end line of the first word,
+    // assignment word, or redirection target after the prefix
+    // chain). A candidate exists only when every recorded element
+    // was the chain plus that one element, so applying it here —
+    // inside the fold, under the fold's own admission — leaves
+    // every non-folded node byte-identical.
+    if command.time_prefix_first_element_end_line != 0 {
+        command.first_word_end_line = Some(command.time_prefix_first_element_end_line);
+        command.time_prefix_first_element_end_line = 0;
+    }
     reclassify_leading_assignment_words(command);
     Some(TimePipelinePrefix {
         keyword,
@@ -1594,7 +1606,23 @@ pub(crate) fn reclassify_leading_assignment_words(command: &mut CommandNode) {
             (name.to_string(), value.to_string(), raw_rhs)
         };
         let pattern_name = name.strip_suffix('+').unwrap_or(&name).to_string();
-        record_extglob_patterns_for_assignment(command, &pattern_name, &value, &raw_rhs, None);
+        // rubash#3224: this reclassification has no token at hand; the
+        // word's patterns were already recorded (and gate-stamped) by
+        // the word intake under their word index, so inherit the stamp
+        // from that record — unstamped words stay unstamped.
+        let read_gate_on = command
+            .extglob_patterns
+            .iter()
+            .filter(|pattern| pattern.word_index == Some(consumed))
+            .any(|pattern| pattern.read_gate_on);
+        record_extglob_patterns_for_assignment(
+            command,
+            &pattern_name,
+            &value,
+            &raw_rhs,
+            None,
+            read_gate_on,
+        );
         command.insert_assignment_with_raw(name, value, raw_rhs);
         consumed += 1;
     }
