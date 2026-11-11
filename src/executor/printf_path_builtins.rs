@@ -584,6 +584,7 @@ impl Executor {
                 &mut self.shell_state.env_vars,
                 &mut self.shell_state.cwd,
                 Some(&anchor_resolver),
+                &mut self.shell_state.logical_cwd,
                 &mut stdout_sink,
                 &mut stderr_sink,
             )?;

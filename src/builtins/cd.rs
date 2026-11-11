@@ -15,13 +15,13 @@ use super::diagnostic::{diagnostic_prefix, readonly_error_prefix};
 use crate::builtins::pushd::{load_stack, save_stack, DIR_STACK};
 
 use paths::{
-    current_logical_pwd, filesystem_path_for_display, logical_destination,
+    current_logical_pwd, filesystem_path_for_display, logical_canon_erased_components_exist,
     logical_destination_display, logical_pwd_var_display, set_shell_env, shell_display_path,
     shell_pwd_display_path, shell_var, starts_with_dot_component, validated_logical_pwd,
 };
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
@@ -66,11 +66,17 @@ pub fn execute(
     let mut stdout = crate::executor::WriteFileStdout;
     let mut stderr = crate::executor::WriteFileStderr;
     let mut cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    // Standalone entry (no session): a one-shot process is a fresh
+    // shell, so its logical cwd is the set_pwd adoption of the
+    // inherited $PWD (variables.c:907), or the process cwd itself.
+    let mut logical_cwd = crate::builtins::pwd::adopted_logical_pwd(env_vars, &cwd)
+        .or_else(|| Some(shell_pwd_display_path(&shell_display_path(&cwd))));
     execute_with_io(
         args.iter().map(String::as_str),
         env_vars,
         &mut cwd,
         None,
+        &mut logical_cwd,
         &mut stdout,
         &mut stderr,
     )
@@ -94,6 +100,7 @@ pub(crate) fn execute_with_io<'a, I, W, E>(
     env_vars: &mut crate::shell::var_table::VarTable,
     cwd: &mut PathBuf,
     anchor_resolver: Option<CwdAnchorResolver<'_>>,
+    logical_cwd: &mut Option<String>,
     stdout: &mut W,
     stderr: &mut E,
 ) -> io::Result<i32>
@@ -158,7 +165,20 @@ where
     // rubash#2143): the two reads are deliberately different values
     // once a user assignment has desynchronized $PWD.
     let old_pwd = current_logical_pwd(env_vars, cwd);
-    let old_logical = validated_logical_pwd(env_vars, cwd);
+    // GNU change_to_directory builds the destination from
+    // the_current_working_directory — the shell's stored logical cwd
+    // (builtins/common.c:589) — never from the $PWD variable, which a
+    // user assignment can desynchronize. The session stores that
+    // value in `logical_cwd`; when it still names the session cwd it
+    // is the base. Otherwise (a mover outside the cd family, e.g.
+    // pushd, changed the cwd without maintaining it) fall back to the
+    // derived validated value (rubash#2143).
+    let old_logical = match logical_cwd.as_deref() {
+        Some(tcwd) if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars) => {
+            PathBuf::from(tcwd)
+        }
+        _ => validated_logical_pwd(env_vars, cwd),
+    };
     if let Some(logical_dir) = logical_posix_test_dir(&target, env_vars) {
         // G-02: the bridge rewrites the logical state only — the session
         // cwd field stays where it was, exactly as the process cwd used
@@ -192,6 +212,7 @@ where
             set_shell_env(env_vars, "PWD", shell_pwd_display_path(&logical_dir));
         }
         refresh_dirstack_top(env_vars, cwd, &shell_pwd_display_path(&logical_dir));
+        *logical_cwd = Some(shell_pwd_display_path(&logical_dir));
         env_vars.insert("__RUBASH_PHYSICAL_PWD".to_string(), logical_dir.to_string());
         match target.print {
             PrintPath::Always | PrintPath::CdPath => writeln!(stdout, "{logical_dir}")?,
@@ -205,25 +226,138 @@ where
 
     // G-02: the move itself is a session-state change, not a process
     // chdir (builtins/cd.def cd_builtin -> chdir moves the SHELL; here
-    // the shell is the session). Probe and physical resolution happen
-    // in one step: canonicalize resolves `.`/`..`/symlinks exactly like
-    // the post-chdir getcwd did, and its failures carry the same OS
-    // error codes chdir reported (ENOENT for a missing target, ENOTDIR
-    // through a file prefix). The probe goes through
+    // the shell is the session). The probe goes through
     // canonicalize_native so the stored form is the getcwd form, not
-    // canonicalize's extended-length verbatim form (unixwin/niubash#659).
+    // canonicalize's extended-length verbatim form (unixwin/niubash#659),
+    // and its failures carry the same OS error codes chdir reported
+    // (ENOENT for a missing target, ENOTDIR through a file prefix).
+    //
+    // GNU builtins/cd.def change_to_directory: the operand is made
+    // absolute against the_current_working_directory — the LOGICAL
+    // value (make_absolute(newdir, tcwd)) — and in logical mode the
+    // move target is sh_canonpath's TEXTUAL canonicalization of that
+    // join (`.`/`..` processed on the logical spelling, symlinks NOT
+    // resolved first); only -P uses sh_physpath (symlinks resolved
+    // before `..`). Probing the physical join instead landed `cd ..`
+    // from a symlinked directory in the physical parent while bindpwd
+    // rebound $PWD by logical truncation, desyncing the landing spot
+    // from `pwd -L`/`pwd -P` (rubash#2796). So the mode decides WHAT
+    // is probed: logical mode probes the logical destination's
+    // physical referent; physical mode probes the physical join, as
+    // before.
+    let target_display = target.display.as_deref().unwrap_or(&target.path);
+    // The physical join (physical mode's probe, and logical mode's
+    // verbatim fallback below).
     let native_target = if target.path.is_absolute() {
         target.path.clone()
     } else {
         cwd.join(&target.path)
     };
-    let probed = match crate::executor::path::canonicalize_native(&native_target) {
-        Ok(path) if path.is_dir() => Ok(path),
-        Ok(_) => Err(not_a_directory_error()),
-        Err(error) => Err(error),
+    let probe = |path: &Path| -> Result<PathBuf, io::Error> {
+        match crate::executor::path::canonicalize_native(path) {
+            Ok(path) if path.is_dir() => Ok(path),
+            Ok(_) => Err(not_a_directory_error()),
+            Err(error) => Err(error),
+        }
     };
-    let physical = match probed {
-        Ok(path) => path,
+    // A completed move: the session cwd field's new physical value,
+    // the value bindpwd binds into $PWD (and the new stored logical
+    // cwd), and — for GNU's canon-failed `cd .` in a deleted cwd —
+    // the getcwd error whose diagnostic the move owes on stderr.
+    struct Move {
+        physical: PathBuf,
+        pwd_value: String,
+        stayed_deleted_dot: Option<io::Error>,
+    }
+    let probed = match mode {
+        Mode::Physical => probe(&native_target).map(|physical| Move {
+            pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
+            physical,
+            stayed_deleted_dot: None,
+        }),
+        Mode::Logical => {
+            let logical_dest_display = logical_destination_display(&old_logical, target_display);
+            let logical_probe_path = filesystem_path_for_display(&logical_dest_display, env_vars);
+            // The textual destination is only sh_canonpath's result
+            // when canon itself succeeds, and canon carries an
+            // existence half the text cannot show: with
+            // PATH_CHECKEXISTS | PATH_CHECKDOTDOT
+            // (lib/sh/pathcanon.c) every component erased by a later
+            // `..` must still name an existing directory, or canon
+            // returns NULL and change_to_directory adjudicates by the
+            // verbatim chdir — the fallthrough arm below — instead of
+            // the canonical form. So the canonical probe stands only
+            // when every erased component checks out; on a canon
+            // failure the verbatim arm is the whole adjudication,
+            // exactly as in GNU (rubash#2796).
+            let logical_probe =
+                if logical_canon_erased_components_exist(&old_logical, target_display, env_vars) {
+                    Some(probe(&logical_probe_path))
+                } else {
+                    None
+                };
+            match logical_probe {
+                Some(Ok(physical)) => Ok(Move {
+                    // GNU builtins/cd.def:136-175 bindpwd stores ONE
+                    // canonical logical PWD string that `pwd` then
+                    // echoes verbatim (pwd.def). Rubash's canonical
+                    // form is the POSIX /<drive>/... spelling
+                    // (rubash#537), so the value renders through
+                    // shell_pwd_display_path.
+                    pwd_value: shell_pwd_display_path(&logical_dest_display),
+                    physical,
+                    stayed_deleted_dot: None,
+                }),
+                _ => match probe(&native_target) {
+                    // GNU's canon-failed fallback: chdir(newdir)
+                    // verbatim succeeds, resetpwd re-reads the
+                    // position with getcwd, and bindpwd binds that
+                    // PHYSICAL value — the logical spelling is lost
+                    // exactly as in GNU.
+                    Ok(physical) => Ok(Move {
+                        pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
+                        physical,
+                        stayed_deleted_dot: None,
+                    }),
+                    Err(error) => {
+                        // The remaining GNU success: a dot-only
+                        // operand in a DELETED cwd. chdir(".")
+                        // resolves through the cwd inode itself, so
+                        // the move succeeds without the directory
+                        // existing; resetpwd's getcwd then fails (the
+                        // diagnostic), and the logical value becomes
+                        // the uncanonicalized make_absolute form
+                        // (old logical value + "/" + operand).
+                        let cwd_error = cwd.canonicalize().err();
+                        if operand_is_dot_only(target_display) {
+                            if let Some(cwd_error) = cwd_error {
+                                let bind = format!(
+                                    "{}/{}",
+                                    logical_pwd_var_display(&old_logical),
+                                    target_display.to_string_lossy()
+                                );
+                                Ok(Move {
+                                    physical: cwd.clone(),
+                                    pwd_value: shell_pwd_display_path(&bind),
+                                    stayed_deleted_dot: Some(cwd_error),
+                                })
+                            } else {
+                                Err(error)
+                            }
+                        } else {
+                            Err(error)
+                        }
+                    }
+                },
+            }
+        }
+    };
+    let Move {
+        physical,
+        pwd_value,
+        stayed_deleted_dot,
+    } = match probed {
+        Ok(move_outcome) => move_outcome,
         Err(error) => {
             // rubash#3268: GNU's tail (builtins/cd.def
             // change_to_directory, POSIX step 9): when the
@@ -243,10 +377,20 @@ where
                 anchor_resolver.and_then(|resolve| resolve(&target.path))
             };
             match anchored {
-                // The anchor walk landed: this arm's value is the
-                // move's physical directory, and the shared tail
-                // below commits it exactly like the probed route.
-                Some(Ok(path)) => path,
+                // The anchor walk landed: the move's physical
+                // directory is the walked path, and the value bindpwd
+                // binds is the physical form — the same binding the
+                // verbatim-chdir fallback above produces, since the
+                // anchor walk IS that chdir performed through the
+                // cwd inode (review-3249 resolution R8: master's
+                // anchor arm returned the bare path when `probed`
+                // was a plain path result; with the ported Move
+                // struct it must construct the whole move).
+                Some(Ok(path)) => Move {
+                    pwd_value: shell_pwd_display_path(&path.to_string_lossy()),
+                    physical: path,
+                    stayed_deleted_dot: None,
+                },
                 verdict => {
                     let error = match verdict {
                         Some(Err(anchor_error)) => anchor_error,
@@ -281,37 +425,29 @@ where
             }
         }
     };
+    // The canon-failed `cd .` in a deleted cwd owes the getcwd
+    // diagnostic (resetpwd("cd") -> get_working_directory, whose
+    // caller name is the literal "cd", builtins/common.c:592) BEFORE
+    // bindpwd binds the uncanonicalized value; the move itself
+    // succeeds.
+    if let Some(error) = &stayed_deleted_dot {
+        writeln!(
+            stderr,
+            "cd: error retrieving current directory: getcwd: \
+             cannot access parent directories: {}",
+            crate::posix_errors::message(error)
+        )?;
+    }
     // The move stands from here on — as with chdir, a readonly-bind
     // failure below does not move the shell back (cd.def bindpwd runs
-    // after the chdir).
+    // after the chdir). The stored logical cwd follows the bound
+    // value: bindpwd binds $PWD from the_current_working_directory
+    // (or its physical form under -P), so the two are one value here.
     *cwd = physical.clone();
-
-    let new_pwd = match mode {
-        Mode::Logical => logical_destination(
-            &old_logical,
-            target.display.as_deref().unwrap_or(&target.path),
-        ),
-        Mode::Physical => physical,
-    };
+    *logical_cwd = Some(pwd_value.clone());
     let new_pwd_display = match mode {
-        Mode::Logical => logical_destination_display(
-            &old_logical,
-            target.display.as_deref().unwrap_or(&target.path),
-        ),
-        Mode::Physical => shell_display_path(&new_pwd),
-    };
-
-    let pwd_value = match mode {
-        // GNU builtins/cd.def:136-175 bindpwd stores ONE canonical logical
-        // PWD string that `pwd` then echoes verbatim (pwd.def). Rubash's
-        // canonical form is the POSIX /<drive>/... spelling (rubash#537:
-        // the msys persona has no native-spelling mode — a drive-form PWD
-        // death-loops nvm.sh's nvm_find_up, and bashdb's _Dbg_is_file
-        // classifies absolute names by a leading '/'), so both the logical
-        // and the physical value render through shell_pwd_display_path and
-        // a session can never mix "/d/..." with "D:/...".
-        Mode::Logical => shell_pwd_display_path(&new_pwd_display),
-        Mode::Physical => shell_pwd_display_path(&new_pwd.to_string_lossy()),
+        Mode::Logical => logical_destination_display(&old_logical, target_display),
+        Mode::Physical => shell_display_path(&physical),
     };
     // The move has committed (the session cwd field above), so the
     // directory stack's top slot follows it now — even when a readonly
@@ -572,6 +708,23 @@ where
     }
 }
 
+/// Whether the operand consists solely of `.` components (`.`,
+/// `./`, `./.`): GNU change_to_directory's verbatim fallback
+/// chdir(newdir) resolves such an operand through the current
+/// directory's inode itself, so it succeeds even when the current
+/// directory has been deleted — the one canon-failed shape whose
+/// move stands in a deleted cwd (rubash#2796).
+fn operand_is_dot_only(path: &Path) -> bool {
+    let mut any = false;
+    for component in path.components() {
+        match component {
+            Component::CurDir => any = true,
+            _ => return false,
+        }
+    }
+    any
+}
+
 /// The logical destination display the real cd/pwd pair produces for
 /// `target` from the given session state: logical_destination_display
 /// built on validated_logical_pwd — the same chain cd_builtin binds
@@ -801,12 +954,14 @@ mod tests {
         let mut stderr = Vec::new();
 
         let mut cwd_slot = std::path::PathBuf::from("/");
+        let mut logical_slot = None;
         assert_eq!(
             execute_with_io(
                 ["/"],
                 &mut env_vars,
                 &mut cwd_slot,
                 None,
+                &mut logical_slot,
                 &mut stdout,
                 &mut stderr
             )
@@ -820,6 +975,7 @@ mod tests {
                 &mut env_vars,
                 &mut cwd_slot,
                 None,
+                &mut logical_slot,
                 &mut stdout,
                 &mut stderr
             )
