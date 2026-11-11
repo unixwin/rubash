@@ -108,11 +108,18 @@ impl Executor {
         let row = crate::executor::builtin_table::builtin_table_row("unset").expect("unset row");
         let mut diag = crate::executor::builtin_diag::Diag::new(row, stderr);
 
-        let function_only = args.iter().any(|arg| arg == "-f");
-        let variable_only = args.iter().any(|arg| arg == "-v");
+        // rubash#3338: the mode words count only in the OPTION
+        // REGION. GNU's scan stops at the first operand
+        // (builtins/bashgetopt.c:77-84), so in `unset v -f` the
+        // `-f` is a NAME and the variable is unset by the default
+        // path; the old whole-list detectors read it as function
+        // mode and the variable survived (same for `-v`/`-n`).
+        let region = &args[..super::builtin_opt::option_region_end(args, false)];
+        let function_only = region.iter().any(|arg| arg == "-f");
+        let variable_only = region.iter().any(|arg| arg == "-v");
         // GNU builtins/set.def:866-867: `unset -f` cancels -n, and -n is
         // only meaningful for variables anyway.
-        let nameref_only = args.iter().any(|arg| arg == "-n") && !function_only;
+        let nameref_only = region.iter().any(|arg| arg == "-n") && !function_only;
         // Operand words may carry the in-band W_ARRAYREF flag
         // (ARRAYREF_FLAG prefix — arrayref.rs); the syntactic flag was
         // already captured in `arrayref_flags` above, so strip the prefix
