@@ -1188,8 +1188,19 @@ impl Iterator for StorageWordIter<'_> {
             // the marker and its whitespace into the word so assoc kv-pairs
             // keep them; the indexed callers re-split on the marker. The
             // \x1c IFS-protection sentinel takes the same glued form here.
+            // So does CTLESC (\x11, markers.rs): GNU quote_string
+            // (subst.c:4773) prefixes EVERY character of a quoted string
+            // with CTLESC, so a protected character is data, never syntax
+            // — dequote_string (subst.c:4807) strips the pairs only at the
+            // end. Without this glue a protected `"` toggled the quote
+            // state (same rubash#3350 shape as the declare storage twin:
+            // the `\x10"..."` transport word's protected `"` closed the
+            // wrapper's span and swallowed the element boundary). Keep
+            // this twin in lockstep with the declare twin in
+            // builtins/declare/storage/words.rs.
             if ch == crate::executor::markers::IFS_GLUE
                 || ch == crate::executor::COMPOUND_EXPANSION_WS_TAG
+                || ch == crate::executor::markers::CTLESC
             {
                 word.push(ch);
                 if let Some((_, next)) = chars.next() {
