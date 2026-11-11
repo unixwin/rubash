@@ -2648,6 +2648,9 @@ impl Executor {
         // to the is_dir arm below (silent, rc 0). The empty word
         // therefore reaches the open attempt un-joined, exactly as
         // spelled, and fails there like any other unopenable name.
+        // The pre-join form is the operand the anchored read below
+        // spends; the joined spelling is the plain route's form.
+        let operand_path = read_path.clone();
         let read_path = if read_path.is_absolute() || file_word.is_empty() {
             read_path
         } else {
@@ -2657,10 +2660,48 @@ impl Executor {
             self.last_command_substitution_status.set(Some(0));
             return String::new();
         }
-        match fs::read_to_string(&read_path) {
-            Ok(value) => {
+        // rubash#3268(a): the read itself spends the cwd anchor, in
+        // the emulated-cat operand shape — a relative operand
+        // escaping a deleted session cwd via `..` died on the joined
+        // string, where GNU's open_redir_file (builtins/
+        // evalstring.c:759) opens the word inside the forked comsub
+        // child sitting in the cwd inode (subst.c:7143). Two shapes
+        // around the route keep their existing modelling:
+        // - The empty word stays on the plain read: it names nothing
+        //   in any directory, and the anchor walk would substitute
+        //   the anchor directory itself for it — it keeps its
+        //   as-spelled ENOENT (see the join comment above).
+        // - A directory the anchor walk reaches: its open succeeds
+        //   and the read fails EISDIR, which is GNU's read_comsub
+        //   shape (subst.c:6700-6712) — the is_dir arm above models
+        //   it for spellings whose stat still resolves; the EISDIR
+        //   mapping below models it for the anchored route, where
+        //   the joined spelling's stat is dead.
+        // The anchored read returns bytes; the string conversion
+        // keeps read_to_string's exact failure (InvalidData, same
+        // text) on the fail() path — only the byte source changed.
+        let read = if file_word.is_empty() {
+            fs::read(&read_path)
+        } else {
+            self.read_session_anchored(&operand_path, &read_path)
+        };
+        match read {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(value) => {
+                    self.last_command_substitution_status.set(Some(0));
+                    value.trim_capture_terminator().to_string()
+                }
+                Err(_) => fail(
+                    file_word,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "stream did not contain valid UTF-8",
+                    ),
+                ),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
                 self.last_command_substitution_status.set(Some(0));
-                value.trim_capture_terminator().to_string()
+                String::new()
             }
             Err(error) => fail(file_word, error),
         }

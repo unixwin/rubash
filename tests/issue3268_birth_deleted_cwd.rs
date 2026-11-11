@@ -340,8 +340,6 @@ fn issue3268e_normal_birth_is_unchanged() {
 }
 
 #[test]
-#[ignore = "composite with face (a): the comsub shortcut spawner's \
-            anchored serve is (a)'s fix — turn positive when (a) merges (rubash#3268)"]
 fn issue3268e_birth_comsub_shortcut_reads_via_anchor() {
     let dir = scratch("comsub-shortcut");
     let (stdout, _, _) = run_born_dead(&dir.0, "x=$(cat ../f); echo \"x=[$x]\"", true);
