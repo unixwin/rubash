@@ -378,6 +378,45 @@ fn fold_anchor_operand(
     out
 }
 
+/// rubash#3268 (d): the root one emulated-cp operand resolved to,
+/// exactly once, at the external_cp entry (Executor::cp_operand_root
+/// is the resolver). The copy engine walks CpNodes under a root; the
+/// root is the ONLY place the session-cwd question is asked, so the
+/// engine below a root never re-derives it. Plain is the pre-face
+/// world — the joined path string, opened exactly as before. At
+/// (unix only) is the anchor-relative root the two-state gate
+/// produced: the operand's walk starts at the cwd anchor's inode
+/// and the kernel resolves the relative spelling from there,
+/// `..` included — the same walk GNU's forked cp child performs
+/// from the inherited cwd inode, and the only form in which a
+/// create aimed INTO the dead directory still fails (the kernel
+/// refuses it there, as it does for GNU) while an escape to the
+/// parent succeeds. Textual normalization of the operand was
+/// measured and rejected for this face (design §6.2): the
+/// root-itself operand (`.`) has no live spelling at all, a
+/// recreated spelling names the ghost directory instead of the
+/// session's inode, and /proc/self/fd readlink does not exist on
+/// every supported target.
+#[derive(Clone)]
+pub(in crate::executor) enum CpRoot {
+    Plain(std::path::PathBuf),
+    #[cfg(unix)]
+    At {
+        /// The cwd anchor's open directory handle, cloned at
+        /// resolution time so the engine's run holds the inode
+        /// open independently of the session's later moves.
+        dir: std::sync::Arc<std::fs::File>,
+        /// The operand itself, relative to the anchor ("." when
+        /// the operand was the empty string).
+        rel: std::path::PathBuf,
+        /// The joined spelling session_path produced for this
+        /// operand — diagnostics only. An At root has no honest
+        /// openable path; the spelling is what the session would
+        /// have printed for the operand, and nothing opens it.
+        spelling: std::path::PathBuf,
+    },
+}
+
 impl Executor {
     /// The simple-command execution lookup. Under a `command -p`
     /// re-dispatch (standard_path_scope set) the lookup walks the
@@ -2515,6 +2554,22 @@ impl Executor {
     #[cfg(unix)]
     fn anchor_fd_for_dead_cwd(&self) -> Option<std::os::unix::io::RawFd> {
         use std::os::unix::io::AsRawFd;
+        self.cwd_anchor_dir_for_dead_cwd()
+            .map(|dir| dir.as_raw_fd())
+    }
+
+    /// The Arc form of the shared two-state gate above, for a
+    /// consumer that must HOLD the anchor across a whole engine run
+    /// (rubash#3268 (d): the emulated cp's operand roots) rather than
+    /// spend it inside one call. The verdict asked is the identical
+    /// one anchor_fd_for_dead_cwd asks — session_cwd_path_resolves
+    /// (the rubash#3275 identity verdict) plus the anchor naming
+    /// exactly the session cwd — only the handle's ownership differs:
+    /// the clone keeps the directory open even if the session moves
+    /// on mid-copy, and the fd borrowed from it stays valid for the
+    /// holder's whole run.
+    #[cfg(unix)]
+    fn cwd_anchor_dir_for_dead_cwd(&self) -> Option<std::sync::Arc<std::fs::File>> {
         let cwd = self.shell_state.cwd.clone();
         if self.session_cwd_path_resolves(&cwd) {
             return None;
@@ -2524,7 +2579,49 @@ impl Executor {
         if anchor.path != cwd {
             return None;
         }
-        Some(anchor.dir.as_raw_fd())
+        Some(anchor.dir.clone())
+    }
+
+    /// rubash#3268 (d): resolve one emulated-cp operand to its root,
+    /// once, at the external_cp entry. A RELATIVE operand under the
+    /// shared two-state gate (cwd_anchor_dir_for_dead_cwd — the same
+    /// verdict read_via_cwd_anchor and the redirect opens spend)
+    /// becomes an anchor-relative root: the copy engine then walks
+    /// the operand from the anchor's inode with the *at family, the
+    /// walk GNU's forked cp child performs from the inherited cwd
+    /// (execute_cmd.c:5771 execute_disk_command — bash keeps no cwd
+    /// string; the child simply inherits the inode). Every other
+    /// shape — an absolute operand, a resolvable cwd, no anchor —
+    /// keeps the plain joined path exactly as before. The empty
+    /// operand names the anchor directory itself ("." — the same
+    /// normalization read_via_cwd_anchor applies).
+    pub(in crate::executor) fn cp_operand_root(
+        &self,
+        operand: &std::path::Path,
+        joined: &std::path::Path,
+    ) -> CpRoot {
+        #[cfg(unix)]
+        {
+            if operand.is_relative() {
+                if let Some(dir) = self.cwd_anchor_dir_for_dead_cwd() {
+                    let rel = if operand.as_os_str().is_empty() {
+                        std::path::PathBuf::from(".")
+                    } else {
+                        operand.to_path_buf()
+                    };
+                    return CpRoot::At {
+                        dir,
+                        rel,
+                        spelling: joined.to_path_buf(),
+                    };
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = operand;
+        }
+        CpRoot::Plain(joined.to_path_buf())
     }
 
     /// rubash#3268: open `operand` relative to the cwd anchor with
