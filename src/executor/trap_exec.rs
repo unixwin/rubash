@@ -3649,18 +3649,13 @@ impl Executor {
             // GNU exec.def reports option errors through builtin_error,
             // which carries the script:line context prefix
             // (redir.tests:53: "./redir.tests: line 53: exec: -1: invalid
-            // option"). The builtin emits the bare shell-name form; swap
-            // the prefix when running inside a script.
-            let prefix = self.diagnostic_prefix();
-            if prefix != "rubash: " {
-                let text = String::from_utf8_lossy(&stderr).into_owned();
-                if text.starts_with("rubash: ") {
-                    stderr.clear();
-                    stderr.extend_from_slice(
-                        format!("{}{}", prefix, &text["rubash: ".len()..]).as_bytes(),
-                    );
-                }
-            }
+            // option"). The builtin face derives that prefix from the
+            // same carriers through the shared chain
+            // (builtins::diagnostic over builtins::prefix, rubash#3256),
+            // so the buffered text already carries the executor's own
+            // prefix shape; the literal-"rubash: " rewrite that used to
+            // bridge the builtin layer's old hard-coded fallback is
+            // gone with the fallback itself.
             // Route the buffered output while the temporary redirections
             // are still in effect (the diagnostics belong in the redirect
             // targets), then undo them if the exec failed.

@@ -91,19 +91,23 @@ fn builtin_error_prefix_three_modes_match_gnu() {
         "test.sh: line 5: "
     );
 
-    // -c mode: rubash + line (no script name)
+    // -c mode: line only, no name carrier at all. The name derives
+    // from the shared argv[0] chain (builtins::prefix, rubash#2791),
+    // whose terminal fallback is GNU's PROGRAM, "bash" — the old
+    // expectation printed the hard-coded brand literal "rubash",
+    // removed by the rubash#3256 (b) migration.
     let mut env_c = std::collections::HashMap::new();
     env_c.insert("__RUBASH_CURRENT_LINE".to_string(), "2".to_string());
     assert_eq!(
         rubash::builtins::set::builtin_error_prefix(&env_c),
-        "rubash: line 2: "
+        "bash: line 2: "
     );
 
-    // Fallback: no context
+    // Fallback: no context — same chain terminal, "bash".
     let env_fallback = std::collections::HashMap::new();
     assert_eq!(
         rubash::builtins::set::builtin_error_prefix(&env_fallback),
-        "rubash: "
+        "bash: "
     );
 }
 

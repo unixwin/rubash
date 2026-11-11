@@ -145,22 +145,29 @@ impl PrologParts {
                 script_file: script_file.clone(),
                 line: variables.get("__RUBASH_CURRENT_LINE").cloned(),
             },
-            PrologParts::Lib => Prolog {
-                interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
-                shell_basename: variables
-                    .get("__RUBASH_SHELL_NAME")
-                    .cloned()
-                    .unwrap_or_else(|| "rubash".to_string()),
-                error_name: "rubash".to_string(),
-                script_file: variables
-                    .get("__RUBASH_SCRIPT_NAME")
-                    .cloned()
-                    .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
-                line: variables
-                    .get("__RUBASH_CURRENT_LINE")
-                    .cloned()
-                    .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
-            },
+            PrologParts::Lib => {
+                // The name cells derive from the single argv[0]
+                // carrier chain (builtins::prefix, rubash#2791), as
+                // the Executor flavor's do through
+                // `interactive_shell_basename` / `error_report_name`:
+                // the old cells printed the shell-name carrier
+                // VERBATIM as the interactive name and a hard-coded
+                // "rubash" as the error name (rubash#3256).
+                let get = |key: &str| variables.get(key).cloned();
+                Prolog {
+                    interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
+                    shell_basename: crate::builtins::prefix::shell_basename(&get),
+                    error_name: crate::builtins::prefix::fallback_error_name(&get),
+                    script_file: variables
+                        .get("__RUBASH_SCRIPT_NAME")
+                        .cloned()
+                        .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+                    line: variables
+                        .get("__RUBASH_CURRENT_LINE")
+                        .cloned()
+                        .or_else(|| std::env::var("__RUBASH_CURRENT_LINE").ok()),
+                }
+            }
         }
     }
 }
