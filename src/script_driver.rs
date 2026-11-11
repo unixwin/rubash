@@ -130,6 +130,90 @@ fn set_args_may_set_onecmd(args: &str) -> bool {
     false
 }
 
+/// rubash#2773: over-admitting routing scan in the
+/// `script_may_set_onecmd` shape — the text may toggle `verbose`
+/// mid-read (`set -v`/`set +v`, a bundled `-…v…`/`+…v…`,
+/// `set -o/+o verbose`), or it may run a `.`/`source`/`eval` unit
+/// whose body toggles it where a text scan cannot see. GNU's reader
+/// echoes each input line at its read moment under the flag state
+/// THEN in effect (flags.c:284 echo_input_at_read = verbose_flag;
+/// parse.y:2712), so such texts take the grouped reader, whose
+/// per-line read point samples the live state; the whole-file fast
+/// path parses every line before any of them executes and cannot
+/// reproduce a mid-text toggle. A false positive only costs the
+/// incremental driver; the scan never decides semantics itself.
+pub fn script_may_toggle_verbose(contents: &str) -> bool {
+    contents.lines().any(line_may_toggle_verbose)
+}
+
+fn line_may_toggle_verbose(line: &str) -> bool {
+    // `set -o verbose` and `set -overbose` both carry the option
+    // name verbatim; so does a comment or string mentioning it —
+    // the scan only routes, so the substring is enough.
+    if line.contains("verbose") {
+        return true;
+    }
+    let bytes = line.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let boundary = i == 0
+            || matches!(
+                bytes[i - 1],
+                b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b'{'
+            );
+        if boundary {
+            // A `.` in command position sources a file whose body
+            // can toggle the flag invisibly to this scan.
+            if bytes[i] == b'.' && dot_is_command_position(bytes, i) {
+                return true;
+            }
+            for word in ["set", "eval", "source"] {
+                let w = word.as_bytes();
+                if bytes.len() - i >= w.len()
+                    && &bytes[i..i + w.len()] == w
+                    && (i + w.len() == bytes.len()
+                        || matches!(bytes[i + w.len()], b' ' | b'\t' | b';' | b'&' | b'|'))
+                {
+                    // An eval/source body can toggle the flag where
+                    // the scan cannot see it; the reader's per-line
+                    // sampling after their unit is what GNU
+                    // adjudicates.
+                    if word != "set" {
+                        return true;
+                    }
+                    if set_args_may_toggle_verbose(&line[i + w.len()..]) {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn set_args_may_toggle_verbose(args: &str) -> bool {
+    for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
+        if token.len() >= 2
+            && (token.starts_with('-') || token.starts_with('+'))
+            && !token.starts_with("--")
+            && !token.starts_with("++")
+        {
+            // A flag bundle carrying `v` in any position counts:
+            // GNU's set parser works the bundle letter by letter,
+            // and an `o` whose remainder is not an option name does
+            // not swallow the rest (verified against GNU bash
+            // 5.3.20: `set -ov` prints the option table AND sets
+            // verbose, `$-` = hvBc). A false positive (the `-ovi`
+            // name form) only costs the incremental driver.
+            if token[1..].contains('v') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn line_enables_history(line: &str) -> bool {
     let bytes = line.as_bytes();
     let mut i = 0usize;
@@ -1039,6 +1123,43 @@ impl ParkShadow {
 /// The trailing line-break separator the feeder emits per committed
 /// logical line is left in place; the caller pops it with the same rule
 /// `tokenize_comsub_body_with_origin` applies to the fresh stream.
+
+/// GNU `set -v` (verbose): echo input lines to stderr as they are
+/// READ, never at execution time (flags.c:284
+/// `echo_input_at_read = verbose_flag`; parse.y:2712 prints
+/// `shell_input_line` with `fprintf (stderr, "%s\n", ...)`). Every
+/// read point routes here: the grouped reader's per-line consumption
+/// ([`read_next_source_group`] — script files, `-c` strings and host
+/// submissions on the grouped route, plus the `source` builtin's
+/// groups), the stdin script reader's per-line read
+/// ([`run_stdin_script`]), and the whole-string read units whose
+/// callers hand over their full text at its single read boundary (the
+/// `-c` and Session whole-source routes — reached only when
+/// [`script_may_toggle_verbose`] shows no mid-text toggle, so the
+/// entry state is the state at every line's read — and
+/// parse_and_execute strings via `execute_eval_source`). The verbose
+/// state is sampled at the read
+/// moment: a `set -v` line is not itself echoed (the flag was off when
+/// it was read) and a `set +v` line still is (it was on) — execution
+/// never echoes (rubash#2773).
+pub fn echo_verbose_input_lines(executor: &Executor, text: &str) {
+    if !crate::builtins::set::shell_option_enabled(&executor.shell_state.env_vars, "verbose") {
+        return;
+    }
+    use std::io::Write as _;
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    // A blank input line is a line too (GNU echoes it as an empty
+    // line); split_inclusive yields nothing for an empty text.
+    if text.is_empty() {
+        let _ = writeln!(lock);
+        return;
+    }
+    for line in text.split_inclusive('\n') {
+        let _ = writeln!(lock, "{}", line.trim_end_matches('\n'));
+    }
+}
+
 pub(crate) fn read_next_source_group(
     executor: &Executor,
     raw_lines: &[&str],
@@ -1127,6 +1248,16 @@ pub(crate) fn read_next_source_group(
         let raw = raw_lines[*index];
         let text = raw.trim_end_matches('\n');
         *index += 1;
+        // rubash#2773: this consumption point IS the read — GNU's
+        // reader echoes the physical line here when verbose is on
+        // (flags.c:284; parse.y:2712). Nothing executes mid-gather, so
+        // the flag sampled now is exactly the state in effect when the
+        // line is read; the previous group's `set -v`/`set +v` has
+        // already landed, this group's own toggles land for the NEXT
+        // group. Heredoc body and delimiter lines pass through this
+        // same point and echo too (make_cmd.c:584 read_secondary_line
+        // echoes secondary lines as they are read).
+        echo_verbose_input_lines(executor, text);
         let mut is_body = false;
         // perf21: with the alias table inert, expand_group_aliases is the
         // identity — skip its per-line String copy and scan the raw text
@@ -5293,6 +5424,28 @@ fn controlling_terminal_available() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stderr())
 }
 
+/// The process-group number GNU's job-control diagnostics print:
+/// jobs.c:4737 `shell_pgrp = getpgid (0)` at initialize_job_control
+/// entry, reported verbatim by jobs.c:4844/4853
+/// `cannot set terminal process group (%d)`. It is the group the
+/// shell BELONGS to, not the shell's pid — the two coincide only for
+/// a session leader, and GNU's number is the group in every other
+/// shape (verified against GNU bash 5.3.20 with pid != pgid: the
+/// diagnostic names the inherited group). Non-unix targets have no
+/// process groups; the pid is the honest stand-in there (the same
+/// port the establishment's non-unix arm makes).
+#[cfg(unix)]
+pub fn shell_process_group_id() -> i32 {
+    // SAFETY: getpgrp takes no arguments and always succeeds.
+    unsafe { libc::getpgrp() }
+}
+
+/// Non-unix form of [`shell_process_group_id`].
+#[cfg(not(unix))]
+pub fn shell_process_group_id() -> i32 {
+    std::process::id() as i32
+}
+
 /// GNU shell.c:1969 -> jobs.c:4731-4869 initialize_job_control, the
 /// interactive establishment: jobs.c:4869 ends with
 /// `change_flag ('m', job_control ? '-' : '+')` — the monitor letter
@@ -5300,8 +5453,8 @@ fn controlling_terminal_available() -> bool {
 /// survive a terminal that cannot be taken (GNU `-i -m -c`, no tty:
 /// the two diagnostics + `hiBHc`), and an explicit `+m` does not
 /// suppress it when the terminal can be taken (GNU `+m -i -c` under
-/// a PTY: `himBHc`). Establishment failure prints jobs.c:4841
-/// "cannot set terminal process group (%d)" and jobs.c:4856
+/// a PTY: `himBHc`). Establishment failure prints jobs.c:4844
+/// "cannot set terminal process group (%d)" and jobs.c:4858
 /// "no job control in this shell".
 ///
 /// This is the engine's single establishment funnel (rubash#2948):
@@ -5325,7 +5478,7 @@ pub fn establish_interactive_job_control(executor: &mut Executor) {
             .unwrap_or("bash");
         eprintln!(
             "{shell_name}: cannot set terminal process group ({}): Inappropriate ioctl for device",
-            std::process::id()
+            shell_process_group_id()
         );
         eprintln!("{shell_name}: no job control in this shell");
     }
@@ -7532,6 +7685,14 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
                 break;
             }
         }
+
+        // rubash#2773: this read IS the line's read moment — GNU's
+        // reader echoes it here when verbose is on (flags.c:284
+        // echo_input_at_read = verbose_flag; parse.y:2712). The
+        // previous unit has already executed, so the sampled state
+        // is the live one; heredoc body lines pass through this same
+        // read and echo too (make_cmd.c:584).
+        echo_verbose_input_lines(executor, &input);
 
         if pending.is_empty() {
             pending_start_line = next_line;
