@@ -1836,6 +1836,21 @@ impl Executor {
                 OutputTarget::Closed => {
                     process.stderr(Stdio::piped());
                 }
+                // rubash#3308: ambient dup snapshots of the shell's stdout
+                // (`2>&1`), a coproc's input, /dev/full, a synthetic
+                // /proc entry, and an in-memory channel have no direct
+                // child handle — pipe them like the merged arm so the
+                // driver's routing pass places the bytes at the resolved
+                // target instead of the child inheriting the process
+                // stderr past the binding.
+                OutputTarget::ProcessStdout
+                | OutputTarget::ProcessStdoutAt(_)
+                | OutputTarget::CoprocStdin(_)
+                | OutputTarget::FullDevice
+                | OutputTarget::ProcContentWrite
+                | OutputTarget::PipeChannel(_) => {
+                    process.stderr(Stdio::piped());
+                }
                 // Ambient stderr, dup snapshots the walk cannot express, or
                 // a failed walk: keep the per-redirect legacy handling.
                 _ => {

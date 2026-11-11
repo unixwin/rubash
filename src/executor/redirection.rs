@@ -1646,9 +1646,16 @@ impl Executor {
         // and its state is discarded. The executing path reports a
         // failed open itself; a report here double-prints (rubash#1844).
         state.diagnostics_muted = true;
-        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            return Ok(None);
-        }
+        // rubash#3308: apply_ordered_output_redirects reports whether
+        // the LIST held an output redirect — a stage with none returns
+        // false, which this probe read as "unresolvable" and answered
+        // None, so the spawner defaulted fd 2 to the ambient Stderr and
+        // an enclosing `2>file` / `2>/dev/null` / `exec 2>...` / `2>&1`
+        // binding was silently dropped (the child inherited the process
+        // stderr). The seeded state already carries the fd-table
+        // ambient bindings, so no list redirect means the seeded
+        // targets stand; only a failed open declines.
+        self.apply_ordered_output_redirects(cmd, &mut state)?;
         // A stage whose own output open failed is not routable from the
         // resolved targets (the failed fd never bound): decline so the
         // sequential stage executor reports the failure per element
