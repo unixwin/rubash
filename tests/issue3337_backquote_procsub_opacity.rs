@@ -256,15 +256,19 @@ fn issue3337_07_escaped_backquote_does_not_open_a_group() {
 }
 
 // 08 — guard: a real top-level embedded process substitution in a
-// plain word (no group anywhere) still materializes: the opacity
-// skip must not over-reach past genuine spans. Green on base and
-// head.
+// plain word (no group anywhere) still materializes and splices:
+// the opacity skip must not over-reach past genuine spans. Green on
+// base and head. Assignment route on purpose: the value is the
+// synchronous readback of the splice (an echo-argument form would
+// hit the separate builtin-argument splice face recorded in the
+// lane report — not this pin's subject). The sleep settles the
+// async body before the cap readback.
 #[test]
 fn issue3337_08_top_level_embedded_procsub_still_materializes() {
     let dir = test_dir("08");
     let output = run_single_process(
         &dir,
-        "echo pre>(printf 'hello\\n' > cap.txt)post\necho \"CAP:[$(cat cap.txt)]\"\n",
+        "v=pre>(printf 'hello\\n' > cap.txt)post\necho \"V:[${v}]\"\nsleep 1\necho \"CAP:[$(cat cap.txt)]\"\n",
     );
     assert!(
         output.status.success(),
@@ -275,7 +279,7 @@ fn issue3337_08_top_level_embedded_procsub_still_materializes() {
     let mut lines = stdout.lines();
     let first = lines.next().unwrap_or_default();
     assert!(
-        first.starts_with("pre/dev/fd/") && first.ends_with("post"),
+        first.starts_with("V:[pre/dev/fd/") && first.ends_with("post]"),
         "first line: {first}"
     );
     assert_eq!(lines.next(), Some("CAP:[hello]"), "stdout: {stdout}");
