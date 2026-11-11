@@ -2259,6 +2259,14 @@ fn run_history_group(
             }
         } else {
             for text in record_texts.iter().flatten() {
+                // bashhist.c:643 pre_process_line records only
+                // `*return_value`: a line that expanded to exactly
+                // empty is never recorded (rubash#3329). Whitespace-
+                // only texts pass — GNU records them, subject only to
+                // check_history_control inside record().
+                if text.is_empty() {
+                    continue;
+                }
                 let was_recorded = session
                     .borrow_mut()
                     .record(text, &control, &ignore, histsize);
