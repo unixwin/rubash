@@ -2032,7 +2032,7 @@ impl Executor {
         // literal argv word resolves through the OS /dev/fd layer.
         #[cfg(unix)]
         crate::executor::dev_fd_operands::attach_unix_dev_fd_operands(&mut process, &dev_ops);
-        process.current_dir(&self.shell_state.cwd);
+        self.stamp_spawn_cwd(&mut process);
         suppress_orphan_console(&mut process);
         let spawned = process.spawn();
         // The child holds its own duplicated inheritable handles;
