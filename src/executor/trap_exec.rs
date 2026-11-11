@@ -1140,7 +1140,18 @@ impl Executor {
         // must persist, exactly like GNU's single variable — restoring
         // the value saved at entry would silently undo it.
         self.pin_extglob_gate_to_live();
+        // rubash#2824: this unit is a parse_and_execute string unit;
+        // GNU runs those with SEVAL_NOHIST unless the caller asked
+        // otherwise (evalstring.c:291-292), which clears
+        // remember_on_history for the unit — a `history -s` inside
+        // appends without popping (builtins/history.def:435-439).
+        // The depth is raised around the inner body only, so the
+        // restore below runs on every path out of the unit.
+        self.nohist_parse_depth
+            .set(self.nohist_parse_depth.get() + 1);
         let result = self.execute_eval_source_inner(source, caller_line, cmd);
+        self.nohist_parse_depth
+            .set(self.nohist_parse_depth.get() - 1);
         self.pin_extglob_gate_to_live();
         self.exit_parse_and_execute_frame(saved_frame);
         self.exit_read_unit(saved_read_generation);
@@ -1527,6 +1538,17 @@ impl Executor {
         // applies at its read); expand at stream level and mark the batch
         // so executor-level expansion does not fire a second time.
         let action = self.comsub_body_alias_splice(&action);
+        // GNU trap.c:1071 run_exit_trap runs the action through
+        // parse_and_execute (trap_command, "exit trap", ...): the
+        // string name becomes yy_input_name, so parser_error
+        // (error.c:300-316) reports `<script>: exit trap: line N:`.
+        // Mirror the signal path's __RUBASH_TRAP_CONTEXT marker
+        // (trap.c:496, rubash#1351) with the exit trap's own name for
+        // the duration of the re-parse and execution (rubash#2716).
+        let old_trap_context = self
+            .shell_state
+            .env_vars
+            .insert("__RUBASH_TRAP_CONTEXT".to_string(), "exit trap".to_string());
         let tokens = crate::lexer::tokenize(&action);
         let mut ast = crate::parser::parse(&tokens);
         if let Some(redirect_cmd) = redirect_cmd {
@@ -1574,14 +1596,48 @@ impl Executor {
         *self.shell_state.debug_trap_command.borrow_mut() = saved_trap_command;
         self.trap_saved_exit_value = prev_saved_exit;
         self.trap_saved_exit_context = prev_saved_context;
+        match old_trap_context {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_TRAP_CONTEXT".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_TRAP_CONTEXT");
+            }
+        }
+        // GNU trap.c:1071-1080: parse_and_execute's own status is
+        // discarded — retval stays trap_saved_exit_value unless the
+        // action jumped out (an explicit exit, or an ERREXIT jump whose
+        // retval is last_command_exit_value). A parse failure of the
+        // action is the discarded class: its diagnostics stand, but the
+        // pending exit status is not replaced (rubash#2716). Consume
+        // the parse-error flag either way so it cannot leak into a
+        // continuing session (the subshell funnel returns to a live
+        // parent). A parser_error that exit_shell(2)ed under live
+        // errexit (error.c:324-327) is a real errexit-class exit, not
+        // the discarded class — it keeps propagating, marked.
+        let parse_error_raised = self.take_parse_error();
+        let parser_error_errexited = self.parser_error_errexited.take();
         match result {
             Ok(()) => {
                 self.exit_code = exit_status;
                 Ok(exit_status)
             }
+            Err(ExecuteError::ExitCode(_)) if parse_error_raised && !parser_error_errexited => {
+                self.exit_code = exit_status;
+                Ok(exit_status)
+            }
+            Err(ExecuteError::ExitCode(code)) if parser_error_errexited => {
+                Err(self.errexit_exit(code))
+            }
             Err(ExecuteError::ExitCode(code)) => {
                 self.exit_code = code;
                 Ok(code)
+            }
+            Err(error) if parse_error_raised && !parser_error_errexited => {
+                self.exit_code = exit_status;
+                Ok(exit_status)
             }
             Err(error) => Err(error),
         }
