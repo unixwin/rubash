@@ -37,11 +37,50 @@
 //! additionally verified against the oracle over pipes. The
 //! script-mode control cell is plain script semantics, verified
 //! byte-for-byte against the oracle.
+//!
+//! Harness note (2026-11-11 rework, probe-2777): the piped
+//! collection is group-bounded — the shell runs in its own
+//! process group, leftover members are swept after it exits,
+//! and the reader threads are joined only once they have
+//! delivered, so a session that leaves a live (e.g. stopped)
+//! job behind can no longer wedge the whole stem on a pipe
+//! EOF that never arrives. The two B4 exit-deferral cells run
+//! over the PTY harness with paced feeding instead of pipes:
+//! the semantics they assert are job-control semantics (GNU
+//! has no job control over pipes and never learns the stop
+//! there), and the pipe form made a cell's fate depend on
+//! whether the TEST process itself owned a controlling
+//! terminal (batch runs have none and hung; an interactive
+//! terminal silently supplied one). Pacing matters: fed at
+//! full speed, even GNU reads the freshly stopped job as
+//! "running jobs" (reap timing), so lines are fed 600 ms
+//! apart — the pace at which the oracle produces exactly the
+//! asserted texts. On the merged PTY transcript the channel
+//! split of the original assertions collapses; the expected
+//! texts and counts are unchanged (calibrated against GNU
+//! bash 5.3.20 through this same harness). The scoped
+//! exceptions are the two B4 cells' `Stopped`-count checks:
+//! the asynchronous stop notice shares the merged stream
+//! (in the separated capture it lived on stderr, which those
+//! checks never inspected), and whether it prints as its own
+//! line races — GNU prints it before the first `exit` in one
+//! run, after the first deferral message in the next, and in
+//! most runs not separately at all (a deferral listing is
+//! its first visible report); its count is stable at at
+//! most one. The checks are therefore evaluated as counts
+//! over the whole transcript: b4off allows at most one
+//! `Stopped` line (the notice) — a job listing printed at
+//! any deferral would push it to two or more; b4on allows
+//! two or three — the two deferral listings, plus the
+//! notice when it lands separately (measured under GNU
+//! through this harness: 2 in five of six calibration runs,
+//! 3 in one).
 
 #![cfg(unix)]
 
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -57,6 +96,32 @@ fn sandbox(tag: &str) -> PathBuf {
     fs::canonicalize(&dir).expect("canonicalize sandbox")
 }
 
+/// Sweep a dead session leader's process group: TERM, a short
+/// grace, then KILL. A session can leave live members behind
+/// (a stopped background job is the case this stem exists to
+/// pin); those members inherit the capture pipes, and without
+/// the sweep their open write ends keep `read_to_end` — and
+/// with it this harness — waiting forever. SIGKILL is what
+/// actually lands on a stopped leftover; the TERM grace only
+/// serves members that are still running.
+fn sweep_process_group(pgid: u32) {
+    let neg = -(pgid as i32);
+    unsafe {
+        let _ = libc::kill(neg, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive = unsafe { libc::kill(neg, 0) } == 0;
+        if !alive || Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    unsafe {
+        let _ = libc::kill(neg, libc::SIGKILL);
+    }
+}
+
 /// Run one interactive pipe session feeding exactly `lines`, then
 /// EOF; return (stdout, stderr, exit status).
 fn run_interactive(home: &PathBuf, lines: &[&str]) -> (String, String, i32) {
@@ -70,6 +135,9 @@ fn run_interactive(home: &PathBuf, lines: &[&str]) -> (String, String, i32) {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Own process group, so the session's leftovers can be
+        // swept as a unit once the shell itself is gone.
+        .process_group(0)
         .spawn()
         .expect("spawn rubash -i");
     let mut stdin = child.stdin.take().expect("child stdin");
@@ -108,11 +176,28 @@ fn run_interactive(home: &PathBuf, lines: &[&str]) -> (String, String, i32) {
             Err(e) => panic!("try_wait failed: {e}"),
         }
     };
+    // The shell is out (or was killed by the watchdog): sweep
+    // its process group so no live leftover keeps the capture
+    // pipes open, then collect. A reader thread is joined only
+    // after it has delivered its buffer — if a write end still
+    // survives outside the group, the recv timeout fires and
+    // the thread is left detached rather than hanging the stem.
+    sweep_process_group(child.id());
     let _ = writer.join();
-    let stdout = rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
-    let stderr = rx2.recv_timeout(Duration::from_secs(5)).unwrap_or_default();
-    let _ = t_out.join();
-    let _ = t_err.join();
+    let (stdout, out_done) = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(buf) => (buf, true),
+        Err(_) => (Vec::new(), false),
+    };
+    let (stderr, err_done) = match rx2.recv_timeout(Duration::from_secs(5)) {
+        Ok(buf) => (buf, true),
+        Err(_) => (Vec::new(), false),
+    };
+    if out_done {
+        let _ = t_out.join();
+    }
+    if err_done {
+        let _ = t_err.join();
+    }
     let code = status.and_then(|s| s.code()).expect("session exit status");
     (
         String::from_utf8_lossy(&stdout).into_owned(),
@@ -131,10 +216,18 @@ fn count(haystack: &str, needle: &str) -> usize {
 /// jobs." and lists the job as Stopped; the second `exit` defers
 /// again (the intervening echo rolled the last-builtin tracker);
 /// EOF then exits with the deferral's status 1.
+///
+/// Runs over the PTY harness (see the file header's harness
+/// note): the asserted texts are job-control semantics, which
+/// exist only with a controlling terminal. The PTY merges the
+/// channels, so both capture arguments below are the session
+/// transcript; GNU 5.3.20 through this same harness produces
+/// the asserted texts, with the one `Stopped`-count range
+/// the header note describes.
 #[test]
 fn b4_session_exit_says_stopped_jobs() {
     let home = sandbox("b4on");
-    let (stdout, stderr, code) = run_interactive(
+    let (transcript, code) = pty::run_paced(
         &home,
         &[
             "shopt -s checkjobs",
@@ -144,24 +237,34 @@ fn b4_session_exit_says_stopped_jobs() {
             "echo after-exit",
             "exit",
         ],
+        Duration::from_millis(600),
     );
+    let stdout = &transcript;
+    let stderr = &transcript;
     assert_eq!(
         count(&stderr, "There are stopped jobs."),
         2,
-        "both typed exits defer for the stopped job:\nstderr={stderr}"
+        "both typed exits defer for the stopped job:\ntranscript={transcript}"
     );
     assert!(
         !stderr.contains("There are running jobs."),
-        "the stopped job must not be read as running:\nstderr={stderr}"
+        "the stopped job must not be read as running:\ntranscript={transcript}"
     );
-    assert_eq!(
-        count(&stdout, "Stopped"),
-        2,
-        "checkjobs on: each deferral lists the stopped job:\nstdout={stdout}"
+    // The asserted signal is the two deferral listings. The
+    // merged transcript can additionally carry the one
+    // asynchronous stop notice (kept on stderr by the
+    // separated capture, racy in whether it lands as its own
+    // line — see the header note), so GNU's count through
+    // this harness is two or three: fewer means a deferral
+    // failed to list, more means listings beyond the two
+    // deferrals.
+    assert!(
+        (2..=3).contains(&count(&stdout, "Stopped")),
+        "checkjobs on: each deferral lists the stopped job:\ntranscript={transcript}"
     );
     assert!(
         stdout.contains("after-exit"),
-        "the first exit deferred, so the echo ran:\nstdout={stdout}"
+        "the first exit deferred, so the echo ran:\ntranscript={transcript}"
     );
     assert_eq!(code, 1, "final status is the deferral's 1 (GNU)");
 }
@@ -169,10 +272,17 @@ fn b4_session_exit_says_stopped_jobs() {
 /// The stopped-job protection does not depend on checkjobs
 /// (exit.def scans STOPPED unconditionally); only the listing
 /// is gated on the shopt.
+///
+/// PTY transport, as in the checkjobs-on cell. The no-listing
+/// check is a count over the whole transcript: the merged
+/// stream carries the one asynchronous stop notice (which the
+/// separated capture kept on stderr), its position relative
+/// to the first `exit` races between runs, and a listing
+/// printed at any deferral would add a second `Stopped` line.
 #[test]
 fn b4_session_checkjobs_off_still_defers_for_stopped() {
     let home = sandbox("b4off");
-    let (stdout, stderr, _code) = run_interactive(
+    let (transcript, _code) = pty::run_paced(
         &home,
         &[
             "shopt -u checkjobs",
@@ -182,18 +292,21 @@ fn b4_session_checkjobs_off_still_defers_for_stopped() {
             "echo after-exit",
             "exit",
         ],
+        Duration::from_millis(600),
     );
+    let stdout = &transcript;
+    let stderr = &transcript;
     assert!(
         stderr.contains("There are stopped jobs."),
-        "stopped protection applies with checkjobs off:\nstderr={stderr}"
+        "stopped protection applies with checkjobs off:\ntranscript={transcript}"
     );
     assert!(
         stdout.contains("after-exit"),
-        "the first exit deferred, so the echo ran:\nstdout={stdout}"
+        "the first exit deferred, so the echo ran:\ntranscript={transcript}"
     );
     assert!(
-        !stdout.contains("Stopped"),
-        "checkjobs off: no job listing on stdout:\nstdout={stdout}"
+        count(&transcript, "Stopped") <= 1,
+        "checkjobs off: no job listing on stdout:\ntranscript={transcript}"
     );
 }
 
@@ -331,6 +444,7 @@ fn script_mode_stopped_job_reads_running_control() {
 
 mod pty {
     use std::io::{Read, Write};
+    use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
@@ -421,6 +535,86 @@ mod pty {
                 }
             }
         }
+    }
+
+    /// The shell the paced sessions drive: the rubash binary
+    /// under test, unless `RUBASH2777_PTY_SHELL` names another
+    /// shell — the oracle-calibration route, which runs the
+    /// identical cells against GNU bash through this identical
+    /// harness before the rubash run is believed.
+    fn paced_shell() -> String {
+        std::env::var("RUBASH2777_PTY_SHELL")
+            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_rubash").to_string())
+    }
+
+    /// Run one paced PTY session in `home`: spawn the shell
+    /// interactively under script(1), feed `lines` one at a
+    /// time with `pace` between them, then close the input and
+    /// wait for the session to end. Returns (transcript, exit
+    /// code). The pacing is part of the shape: these sessions
+    /// turn on reap timing at the reader boundary, and fed at
+    /// full speed even GNU misreads a freshly stopped job as
+    /// running. A session that does not end within the deadline
+    /// fails the cell loudly instead of hanging the stem.
+    pub fn run_paced(home: &PathBuf, lines: &[&str], pace: Duration) -> (String, i32) {
+        assert!(
+            Command::new("script").arg("--version").output().is_ok(),
+            "the paced PTY cells require script(1) on this host"
+        );
+        let cmdline = format!("{} -i", paced_shell());
+        let mut child = Command::new("script")
+            .args(["-qec", &cmdline, "/dev/null"])
+            .current_dir(home)
+            .env("HOME", home)
+            .env("PATH", "/usr/local/bin:/usr/bin:/bin")
+            .env("TERM", "xterm")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn script(1)");
+        let mut stdin = child.stdin.take().expect("script stdin");
+        let mut stdout = child.stdout.take().expect("script stdout");
+        let transcript = Arc::new(Mutex::new(String::new()));
+        let sink = Arc::clone(&transcript);
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let text = String::from_utf8_lossy(&chunk[..n]).into_owned();
+                        sink.lock().expect("transcript lock").push_str(&text);
+                    }
+                }
+            }
+        });
+        std::thread::sleep(Duration::from_millis(800));
+        for line in lines {
+            let _ = stdin.write_all(line.as_bytes());
+            let _ = stdin.write_all(b"\n");
+            let _ = stdin.flush();
+            std::thread::sleep(pace);
+        }
+        std::thread::sleep(pace);
+        drop(stdin);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            match child.try_wait().expect("poll script(1)") {
+                Some(status) => break status,
+                None => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "paced session did not exit; transcript so far: {:?}",
+                        transcript.lock().expect("transcript lock")
+                    );
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        };
+        let _ = reader.join();
+        let text = transcript.lock().expect("transcript lock").clone();
+        (text, status.code().unwrap_or(-1))
     }
 }
 
