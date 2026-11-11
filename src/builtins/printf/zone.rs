@@ -405,7 +405,9 @@ fn parse_tzif(data: &[u8]) -> Option<TzifZone> {
     cursor.skip(4)?;
     let counts = read_tzif_counts(&mut cursor)?;
     let mut zone = parse_tzif_block(&mut cursor, &counts, true, None)?;
-    let rest = &data[cursor.pos.min(data.len())..];
+    let rest = cursor
+        .take(data.len().saturating_sub(cursor.pos))
+        .unwrap_or_default();
     if rest.len() >= 2 && rest[0] == b'\n' {
         if let Some(end) = rest[1..].iter().position(|byte| *byte == b'\n') {
             let footer_text = String::from_utf8_lossy(&rest[1..1 + end]).into_owned();
