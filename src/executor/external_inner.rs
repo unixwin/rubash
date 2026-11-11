@@ -2755,6 +2755,56 @@ impl Executor {
         self.open_via_cwd_anchor(operand, libc::O_RDONLY, 0)
     }
 
+    /// rubash#3286: the output-redirect probe consumer of the cwd
+    /// anchor — the write twin of open_input_redirect_via_anchor's
+    /// probe arm. Some(Ok(())) when the anchor classifies the
+    /// operand as an existing FIFO and write access validates
+    /// (faccessat W_OK); Some(Err) when it is an existing FIFO but
+    /// access fails; None when the anchor does not apply or the
+    /// operand is not an existing FIFO there — the caller falls
+    /// through to its joined-path FIFO check and then to the bind,
+    /// which performs GNU's single open (redir.c:725 redir_open).
+    /// A probe must never open a FIFO: the open would consume the
+    /// rendezvous the bind then waits for (rubash#1820). A
+    /// nonexistent operand is NOT an error here (unlike the input
+    /// face): the bind creates it — so an fstatat failure falls
+    /// through instead of surfacing.
+    #[cfg(unix)]
+    pub(in crate::executor) fn probe_output_fifo_via_anchor(
+        &self,
+        target: &str,
+    ) -> Option<std::io::Result<()>> {
+        let fs_operand = self.redirect_target_filesystem_path(target);
+        if !fs_operand.is_relative() {
+            return None;
+        }
+        match self.fstatat_via_cwd_anchor(&fs_operand) {
+            Some(Err(_)) | None => None,
+            // Widened through u32 like fd_is_anonymous_pipe:
+            // st_mode and the S_IF* constants disagree in width
+            // across libc targets (bionic/darwin).
+            Some(Ok(stat))
+                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                    == u32::from(libc::S_IFIFO) =>
+            {
+                let anchor_fd = self.anchor_fd_for_dead_cwd()?;
+                let c_operand = std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(
+                    fs_operand.as_os_str(),
+                ))
+                .ok()?;
+                // SAFETY: anchor_fd stays alive for the call;
+                // faccessat only validates, it takes no descriptor
+                // and consumes no rendezvous.
+                let rc = unsafe { libc::faccessat(anchor_fd, c_operand.as_ptr(), libc::W_OK, 0) };
+                if rc != 0 {
+                    return Some(Err(std::io::Error::last_os_error()));
+                }
+                Some(Ok(()))
+            }
+            Some(Ok(_)) => None,
+        }
+    }
+
     #[cfg(unix)]
     pub(in crate::executor) fn ambient_fd_pins_for(
         &self,
