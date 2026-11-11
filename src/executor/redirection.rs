@@ -3240,12 +3240,26 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path = self.session_path(self.redirect_target_filesystem_path(&target));
-                crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
-                    match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
-                        Some(error) => Err(crate::posix_errors::path_error(&target, error)),
-                        None => Ok(()),
-                    }
+                // rubash#3286: the anchor classification comes first
+                // — the joined-path check below is blind in a deleted
+                // cwd, and the dropped validation open in the None
+                // arm would consume the bind's rendezvous
+                // (rubash#1820) now that the bind opens a FIFO
+                // through the anchor.
+                #[cfg(unix)]
+                let anchor = self.probe_output_fifo_via_anchor(&target);
+                #[cfg(not(unix))]
+                let anchor: Option<Result<(), std::io::Error>> = None;
+                anchor.or_else(|| {
+                    let path = self.session_path(self.redirect_target_filesystem_path(&target));
+                    crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
+                        match crate::executor::shell_options::redirect_fifo_access_error(
+                            &path, true,
+                        ) {
+                            Some(error) => Err(crate::posix_errors::path_error(&target, error)),
+                            None => Ok(()),
+                        }
+                    })
                 })
             };
             #[cfg(not(any(unix, windows)))]

@@ -2436,28 +2436,24 @@ impl Executor {
         }
         // rubash#3268: the plain create is a shell-process redirect
         // open — same anchor rule as the input face for a relative
-        // operand. An existing FIFO target is classified out through
-        // the anchor's fstatat and keeps the plain open: the probe
-        // faces classify FIFOs by joined-path metadata, which a dead
-        // cwd defeats, and an anchor O_WRONLY open in a probe would
-        // consume the bind's rendezvous (rubash#1820).
+        // operand. rubash#3286: an existing FIFO takes the anchor
+        // open too — it IS the bind's one real open (GNU redir.c:725
+        // redir_open), blocking until a reader arrives (the
+        // rendezvous) instead of the old carve-out's string-path
+        // fallback, which dies at a dead cwd component with instant
+        // ENOENT. The probe faces classify FIFOs by anchor fstatat
+        // and validate by faccessat, so no probe ever reaches this
+        // open (rubash#1820).
         #[cfg(unix)]
         {
             let fs_operand = self.redirect_target_filesystem_path(&target);
             if fs_operand.is_relative() {
-                let is_fifo = matches!(
-                    self.fstatat_via_cwd_anchor(&fs_operand),
-                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                        == u32::from(libc::S_IFIFO)
-                );
-                if !is_fifo {
-                    if let Some(result) = self.open_via_cwd_anchor(
-                        &fs_operand,
-                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-                        0o666,
-                    ) {
-                        return result.map_err(|e| crate::posix_errors::path_error(&target, e));
-                    }
+                if let Some(result) = self.open_via_cwd_anchor(
+                    &fs_operand,
+                    libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                    0o666,
+                ) {
+                    return result.map_err(|e| crate::posix_errors::path_error(&target, e));
                 }
             }
         }
@@ -2500,6 +2496,16 @@ impl Executor {
         // File, so the null-device stand-in is inert. rubash#1903: a
         // WinuxCmd marker is a FIFO for this rule on Windows, with the
         // marker probe standing in for access(2).
+        // rubash#3286: the anchor classification comes first — the
+        // joined-path check below is blind in a deleted cwd, and an
+        // anchor open here would consume the bind's rendezvous.
+        #[cfg(unix)]
+        if let Some(result) = self.probe_output_fifo_via_anchor(target) {
+            return match result {
+                Ok(()) => File::open("/dev/null"),
+                Err(error) => Err(crate::posix_errors::path_error(target, error)),
+            };
+        }
         #[cfg(any(unix, windows))]
         {
             let path = self.session_path(shell_path_to_windows(
@@ -2728,26 +2734,26 @@ impl Executor {
             SpecialPathClass::Filesystem => {
                 // rubash#3268: the append open is a shell-process
                 // redirect open — same anchor rule as the input and
-                // create faces for a relative operand, with the same
-                // FIFO classification carve-out as the create face.
+                // create faces for a relative operand. rubash#3286:
+                // an existing FIFO takes the anchor open too — it IS
+                // the bind's one real open (GNU redir.c:725
+                // redir_open), blocking until a reader arrives (the
+                // rendezvous) instead of the old carve-out's
+                // string-path fallback, which dies at a dead cwd
+                // component with instant ENOENT. The probe faces
+                // classify FIFOs by anchor fstatat and validate by
+                // faccessat, so no probe ever reaches this open
+                // (rubash#1820).
                 #[cfg(unix)]
                 {
                     let fs_operand = self.redirect_target_filesystem_path(target);
                     if fs_operand.is_relative() {
-                        let is_fifo = matches!(
-                            self.fstatat_via_cwd_anchor(&fs_operand),
-                            Some(Ok(stat))
-                                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
-                                    == u32::from(libc::S_IFIFO)
-                        );
-                        if !is_fifo {
-                            if let Some(result) = self.open_via_cwd_anchor(
-                                &fs_operand,
-                                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
-                                0o666,
-                            ) {
-                                return result;
-                            }
+                        if let Some(result) = self.open_via_cwd_anchor(
+                            &fs_operand,
+                            libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                            0o666,
+                        ) {
+                            return result;
                         }
                     }
                 }
@@ -4899,6 +4905,14 @@ pub(in crate::executor) fn probe_output_redirect(
             .validate_net_redirect_target(target)
             .map_err(|e| crate::posix_errors::path_error(target, e));
     }
+    // rubash#3286: the anchor classification comes first — the
+    // joined-path check below is blind in a deleted cwd, and the
+    // fallthrough create would open a FIFO and consume the bind's
+    // rendezvous (rubash#1820).
+    #[cfg(unix)]
+    if let Some(result) = executor.probe_output_fifo_via_anchor(target) {
+        return result.map_err(|e| crate::posix_errors::path_error(target, e));
+    }
     #[cfg(any(unix, windows))]
     {
         let path = executor.session_path(shell_path_to_windows(
@@ -4930,6 +4944,14 @@ pub(in crate::executor) fn probe_output_redirect_append(
         return executor
             .validate_net_redirect_target(target)
             .map_err(|e| crate::posix_errors::path_error(target, e));
+    }
+    // rubash#3286: the anchor classification comes first — the
+    // joined-path check below is blind in a deleted cwd, and the
+    // fallthrough append open would consume the bind's rendezvous
+    // (rubash#1820).
+    #[cfg(unix)]
+    if let Some(result) = executor.probe_output_fifo_via_anchor(target) {
+        return result.map_err(|e| crate::posix_errors::path_error(target, e));
     }
     #[cfg(any(unix, windows))]
     {
