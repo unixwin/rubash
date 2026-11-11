@@ -657,6 +657,22 @@ pub struct Executor {
     /// consumers (startup-file handling in main.rs, source driver);
     /// the driver layer reads this mark to decompose the unwind kind.
     errexit_unwind_armed: bool,
+    /// rubash#2652: the current unit's terminal status was produced
+    /// while errexit was suppressed — a CMD_IGNORE_RETURN position
+    /// (a non-last &&/|| operand, an if/while/until condition, a `!`
+    /// pipeline, or a function/eval body invoked in such a position;
+    /// GNU execute_cmd.c's CMD_IGNORE_RETURN propagation,
+    /// execute_cmd.c:2703/2829/3803, and the
+    /// execute_command_internal ignore_return checks). The
+    /// driver-level errexit verdict is a status re-derivation (Q6
+    /// arm B) and must not re-fire on such a status: GNU's -e
+    /// decision is made per command inside
+    /// execute_command_internal (execute_cmd.c:624) and the reader
+    /// never re-adjudicates it. Set by
+    /// `with_errexit_suppressed` when a suppressed execution
+    /// leaves a nonzero status; cleared by `run_source_impl` at
+    /// each outermost unit's entry so it never leaks across units.
+    errexit_suppressed_terminal: Cell<bool>,
     /// Q6 arm B: `run_source_impl` records that the unit ended in a
     /// signal discard, so the grouped driver loop can surface the
     /// fact per group (the pending itself is consumed inside

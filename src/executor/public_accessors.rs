@@ -998,6 +998,22 @@ impl Executor {
         std::mem::take(&mut self.errexit_unwind_armed)
     }
 
+    /// rubash#2652: whether the current unit's terminal status was
+    /// produced while errexit was suppressed (see
+    /// Executor::errexit_suppressed_terminal). The driver-level
+    /// errexit verdict consults this instead of re-deciding from
+    /// the status alone.
+    pub(crate) fn errexit_suppressed_terminal(&self) -> bool {
+        self.errexit_suppressed_terminal.get()
+    }
+
+    /// rubash#2652: clear the suppressed-terminal record at a new
+    /// outermost unit's entry (`run_source_impl`); nested units
+    /// (eval/source/comsub bodies) must not clear it mid-unit.
+    pub(crate) fn clear_errexit_suppressed_terminal(&mut self) {
+        self.errexit_suppressed_terminal.set(false);
+    }
+
     /// Q6 arm B: record that the current unit ended in a signal
     /// discard (see Executor::unit_signal_discard).
     pub fn note_unit_signal_discard(&mut self) {
