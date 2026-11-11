@@ -321,11 +321,78 @@ impl Executor {
         if is_con_device_path(&path) {
             return File::open("CONIN$");
         }
+        // rubash#3268: the `<>` open is a shell-process redirect open
+        // like the input face — same anchor rule for a relative
+        // operand (O_RDWR|O_CREAT, the redir.c r_input_output flags;
+        // an O_RDWR open of a FIFO does not block, so no rendezvous
+        // carve-out is owed here).
+        #[cfg(unix)]
+        {
+            let operand = shell_path_to_windows(target, &self.shell_state.env_vars);
+            if operand.is_relative() {
+                if let Some(result) =
+                    self.open_via_cwd_anchor(&operand, libc::O_RDWR | libc::O_CREAT, 0o666)
+                {
+                    return result;
+                }
+            }
+        }
         OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&path)
+    }
+
+    /// rubash#3268: the validation-probe face of the cwd anchor. The
+    /// redirect rejection gates (redirection.rs's ordered validation,
+    /// command_input_scope.rs's compound probe) judge a plain Input /
+    /// ReadWrite target by opening the JOINED session-cwd path in the
+    /// shell process — a probe GNU never performs in the parent
+    /// (do_redirections runs in the forked child, redir.c:237), so
+    /// from a deleted cwd the joined spelling dies at its dead
+    /// component and the gate condemns a target the inode walk would
+    /// have opened. Under the anchor family's two-state rule
+    /// (relative filesystem operand, the cwd path no longer resolves,
+    /// the anchor naming exactly that cwd) the probe's verdict comes
+    /// from the anchor instead: for Input, the rubash#1820-shaped
+    /// probe (faccessat for a FIFO, one openat otherwise — the probe
+    /// File is dropped unread, exactly like the joined-path gate's);
+    /// for ReadWrite, one O_RDWR|O_CREAT openat, whose creation side
+    /// effect is the redirection's own (rubash#264). Some(verdict)
+    /// when the anchor applies — the kernel's answer stands, error
+    /// included; None when the joined-path probe should run instead.
+    pub(in crate::executor) fn anchored_redirect_probe(
+        &self,
+        target: &str,
+        readwrite: bool,
+    ) -> Option<io::Result<()>> {
+        #[cfg(unix)]
+        {
+            // The empty word is not an operand: GNU's open of ""
+            // fails ENOENT in the child (redir.c redir_open), and the
+            // joined-path probes own that verdict — the anchor walk
+            // would name "." and manufacture a success.
+            if target.is_empty() {
+                return None;
+            }
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if !fs_operand.is_relative() {
+                return None;
+            }
+            if readwrite {
+                self.open_via_cwd_anchor(&fs_operand, libc::O_RDWR | libc::O_CREAT, 0o666)
+                    .map(|result| result.map(|_| ()))
+            } else {
+                self.open_input_redirect_via_anchor(&fs_operand, false)
+                    .map(|result| result.map(|_| ()))
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (target, readwrite);
+            None
+        }
     }
 
     /// Formatted variant: the returned error already carries the
@@ -718,7 +785,7 @@ impl Executor {
         // POSIX target word is kept for diagnostics. A path that exists
         // (or misses under both spellings) keeps the plain mapped form.
         let win_path = self.session_path(crate::executor::path::windows_operand_file_path(
-            shell_path_to_windows(target, &self.shell_state.env_vars),
+            self.redirect_target_filesystem_path(target),
             &self.shell_state.env_vars,
         ));
         // A spawned child reading a `<(cmd)` carrier must get the stream's
@@ -774,6 +841,25 @@ impl Executor {
                 crate::winuxcmd_fifo::fifo_wait_interrupted(&self.shell_state.env_vars)
             })
             .map_err(|e| crate::posix_errors::path_error(target, e));
+        }
+        // rubash#3268: the plain-filesystem fallthrough opens the
+        // target IN THE SHELL PROCESS through the joined session-cwd
+        // string — the one open GNU never performs in the parent
+        // (redir.c:237 do_redirections runs in the forked child,
+        // whose inherited cwd is the directory inode itself). Once
+        // that directory is unlinked, the joined spelling dies at
+        // its dead component while the same relative operand still
+        // resolves from the inode; spend the cwd anchor for the open
+        // under the anchor family's two-state rule, exactly like the
+        // emulated-cat read face (read_via_cwd_anchor).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(target);
+            if fs_operand.is_relative() {
+                if let Some(result) = self.open_input_redirect_via_anchor(&fs_operand, consume) {
+                    return result.map_err(|e| crate::posix_errors::path_error(target, e));
+                }
+            }
         }
         open_redirect_input_file(&win_path).map_err(|e| crate::posix_errors::path_error(target, e))
     }
@@ -2162,6 +2248,26 @@ impl Executor {
         }
     }
 
+    /// The filesystem path for an expanded redirect target. When the
+    /// target's expansion carried raw-byte transport (recorded by
+    /// expand_redirect_operand_fields in `redirect_target_had_transport`),
+    /// its byte chars emit raw bytes — GNU redir.c:298 opens the name
+    /// bytes verbatim, so a folded U+009C must reach the disk as 0x9C,
+    /// not re-encoded as UTF-8 C2 9C. Any other target takes the
+    /// existing shell-name funnel unchanged, so a genuine non-ASCII
+    /// name keeps its UTF-8 bytes. (rubash#3104 p23)
+    pub(in crate::executor) fn redirect_target_filesystem_path(
+        &self,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
+        if self.redirect_target_had_transport.borrow().contains(target) {
+            crate::executor::path::path_buf_from_folded_name(&normalized.to_string_lossy())
+        } else {
+            normalized
+        }
+    }
+
     pub(in crate::executor) fn create_redirect_output(
         &self,
         target: &str,
@@ -2252,11 +2358,37 @@ impl Executor {
             };
         }
         let target = self.redirect_output_path_target(target);
-        let path = self.session_path(shell_path_to_windows(&target, &self.shell_state.env_vars));
+        let path = self.session_path(self.redirect_target_filesystem_path(&target));
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
             && !Self::noclobber_target_is_device_like(&path)
         {
+            // rubash#3268: the noclobber create is a shell-process
+            // redirect open — same anchor rule as the input face for
+            // a relative operand (O_EXCL carries the clobber verdict
+            // out of the inode walk itself).
+            #[cfg(unix)]
+            {
+                let fs_operand = self.redirect_target_filesystem_path(&target);
+                if fs_operand.is_relative() {
+                    if let Some(result) = self.open_via_cwd_anchor(
+                        &fs_operand,
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                        0o666,
+                    ) {
+                        return result.map_err(|e| {
+                            if e.kind() == io::ErrorKind::AlreadyExists {
+                                io::Error::new(
+                                    io::ErrorKind::AlreadyExists,
+                                    format!("{target}: cannot overwrite existing file"),
+                                )
+                            } else {
+                                e
+                            }
+                        });
+                    }
+                }
+            }
             // GNU wording (bash builtins/common.c): "<target>: cannot
             // overwrite existing file"; the redirect machinery prints the
             // payload after its script/line prefix.
@@ -2301,6 +2433,33 @@ impl Executor {
                 .write(true)
                 .open(path)
                 .map_err(|e| crate::posix_errors::path_error(&target, e));
+        }
+        // rubash#3268: the plain create is a shell-process redirect
+        // open — same anchor rule as the input face for a relative
+        // operand. An existing FIFO target is classified out through
+        // the anchor's fstatat and keeps the plain open: the probe
+        // faces classify FIFOs by joined-path metadata, which a dead
+        // cwd defeats, and an anchor O_WRONLY open in a probe would
+        // consume the bind's rendezvous (rubash#1820).
+        #[cfg(unix)]
+        {
+            let fs_operand = self.redirect_target_filesystem_path(&target);
+            if fs_operand.is_relative() {
+                let is_fifo = matches!(
+                    self.fstatat_via_cwd_anchor(&fs_operand),
+                    Some(Ok(stat)) if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                        == u32::from(libc::S_IFIFO)
+                );
+                if !is_fifo {
+                    if let Some(result) = self.open_via_cwd_anchor(
+                        &fs_operand,
+                        libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
+                        0o666,
+                    ) {
+                        return result.map_err(|e| crate::posix_errors::path_error(&target, e));
+                    }
+                }
+            }
         }
         File::create(path).map_err(|e| crate::posix_errors::path_error(&target, e))
     }
@@ -2529,9 +2688,9 @@ impl Executor {
                 match self.open_output_fd_append(target) {
                     Ok(file) => Ok(file),
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
+                        crate::executor::execution_misc::open_redirect_append(
+                            &self.session_path(self.redirect_target_filesystem_path(target)),
+                        )
                     }
                     Err(error) => Err(error),
                 }
@@ -2543,11 +2702,9 @@ impl Executor {
                         "Permission denied",
                     )),
                     Some(true) => Self::synthetic_proc_write_sink(true),
-                    None => {
-                        crate::executor::execution_misc::open_redirect_append(&self.session_path(
-                            shell_path_to_windows(target, &self.shell_state.env_vars),
-                        ))
-                    }
+                    None => crate::executor::execution_misc::open_redirect_append(
+                        &self.session_path(self.redirect_target_filesystem_path(target)),
+                    ),
                 }
             }
             SpecialPathClass::SyntheticLink => {
@@ -2568,9 +2725,36 @@ impl Executor {
                     )),
                 }
             }
-            SpecialPathClass::Filesystem => crate::executor::execution_misc::open_redirect_append(
-                &self.session_path(shell_path_to_windows(target, &self.shell_state.env_vars)),
-            ),
+            SpecialPathClass::Filesystem => {
+                // rubash#3268: the append open is a shell-process
+                // redirect open — same anchor rule as the input and
+                // create faces for a relative operand, with the same
+                // FIFO classification carve-out as the create face.
+                #[cfg(unix)]
+                {
+                    let fs_operand = self.redirect_target_filesystem_path(target);
+                    if fs_operand.is_relative() {
+                        let is_fifo = matches!(
+                            self.fstatat_via_cwd_anchor(&fs_operand),
+                            Some(Ok(stat))
+                                if (u32::from(stat.st_mode) & u32::from(libc::S_IFMT))
+                                    == u32::from(libc::S_IFIFO)
+                        );
+                        if !is_fifo {
+                            if let Some(result) = self.open_via_cwd_anchor(
+                                &fs_operand,
+                                libc::O_WRONLY | libc::O_CREAT | libc::O_APPEND,
+                                0o666,
+                            ) {
+                                return result;
+                            }
+                        }
+                    }
+                }
+                crate::executor::execution_misc::open_redirect_append(
+                    &self.session_path(self.redirect_target_filesystem_path(target)),
+                )
+            }
         }
     }
 
@@ -3926,7 +4110,31 @@ impl Executor {
                     return String::from_utf8(buf).ok();
                 }
             }
-            let mut file = File::open(&path).ok()?;
+            // rubash#3268: the slurp's one open is a shell-process
+            // redirect open like the ladders above — from a deleted
+            // cwd the joined spelling dies at its dead component, so
+            // when the cwd anchor applies for the relative operand
+            // the open spends it instead; the handle checks below run
+            // on whichever handle answered (the rubash#1820 one-open
+            // rule is preserved: classification and slurp still share
+            // the single open).
+            let mut file = {
+                #[cfg(unix)]
+                let anchored = {
+                    let fs_operand = self.redirect_target_filesystem_path(&target);
+                    if fs_operand.is_relative() {
+                        self.open_via_cwd_anchor(&fs_operand, libc::O_RDONLY, 0)
+                    } else {
+                        None
+                    }
+                };
+                #[cfg(not(unix))]
+                let anchored: Option<io::Result<File>> = None;
+                match anchored {
+                    Some(result) => result.ok()?,
+                    None => File::open(&path).ok()?,
+                }
+            };
             {
                 #[cfg(unix)]
                 use std::os::unix::io::AsRawFd;

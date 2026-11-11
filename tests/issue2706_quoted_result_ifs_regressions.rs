@@ -63,14 +63,12 @@ fn quoted_result_protection_in_for_list() {
 
 /// The quoted neighbor of an UNQUOTED `${arr[@]}` splice: GNU joins
 /// the quoted segment onto the first/last element as a quoted string
-/// before splitting, so only the array's own characters split. The
-/// dollar_at segment assembly (quoted_positional_at_segments /
-/// expand_quoted_positional_at_segments) joins first and splits the
-/// joined string, erasing that boundary — it needs the same site
-/// verdict plumbed through its segment model, a separate surface
-/// from the scalar walks fixed here.
+/// before splitting, so only the array's own characters split. Filed
+/// as rubash#2759 (the #2706 residual): the dollar_at segment assembly
+/// now carries the quoted-site verdict through its segment model —
+/// a plain double-quoted span becomes a quoted literal segment, the
+/// same model the in-body segmenter already used around `$@`.
 #[test]
-#[ignore = "issue#2706 residual: quoted prefix/suffix joined to an unquoted ${arr[@]} splice still splits inside the quoted part (${arr[@]}$\"$b\" -> w3, 4 instead of 'w3 4'); the dollar_at segment assembly does not yet carry the quoted-site protection"]
 fn quoted_result_protection_at_array_junction() {
     let (stdout, stderr, code) = rubash(
         "a='1 2'; b='3 4'; arr=('x y' 'z w')\n\

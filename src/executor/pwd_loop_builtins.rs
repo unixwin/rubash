@@ -27,49 +27,23 @@ impl Executor {
         W: Write,
         E: Write,
     {
-        // The $PWD echo fast path is the LOGICAL rendering; with the
-        // `physical` shell option set (set -P) a bare `pwd` defaults to
-        // physical mode and must not take it (rubash#1039).
-        if (args.is_empty() || args.first().map(String::as_str) == Some("-L"))
-            && !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "physical")
-        {
-            if let Some(pwd) = self.shell_state.env_vars.get("PWD") {
-                // GNU builtins/common.c get_working_directory: `pwd`
-                // prints the_current_working_directory — the shell's
-                // VALIDATED logical cwd — never the raw $PWD variable.
-                // A user assignment to $PWD desynchronizes the variable
-                // and bash keeps printing the validated value
-                // (rubash#2143). Echo the variable only when it IS the
-                // validated value (logical_pwd_if_current, the same
-                // same-directory judgment the full path below uses);
-                // otherwise fall through to the full path, which
-                // prints the physical session cwd. On Windows the
-                // bridge state (the __RUBASH_PHYSICAL_PWD marker set by
-                // cd's logical bridge branch) has no physical directory
-                // to validate against, so its '/'-spelled $PWD stays
-                // echoable exactly as before.
-                if pwd.starts_with('/')
-                    && (crate::builtins::pwd::logical_pwd_if_current(
-                        &self.shell_state.cwd,
-                        &self.shell_state.env_vars,
-                    )
-                    .is_some()
-                        || (cfg!(windows)
-                            && self
-                                .shell_state
-                                .env_vars
-                                .contains_key("__RUBASH_PHYSICAL_PWD")))
-                {
-                    writeln!(stdout, "{pwd}")?;
-                    return Ok(0);
-                }
-            }
-        }
-
+        // GNU builtins/cd.def pwd_builtin prints
+        // the_current_working_directory — the shell's own logical cwd
+        // (builtins/common.c:589) — never the raw $PWD variable: a
+        // bare assignment to $PWD desynchronizes the variable and the
+        // logical value stands (rubash#2143, rubash#2797). The session
+        // carries that value in ShellState::logical_cwd, maintained by
+        // the cd family and the startup adoption; the builtin receives
+        // it here and adjudicates every mode itself (including the
+        // Windows bridge state, whose cd branch maintains the same
+        // field). The old $PWD-verbatim echo fast path is gone: it
+        // printed the variable's non-canonical spelling, which is
+        // exactly the #2797 divergence.
         crate::builtins::pwd::execute_with_env_and_io(
             args.iter().map(String::as_str),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
+            self.shell_state.logical_cwd.as_deref(),
             stdout,
             stderr,
         )
