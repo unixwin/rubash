@@ -351,6 +351,81 @@ pub(in crate::executor) fn assign_applied_clear() {
     FROZEN_FRAGMENTS.with(|map| map.borrow_mut().clear());
 }
 
+/// The simulated value of one `:=`/`=` binding the error pre-scan's
+/// in-order walk has passed (rubash#2762): either the exact bound value
+/// (the operator word was a literal, so it is known without evaluating
+/// anything) or set-ness only (the word needs evaluation, so only the
+/// fact that the parameter is now set is known).
+#[derive(Clone, Debug)]
+pub(in crate::executor) enum ScanSimValue {
+    Exact(String),
+    SetUnknown,
+}
+
+thread_local! {
+    /// Simulated `:=`/`=` bindings recorded by the error pre-scan's
+    /// in-order walk (rubash#2762): name -> simulated value state.
+    /// GNU expands one left-to-right walk (subst.c:13219
+    /// expand_word_list_internal), so a `:=`/`=` fragment binds before
+    /// the walk reaches a later `:?` fragment; the scan, which used to
+    /// judge every fragment against the pre-command environment, keeps
+    /// the same order by recording each bind as it passes it. The table
+    /// lives only for one scan call (cleared by `scan_ctx_begin`) and
+    /// is consulted only by the scan's own verdicts, never by the real
+    /// expansion, which binds for real.
+    static SCAN_SIM_BINDINGS: std::cell::RefCell<HashMap<String, ScanSimValue>> =
+        std::cell::RefCell::new(HashMap::new());
+    /// Pure mode for the pipeline-admission predicate
+    /// (`parameter_expansion_error_pending`, rubash#1540): its scan is
+    /// documented side-effect-free, so an undecidable `:?` span counts
+    /// as pending instead of being evaluated. Set only by the
+    /// predicate's guard, never by a reporting scan.
+    static SCAN_PURE_MODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Begin one error pre-scan call: fresh simulated bindings. Nested
+/// scans of the same walk (operator words, `:?` message words) share
+/// the context and must NOT call this.
+pub(in crate::executor) fn scan_ctx_begin() {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow_mut().clear());
+}
+
+/// Record one simulated `:=`/`=` binding for the current scan walk.
+pub(in crate::executor) fn scan_sim_record(name: String, value: ScanSimValue) {
+    SCAN_SIM_BINDINGS.with(|map| {
+        map.borrow_mut().insert(name, value);
+    });
+}
+
+/// Look up one simulated binding for the current scan walk.
+pub(in crate::executor) fn scan_sim_lookup(name: &str) -> Option<ScanSimValue> {
+    SCAN_SIM_BINDINGS.with(|map| map.borrow().get(name).cloned())
+}
+
+/// Whether the current scan walk is the pipeline-admission predicate's
+/// pure probe.
+pub(in crate::executor) fn scan_pure_mode() -> bool {
+    SCAN_PURE_MODE.with(|flag| flag.get())
+}
+
+/// RAII guard installing pure mode for the pipeline-admission predicate.
+pub(in crate::executor) struct ScanPureGuard {
+    saved: bool,
+}
+
+impl ScanPureGuard {
+    pub(in crate::executor) fn new() -> Self {
+        let saved = SCAN_PURE_MODE.with(|flag| flag.replace(true));
+        Self { saved }
+    }
+}
+
+impl Drop for ScanPureGuard {
+    fn drop(&mut self) {
+        SCAN_PURE_MODE.with(|flag| flag.set(self.saved));
+    }
+}
+
 pub(in crate::executor) fn sub_idx_lookup(
     key: &(SubSite, String),
 ) -> Option<crate::executor::subscript_expansion::IndexedSubscript> {
