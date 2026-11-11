@@ -1109,6 +1109,12 @@ impl Executor {
         cmd: &CommandNode,
     ) -> Result<(), ExecuteError> {
         let saved_read_generation = self.enter_read_unit();
+        // rubash#2773: a parse_and_execute string is a fresh READ unit
+        // (evalstring.c pushes it as parser input), so its lines are
+        // echoed at this read boundary when verbose is on (flags.c:284
+        // echo_input_at_read = verbose_flag; parse.y:2712 prints the
+        // line as read) — never per command at execution time.
+        crate::script_driver::echo_verbose_input_lines(self, source);
         // rubash#1563: the string runs through GNU's parse_and_execute
         // (evalstring.c) — push its frame (the DISCARD fold catch, and
         // the CMD_IGNORE_RETURN errexit-clearing frame when this eval
