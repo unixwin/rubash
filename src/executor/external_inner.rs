@@ -3491,11 +3491,11 @@ impl Executor {
             } else {
                 let opened = if write {
                     if redirect.append {
-                        open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(&target)),
-                        )
+                        open_redirect_append(&self.session_path(
+                            self.redirect_target_filesystem_path_for(redirect, &target),
+                        ))
                     } else {
-                        self.create_redirect_output(&target, redirect.clobber)
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
                             .map_err(|error| crate::posix_errors::path_error(&target, error))
                     }
                 } else if readwrite {

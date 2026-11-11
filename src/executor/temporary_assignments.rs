@@ -49,8 +49,16 @@ impl Executor {
             // with `declare -i i`) reports evalerror and propagates exit
             // status 1. apply_shell_assignment resets exit_code to 0 on
             // success, so promote the arithmetic_expansion_error flag here.
+            // rubash#3287: consume the WHOLE error record, not just the
+            // latch — a stale `arithmetic_fatal_error` left standing
+            // here skipped the NEXT `(( ))` / `let` / `for (( ))`
+            // (eval_arithmetic_command_value_with_flags bails out early
+            // on it). The #1226 prefix consumer below already clears
+            // all three flags together; this site must match it.
             if self.shell_state.arithmetic_expansion_error.get() {
                 self.shell_state.arithmetic_expansion_error.set(false);
+                self.shell_state.arithmetic_fatal_error.set(false);
+                self.shell_state.arithmetic_nonfatal_error.set(false);
                 self.exit_code = 1;
                 return false;
             }

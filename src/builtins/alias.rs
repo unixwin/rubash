@@ -16,16 +16,24 @@ const EXECUTION_SUCCESS: i32 = 0;
 const EXECUTION_FAILURE: i32 = 1;
 const EX_USAGE: i32 = 2;
 
-/// The lib-level `Diag` prolog. `alias`/`unalias` take no variable
-/// table, so this reads the same process-env cells the deleted
-/// `diagnostic_prefix` read (`__RUBASH_SCRIPT_NAME`,
-/// `__RUBASH_CURRENT_LINE`).
+/// The lib-level `Diag` prolog for the standalone entries below.
+/// `alias`/`unalias` take no variable table, so this reads the
+/// process-env cells the deleted `diagnostic_prefix` read
+/// (`__RUBASH_SCRIPT_NAME`, `__RUBASH_CURRENT_LINE`); the name
+/// cells derive from the single argv[0] carrier chain
+/// (builtins::prefix, rubash#2791) — the old cells printed a
+/// hard-coded "rubash" for both (rubash#3256). The executor
+/// dispatch does NOT use this prolog: it hands its own
+/// `Executor::diagnostic_prolog()` into the `with_io` entries, so
+/// a session's diagnostics carry the executor's composed frame
+/// (including the interactive arm, whose carrier never reaches
+/// the process env — rubash#2259).
 fn diag_prolog() -> Prolog {
+    let get = |key: &str| std::env::var(key).ok();
     Prolog {
         interactive: std::env::var("__RUBASH_INTERACTIVE").is_ok(),
-        shell_basename: std::env::var("__RUBASH_SHELL_NAME")
-            .unwrap_or_else(|_| "rubash".to_string()),
-        error_name: "rubash".to_string(),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
+        error_name: crate::builtins::prefix::fallback_error_name(&get),
         script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
         line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
     }
@@ -54,13 +62,20 @@ impl Alias {
 pub fn alias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    alias_with_io(args, aliases, &mut stdout, &mut stderr, false)
+    alias_with_io(
+        args,
+        aliases,
+        &mut stdout,
+        &mut stderr,
+        false,
+        diag_prolog(),
+    )
 }
 
 pub fn unalias(args: &[String], aliases: &mut HashMap<String, Alias>) -> io::Result<i32> {
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    unalias_with_io(args, aliases, &mut stdout, &mut stderr)
+    unalias_with_io(args, aliases, &mut stdout, &mut stderr, diag_prolog())
 }
 
 pub(crate) fn alias_with_io<W>(
@@ -69,6 +84,7 @@ pub(crate) fn alias_with_io<W>(
     stdout: &mut W,
     stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
     posix: bool,
+    prolog: Prolog,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -103,7 +119,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(diag_prolog);
+            diag.flush_with(|| prolog.clone());
             return Ok(diag.status());
         }
         operands
@@ -145,7 +161,7 @@ where
         }
     }
 
-    diag.flush_with(diag_prolog);
+    diag.flush_with(|| prolog.clone());
     Ok(status)
 }
 
@@ -154,6 +170,7 @@ pub fn unalias_with_io<W>(
     aliases: &mut HashMap<String, Alias>,
     stdout: &mut W,
     stderr: &mut dyn crate::executor::builtin_diag::DiagSink,
+    prolog: Prolog,
 ) -> io::Result<i32>
 where
     W: Write,
@@ -171,7 +188,7 @@ where
         // itself is the Diag one above (no prolog, per the comment
         // on this function); only the STATUS is #2975's.
         diag.usage();
-        diag.flush_with(diag_prolog);
+        diag.flush_with(|| prolog.clone());
         return Ok(EX_USAGE);
     }
 
@@ -199,7 +216,7 @@ where
         drop(opt);
         if diag.status() != 0 {
             diag.usage();
-            diag.flush_with(diag_prolog);
+            diag.flush_with(|| prolog.clone());
             return Ok(diag.status());
         }
         operands
@@ -215,7 +232,7 @@ where
         // option-only invocation (`unalias --`) names no alias
         // (rubash#2975).
         diag.usage();
-        diag.flush_with(diag_prolog);
+        diag.flush_with(|| prolog.clone());
         return Ok(EX_USAGE);
     }
 
@@ -227,7 +244,7 @@ where
         }
     }
 
-    diag.flush_with(diag_prolog);
+    diag.flush_with(|| prolog.clone());
     Ok(status)
 }
 
@@ -310,6 +327,7 @@ mod tests {
             &mut out,
             &mut err,
             false,
+            diag_prolog(),
         )
         .unwrap();
 
@@ -329,27 +347,51 @@ mod tests {
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        alias_with_io(&[], &mut aliases, &mut out, &mut err, true).unwrap();
+        alias_with_io(&[], &mut aliases, &mut out, &mut err, true, diag_prolog()).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "ll='echo LL'\n");
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        alias_with_io(&["ll".to_string()], &mut aliases, &mut out, &mut err, true).unwrap();
+        alias_with_io(
+            &["ll".to_string()],
+            &mut aliases,
+            &mut out,
+            &mut err,
+            true,
+            diag_prolog(),
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "ll='echo LL'\n");
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        alias_with_io(&["-p".to_string()], &mut aliases, &mut out, &mut err, true).unwrap();
+        alias_with_io(
+            &["-p".to_string()],
+            &mut aliases,
+            &mut out,
+            &mut err,
+            true,
+            diag_prolog(),
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        alias_with_io(&[], &mut aliases, &mut out, &mut err, false).unwrap();
+        alias_with_io(&[], &mut aliases, &mut out, &mut err, false, diag_prolog()).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        alias_with_io(&["ll".to_string()], &mut aliases, &mut out, &mut err, false).unwrap();
+        alias_with_io(
+            &["ll".to_string()],
+            &mut aliases,
+            &mut out,
+            &mut err,
+            false,
+            diag_prolog(),
+        )
+        .unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "alias ll='echo LL'\n");
     }
 }
