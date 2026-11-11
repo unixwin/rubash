@@ -21,12 +21,22 @@ const EX_USAGE: i32 = 2;
 /// `diagnostic_prefix` read (`__RUBASH_SCRIPT_NAME`,
 /// `__RUBASH_CURRENT_LINE`).
 fn diag_prolog() -> Prolog {
+    // rubash#3355: error_name follows the get_name_for_error chain,
+    // not the hardcoded "rubash" brand — an empty $0 prints an
+    // empty name. alias takes no variable table, so the chain is
+    // composed here from the process-env carriers (the script-file
+    // arm, else prefix::fallback_error_name's $0 step).
+    let script_file = std::env::var("__RUBASH_SCRIPT_NAME").ok();
+    let error_name = match script_file.as_deref().filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => crate::builtins::prefix::fallback_error_name(&|key: &str| std::env::var(key).ok()),
+    };
     Prolog {
         interactive: std::env::var("__RUBASH_INTERACTIVE").is_ok(),
         shell_basename: std::env::var("__RUBASH_SHELL_NAME")
             .unwrap_or_else(|_| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+        error_name,
+        script_file,
         line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
     }
 }

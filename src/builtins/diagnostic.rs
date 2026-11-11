@@ -39,6 +39,17 @@ pub(crate) fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     ) {
         return format!("{file}: line {line}: ");
     }
+    // rubash#3355: with a line but no file — the -c face when $0 is
+    // empty (the reader-name carrier stays absent there) — the name
+    // is get_name_for_error's $0 verdict, not the "rubash" brand: an
+    // empty $0 prints an empty name (error.c:90-120). The no-line arm
+    // below stays "rubash: ": no line is stamped interactively, so
+    // it is the interactive shape, out of this issue's scope.
+    if let Some(line) = env_vars.get("__RUBASH_CURRENT_LINE") {
+        let name =
+            crate::builtins::prefix::fallback_error_name(&|key: &str| env_vars.get(key).cloned());
+        return format!("{name}: line {line}: ");
+    }
     "rubash: ".to_string()
 }
 
@@ -52,7 +63,17 @@ pub(crate) fn sys_error_prefix(env_vars: &HashMap<String, String>) -> String {
     if let Some(file) = error_file_name(env_vars) {
         return format!("{file}: ");
     }
-    "rubash: ".to_string()
+    // rubash#3355: the no-file arm is get_name_for_error alone
+    // (error.c:275-281 sys_error) — the $0 verdict, not the brand:
+    // an empty $0 prints an empty name. Interactive keeps today's
+    // "rubash: " (no line is stamped there, and the interactive
+    // basename face is out of this issue's scope).
+    if env_vars.contains_key("__RUBASH_INTERACTIVE") {
+        return "rubash: ".to_string();
+    }
+    let name =
+        crate::builtins::prefix::fallback_error_name(&|key: &str| env_vars.get(key).cloned());
+    format!("{name}: ")
 }
 
 /// GNU error.c:453 err_readonly (report_error family): the bare
@@ -67,6 +88,18 @@ pub(crate) fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> Strin
             return format!("{file}:{line}: ");
         }
         return format!("{file}: line {line}: ");
+    }
+    // rubash#3355: same $0-verdict arm as diagnostic_prefix above —
+    // a line but no file is the -c face with an empty $0, whose name
+    // is empty (error.c:90-120). The no-line arm stays "rubash: "
+    // (the interactive shape).
+    if let Some(line) = env_vars.get("__RUBASH_CURRENT_LINE") {
+        let name =
+            crate::builtins::prefix::fallback_error_name(&|key: &str| env_vars.get(key).cloned());
+        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
+            return format!("{name}:{line}: ");
+        }
+        return format!("{name}: line {line}: ");
     }
     "rubash: ".to_string()
 }

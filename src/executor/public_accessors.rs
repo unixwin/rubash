@@ -3409,10 +3409,17 @@ impl Executor {
     pub(in crate::executor) fn interactive_shell_basename(
         env_vars: &HashMap<String, String>,
     ) -> String {
+        // rubash#3355: GNU error.c:115 get_name_for_error only takes
+        // base_pathname(shell_name) when shell_name is non-empty
+        // (`shell_name && *shell_name`); shell.c:1804-1805
+        // set_shell_name already rescued an empty shell_name to
+        // PROGRAM, so an empty carrier here means "no name" and the
+        // terminal fallback is "bash", never "".
         let name = env_vars
             .get("__RUBASH_SHELL_NAME")
             .or_else(|| env_vars.get("BASH_ARGV0"))
             .map(String::as_str)
+            .filter(|name| !name.is_empty())
             .unwrap_or("bash");
         // base_pathname: text after the last path separator (both separators,
         // since a Windows argv[0] may use either).
@@ -3551,17 +3558,19 @@ impl Executor {
         if let Some(name) = file_name.as_ref().filter(|name| !name.is_empty()) {
             return name.clone();
         }
+        // rubash#3355: GNU error.c:90-120 get_name_for_error stops at
+        // dollar_vars[0] itself — it is always a non-NULL string, so a
+        // present-but-empty $0 (empty argv[0]) IS the verdict and the
+        // chain must NOT fall through to base_pathname(shell_name) or
+        // PROGRAM. These three keys are the $0 carriers in
+        // script_name_value_from_env's order, which already reads them
+        // presence-based; test presence here, not non-emptiness.
         for key in [
             "BASH_ARGV0",
             "__RUBASH_ARGV0_AFTER_UNSET",
             "__RUBASH_TOP_LEVEL_NAME",
         ] {
-            if let Some(value) = self
-                .shell_state
-                .env_vars
-                .get(key)
-                .filter(|value| !value.is_empty())
-            {
+            if let Some(value) = self.shell_state.env_vars.get(key) {
                 return value.clone();
             }
         }

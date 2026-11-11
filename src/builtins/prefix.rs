@@ -58,12 +58,21 @@ fn base_pathname(name: &str) -> &str {
 /// carrier), else `base_pathname(shell_name)` from the
 /// `__RUBASH_SHELL_NAME` carrier, else PROGRAM.
 pub(crate) fn fallback_error_name(get: &CarrierGet<'_>) -> String {
+    // rubash#3355: same presence-based $0 step as
+    // Executor::error_report_name_with_file — GNU error.c:90-120
+    // get_name_for_error stops at dollar_vars[0] itself, so a
+    // present-but-empty $0 (empty argv[0]) is the verdict, not a
+    // reason to fall through to base_pathname(shell_name) or
+    // PROGRAM. (The shell_basename helper below keeps the
+    // non-empty filter: the interactive face takes
+    // base_pathname(shell_name), and an empty shell_name means
+    // PROGRAM there — error.c:115.)
     for key in [
         "BASH_ARGV0",
         "__RUBASH_ARGV0_AFTER_UNSET",
         "__RUBASH_TOP_LEVEL_NAME",
     ] {
-        if let Some(value) = non_empty(get(key)) {
+        if let Some(value) = get(key) {
             return value;
         }
     }

@@ -29,17 +29,21 @@ struct UnsetOptions {
 /// `PrologParts::Lib` composition: the same env cells the deleted
 /// local `diagnostic_prefix` read.
 fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    // rubash#3355: error_name follows the get_name_for_error chain
+    // (via builtin_diag::error_report_name), not the hardcoded
+    // "rubash" brand — an empty $0 prints an empty name.
+    let script_file = env_vars
+        .get("__RUBASH_SCRIPT_NAME")
+        .cloned()
+        .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
         shell_basename: env_vars
             .get("__RUBASH_SHELL_NAME")
             .cloned()
             .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+        error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
+        script_file,
         line: env_vars
             .get("__RUBASH_CURRENT_LINE")
             .cloned()
