@@ -4,6 +4,20 @@ use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // rubash#2652: a command dispatched outside suppression owns
+        // the terminal status from here — clear any stale
+        // suppressed-terminal record from an earlier command in the
+        // unit, so it cannot exempt this command's own failure (the
+        // `false || false` shape: the first `false` records the
+        // exemption, the last `false` must clear it before its own
+        // gate fires). A command dispatched under suppression keeps
+        // the record: its `with_errexit_suppressed` wrapper
+        // re-records it from the outcome. A pass-through compound
+        // clears here too, then re-records inside its body if its
+        // terminal failure was suppressed.
+        if self.suppress_errexit == 0 {
+            self.errexit_suppressed_terminal.set(false);
+        }
         // rubash#545 (cell 2): the command owns every input-procsub fd its
         // words materialize — expansion registers them into the scoped vec
         // and the close below runs at the command's very end, giving the
