@@ -91,8 +91,16 @@ pub struct BuiltinOpt<'a, 'd> {
     words: &'a [String],
     diag: &'d mut Diag<'a>,
     /// The parsed spec: (option byte, argument kind) pairs, plus
-    /// whether the spec opens with `'+'` (plus mode).
-    spec: Vec<(u8, ArgKind)>,
+    /// whether the spec opens with `'+'` (plus mode). Parsed into
+    /// a fixed stack buffer at construction (`parse_spec_into`):
+    /// the declare family's predicate probes construct this
+    /// machine several times per call, and the earlier shared
+    /// memoization put a global mutex lock + hash lookup on every
+    /// construction — itself a measurable per-call tax on the
+    /// fast builtins (E4, PR #2968). Only a spec too large for the
+    /// buffer (none in the table; the longest carries 25 pairs)
+    /// falls back to the memoized leaked parse (`parsed_spec`).
+    spec: SpecPairs,
     plus: bool,
     /// Index of the word being scanned.
     index: usize,
@@ -127,8 +135,20 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         posix: bool,
     ) -> Self {
         let (spec, plus, scannable) = match row.opt_spec {
-            OptSpec::Getopt(spec) => (parse_spec(spec), spec.starts_with('+'), true),
-            OptSpec::Grammar | OptSpec::NoScan => (Vec::new(), false, false),
+            OptSpec::Getopt(spec) => {
+                let plus = spec.starts_with('+');
+                let mut buffer = [(0, ArgKind::None); MAX_SPEC_PAIRS];
+                let spec = match parse_spec_into(spec, &mut buffer) {
+                    Some(len) => SpecPairs::Stack(buffer, len),
+                    None => SpecPairs::Shared(parsed_spec(spec)),
+                };
+                (spec, plus, true)
+            }
+            OptSpec::Grammar | OptSpec::NoScan => (
+                SpecPairs::Stack([(0, ArgKind::None); MAX_SPEC_PAIRS], 0),
+                false,
+                false,
+            ),
         };
         BuiltinOpt {
             row,
@@ -212,7 +232,11 @@ impl<'a, 'd> BuiltinOpt<'a, 'd> {
         let kind = if c == b':' {
             None
         } else {
-            self.spec.iter().find(|(b, _)| *b == c).map(|(_, k)| *k)
+            self.spec
+                .as_slice()
+                .iter()
+                .find(|(b, _)| *b == c)
+                .map(|(_, k)| *k)
         };
         let Some(kind) = kind else {
             // Invalid: errstr is the sign + the one character.
@@ -400,17 +424,106 @@ fn diagnostic_byte(byte: u8) -> String {
 /// `ISOPT` / `NOTOPT` (`bashgetopt.c:36-37`): a word is an option
 /// word when it starts with `-` (or `+` in plus mode) and has a
 /// second character. A bare `-` / `+` is an operand.
-fn is_option_word(word: &[u8], plus: bool) -> bool {
+pub(super) fn is_option_word(word: &[u8], plus: bool) -> bool {
     if word.len() < 2 {
         return false;
     }
     word[0] == b'-' || (plus && word[0] == b'+')
 }
 
-/// Parse a spec string into (option byte, argument kind) pairs.
-/// A leading `'+'` enables plus mode and is not an option. The
-/// `':'` / `';'` / `'#'` after a letter sets its argument kind;
-/// a leading `':'` in the spec (fc's `":e:lnrs"`) is inert.
+/// Capacity of the stack parse buffer (`parse_spec_into`): the
+/// longest spec in the builtin table (`complete`'s) carries 25
+/// pairs, so 64 leaves wide headroom; the table-walk test in this
+/// module pins that every row spec fits.
+const MAX_SPEC_PAIRS: usize = 64;
+
+/// A parsed spec: the (option byte, argument kind) pairs of one
+/// row's spec string, held either in the machine's own stack
+/// buffer (the universal case) or, for a spec too large for the
+/// buffer, in the memoized leaked slice (`parsed_spec`).
+enum SpecPairs {
+    Stack([(u8, ArgKind); MAX_SPEC_PAIRS], usize),
+    Shared(&'static [(u8, ArgKind)]),
+}
+
+impl SpecPairs {
+    fn as_slice(&self) -> &[(u8, ArgKind)] {
+        match self {
+            SpecPairs::Stack(buffer, len) => &buffer[..*len],
+            SpecPairs::Shared(slice) => slice,
+        }
+    }
+}
+
+/// Parse a spec string into (option byte, argument kind) pairs,
+/// writing them into `out`; returns the pair count, or `None`
+/// when the spec carries more pairs than the buffer holds. The
+/// parse mirrors `parse_spec` step for step: a leading `'+'`
+/// enables plus mode and is not an option; the `':'` / `';'` /
+/// `'#'` after a letter sets its argument kind; a `':'` where a
+/// letter is expected (fc's leading one) is skipped as inert.
+fn parse_spec_into(spec: &str, out: &mut [(u8, ArgKind); MAX_SPEC_PAIRS]) -> Option<usize> {
+    let bytes = spec.as_bytes();
+    let mut n = 0;
+    let mut i = 0;
+    if bytes.first() == Some(&b'+') {
+        i = 1;
+    }
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b':' {
+            // A ':' where an option letter is expected (only the
+            // leading one, in practice) is not an option.
+            i += 1;
+            continue;
+        }
+        let kind = match bytes.get(i + 1) {
+            Some(b':') => {
+                i += 1;
+                ArgKind::Required
+            }
+            Some(b';') => {
+                i += 1;
+                ArgKind::Optional
+            }
+            Some(b'#') => {
+                i += 1;
+                ArgKind::Numeric
+            }
+            _ => ArgKind::None,
+        };
+        if n >= MAX_SPEC_PAIRS {
+            return None;
+        }
+        out[n] = (c, kind);
+        n += 1;
+        i += 1;
+    }
+    Some(n)
+}
+
+/// The oversized-spec fallback: `parse_spec` memoized per distinct
+/// spec string — the parse is a pure function of the row's static
+/// spec, so it is computed once and the result leaked into a
+/// shared slice. Bounded by the number of distinct row specs (one
+/// per builtin). Steady-state constructions never reach this (see
+/// `parse_spec_into`); it exists so a hypothetical spec larger
+/// than the stack buffer still parses exactly as before.
+fn parsed_spec(spec: &'static str) -> &'static [(u8, ArgKind)] {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<&'static str, &'static [(u8, ArgKind)]>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+    if let Some(hit) = cache.get(spec) {
+        return hit;
+    }
+    let parsed: &'static [(u8, ArgKind)] = Box::leak(parse_spec(spec).into_boxed_slice());
+    cache.insert(spec, parsed);
+    parsed
+}
+
 fn parse_spec(spec: &str) -> Vec<(u8, ArgKind)> {
     let bytes = spec.as_bytes();
     let mut out = Vec::new();
@@ -934,6 +1047,35 @@ mod tests {
         let mut opt = BuiltinOpt::new(builtin_table_row("set").unwrap(), &w, &mut diag, false);
         assert_eq!(opt.next(), OptEvent::Opt(b'i'));
         assert_eq!(opt.opttype(), b'+');
+    }
+
+    #[test]
+    fn stack_parse_matches_vec_parse_for_every_table_spec() {
+        // The stack parse (parse_spec_into) replaced the global
+        // memoized parse on the construction path (E4, PR #2968):
+        // pin that it agrees with the Vec parse (parse_spec) on
+        // every row spec in the table, and that every row spec
+        // fits the stack buffer — a spec that outgrew the buffer
+        // would silently take the Shared fallback (correct, but
+        // the hot path would pay the lock again unnoticed).
+        use super::super::builtin_table::BUILTIN_TABLE;
+        let mut checked = 0;
+        for row in BUILTIN_TABLE {
+            let OptSpec::Getopt(spec) = row.opt_spec else {
+                continue;
+            };
+            let mut buffer = [(0, ArgKind::None); MAX_SPEC_PAIRS];
+            let len = parse_spec_into(spec, &mut buffer)
+                .unwrap_or_else(|| panic!("spec for {} exceeds the stack buffer", row.name));
+            assert_eq!(
+                &buffer[..len],
+                parse_spec(spec).as_slice(),
+                "stack parse disagrees with vec parse for {}",
+                row.name
+            );
+            checked += 1;
+        }
+        assert!(checked > 0);
     }
 
     #[test]

@@ -404,15 +404,20 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        // rubash#2638: GNU display_traps (builtins/trap.def:333) emits
+        // each operand's listing or invalid-spec diagnostic in operand
+        // order through the command's descriptors; the separate-Vec
+        // flush emitted every listing before any diagnostic, so a
+        // merged stream (2>&1) reordered them. The OrderedOutputLog
+        // (rubash#2699) preserves the production order across both fds.
+        let log = OrderedOutputLog::new();
         let status = crate::builtins::trap::execute_with_io(
             &cmd.words[1..],
             &mut self.shell_state.env_vars,
-            &mut stdout,
-            &mut stderr,
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
         )?;
-        self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU execute_cmd.c:4886-4888: a special builtin whose status
         // exceeds EX_SHERRBASE has it converted (EX_USAGE 258 ->
         // EX_BADUSAGE 2, EX_UTILERROR 263 -> EXECUTION_FAILURE 1) and
@@ -458,8 +463,22 @@ impl Executor {
     ) -> Result<i32, ExecuteError> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status =
-            crate::builtins::help::execute_with_io(&cmd.words[1..], &mut stdout, &mut stderr)?;
+        // help.def's listing reads COLUMNS through get_string_value
+        // (general.c default_columns) and picks its column renderer by
+        // the active locale's MB_CUR_MAX — both are session state, so
+        // they travel from this variable table, not the process env.
+        let layout = crate::builtins::help::HelpListingLayout {
+            columns_var: self.shell_state.env_vars.get("COLUMNS").cloned(),
+            multibyte: crate::locale::locale_name_selects_utf8(
+                &crate::locale::locale_name_from_vars(&self.shell_state.env_vars),
+            ),
+        };
+        let status = crate::builtins::help::execute_with_io_and_layout(
+            &cmd.words[1..],
+            &mut stdout,
+            &mut stderr,
+            &layout,
+        )?;
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
     }

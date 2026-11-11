@@ -1348,6 +1348,29 @@ impl Executor {
                         }
                     }
                 }
+                Some('"') if !heredoc && !in_double && !double_quoted => {
+                    chars.next();
+                    // rubash#3086: `$"..."` is a locale string — in the C
+                    // locale it expands exactly like `"..."` in every word
+                    // context (GNU subst.c:4133 expand_string_dollar_quote
+                    // `$"` arm; subst.c:1639 sh_mkdoublequoted), so the
+                    // dollar is quote syntax, not an expansion introducer
+                    // glued onto the span content. Consume it and open a
+                    // double-quoted span exactly like the bare `"` arm
+                    // above; the span body and its closing quote are then
+                    // scanned by the same loop (in_double semantics,
+                    // IFS protection and quote removal included). The arm
+                    // must not fire inside an open double-quoted span —
+                    // there `$` before `"` is literal data and the `"`
+                    // closes the span (GNU: "a$"b"c" -> a$bc) — nor in
+                    // heredoc / double-quoted word contexts, where quote
+                    // characters are data; those shapes keep the literal
+                    // fall-through below.
+                    in_double = true;
+                    if preserve_quotes {
+                        output.push('"');
+                    }
+                }
                 Some(other) => {
                     chars.next();
                     output.push('$');

@@ -5,11 +5,12 @@ impl Executor {
         &mut self,
         cmd: &CommandNode,
     ) -> Result<i32, ExecuteError> {
-        let stdout = Vec::new();
+        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let status = crate::builtins::alias::unalias_with_io(
             &cmd.words[1..],
             &mut self.shell_state.aliases,
+            &mut stdout,
             &mut stderr,
         )?;
         self.clear_alias_definition_lines(&cmd.words[1..]);

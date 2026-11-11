@@ -1569,7 +1569,7 @@ impl Executor {
             crate::executor::parameter_ops::whole_word_arithmetic_substitution_body(value)
                 .filter(|expression| !expression.contains("${"))
         {
-            let Some(value) = self.eval_arithmetic_command_value(expression) else {
+            let Some(value) = self.eval_arithmetic_command_value_unlabeled(expression) else {
                 // GNU expr.c raises evalerror from the actual evaluation, so
                 // the recorded real-environment category decides fatality.
                 // A fresh-environment re-evaluation would lose state-dependent

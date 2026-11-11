@@ -1395,12 +1395,24 @@ impl Executor {
                                     (format!("({temp2}"), true)
                                 };
                             if force_comsub {
-                                let value = protect_command_substitution_output(
-                                    &self.expand_command_substitution_mut_with_context(
-                                        &expression,
-                                        context,
-                                    ),
+                                // rubash#2677: GNU parses this fallback body
+                                // in the substituted child at execution time
+                                // (subst.c:10841-10866 LPAREN arm -> comsub;
+                                // subst.c:7143 parse_and_execute), never at
+                                // read time — the ambient arith-fallback
+                                // window lasts through the expansion so a
+                                // body parse error is contained (same
+                                // pattern as the backtick window, issue
+                                // #515), instead of latching a fatal
+                                // read-time failure of the enclosing command.
+                                let saved_arith_fallback =
+                                    self.arith_fallback_comsub_body.replace(true);
+                                let expanded = self.expand_command_substitution_mut_with_context(
+                                    &expression,
+                                    context,
                                 );
+                                self.arith_fallback_comsub_body.set(saved_arith_fallback);
+                                let value = protect_command_substitution_output(&expanded);
                                 if expansion_ws_marked(alternate, preserve_quotes, in_double) {
                                     output.push_str(&mark_expansion_whitespace(
                                         &value,
@@ -1857,6 +1869,29 @@ impl Executor {
                             output.push('\'');
                             output.push_str(&quoted);
                         }
+                    }
+                }
+                Some('"')
+                    if !heredoc
+                        && !in_double
+                        && matches!(context, SubstitutionQuoteContext::Unquoted) =>
+                {
+                    chars.next();
+                    // rubash#3086: `$"..."` locale string — the mutable
+                    // walker's twin of the `&self` walker's arm in
+                    // embedded_parameters.rs (GNU subst.c:4133
+                    // expand_string_dollar_quote; subst.c:1639): consume
+                    // the dollar as quote syntax and open a double-quoted
+                    // span exactly like this walker's bare `"` arm,
+                    // including compound quote retention and the
+                    // alternate-mode quoted-null bookkeeping. Inside an
+                    // open span, in heredocs, and in quoted contexts the
+                    // `$` stays literal via the fall-through below.
+                    in_double = true;
+                    if preserve_quotes {
+                        output.push('"');
+                    } else if alternate {
+                        dquote_open_len = Some(output.len());
                     }
                 }
                 Some(other) => {
@@ -2485,7 +2520,20 @@ impl Executor {
             body_start_line,
             true,
         );
-        let mut commands = crate::parser::parse(&tokens);
+        // GNU parses the body as its own input (subst.c parse_and_execute)
+        // and echoes the offending line verbatim (parse.y print_offending_line
+        // over the body's shell_input_line) — thread the body text so the
+        // near guard slices it instead of joining tokens (`( 1 + 2)x', not
+        // `( 1 + 2 ) x', rubash#2677). Tokens are seeded at body_start_line,
+        // so the offset maps them back to lines of the body text.
+        let mut commands = crate::parser::parse_with_options(
+            &tokens,
+            crate::parser::ParseLoopOptions {
+                source_text: Some(source.into()),
+                source_line_offset: body_start_line - 1,
+                ..crate::parser::ParseLoopOptions::default()
+            },
+        );
         super::command_substitution::normalize_comsub_body_statement_lines(&mut commands, &tokens);
         // rubash#2751: the same body screen the typed route runs —
         // a parse-errored body executes nothing and reports once, in
