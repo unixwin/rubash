@@ -116,7 +116,19 @@ impl Executor {
         let invalid_identifier =
             function.name.contains('$') || name_quoted || procsubst_like || name_raw.contains('`');
         let posix_mode = self.posix_mode_enabled();
-        let name_error_line = function.body_end_line.or(cmd.line);
+        // The definition executes as a command under the ambient line
+        // (execute_cmd.c: the definition's diagnostics use the global
+        // line_number, which the reader/enclosing frame pinned — a
+        // top-level definition reports its own parse-end line, one
+        // inside `( ... )' the subshell's `)' line, rubash#3183). The
+        // body's own end line is only the last-resort fallback for
+        // frames that pinned nothing.
+        let name_error_line = self
+            .ambient_line
+            .get()
+            .or(cmd.end_line)
+            .or(cmd.line)
+            .or(function.body_end_line);
         let name_error_prefix = |executor: &Self| {
             name_error_line.map_or_else(
                 || executor.diagnostic_prefix(),

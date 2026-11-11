@@ -661,7 +661,8 @@ impl Executor {
                             .array_subscript_range_values(name, 0, None)
                             .unwrap_or_default()
                             .join(&self.ifs_first_char_separator())],
-                        QuotedPositionalAtSegment::Literal { .. } => Vec::new(),
+                        QuotedPositionalAtSegment::Literal { .. }
+                        | QuotedPositionalAtSegment::VerbatimQuoted(_) => Vec::new(),
                     },
                     |literal| self.expand_embedded_parameters(literal),
                 )
@@ -1290,6 +1291,16 @@ enum QuotedPositionalAtSegment {
     /// split. Text collected between quoted spans is `quoted == false` and
     /// keeps the historic unquoted-literal split behavior.
     Literal { text: String, quoted: bool },
+    /// A `'...'` or `$'...'` span (rubash#3192): the body is literal data
+    /// with NO expansion stage — GNU subst.c:11880 hands the whole
+    /// single-quoted body to add_quoted_string via
+    /// string_extract_single_quoted, and subst.c:8766 ansicstr decodes a
+    /// `$'...'` body into the same quoted-data status — so it carries
+    /// the same IFS protection as a quoted `Literal` but must never reach
+    /// the literal expansion pass (a `$` inside is data, not an
+    /// expansion introducer). For `$'...'` the stored text is the
+    /// ansicstr-decoded body; for `'...'` it is the verbatim body.
+    VerbatimQuoted(String),
     /// `quoted` distinguishes a `"$@"`/`"${@}"` span from a bare unquoted
     /// `$@`/`${@}`: quoted elements' IFS characters are quote-protected data
     /// (GNU CTLESC, subst.c:12273+ word splitting skips them); unquoted
@@ -1600,11 +1611,40 @@ fn quoted_positional_at_segments(
                 continue;
             }
             '\'' => {
-                index = skip_single_quote(&chars, index + 1)?;
+                // A single-quoted span carries the same quoted-site
+                // verdict as a double-quoted span (rubash#3192): emit it
+                // as a verbatim quoted segment so its IFS characters are
+                // protected at the junction. Declined spans stay in the
+                // literal run, byte-for-byte the historic path.
+                let after = skip_single_quote(&chars, index + 1)?;
+                if push_verbatim_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 1..after - 1],
+                    false,
+                ) {
+                    index = after;
+                    literal_start = index;
+                    continue;
+                }
+                index = after;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'\'') => {
-                index = skip_single_quote(&chars, index + 2)?;
+                // `$'...'` (ANSI-C quoting) is the same quoted-data
+                // class with an ansicstr-decoded body (rubash#3192).
+                let after = skip_single_quote(&chars, index + 2)?;
+                if push_verbatim_quoted_span_segment(
+                    &mut segments,
+                    &chars[literal_start..index],
+                    &chars[index + 2..after - 1],
+                    true,
+                ) {
+                    index = after;
+                    literal_start = index;
+                    continue;
+                }
+                index = after;
                 continue;
             }
             '$' if chars.get(index + 1) == Some(&'"')
@@ -2082,6 +2122,34 @@ fn push_quoted_span_segment(
     true
 }
 
+/// Emit a `'...'` / `$'...'` span as a verbatim quoted segment,
+/// flushing the pending unquoted literal run first — the
+/// single-quote twin of push_quoted_span_segment (rubash#3192). The
+/// body needs no admissibility decline of its own: unlike a
+/// double-quoted body it never reaches an expansion pass, so `$`,
+/// backtick and backslash inside it are inert data. The RUN keeps the
+/// historic decline (the literal pushers refuse backtick/backslash
+/// runs by design); on decline the span stays in the run,
+/// byte-for-byte the historic path.
+fn push_verbatim_quoted_span_segment(
+    segments: &mut Vec<QuotedPositionalAtSegment>,
+    run: &[char],
+    body: &[char],
+    ansi_c: bool,
+) -> bool {
+    if push_quoted_positional_literal_segment(segments, run, false).is_none() {
+        return false;
+    }
+    let raw: String = body.iter().collect();
+    let text = if ansi_c {
+        crate::lexer::decode_ansi_c_quoted(&raw)
+    } else {
+        raw
+    };
+    segments.push(QuotedPositionalAtSegment::VerbatimQuoted(text));
+    true
+}
+
 fn push_body_piece(segments: &mut Vec<QuotedPositionalAtSegment>, chars: &[char]) -> Option<()> {
     if chars.is_empty() {
         return Some(());
@@ -2186,6 +2254,19 @@ where
 
     for (segment_index, segment) in segments.iter().enumerate() {
         match segment {
+            QuotedPositionalAtSegment::VerbatimQuoted(text) => {
+                // Verbatim quoted data (rubash#3192): no expansion pass —
+                // the stored text IS the expansion result — but the same
+                // IFS protection and quoted-null presence as a quoted
+                // literal, so a trailing quoted space survives the
+                // junction exactly as GNU's add_quoted_string data does.
+                if !text.is_empty() {
+                    saw_non_empty_expansion = true;
+                }
+                current_has_quoted = true;
+                current.push_str(&protect_ifs_field_chars(text, ifs));
+                current_present = true;
+            }
             QuotedPositionalAtSegment::Literal { text, quoted } => {
                 // GNU word splitting (subst.c:10649+ word_split) applies to
                 // expansion-produced text only — literal characters in the

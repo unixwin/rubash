@@ -2244,7 +2244,7 @@ impl Executor {
                             && !t.starts_with("<(")
                             && !t.starts_with(">(")
                         {
-                            let _ = self.create_redirect_output(&t, r.clobber);
+                            let _ = self.create_redirect_output_for(Some(r), &t, r.clobber);
                         }
                     } else {
                         seen_last = true;
@@ -2261,7 +2261,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                let file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);

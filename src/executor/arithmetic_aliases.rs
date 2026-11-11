@@ -270,7 +270,18 @@ impl Executor {
         self.report_arithmetic_error_with_label("[[", expression, false);
     }
 
-    pub(in crate::executor) fn execute_arithmetic_command(&mut self, cmd: &CommandNode) -> i32 {
+    // rubash#3287: returns Err(ExpansionFailure) when THIS command's own
+    // expansion failed fatally (a nested `$(( 1/0 ))` inside the body)
+    // — GNU's expand_wdesc_error DISCARD (subst.c:4296): the `(( ))`
+    // is abandoned with the rest of its line, the script continues on
+    // the next line, and the error flags are consumed HERE so they
+    // cannot leak into the next command. (A bad substitution instead
+    // returns status 1 with the flags cleared — rubash#533 — see the
+    // arm below.)
+    pub(in crate::executor) fn execute_arithmetic_command(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<i32, ExecuteError> {
         let raw_expression = cmd
             .arithmetic_command
             .as_ref()
@@ -323,7 +334,23 @@ impl Executor {
                     self.error_prefix()
                 ));
             }
-            return 1;
+            // rubash#3287: consume the record this arm just latched and
+            // return the plain status 1 (rubash#533: the command is
+            // discarded, the script continues on the next line). An
+            // Err(ExpansionFailure) return here regressed #533: the
+            // DISCARD arm's same-line skip reads the command's
+            // logical_line, which the unterminated `${` continuation
+            // scan extends past the failing line, so the NEXT line's
+            // commands were skipped too. The status-1 return keeps
+            // #533 byte-exact while the flag clear removes the leak
+            // (a stale latch would suppress the next command's own
+            // arithmetic diagnostics through the print guards).
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.shell_state.arithmetic_fatal_error.set(false);
+            self.shell_state.arithmetic_nonfatal_error.set(false);
+            self.exit_code = 1;
+            self.command_expansion_failed.set(true);
+            return Ok(1);
         }
         self.shell_state.arithmetic_readonly_error.set(false);
         let eval_result = self.eval_arithmetic_command_value(raw_expression.unwrap_or(expression));
@@ -333,8 +360,8 @@ impl Executor {
         // above, and the status is the expression value below — the
         // old post-hoc reporter that forced status 1 here is gone.
         match eval_result {
-            Some(0) => 1,
-            Some(_) => 0,
+            Some(0) => Ok(1),
+            Some(_) => Ok(0),
             None => {
                 // GNU expr.c:1528 evalerror echoes the expression with only
                 // leading whitespace skipped, and every error token is the
@@ -360,9 +387,35 @@ impl Executor {
                     }
                 }
                 if self.shell_state.arithmetic_nounset_error.get() {
-                    127
+                    Ok(127)
+                } else if self.shell_state.arithmetic_fatal_error.get() {
+                    // rubash#3287: a fatal error raised by a NESTED
+                    // expansion inside this `(( ))` — e.g.
+                    // `(( x = $(( 1/0 )) ))` — is GNU's expand_wdesc_error
+                    // DISCARD (subst.c:10877-10889 + subst.c:4296): the
+                    // `(( ))` is abandoned with the rest of its line and
+                    // the script continues on the next line. The nested
+                    // expansion already printed its diagnostic; the report
+                    // above prints nothing further because the fatal flag
+                    // suppresses the synthesized line. Consume the whole
+                    // error record here: returning a plain status 1 left
+                    // the flags standing, and the NEXT command was then
+                    // skipped (a following `(( ))` / `let` / `for (( ))`
+                    // header bails out early on a set fatal flag) or
+                    // discarded (a simple command's abort check).
+                    self.shell_state.arithmetic_fatal_error.set(false);
+                    self.shell_state.arithmetic_expansion_error.set(false);
+                    self.shell_state.arithmetic_nonfatal_error.set(false);
+                    self.exit_code = 1;
+                    // rubash#439: an expansion error, not a failed
+                    // command — no ERR trap.
+                    self.command_expansion_failed.set(true);
+                    // rubash#1518: the arithmetic evalerror class — the
+                    // reader's errexit promotion skips it.
+                    self.evalerror_arith_pending.set(true);
+                    Err(ExecuteError::ExpansionFailure(1))
                 } else {
-                    1
+                    Ok(1)
                 }
             }
         }
