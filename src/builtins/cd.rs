@@ -727,17 +727,35 @@ fn operand_is_dot_only(path: &Path) -> bool {
 
 /// The logical destination display the real cd/pwd pair produces for
 /// `target` from the given session state: logical_destination_display
-/// built on validated_logical_pwd — the same chain cd_builtin binds
-/// into $PWD (builtins/cd.def bindpwd) and pwd_builtin prints verbatim.
-/// Exposed for the `$(cd X && pwd)` fast path (rubash#2220) so its
-/// bare-`pwd` rendering is the builtin's own chain rather than a
-/// parallel implementation that could drift from it.
+/// built on the session's STORED logical cwd — the same chain
+/// cd_builtin binds into $PWD (builtins/cd.def bindpwd) and
+/// pwd_builtin prints verbatim. Exposed for the `$(cd X && pwd)` fast
+/// path (rubash#2220) so its bare-`pwd` rendering is the builtin's own
+/// chain rather than a parallel implementation that could drift from
+/// it.
+///
+/// rubash#3348: the base is the stored value, not a re-derivation
+/// from $PWD — GNU's change_to_directory builds from
+/// the_current_working_directory (builtins/cd.def:535), never from
+/// the variable, which a user assignment can desynchronize. The
+/// stored value is used when it still names the session cwd (the
+/// reader protocol pwd's logical face and cd's old_logical share);
+/// otherwise — a mover outside the cd family changed the cwd without
+/// maintaining it — the validated derivation stands in, exactly as
+/// before.
 pub(crate) fn logical_destination_display_from(
+    logical_cwd: Option<&str>,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
     target: &Path,
 ) -> String {
-    paths::logical_destination_display(&paths::validated_logical_pwd(env_vars, cwd), target)
+    let base = match logical_cwd {
+        Some(tcwd) if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars) => {
+            PathBuf::from(tcwd)
+        }
+        _ => paths::validated_logical_pwd(env_vars, cwd),
+    };
+    paths::logical_destination_display(&base, target)
 }
 
 fn resolve_cdpath(
