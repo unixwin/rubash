@@ -190,6 +190,27 @@ where
                 return Ok(Some(tcwd.replace('\\', "/")));
             }
         }
+        // Windows bridge state: cd's logical bridge branch (and
+        // popd's bridged inner cd) moved ONLY the logical state —
+        // the bridged POSIX name has no physical directory — and
+        // marked the state with __RUBASH_PHYSICAL_PWD. A bridged
+        // value can never pass the same-directory judgment above
+        // (the physical field deliberately stayed put), so without
+        // this arm the face falls through to the physical display
+        // and the bridged name is lost — after `cd /`, `pwd` printed
+        // the birth directory instead of `/` (the redir goldens
+        // slice). Under the marker the cd family itself treats a
+        // '/'-spelled $PWD as the logical truth
+        // (paths::validated_logical_pwd, the same condition), and
+        // the pre-port session fast path echoed it under the same
+        // marker; print it the same way.
+        if cfg!(windows) && env_vars.contains_key("__RUBASH_PHYSICAL_PWD") {
+            if let Some(pwd) = env_vars.get("PWD") {
+                if pwd.starts_with('/') {
+                    return Ok(Some(pwd.replace('\\', "/")));
+                }
+            }
+        }
         // No stored logical value (or a mover outside the cd family
         // invalidated it): derive it from $PWD as before, but print
         // the CANONICAL spelling — GNU's logical value was
@@ -405,6 +426,58 @@ mod tests {
             Some(value) => env::set_var("PWD", value),
             None => env::remove_var("PWD"),
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn logical_mode_prints_bridged_name_in_bridge_state() {
+        // After cd's Windows bridge branch (`cd /` with no configured
+        // shell root; popd's bridged inner cd is the twin), the
+        // session's logical position is the bridged POSIX name: $PWD
+        // and the stored logical cwd hold it, __RUBASH_PHYSICAL_PWD
+        // marks the state, and the physical cwd field deliberately
+        // stayed in the real directory. Logical pwd must print the
+        // bridged name, not the physical directory — the shape the
+        // redir goldens slice records (redir6.sub: `cd /`, `pwd`).
+        let cwd = env::temp_dir();
+        let mut env_vars = HashMap::new();
+        env_vars.insert("PWD".to_string(), "/".to_string());
+        env_vars.insert("__RUBASH_PHYSICAL_PWD".to_string(), "/".to_string());
+        for args in [&["-L"][..], &[][..]] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let status = execute_with_env_and_io(
+                args.iter().copied(),
+                &env_vars,
+                &cwd,
+                Some("/"),
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(status, EXECUTION_SUCCESS);
+            assert_eq!(String::from_utf8(stdout).unwrap(), "/\n");
+        }
+
+        // Negative control: the same values WITHOUT the bridge marker
+        // are a desynchronized $PWD, not a bridge state — the face
+        // must not print the stored spelling; it derives the physical
+        // directory instead (rubash#2797).
+        env_vars.remove("__RUBASH_PHYSICAL_PWD");
+        let expected = crate::executor::path::shell_pwd_display_path(&shell_display_path(&cwd));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = execute_with_env_and_io(
+            ["-L"].iter().copied(),
+            &env_vars,
+            &cwd,
+            Some("/"),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(status, EXECUTION_SUCCESS);
+        assert_eq!(String::from_utf8(stdout).unwrap(), format!("{expected}\n"));
     }
 
     #[cfg(windows)]
