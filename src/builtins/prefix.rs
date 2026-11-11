@@ -106,6 +106,20 @@ pub(crate) fn diagnostic_prefix(get: &CarrierGet<'_>) -> String {
     }
 }
 
+/// The sys_error prolog (error.c:275-281): `error_prolog(0)` —
+/// `get_name_for_error` alone, never a line segment. The name is
+/// the executing frame's file when one is named, else the
+/// [`fallback_error_name`] chain. This is the renderer the
+/// bad-interpreter refusal (execute_cmd.c:6184) reports through;
+/// the executor's own `sys_error_prefix` renders the same shape
+/// from its composed BASH_SOURCE view.
+pub(crate) fn sys_error_prefix(get: &CarrierGet<'_>) -> String {
+    match error_file_name(get) {
+        Some(file) => format!("{file}: "),
+        None => format!("{}: ", fallback_error_name(get)),
+    }
+}
+
 /// The err_readonly prolog (error.c:453, report_error family):
 /// like [`diagnostic_prefix`], but the line segment honors
 /// `gnu_errfmt` (`{file}:{line}: `) when the caller reports the
@@ -193,6 +207,23 @@ mod tests {
         assert_eq!(diagnostic_prefix(&getter(&env)), "bash: ");
         assert_eq!(fallback_error_name(&getter(&env)), "bash");
         assert_eq!(shell_basename(&getter(&env)), "bash");
+    }
+
+    #[test]
+    fn sys_error_prefix_is_the_name_alone() {
+        // A named frame file wins, and a line carrier never adds a
+        // segment (error.c:275-281 sys_error calls error_prolog(0)).
+        let framed = map(&[
+            ("__RUBASH_SCRIPT_NAME", "probe.sh"),
+            ("__RUBASH_CURRENT_LINE", "3"),
+        ]);
+        assert_eq!(sys_error_prefix(&getter(&framed)), "probe.sh: ");
+        // No frame file: the $0 carrier verbatim, still no line.
+        let bare = map(&[("BASH_ARGV0", "/opt/zimsh"), ("__RUBASH_CURRENT_LINE", "1")]);
+        assert_eq!(sys_error_prefix(&getter(&bare)), "/opt/zimsh: ");
+        // No carriers at all: PROGRAM.
+        let empty = map(&[]);
+        assert_eq!(sys_error_prefix(&getter(&empty)), "bash: ");
     }
 
     #[test]

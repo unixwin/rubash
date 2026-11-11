@@ -1498,7 +1498,9 @@ impl Executor {
                     return Ok(Some((diagnostic, String::new(), 127)));
                 }
                 if !is_closed_redirect_target(&target) && redirect_target_fd(&target).is_none() {
-                    if let Ok(mut file) = self.create_redirect_output(&target, redirect.clobber) {
+                    if let Ok(mut file) =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
+                    {
                         let _ = file.write_all(diagnostic.as_bytes());
                     }
                     // rubash#1571: the diagnostic was just delivered
@@ -1857,8 +1859,11 @@ impl Executor {
                         if !is_closed_redirect_target(&target)
                             && redirect_target_fd(&target).is_none()
                         {
-                            if let Ok(file) = self.create_redirect_output(&target, redirect.clobber)
-                            {
+                            if let Ok(file) = self.create_redirect_output_for(
+                                Some(redirect),
+                                &target,
+                                redirect.clobber,
+                            ) {
                                 process.stderr(Stdio::from(file));
                             }
                         }
