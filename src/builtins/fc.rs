@@ -154,7 +154,16 @@ where
             index += 1;
             break;
         }
-        if arg == "--help" || arg == "-h" {
+        if arg == "--help" {
+            // Historical hand-rolled face, kept for direct callers:
+            // through the shell, the dispatch gate (rubash#2753)
+            // intercepts `--help` in option position before this
+            // parser runs and prints the long help with EX_USAGE,
+            // per CASE_HELPOPT (builtins/common.h:38-41). GNU has
+            // no `-h` option for fc (fc.def's spec is ":e:lnrs"),
+            // so `-h` is deliberately NOT aliased here — it falls
+            // into the cluster scan below and reports the invalid
+            // option with EX_USAGE, as GNU does.
             write_help(stdout)?;
             return Ok(FcResult::Status(EXECUTION_SUCCESS));
         }

@@ -876,7 +876,7 @@ impl Executor {
                     (field, anchor)
                 }
             };
-        Self::initialize_fresh_shell_env_vars(
+        let startup_logical_cwd = Self::initialize_fresh_shell_env_vars(
             &mut env_vars,
             &birth_cwd,
             internal_respawn,
@@ -1154,6 +1154,9 @@ impl Executor {
                 // the anchor lazy: no per-birth open is added to the
                 // respawn-hot path.
                 cwd_anchor: std::cell::RefCell::new(birth_anchor),
+                // variables.c:907 set_pwd via initialize_fresh_shell_env_vars
+                // above: the adopted-or-physical logical cwd.
+                logical_cwd: Some(startup_logical_cwd),
                 array_compact_budget: HashMap::new(),
                 // rubash#2130: born unshaped — the ambient carriers
                 // were stripped from the import above (#2259), and
@@ -1614,31 +1617,48 @@ impl Executor {
         // anti-leak heuristic: their "environment" is a parent
         // session's serialization or a shared host process env.
         process_startup: bool,
-    ) {
+    ) -> String {
         env_vars.remove("BASH_ARGV0");
         env_vars.remove("BASH_EXECUTION_STRING");
-        // GNU Bash derives PWD from the real working directory at startup
-        // (variables.c initialize_shell_variables): it only trusts an
-        // inherited PWD that still matches the current directory, and
-        // otherwise falls back to getcwd(). WSL interop forwards the Windows
-        // session's PWD (e.g. D:/repo/rubash) rather than the WSL shell's
-        // actual CWD; trusting it desynchronized cd/OLDPWD, so `cd $OLDPWD`
-        // (assoc.tests) landed in the wrong directory and subsequent
-        // `./assocN.sub` lookups failed. Always align PWD with the real CWD.
-        // G-02: the "real CWD" is the caller's session cwd field, passed in
-        // (at process birth it is the process cwd; for an in-process fresh
-        // shell it is the parent session's cwd).
+        // GNU variables.c:907 set_pwd: an imported $PWD that is
+        // absolute and names the current directory (same_file with
+        // ".") is ADOPTED as the shell's logical cwd,
+        // the_current_working_directory, canonicalized by sh_canonpath
+        // — and the $PWD variable keeps its imported spelling in
+        // non-POSIX mode. Only a value naming ANOTHER directory (or no
+        // directory) is replaced: WSL interop forwards the Windows
+        // session's PWD (e.g. D:/repo/rubash) rather than the WSL
+        // shell's actual CWD, and trusting THAT value desynchronized
+        // cd/OLDPWD (`cd $OLDPWD` in assoc.tests landed in the wrong
+        // directory). The unconditional overwrite also discarded a
+        // VALID inherited logical PWD — a child shell born in a
+        // symlinked directory reset its logical cwd to the physical
+        // path (rubash#2799). G-02: the "real CWD" is the caller's
+        // session cwd field, passed in (at process birth it is the
+        // process cwd; for an in-process fresh shell it is the parent
+        // session's cwd). The adopted-or-physical logical cwd is this
+        // function's return value; the caller stores it in
+        // ShellState::logical_cwd.
+        //
         // rubash#3268 (e): an empty cwd is the unknown birth state
         // (the birth getcwd failed). GNU does not rebind PWD there:
         // set_pwd calls get_working_directory("shell-init"), which
         // fails WITHOUT binding the variable (variables.c:907), so an
         // imported PWD keeps its stale value and an absent one stays
-        // unbound. Seeding the empty string — or any fabrication —
-        // would assert a directory the session does not have.
-        if !cwd.as_os_str().is_empty() {
-            let pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
-            env_vars.insert("PWD".to_string(), pwd);
-        }
+        // unbound; no logical value is adopted either — the readers
+        // gate on the empty field itself.
+        let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+        let startup_logical_cwd = if cwd.as_os_str().is_empty() {
+            String::new()
+        } else {
+            match crate::builtins::pwd::adopted_logical_pwd(env_vars, cwd) {
+                Some(logical) => logical,
+                None => {
+                    env_vars.insert("PWD".to_string(), physical_pwd.clone());
+                    physical_pwd
+                }
+            }
+        };
         // Windows-only: suites write $TMPDIR/$HOME into generated scripts
         // unquoted (posix2.tests conftest2: `$TMPDIR/conftest2 "$@"`; exp.tests
         // `${x#$HOME}`), and an inherited Windows backslash path is escape
@@ -1999,5 +2019,6 @@ impl Executor {
         mark_env_name(env_vars, INTEGER_VARS, "UID");
         mark_env_name(env_vars, INTEGER_VARS, "EUID");
         mark_env_name(env_vars, INTEGER_VARS, "PPID");
+        startup_logical_cwd
     }
 }
