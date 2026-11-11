@@ -222,6 +222,51 @@ pub(in crate::executor) fn command_sets_own_line(cmd: &CommandNode) -> bool {
         && !command_is_time_prefixed_compound(cmd)
 }
 
+/// Whether a failure opening THIS command's own redirections reports
+/// at the ambient line instead of the command's own line. GNU
+/// execute_cmd.c:854 do_redirections runs before the dispatch switch
+/// stamps any line, and error_prolog reads the global line_number —
+/// the reader/enclosing frame's line — for every command kind except
+/// cm_cond / cm_arith / cm_arith_for, whose executing_line_number
+/// (execute_cmd.c:412-428) substitutes the node's own line. Simple
+/// commands keep their own line (cm_simple stamps Simple->line before
+/// its redirections are serviced, execute_cmd.c:936). Everything
+/// compound that is not in the special set is ambient (rubash#3183).
+/// Whether a failure opening THIS command's own redirections reports
+/// at the command's COMPLETION line (its parse-end line) rather than
+/// its first line. GNU's parser stamps cm_arith / cm_cond nodes when
+/// the closing token is read, so a construct completed on a later
+/// physical line (continuation, multiline condition) reports that
+/// later line from do_redirections and from the executing_line_number
+/// special case alike (execute_cmd.c:412-428); cm_arith_for keeps the
+/// `for' keyword's line (rubash#3183, measured).
+pub(in crate::executor) fn redirect_error_uses_completion_line(cmd: &CommandNode) -> bool {
+    cmd.arithmetic_command.is_some() || cmd.conditional_command.is_some()
+}
+
+pub(in crate::executor) fn compound_redirect_error_is_ambient(cmd: &CommandNode) -> bool {
+    let own_line_special = cmd.conditional_command.is_some()
+        || cmd.arithmetic_command.is_some()
+        || cmd
+            .for_command
+            .as_ref()
+            .is_some_and(|for_command| for_command.arithmetic.is_some());
+    if own_line_special {
+        return false;
+    }
+    cmd.for_command.is_some()
+        || cmd.select_command.is_some()
+        || cmd.loop_command.is_some()
+        || cmd.if_command.is_some()
+        || cmd.case_command.is_some()
+        || cmd.function_command.is_some()
+        || cmd.brace_group.is_some()
+        || cmd.subshell_command.is_some()
+        || cmd.coproc_command.is_some()
+        || cmd.pipeline_command.is_some()
+        || cmd.and_or_list.is_some()
+}
+
 /// GNU `Simple->line` for a plain simple command is `simplecmd_lineno`
 /// (parse.y:316), which read_token_word captures at the END of the first
 /// word in command position (parse.y:5849-5851 `simplecmd_lineno =

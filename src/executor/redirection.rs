@@ -1766,6 +1766,23 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Option<usize> {
+        let prefix = self.error_prefix();
+        self.failing_open_redirect_index_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `failing_open_redirect_index` with the diagnostic prefix given
+    /// explicitly: the identification strips the prefix from `message`
+    /// before matching the `{target}: ` head, so a caller that composed
+    /// the message under a different line's prefix (a compound's own
+    /// redirect errors report the ambient line, rubash#3183) must hand
+    /// that same prefix over, or the strip misses and the entry is
+    /// never located.
+    pub(in crate::executor) fn failing_open_redirect_index_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Option<usize> {
         use crate::parser::RedirectKind;
         let by_target = cmd.redirects.iter().position(|redirect| {
             let opens_path = match redirect.kind {
@@ -1791,9 +1808,8 @@ impl Executor {
                 return false;
             }
             let head = format!("{}: ", target.strip_prefix('&').unwrap_or(&target));
-            let prefix = self.error_prefix();
             std::str::from_utf8(message).is_ok_and(|text| {
-                text.strip_prefix(prefix.as_str())
+                text.strip_prefix(prefix)
                     .is_some_and(|rest| rest.starts_with(&head))
             })
         });
@@ -1808,7 +1824,7 @@ impl Executor {
         // whose effective redirector equals the named number (file
         // arms), or whose dup source does (dup arms).
         let text = std::str::from_utf8(message).ok()?;
-        let rest = text.strip_prefix(self.error_prefix().as_str())?;
+        let rest = text.strip_prefix(prefix)?;
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if digits.is_empty() || !rest[digits.len()..].starts_with(": Bad file descriptor") {
             return None;
@@ -1855,7 +1871,22 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Result<(), ExecuteError> {
-        let failed_index = self.failing_open_redirect_index(cmd, message);
+        let prefix = self.error_prefix();
+        self.write_redirect_diagnostic_routed_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `write_redirect_diagnostic_routed` with the diagnostic prefix
+    /// given explicitly, for messages composed under a different
+    /// line's prefix than the funnel-stamped one (rubash#3183 ambient
+    /// redirect reports): the failing-entry identification inside must
+    /// strip the same prefix the message was composed with.
+    pub(in crate::executor) fn write_redirect_diagnostic_routed_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Result<(), ExecuteError> {
+        let failed_index = self.failing_open_redirect_index_with_prefix(cmd, message, prefix);
         let mut state = self.command_output_fd_state();
         match failed_index {
             Some(index) => {
