@@ -209,7 +209,7 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 pub(crate) fn source_ends_in_cond_command(input: &str, posix: bool) -> bool {
     let mut parse_state = LexerParseState::default();
     let mut brace_cache = BraceScanCache::default();
-    let _ = tokenize_plain(input, posix, &mut parse_state, &mut brace_cache);
+    let _ = tokenize_plain(input, posix, &mut parse_state, &mut brace_cache, &[]);
     LexerParseState::cond_command_open(&parse_state)
 }
 
@@ -1551,6 +1551,24 @@ impl GroupScanFeeder {
             self.brace_join_active = false;
             return;
         }
+        // rubash#3229: an extglob pattern group is word-internal, so
+        // none of the join gates above can see it — the word reader
+        // folds the group into the word even when the pair never
+        // closes on the accumulated text (skip_extglob_group has no
+        // unclosed marker), and the logical line would be tokenized
+        // as complete with the group cut at the newline. GNU
+        // read_token_word's matched pair reads across lines
+        // (parse.y:5466-5489 -> parse_matched_pair), so while the
+        // pair is open the logical line is not finished. The scan is
+        // seeded with the parse gate in force at this logical line's
+        // start (shopt flips land when a line tokenizes, i.e. after
+        // the previous logical line completed — GNU's read-execute
+        // cadence); `shopt` lines inside the accumulated text itself
+        // are mirrored by the scan.
+        if unclosed_extglob_group_line(&self.logical_line, parse_extended_glob()).is_some() {
+            self.brace_join_active = false;
+            return;
+        }
         // GNU parse.y parse_comsub (PST_EOFTOKEN) + print_comsub
         // (parse.y:4632): a `)` on a heredoc header line inside `$(...)`
         // closes the substitution while the still-pending body was gathered
@@ -1659,6 +1677,7 @@ impl GroupScanFeeder {
             self.parse_posix,
             &mut line_lex_state,
             &mut self.brace_cache,
+            &self.continuation_join_columns,
         );
         // Summary fold BEFORE the join branch moves `line_tokens` into the
         // next boundary checkpoint: a tail-resumed pass extends the previous
@@ -2185,6 +2204,7 @@ impl GroupScanFeeder {
                 self.parse_posix,
                 &mut self.lexer_parse_state,
                 &mut self.brace_cache,
+                &self.continuation_join_columns,
             );
             if ws_capture_armed {
                 let mut previous_end = 0usize;
@@ -2436,6 +2456,25 @@ pub fn unclosed_array_subscript_line(input: &str) -> Option<(usize, bool)> {
 /// execution stops there).
 pub fn unclosed_array_subscript_eof(input: &str) -> Option<(usize, char, usize, bool)> {
     skip::unclosed_array_subscript_eof(input)
+}
+
+/// rubash#3229: same router with the walk's `extended_glob` mirror
+/// seeded from the reader's executed gate state (a grouped run's
+/// `shopt` line is an earlier group, invisible in this group's text).
+pub fn unclosed_array_subscript_eof_seeded(
+    input: &str,
+    extglob_seed: bool,
+) -> Option<(usize, char, usize, bool)> {
+    skip::unclosed_array_subscript_eof_seeded(input, extglob_seed)
+}
+
+/// rubash#3229: the line an unclosed extglob pattern group opened on,
+/// when the read-time matched-pair EOF (parse.y:5466-5489 ->
+/// 3901-3912) owns the diagnostic; see
+/// skip::unclosed_extglob_group_line for the walk and its ownership
+/// boundaries.
+pub fn unclosed_extglob_group_line(input: &str, extglob_seed: bool) -> Option<usize> {
+    skip::unclosed_extglob_group_line(input, extglob_seed)
 }
 
 /// rubash#390 q1: `((` P_ARITH-group probe for the unclosed-command-`(`
@@ -3133,8 +3172,10 @@ fn tokenize_plain(
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
+    join_columns: &[usize],
 ) -> TokenizePass {
     let mut lexer = Lexer::new_with_cache(input, posix, brace_cache);
+    lexer.set_join_columns(join_columns);
     lexer.extended_glob = parse_extended_glob();
     // parse.y keeps a single parser_state for the whole input — resume the
     // PST_CASEPAT / last_read_token state left by the previous logical line.
@@ -3168,6 +3209,7 @@ fn tokenize_resume_from(
     offset: usize,
     state: &LexerBoundaryState,
     parse_state: &mut LexerParseState,
+    join_columns: &[usize],
     // True for the BOUNDARY tail resume (the list strictly extends the
     // checkpointed prefix, so the caller folds only the token delta into
     // the keyword-stack summary); false for the OPENER resume (the list is
@@ -3177,6 +3219,7 @@ fn tokenize_resume_from(
     tail_resume: bool,
 ) -> TokenizePass {
     let mut lexer = Lexer::new_resumed_at(input, posix, brace_cache, offset, state);
+    lexer.set_join_columns(join_columns);
     lexer.extended_glob = parse_extended_glob();
     for token in &mut lexer {
         if token.kind == TokenKind::Eof {
@@ -3240,6 +3283,7 @@ fn tokenize_with_boundary(
     posix: bool,
     parse_state: &mut LexerParseState,
     brace_cache: &mut BraceScanCache,
+    join_columns: &[usize],
 ) -> TokenizePass {
     if resume_allowed {
         if let Some((offset, tokens, state)) = checkpoint {
@@ -3252,6 +3296,7 @@ fn tokenize_with_boundary(
                     offset,
                     &state,
                     parse_state,
+                    join_columns,
                     true,
                 );
             }
@@ -3270,6 +3315,7 @@ fn tokenize_with_boundary(
                 offset,
                 &state,
                 parse_state,
+                join_columns,
                 false,
             );
         }
@@ -3277,9 +3323,9 @@ fn tokenize_with_boundary(
     if resume_allowed {
         // resume was allowed but no checkpoint existed: full re-lex under
         // the ALLOWED stat (tail = whole input).
-        return tokenize_plain(input, posix, parse_state, brace_cache);
+        return tokenize_plain(input, posix, parse_state, brace_cache, join_columns);
     }
-    tokenize_plain(input, posix, parse_state, brace_cache)
+    tokenize_plain(input, posix, parse_state, brace_cache, join_columns)
 }
 
 /// Detect top-level `set -o posix` / `set +o posix` commands in a tokenized
