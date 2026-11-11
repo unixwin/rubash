@@ -519,9 +519,47 @@ impl Executor {
     pub(in crate::executor) fn assoc_subscript_key(&self, key: &str) -> String {
         // A `\x1d` marker is the lexer's wholly-double-quoted word bookkeeping
         // and never part of the key text.
-        self.expand_subscript_string(key)
-            .trim_matches(STORAGE_WORD_PREFIX)
-            .to_string()
+        // rubash#2595: the error pre-scan already resolved this subscript
+        // (its evaluating fetch) — reuse the resolved text instead of
+        // re-executing it; the real expansion reads the element live.
+        // Out of scope (pre-scan) a resolution is PEEKED, not consumed:
+        // identical fragments share the scan's single evaluation, and
+        // the entry stays for the real expansion. In scope (real
+        // expansion) it is CONSUMED: each fragment's fetch takes
+        // exactly one entry, so a later identical fragment re-expands
+        // — GNU evaluates the substitution once per fragment.
+        let in_word_scope = crate::executor::expand_braced_indices::word_ctx_active();
+        let carried = if in_word_scope {
+            crate::executor::expand_braced_indices::scan_carry_take(key)
+        } else {
+            crate::executor::expand_braced_indices::scan_carry_peek(key)
+        };
+        let expanded = match carried {
+            Some(expanded) => expanded,
+            None => {
+                let writes_before =
+                    crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                        .with(|w| w.borrow().len());
+                let expanded = self.expand_subscript_string(key);
+                // Only carry a pre-scan resolution the real expansion
+                // may replay: no deferred writes were queued during the
+                // resolution (a `$((i++))` inside the subscript must be
+                // re-evaluated, not replayed from stale text), and the
+                // raw text is carryable (no `$?`, no reference to a
+                // simulated bind). A real-expansion fetch never stores:
+                // its re-expansion belongs to this fragment alone.
+                if !in_word_scope
+                    && crate::executor::expand_braced_indices::PENDING_SUBSCRIPT_WRITES
+                        .with(|w| w.borrow().len())
+                        == writes_before
+                    && crate::executor::expand_braced_indices::scan_carry_may_store(key)
+                {
+                    crate::executor::expand_braced_indices::scan_carry_store(key, expanded.clone());
+                }
+                expanded
+            }
+        };
+        expanded.trim_matches(STORAGE_WORD_PREFIX).to_string()
     }
 
     pub(in crate::executor) fn apply_array_element_parameter_assignment(

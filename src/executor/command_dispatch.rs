@@ -725,7 +725,26 @@ impl Executor {
             // with `f(){ return 7; }`, not ERR:1 / exit 1. The unwind passes
             // through to the function (or source) boundary untouched.
             result
-        } else if self.errexit_enabled() && self.errexit_is_active() && self.exit_code != 0 {
+        } else if self.errexit_enabled()
+            && self.errexit_is_active()
+            && self.exit_code != 0
+            && !self.evalerror_arith_pending.get()
+        {
+            // rubash#3287: the arithmetic evalerror class is exempt
+            // here exactly as at the list loop's promotion
+            // (ast_exec.rs, rubash#1518): expr.c's evalerror jumps
+            // DISCARD directly, bypassing the errexit epilogue in
+            // every context — a fatal nested expansion inside a
+            // `(( ))` discards the command and the script continues,
+            // it does not exit under `set -e`. This funnel is the
+            // loop promotion's twin for the materialized dispatch
+            // (a `(( ))` carrying `$` in its words takes the generic
+            // path through here, never the bare fast entry), and
+            // without the exemption its ExpansionFailure was
+            // converted to ExitCode(1) before any list arm could
+            // absorb it. Other expansion failures (bad substitution,
+            // failglob) set no such pending mark and keep exiting
+            // under `set -e`, per the 2026-09-02 probe.
             // rubash#1611: inside a timed dispatch the ERR trap is
             // adjudicated once, by the ast_exec time branch, when the
             // timed command completes (rubash#1277) — firing here too

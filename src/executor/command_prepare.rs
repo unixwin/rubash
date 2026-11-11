@@ -258,7 +258,10 @@ impl Executor {
     /// Only reachable when [`arithmetic_command_is_bare`] admitted the
     /// command, so no redirects/assignments/background modifiers exist.
     fn execute_bare_arithmetic_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
-        self.exit_code = self.execute_arithmetic_command(cmd);
+        // rubash#3287: a fatal nested expansion inside the `(( ))`
+        // abandons the command (ExpansionFailure DISCARD) — propagate
+        // it instead of swallowing it into a status.
+        self.exit_code = self.execute_arithmetic_command(cmd)?;
         // The generic path's execute_materialized_command tail behaviors for
         // an arithmetic command: the errexit check (GNU
         // set_pipestatus_from_exit at execute_cmd.c:1217 is the exit_code

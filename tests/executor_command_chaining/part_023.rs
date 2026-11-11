@@ -113,7 +113,14 @@ fn test_cd_redirects_stderr() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: cd:"));
+    // The bare Executor::new() embedding carries a line but no
+    // file/name carrier, so the shared chain renders its line-only
+    // arm from the terminal fallback, GNU's PROGRAM "bash" — the
+    // same shape the executor's own prefix locks for this
+    // embedding. The old expectation encoded the builtin layer's
+    // hard-coded "rubash: " fallback, removed by the rubash#3256
+    // (b) migration.
+    assert!(error.contains("bash: line 1: cd:"));
     assert!(error.contains("rubash-cd-no-such-dir"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
@@ -138,7 +145,9 @@ fn test_cd_appends_stderr() {
     assert_eq!(executor.last_exit_code(), 1);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: cd:"));
+    // Chain line-only arm for this embedding, as in
+    // test_cd_redirects_stderr above (rubash#3256 (b)).
+    assert!(error.contains("bash: line 1: cd:"));
     assert!(error.contains("rubash-cd-no-such-dir"));
     let _ = fs::remove_file(error_path);
 }
