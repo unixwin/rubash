@@ -461,7 +461,20 @@ impl Executor {
                 } else {
                     None
                 };
-                return self.execute_empty_words_command(cmd, vanished_status);
+                // rubash#2761: GNU's words==0 check
+                // (execute_cmd.c:4626-4640) runs on the EXPANDED word
+                // list, which is empty here — but `cmd` still carries
+                // the raw words, and the null-command path decides
+                // on them (the heredoc fork classifier reads the
+                // effective word). Hand it the node as GNU sees it:
+                // wordless, so `$EMPTY 3<<EOF` classifies under
+                // execute_null_command's force-fork rule (no fd-0
+                // redirect -> the body expands in the shell and
+                // `:=` persists) instead of as an external
+                // command's forked expansion.
+                let mut vanished_cmd = cmd.clone();
+                vanished_cmd.words.clear();
+                return self.execute_empty_words_command(&vanished_cmd, vanished_status);
             }
             if let Some(status) = self.last_command_substitution_status.get() {
                 self.exit_code = status;
@@ -1850,7 +1863,10 @@ impl Executor {
     /// order). A fatal word-expansion arithmetic failure in a bare command
     /// (e.g. bare `$((1/0))` with no other words) abandons the rest of the
     /// current command list (GNU Bash 5.2.37 evidence).
-    fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
+    /// rubash#2761: the empty-words path calls this too (from
+    /// execute_empty_words_command, right after its pre-expansion),
+    /// so it is crate-visible rather than module-private.
+    pub(in crate::executor) fn abort_on_expansion_errors(&mut self) -> Result<(), ExecuteError> {
         if self.shell_state.arithmetic_expansion_error.get() {
             self.shell_state.arithmetic_expansion_error.set(false);
             let was_fatal = self.shell_state.arithmetic_fatal_error.replace(false);
@@ -2076,7 +2092,10 @@ impl Executor {
         result
     }
 
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+    // rubash#2761: the empty-words path calls this too (from
+    // execute_empty_words_command, after its assignment loop), so
+    // the funnel is crate-visible rather than module-private.
+    pub(in crate::executor) fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see
