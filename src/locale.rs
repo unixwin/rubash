@@ -2011,7 +2011,7 @@ mod tests {
         // drop arm can see it.
         assert_eq!(
             super::decode_to_visible_text(&format!("a\u{E400}{site}b")),
-            &format!("a{site}b")
+            format!("a{site}b")
         );
     }
 
