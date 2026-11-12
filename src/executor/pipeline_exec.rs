@@ -145,6 +145,35 @@ enum PipelineDrainTarget {
     StreamHostStdout,
 }
 
+/// rubash#3308: how one stage of a concurrent external pipeline wires
+/// its fd 2. GNU `execute_cmd.c:2620 execute_pipeline` forks each
+/// element with the shell's fd 2 exactly as `redir.c:237
+/// do_redirections` bound it — an enclosing `2>file`, `2>/dev/null`,
+/// `exec 2>...` or `2>&1` binding IS the child's fd 2, never the raw
+/// process stderr. The spawn loops used to leave every non-last
+/// stage's stderr unset (process inherit) unless fd 2 was merged
+/// onto fd 1, and the last stage's collected stderr was written back
+/// through the raw process stderr, so both bypassed the fd-table
+/// binding.
+#[cfg(not(windows))]
+enum ConcurrentPipelineStderr {
+    /// fd 2 is the shell's own stderr (or unbound): inherit the
+    /// process descriptor.
+    Inherit,
+    /// fd 2 is closed (`2>&-`): the child gets /dev/null — GNU's
+    /// write to a closed fd 2 fails EBADF and shows nothing.
+    Null,
+    /// fd 2 names a real file object (plain `2>file`, a coproc's
+    /// input): the fd-table handle, dup'd per stage at spawn time —
+    /// GNU's dup2 snapshot, shared offset and all.
+    Direct(crate::fd::HANDLE),
+    /// fd 2 has no direct handle (`2>&1`, /dev/full, `>(...)`, an
+    /// in-memory channel, a synthetic /proc entry): pipe it; the
+    /// parent collects the bytes and re-emits them through the
+    /// fd-table face.
+    Piped,
+}
+
 /// Drain one end of a child's pipe on a reader thread so the child can keep
 /// writing while the parent waits on other pipeline members (niubash#158).
 #[cfg(any(windows, unix))]
@@ -1532,11 +1561,15 @@ impl Executor {
                     input = prefix_output;
                     ambient_stderr.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
-                    std::io::stderr().write_all(
+                    // rubash#3308: prefix members' stderr is the shell's
+                    // fd-2 output — route it through the fd-table binding
+                    // instead of the raw process stderr (a failing relay
+                    // write must not fail the pipeline; GNU has no relay).
+                    let _ = self.write_default_stderr(
                         &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
                             &prefix_stderr,
                         ),
-                    )?;
+                    );
                 } else {
                     input = prefix_output;
                 }
@@ -1822,9 +1855,13 @@ impl Executor {
                     ambient_stderr.push_str(&next_stderr);
                 }
             } else if !next_stderr.is_empty() {
-                std::io::stderr().write_all(
+                // rubash#3308: a stage's stderr is the shell's fd-2
+                // output — route it through the fd-table binding instead
+                // of the raw process stderr (a failing relay write must
+                // not fail the pipeline; GNU has no relay).
+                let _ = self.write_default_stderr(
                     &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&next_stderr),
-                )?;
+                );
             }
             if let Some(base) = stage0_stdin_base {
                 // Fold the element's measured fd-0 reads into the shared
@@ -2987,7 +3024,23 @@ impl Executor {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
             })??;
             if capture_intermediate_stderr {
-                self.write_default_stdout(&output)?;
+                // rubash#3308: fd 2 is merged onto fd 1 (`2>&1`), so the
+                // intermediate bytes ride fd 2's own binding — the dup2
+                // snapshot (redir.c:1170), not fd 1's live target: a dup
+                // that ran outside a command substitution must reach the
+                // real stdout, never the capture (the `len:69` pollution:
+                // write_default_stdout fed the bytes into the live
+                // capture). write_default_stderr resolves the snapshot
+                // generation the alias layer recorded at dup time.
+                self.write_default_stderr(&output)?;
+            } else {
+                // Any other piped fd-2 shape (/dev/full, `>(...)`, an
+                // in-memory channel, a synthetic /proc entry): relay
+                // through the fd-table face too. A failing relay write
+                // must not fail the pipeline — GNU has no relay, the
+                // child writes fd 2 directly, so the bytes are simply
+                // lost exactly as a failed direct write would lose them.
+                let _ = self.write_default_stderr(&output);
             }
         }
 
@@ -3012,11 +3065,16 @@ impl Executor {
             let final_command = *consumers.last().expect("pipeline has at least two stages");
             self.write_pipeline_output(final_command, &results[last_index].0, false)?;
             if !results[last_index].1.is_empty() {
-                std::io::stderr().write_all(
+                // rubash#3308: the last consumer's collected stderr is
+                // the shell's fd-2 output — route it through the
+                // fd-table binding instead of the raw process stderr (a
+                // failing relay write must not fail the pipeline; GNU
+                // has no relay).
+                let _ = self.write_default_stderr(
                     &crate::executor::substitution_metadata::shell_text_to_raw_bytes(
                         &results[last_index].1,
                     ),
-                )?;
+                );
             }
         }
 
@@ -3758,6 +3816,25 @@ impl Executor {
             pipes.push((Some(read), Some(write)));
         }
 
+        // rubash#3308: prefix members are plain externals with no own
+        // redirects, so their fd 2 is the ambient fd-table binding
+        // (GNU execute_cmd.c:2620 + redir.c:237) — the spawn below
+        // never set stderr, so every prefix child inherited the
+        // process stderr past an enclosing `2>file` / `2>/dev/null` /
+        // `exec 2>...` / `2>&1` binding. Resolve the plan once from
+        // the fd table; the Piped arm drains per member and relays
+        // through the fd-table face after the reap, like the
+        // concurrent twin. (Unix only: the Windows twin is owed a
+        // Windows-capable run, as for the concurrent path.)
+        #[cfg(not(windows))]
+        let stderr_plan = self.concurrent_pipeline_stderr_plan();
+        #[cfg(not(windows))]
+        let stderr_plan_is_piped = matches!(stderr_plan, ConcurrentPipelineStderr::Piped);
+        #[cfg(not(windows))]
+        let mut prefix_stderr_drains: Vec<
+            std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+        > = Vec::with_capacity(tail_index);
+
         let mut processes = Vec::with_capacity(tail_index);
         for (index, (program, expanded_name, args)) in specs.iter().enumerate() {
             let (mut process, _) = if let Some(name) = internal_pipeline_program_name(program) {
@@ -3801,6 +3878,25 @@ impl Executor {
             process.stdout(stdio_from_transferred_handle(
                 write.take().expect("producer writer already transferred"),
             ));
+            // rubash#3308: the member's fd 2 is the ambient fd-table
+            // binding — see the plan computed above the spawn loop.
+            #[cfg(not(windows))]
+            match &stderr_plan {
+                ConcurrentPipelineStderr::Inherit => {
+                    process.stderr(Stdio::inherit());
+                }
+                ConcurrentPipelineStderr::Null => {
+                    process.stderr(Stdio::null());
+                }
+                ConcurrentPipelineStderr::Direct(handle) => {
+                    let dup = crate::fd::duplicate_handle_inheritable(*handle)
+                        .map_err(ExecuteError::IoError)?;
+                    process.stderr(Stdio::from(crate::fd::handle_to_file(dup)));
+                }
+                ConcurrentPipelineStderr::Piped => {
+                    process.stderr(Stdio::piped());
+                }
+            }
             // rubash#1688: pin the ambient descriptors for the stage.
             self.attach_ambient_fd_pins(commands[index], &mut process);
             // rubash#2308: the Text half of the ambient delivery
@@ -3827,6 +3923,19 @@ impl Executor {
                 ))
             })?;
             adopt_orphan_console(child.id());
+            // rubash#3308: drain a piped member stderr from spawn time
+            // so a chatty member cannot block on a full pipe buffer;
+            // the bytes are relayed after the reap, in member order.
+            #[cfg(not(windows))]
+            if stderr_plan_is_piped {
+                if let Some(mut stderr) = child.stderr.take() {
+                    prefix_stderr_drains.push(std::thread::spawn(move || {
+                        let mut output = Vec::new();
+                        stderr.read_to_end(&mut output)?;
+                        Ok::<_, std::io::Error>(output)
+                    }));
+                }
+            }
             processes.push(child);
         }
 
@@ -3891,6 +4000,22 @@ impl Executor {
             statuses.push(crate::executor::wait_status::process_exit_status(&status));
         }
 
+        // rubash#3308: relay the prefix members' collected stderr
+        // through the fd-table fd-2 face, in member order, before the
+        // tail's own output is written back (GNU runs the elements
+        // concurrently, so a prefix diagnostic precedes the final
+        // stage's output — the same order rule as rubash#1552). A
+        // failing relay write must not fail the pipeline; GNU has no
+        // relay.
+        #[cfg(not(windows))]
+        for drain in prefix_stderr_drains {
+            if let Ok(Ok(bytes)) = drain.join() {
+                if !bytes.is_empty() {
+                    let _ = self.write_default_stderr(&bytes);
+                }
+            }
+        }
+
         let (tail_out, tail_err, tail_status) = match tail_result? {
             Some(triple) => triple,
             None => (String::new(), String::new(), 0),
@@ -3899,9 +4024,13 @@ impl Executor {
 
         self.write_pipeline_output(tail, &tail_out, false)?;
         if !tail_err.is_empty() {
-            std::io::stderr().write_all(
+            // rubash#3308: the tail's collected stderr is the shell's
+            // fd-2 output — route it through the fd-table binding
+            // instead of the raw process stderr (a failing relay write
+            // must not fail the pipeline; GNU has no relay).
+            let _ = self.write_default_stderr(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&tail_err),
-            )?;
+            );
         }
         self.exit_code = self.pipeline_exit_status(&statuses);
         self.set_pipestatus(statuses);
@@ -4361,15 +4490,24 @@ impl Executor {
             )?;
             let stderr_bytes = join_pipe_drain(last_stderr_drain)?;
             if !stderr_bytes.is_empty() {
-                std::io::stderr().write_all(&stderr_bytes)?;
+                // rubash#3308: the last process stage's collected stderr
+                // is the shell's fd-2 output — route it through the
+                // fd-table binding instead of the raw process stderr (a
+                // failing relay write must not fail the pipeline; GNU
+                // has no relay).
+                let _ = self.write_default_stderr(&stderr_bytes);
             }
         } else {
             self.write_pipeline_output(shell_command, &shell_out, false)?;
         }
         if !shell_err.is_empty() {
-            std::io::stderr().write_all(
+            // rubash#3308: the in-shell tail's stderr is the shell's
+            // fd-2 output — route it through the fd-table binding
+            // instead of the raw process stderr (a failing relay write
+            // must not fail the pipeline; GNU has no relay).
+            let _ = self.write_default_stderr(
                 &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&shell_err),
-            )?;
+            );
         }
         self.exit_code = self.pipeline_exit_status(&statuses);
         self.set_pipestatus(statuses);
@@ -4778,6 +4916,28 @@ impl Executor {
         Ok((final_statuses, true, stop_signal, Vec::new(), Vec::new()))
     }
 
+    /// rubash#3308: resolve the concurrent pipeline's fd-2 wiring from
+    /// the fd table once, before the spawn loop — the binding is
+    /// loop-invariant (spawning mutates none of it). See the
+    /// `ConcurrentPipelineStderr` variants for the per-endpoint rule.
+    #[cfg(not(windows))]
+    fn concurrent_pipeline_stderr_plan(&self) -> ConcurrentPipelineStderr {
+        if self.fd_table.is_closed(2) {
+            return ConcurrentPipelineStderr::Null;
+        }
+        match self.fd_table.output_endpoint(2) {
+            None | Some(FdWriteEndpoint::Stderr) => ConcurrentPipelineStderr::Inherit,
+            Some(FdWriteEndpoint::Stdout) => ConcurrentPipelineStderr::Piped,
+            Some(FdWriteEndpoint::File(file)) => ConcurrentPipelineStderr::Direct(file.handle),
+            Some(FdWriteEndpoint::CoprocStdin { fd, .. }) => {
+                ConcurrentPipelineStderr::Direct(fd.handle)
+            }
+            // /dev/full, >(…), in-memory channel, synthetic /proc: no
+            // direct handle — pipe and relay through the fd-table face.
+            Some(_) => ConcurrentPipelineStderr::Piped,
+        }
+    }
+
     #[cfg(not(windows))]
     fn execute_external_pipeline_concurrently(
         &mut self,
@@ -4985,11 +5145,11 @@ impl Executor {
         // predicates read (same argument as the Windows drain below).
         let last_index = commands.len() - 1;
         let inherit_last_stdout = self.final_member_stdout_streams_to_host(commands[last_index]);
-        let inherit_last_stderr = !capture_intermediate_stderr
-            && matches!(
-                self.fd_table.output_endpoint(2),
-                Some(FdWriteEndpoint::Stderr)
-            );
+        // rubash#3308: fd 2's wiring for every stage, resolved once
+        // from the fd table (loop-invariant) — see
+        // `concurrent_pipeline_stderr_plan`.
+        let stderr_plan = self.concurrent_pipeline_stderr_plan();
+        let stderr_plan_is_piped = matches!(stderr_plan, ConcurrentPipelineStderr::Piped);
         let mut intermediate_stderr = Vec::new();
         let mut previous_stdout: Option<std::process::ChildStdout> = None;
         let mut first_stdin: Option<std::process::ChildStdin> = None;
@@ -5075,10 +5235,25 @@ impl Executor {
             } else {
                 process.stdout(Stdio::piped());
             }
-            if capture_intermediate_stderr || index + 1 == commands.len() {
-                if index == last_index && inherit_last_stderr {
+            // rubash#3308: every stage's fd 2 comes from the fd table
+            // (GNU execute_cmd.c:2620 + redir.c:237) — leaving it unset
+            // handed non-last stages the raw process stderr past any
+            // enclosing `2>file` / `2>/dev/null` / `exec 2>...` binding.
+            // A piped last stage is collected and re-emitted through
+            // the fd-table face by finish_concurrent_pipeline_results.
+            match &stderr_plan {
+                ConcurrentPipelineStderr::Inherit => {
                     process.stderr(Stdio::inherit());
-                } else {
+                }
+                ConcurrentPipelineStderr::Null => {
+                    process.stderr(Stdio::null());
+                }
+                ConcurrentPipelineStderr::Direct(handle) => {
+                    let dup = crate::fd::duplicate_handle_inheritable(*handle)
+                        .map_err(ExecuteError::IoError)?;
+                    process.stderr(Stdio::from(crate::fd::handle_to_file(dup)));
+                }
+                ConcurrentPipelineStderr::Piped => {
                     process.stderr(Stdio::piped());
                 }
             }
@@ -5169,7 +5344,7 @@ impl Executor {
                     }
                 }
             }
-            if capture_intermediate_stderr && index + 1 < commands.len() {
+            if stderr_plan_is_piped && index + 1 < commands.len() {
                 if let Some(mut stderr) = child.stderr.take() {
                     intermediate_stderr.push(std::thread::spawn(move || {
                         let mut output = Vec::new();
@@ -5394,7 +5569,23 @@ impl Executor {
                 ExecuteError::IoError(std::io::Error::other("pipeline stderr reader panicked"))
             })??;
             if capture_intermediate_stderr {
-                self.write_default_stdout(&output)?;
+                // rubash#3308: fd 2 is merged onto fd 1 (`2>&1`), so the
+                // intermediate bytes ride fd 2's own binding — the dup2
+                // snapshot (redir.c:1170), not fd 1's live target: a dup
+                // that ran outside a command substitution must reach the
+                // real stdout, never the capture (the `len:69` pollution:
+                // write_default_stdout fed the bytes into the live
+                // capture). write_default_stderr resolves the snapshot
+                // generation the alias layer recorded at dup time.
+                self.write_default_stderr(&output)?;
+            } else {
+                // Any other piped fd-2 shape (/dev/full, `>(...)`, an
+                // in-memory channel, a synthetic /proc entry): relay
+                // through the fd-table face too. A failing relay write
+                // must not fail the pipeline — GNU has no relay, the
+                // child writes fd 2 directly, so the bytes are simply
+                // lost exactly as a failed direct write would lose them.
+                let _ = self.write_default_stderr(&output);
             }
         }
         self.write_pipeline_output(
@@ -5409,9 +5600,14 @@ impl Executor {
                         &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stderr),
                     )?;
                 } else {
-                    std::io::stderr().write_all(
-                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&stderr),
-                    )?;
+                    // rubash#3308: the last stage's collected stderr is
+                    // the shell's fd-2 output — route it through the
+                    // fd-table binding (file, /dev/null, `2>&1`, closed)
+                    // instead of the raw process stderr. A failing relay
+                    // write must not fail the pipeline (see above).
+                    let _ = self.write_default_stderr(
+                        &crate::executor::substitution_metadata::shell_text_to_raw_bytes(stderr),
+                    );
                 }
             }
         }

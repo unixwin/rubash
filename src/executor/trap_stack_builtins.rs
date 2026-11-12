@@ -317,7 +317,8 @@ impl Executor {
             } else if redirect_target_fd(&target) == Some(1) {
                 super::write_stdout_bytes(&stdout)?;
             } else {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stdout)?;
             }
         } else if let Some(redirect) = &cmd.append {
@@ -366,7 +367,8 @@ impl Executor {
                     super::write_stdout_bytes(&stderr)?;
                 }
             } else if !is_null_device(&target) {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stderr)?;
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {

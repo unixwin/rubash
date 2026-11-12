@@ -339,8 +339,24 @@ impl Executor {
         // element) leave an empty slot — the lib must not re-unset
         // the whole variable. Borrowed names only; every later
         // consumer only reads them.
+        // GNU set.def internal_getopt stops at the first operand, so
+        // the lib's re-scan must end exactly where the original
+        // option region ended: a `-` word behind the first operand is
+        // a NAME, never an option. The rebuild preserves written
+        // order, but an operand consumed upstream leaves its pushed
+        // slot empty, and the next `-` word would slide into option
+        // position for the lib (rubash#3343: `unset -n 1bad -f -v`
+        // reported the -f/-v conflict; `unset v -x` on a nameref
+        // reported an invalid option). Emit `--` before the first
+        // such word when no operand and no `--` has been emitted yet
+        // — BuiltinOpt consumes `--` as end-of-options, so the word
+        // reaches the lib as an operand. The region is the shared
+        // option_region_end prefix above, so no word inside it is
+        // ever guarded.
         let mut variable_args: Vec<&str> = Vec::new();
         let mut seen_operand = false;
+        let mut emitted_operand = false;
+        let mut emitted_dashdash = false;
         for (index, arg) in args.iter().enumerate() {
             if !seen_operand && arg.starts_with('-') {
                 if arg.as_str() != "-f" {
@@ -348,13 +364,19 @@ impl Executor {
                 }
                 if arg.as_str() == "--" {
                     seen_operand = true;
+                    emitted_dashdash = true;
                 }
                 continue;
             }
             seen_operand = true;
             if let Some(name) = pushed[index] {
                 variable_args.push(name);
+                emitted_operand = true;
             } else if arg.starts_with('-') {
+                if !emitted_operand && !emitted_dashdash {
+                    variable_args.push("--");
+                    emitted_dashdash = true;
+                }
                 variable_args.push(arg.as_str());
             }
         }

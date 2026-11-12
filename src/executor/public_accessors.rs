@@ -750,8 +750,18 @@ impl Executor {
                 return;
             }
             if self.offending_line_echo_enabled() {
-                if let Some(source) = cmd.get_assignment("__RUBASH_PARSE_SOURCE__") {
-                    let source = self.comsub_body_echo_source(paren_line, source);
+                // The compound-EOF producer records no offending line
+                // of its own; the reader unit still names the enclosing
+                // line (comsub_body_echo_source prefers it), which is
+                // the line GNU's print_offending_line (parse.y:6814)
+                // echoes for this body-boundary re-presentation
+                // (rubash#3184: `: $( for z in 1 2 3; do )').
+                let stored = cmd
+                    .get_assignment("__RUBASH_PARSE_SOURCE__")
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let source = self.comsub_body_echo_source(paren_line, stored);
+                if !source.is_empty() {
                     self.write_diagnostic_fd2(
                         format!(
                             "{}`{}'\n",
@@ -986,6 +996,22 @@ impl Executor {
     /// Q6 arm B: take-style read of the armed errexit-unwind mark.
     pub fn take_errexit_unwind_armed(&mut self) -> bool {
         std::mem::take(&mut self.errexit_unwind_armed)
+    }
+
+    /// rubash#2652: whether the current unit's terminal status was
+    /// produced while errexit was suppressed (see
+    /// Executor::errexit_suppressed_terminal). The driver-level
+    /// errexit verdict consults this instead of re-deciding from
+    /// the status alone.
+    pub(crate) fn errexit_suppressed_terminal(&self) -> bool {
+        self.errexit_suppressed_terminal.get()
+    }
+
+    /// rubash#2652: clear the suppressed-terminal record at a new
+    /// outermost unit's entry (`run_source_impl`); nested units
+    /// (eval/source/comsub bodies) must not clear it mid-unit.
+    pub(crate) fn clear_errexit_suppressed_terminal(&mut self) {
+        self.errexit_suppressed_terminal.set(false);
     }
 
     /// Q6 arm B: record that the current unit ended in a signal
@@ -3841,6 +3867,49 @@ impl Executor {
         }
 
         format!("{}: ", self.error_report_name())
+    }
+
+    /// The error_prolog prefix for a failure opening `cmd`'s own
+    /// redirections: the ambient line for a compound in the ambient
+    /// class (see command_text::compound_redirect_error_is_ambient —
+    /// do_redirections precedes the line stamp, execute_cmd.c:854),
+    /// the ordinary funnel-stamped prefix otherwise (rubash#3183).
+    pub(in crate::executor) fn compound_redirect_error_prefix(
+        &self,
+        cmd: &crate::parser::CommandNode,
+    ) -> String {
+        if super::command_text::compound_redirect_error_is_ambient(cmd) {
+            if let Some(line) = self.ambient_line.get().or(cmd.end_line).or(cmd.line) {
+                return self.error_prefix_at_line(line);
+            }
+        }
+        if super::command_text::redirect_error_uses_completion_line(cmd) {
+            if let Some(line) = cmd.end_line.or(cmd.line) {
+                return self.error_prefix_at_line(line);
+            }
+        }
+        self.error_prefix()
+    }
+
+    /// `error_prefix` with the line forced to a caller-supplied value:
+    /// same name resolution and gnu_errfmt handling, for reporters
+    /// whose diagnostic line is not the funnel-stamped CURRENT_LINE
+    /// (a compound's own redirect errors report the AMBIENT line —
+    /// execute_cmd.c:854 do_redirections runs before the command's own
+    /// line stamp, rubash#3183). Unlike error_prefix_for_line this
+    /// keeps the line segment in the no-script-name (-c / API) form,
+    /// exactly like error_prefix itself.
+    pub(in crate::executor) fn error_prefix_at_line(&self, line: usize) -> String {
+        if self.invocation_interactive() {
+            return format!(
+                "{}: ",
+                Self::interactive_shell_basename(&self.shell_state.env_vars)
+            );
+        }
+        match self.current_error_file_name() {
+            Some(script) => self.gnu_error_line(&script, line),
+            None => self.gnu_error_line(&self.error_report_name(), line),
+        }
     }
 
     /// error_prolog-family (report_error/internal_error/internal_warning)
