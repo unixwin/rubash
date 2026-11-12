@@ -1035,12 +1035,20 @@ fn bash_compat_debugger_options_run_init_file_before_script() {
             "value= starter=\n"
         );
         // rubash#3254: the debugger pair carries the driver-time name
-        // ($0 as currently bound — here the invocation path, normalized
-        // to `bash` by the suite helper like every other prolog).
+        // ($0 as bound at driver time — here the script name, per GNU
+        // shell.c:1547-1566; the new pin
+        // `issue3254_debugger_missing_starter_uses_script_name` nails
+        // the same shape). `cli_normalized_text` only normalizes the
+        // harness's own exe path and must not wrap a script-path
+        // leader (its doc comment says so).
         assert_eq!(
-            crate::cli_normalized_text(&output_b.stderr),
-            "bash: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
-             bash: warning: cannot start debugger; debugging mode disabled\n"
+            String::from_utf8_lossy(&output_b.stderr),
+            format!(
+                "{}: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
+                 {}: warning: cannot start debugger; debugging mode disabled\n",
+                script.display(),
+                script.display()
+            )
         );
     }
 
