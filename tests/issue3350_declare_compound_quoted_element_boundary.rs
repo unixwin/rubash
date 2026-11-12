@@ -147,3 +147,30 @@ fn issue3350_assoc_subscript_form_control() {
         "assoc (['a\"b']=1 ['c']=2)"
     );
 }
+
+#[test]
+fn issue3350_a2_delim_backslash_ending_element_splits() {
+    // Delimitation original A2 (#3346 probe-adjacent.sh, verbatim shape —
+    // NOT the a2 cell above, whose quote sits mid-element): the first
+    // element ends in a backslash. GNU: 2 elements, `a\` and `b`.
+    // Base rubash: 1 merged element with the \x10 marker leaking.
+    assert_eq!(
+        describe("declare -a V=('a\\' 'b')"),
+        "2|a\\ b",
+        "A2-delim: ('a\\' 'b')"
+    );
+}
+
+#[test]
+fn issue3350_a4_delim_double_quoted_escaped_quote_splits() {
+    // Delimitation original A4 (#3346 probe-adjacent.sh, verbatim shape —
+    // NOT the a4 cell above, whose quoted space sits inside a
+    // single-quoted element): a double-quoted element holding an escaped
+    // quote. GNU: 2 elements, `a"b` and `c`. Base rubash: 1 merged
+    // element with the \x10 marker leaking.
+    assert_eq!(
+        describe("declare -a V=(\"a\\\"b\" 'c')"),
+        "2|a\"b c",
+        "A4-delim: (\"a\\\"b\" 'c')"
+    );
+}
