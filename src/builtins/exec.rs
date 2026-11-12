@@ -887,12 +887,9 @@ fn external_exec_process(
         crate::executor::path::shebang_interpreter_command(program, &zero_word, operands, env_vars)
     {
         command
-    } else if let Some((command, _)) = crate::executor::path::shell_wrapped_command(
-        program,
-        &zero_word,
-        operands,
-        env_vars,
-    ) {
+    } else if let Some((command, _)) =
+        crate::executor::path::shell_wrapped_command(program, &zero_word, operands, env_vars)
+    {
         command
     } else {
         // Non-script targets get the command word as typed for argv[0]

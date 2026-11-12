@@ -117,7 +117,11 @@ fn foreign_interp_shebang_only_file_is_not_silent() {
 #[test]
 fn foreign_interp_env_launcher() {
     let dir = scratch("env");
-    write(&dir.0, "t_host", "#!/usr/bin/env hostname\nconsole.log(1)\n");
+    write(
+        &dir.0,
+        "t_host",
+        "#!/usr/bin/env hostname\nconsole.log(1)\n",
+    );
     let (code, stdout, stderr) = run_parent(&dir.0, "./t_host; echo \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty(), "stderr must be empty, saw: {stderr}");
@@ -132,7 +136,11 @@ fn foreign_interp_env_launcher() {
 #[test]
 fn foreign_interp_direct_absolute_path() {
     let dir = scratch("abspath");
-    write(&dir.0, "t_h2", "#!C:/Windows/System32/hostname.exe\nconsole.log(1)\n");
+    write(
+        &dir.0,
+        "t_h2",
+        "#!C:/Windows/System32/hostname.exe\nconsole.log(1)\n",
+    );
     let (code, stdout, stderr) = run_parent(&dir.0, "./t_h2; echo \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty(), "stderr must be empty, saw: {stderr}");
@@ -148,7 +156,11 @@ fn foreign_interp_direct_absolute_path() {
 #[test]
 fn foreign_interp_single_optional_argument() {
     let dir = scratch("optarg");
-    write(&dir.0, "t_cmd", "#!C:/Windows/System32/cmd.exe /c\n@echo off\necho batch-ran\n");
+    write(
+        &dir.0,
+        "t_cmd",
+        "#!C:/Windows/System32/cmd.exe /c\n@echo off\necho batch-ran\n",
+    );
     let (code, stdout, stderr) = run_parent(&dir.0, "./t_cmd; echo \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty(), "stderr must be empty, saw: {stderr}");
@@ -172,7 +184,11 @@ fn shell_shebang_unchanged() {
 #[test]
 fn shebangless_script_still_runs_as_shell() {
     let dir = scratch("nosheb");
-    write(&dir.0, "t_nosheb", "echo \"runner=$0\"\narr=(a b)\necho \"len=${#arr[@]}\"\n");
+    write(
+        &dir.0,
+        "t_nosheb",
+        "echo \"runner=$0\"\narr=(a b)\necho \"len=${#arr[@]}\"\n",
+    );
     let (code, stdout, stderr) = run_parent(&dir.0, "./t_nosheb; echo \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty(), "stderr must be empty, saw: {stderr}");
@@ -194,7 +210,10 @@ fn foreign_interp_exec_builtin() {
         stdout.contains("interp-got:MYOPT ") && stdout.contains("t_x A B"),
         "stdout must carry the interpreter argv, saw: {stdout}"
     );
-    assert!(!stdout.contains("UNREACHABLE"), "exec must replace: {stdout}");
+    assert!(
+        !stdout.contains("UNREACHABLE"),
+        "exec must replace: {stdout}"
+    );
 }
 
 /// The pipeline-stage face spawns through the same funnel, so a
@@ -203,7 +222,11 @@ fn foreign_interp_exec_builtin() {
 #[test]
 fn foreign_interp_pipeline_stage() {
     let dir = scratch("pipeline");
-    write(&dir.0, "t_host", "#!/usr/bin/env hostname\nconsole.log(1)\n");
+    write(
+        &dir.0,
+        "t_host",
+        "#!/usr/bin/env hostname\nconsole.log(1)\n",
+    );
     let (code, stdout, stderr) = run_parent(&dir.0, "./t_host | cat; echo \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert!(stderr.is_empty(), "stderr must be empty, saw: {stderr}");

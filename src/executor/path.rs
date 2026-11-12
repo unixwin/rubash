@@ -2413,7 +2413,10 @@ fn read_shebang_line(program: &Path) -> Option<String> {
 fn dispatch_prefixed(program: &Path, word: &str, mut leading: Vec<String>) -> Vec<String> {
     if is_winuxcmd_dispatcher(program) {
         let name = dispatcher_command_name(word);
-        if !matches!(name.to_ascii_lowercase().as_str(), "winuxcmd" | "winuxcmd.exe") {
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "winuxcmd" | "winuxcmd.exe"
+        ) {
             leading.insert(0, name);
         }
     }
@@ -2467,8 +2470,7 @@ pub(crate) fn foreign_shebang_interpreter(
             Some(target) if is_shell_interpreter_name(target) => None,
             Some(target) => {
                 if let Some(env_program) = find_user_command(interp, env_vars) {
-                    let leading =
-                        dispatch_prefixed(&env_program, interp, vec![target.to_string()]);
+                    let leading = dispatch_prefixed(&env_program, interp, vec![target.to_string()]);
                     Some((env_program, leading))
                 } else {
                     // No env binary on this host (native Windows without
