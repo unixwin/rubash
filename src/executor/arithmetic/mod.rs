@@ -2643,8 +2643,12 @@ pub(super) fn arithmetic_name_is_unbound(
 ///   read the name, then their pattern/word text expands like the
 ///   enclosing text;
 /// - `?` / `:?` raise their own diagnostic, never `unbound variable`;
-/// - `$(...)`, `` `...` `` and `$((...))` are separate frames whose
-///   own machinery traps inside them; `$'...'` / `$"..."` hold no
+/// - `$(...)` and `` `...` `` are separate frames whose own
+///   machinery traps inside them; a nested `$((...))` is NOT one —
+///   the enclosing expansion expands it inline (GNU subst.c:3981
+///   expand_arith_string recurses into it), so the scan recurses
+///   into the nested text (rubash#3251 c13: `(( $(( $undef )) ))`
+///   went silent under the old skip); `$'...'` / `$"..."` hold no
 ///   `$` reads; a `\` escape makes the next character data;
 /// - the special parameters (`$@`, `$*`, `$#`, `$?`, `$$`, `$!`,
 ///   `$-`, `$0`) are always bound; positional reads (`$1`..`$9`,
@@ -2663,9 +2667,40 @@ fn first_unbound_dollar_read(
             b'$' => {
                 let rest = &text[index + 1..];
                 match rest.chars().next() {
-                    // Command substitution and arithmetic expansion are
-                    // separate frames; their own entries trap inside.
-                    Some('(') => index = skip_arith_paren_span(bytes, index + 1),
+                    // A `$(...)` command substitution is a separate
+                    // frame: the subshell's own machinery traps inside
+                    // it, so the span is skipped. A `$((...))` nested
+                    // arithmetic expansion is NOT a separate entry —
+                    // the enclosing expansion expands it inline (GNU
+                    // subst.c:3981 expand_arith_string recurses into
+                    // it), so an unbound `$name` inside it is erased
+                    // by the same walk that erases a top-level read
+                    // (rubash#3251 c13: `(( $(( $undef )) ))` went
+                    // silent). Recurse the scan into the inner text
+                    // (re-masking first, so a quoted subscript key
+                    // inside the nest stays literal, q02-shape).
+                    Some('(') => {
+                        if bytes.get(index + 2) == Some(&b'(') {
+                            let end = skip_arith_paren_span(bytes, index + 1);
+                            if end > index + 3
+                                && bytes.get(end - 1) == Some(&b')')
+                                && bytes.get(end - 2) == Some(&b')')
+                            {
+                                if let Some(inner) = text.get(index + 3..end - 2) {
+                                    if let Some(name) = first_unbound_dollar_read_arith(
+                                        inner,
+                                        env_vars,
+                                        positional_count,
+                                    ) {
+                                        return Some(name);
+                                    }
+                                }
+                            }
+                            index = end;
+                        } else {
+                            index = skip_arith_paren_span(bytes, index + 1);
+                        }
+                    }
                     Some('{') => {
                         let Some(end) =
                             crate::executor::parameter_ops::matching_parameter_brace(&rest[1..])
