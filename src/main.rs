@@ -233,6 +233,14 @@ fn run_main() -> i32 {
     // AND shell_name, so "BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice. The executable path is only the fallback when
     // the environment did not supply a value.
+    // rubash#3413: the test is EXISTENCE, never non-emptiness — GNU
+    // marks every imported env string att_imported
+    // (initialize_shell_variables: bind_variable + VSETATTR
+    // att_imported) and set_argv0 (variables.c:1547-1555) asks only
+    // `v && imported_p (v)`; assign_bash_argv0 (variables.c:1528-1545)
+    // copies the value verbatim, empty string included. "Set to
+    // empty" therefore seeds an empty $0 (and empty diagnostic name);
+    // only a genuinely absent BASH_ARGV0 falls back to argv[0].
     // rubash#590: the invocation face read above (NIU_INVOKED_AS, else
     // argv[0]) reconstructs the argv[0] the shim erased, per GNU
     // set_shell_name (shell.c:1778-1806): it feeds dollar_vars[0]/shell_name
@@ -240,10 +248,7 @@ fn run_main() -> i32 {
     // BASH_ARGV0 import — variables.c:1547-1555 ranks the environment value
     // above argv[0] ("BASH_ARGV0=this-bash bash -c 'echo $0 $BASH_ARGV0'"
     // prints this-bash twice).
-    match env::var("BASH_ARGV0")
-        .ok()
-        .filter(|value| !value.is_empty())
-    {
+    match env::var("BASH_ARGV0").ok() {
         Some(imported) => {
             // rubash#3105: this re-seed reads the RAW process
             // environment, so it entry-encodes like every raw-data
