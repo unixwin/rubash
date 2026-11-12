@@ -4138,9 +4138,9 @@ impl Executor {
                 // shell text; callers decode on the way out.
                 match self.read_fd_read_endpoint_bytes(effective_fd, &target) {
                     Ok(buf) => {
-                        return Some(
-                            crate::executor::substitution_metadata::bytes_to_shell_text(&buf),
-                        );
+                        return Some(crate::executor::substitution_metadata::bytes_to_shell_text(
+                            &buf,
+                        ));
                     }
                     Err(_) => {
                         // rubash#2101: a hard read error is not an
