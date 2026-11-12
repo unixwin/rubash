@@ -173,8 +173,20 @@ where
     // is the base. Otherwise (a mover outside the cd family, e.g.
     // pushd, changed the cwd without maintaining it) fall back to the
     // derived validated value (rubash#2143).
+    //
+    // rubash#3335: in a DELETED cwd the stored value cannot be
+    // disproven — canonicalize fails for every spelling there, so
+    // both the names-cwd check and the validated fallback collapse
+    // onto the physical cwd and the logical spelling (a symlinked
+    // entry, "$D/link") is lost. GNU never re-validates tcwd: it is
+    // a stored string, and change_to_directory uses it as the
+    // make_absolute base unconditionally. Trust the stored value
+    // whenever the cwd itself no longer canonicalizes.
     let old_logical = match logical_cwd.as_deref() {
-        Some(tcwd) if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars) => {
+        Some(tcwd)
+            if crate::builtins::pwd::logical_value_names_cwd(tcwd, cwd, env_vars)
+                || cwd.canonicalize().is_err() =>
+        {
             PathBuf::from(tcwd)
         }
         _ => validated_logical_pwd(env_vars, cwd),
@@ -269,12 +281,41 @@ where
         pwd_value: String,
         stayed_deleted_dot: Option<io::Error>,
     }
+    // The GNU verbatim-chdir success shared by BOTH modes
+    // (builtins/cd.def:522 change_to_directory): a dot-only operand
+    // resolves through the cwd inode itself, so the move stands even
+    // when the cwd is deleted; resetpwd's getcwd then fails (the
+    // diagnostic), and the bound value is the uncanonicalized
+    // make_absolute form — the LOGICAL base in -L, the PHYSICAL base
+    // in -P (the stored value is already the physical spelling
+    // there). -P tries the verbatim chdir FIRST (`chdir (nolinks ?
+    // newdir : tdir)`), so the arm is checked before the anchor
+    // fallback in both modes (rubash#3335: the -P form used to fall
+    // through to the anchor and silently rebind the physical path
+    // with no diagnostic).
+    let deleted_dot_move = |base_display: String, error: io::Error| -> Result<Move, io::Error> {
+        let cwd_error = cwd.canonicalize().err();
+        if operand_is_dot_only(target_display) {
+            if let Some(cwd_error) = cwd_error {
+                let bind = format!("{base_display}/{}", target_display.to_string_lossy());
+                return Ok(Move {
+                    physical: cwd.clone(),
+                    pwd_value: shell_pwd_display_path(&bind),
+                    stayed_deleted_dot: Some(cwd_error),
+                });
+            }
+        }
+        Err(error)
+    };
     let probed = match mode {
-        Mode::Physical => probe(&native_target).map(|physical| Move {
-            pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
-            physical,
-            stayed_deleted_dot: None,
-        }),
+        Mode::Physical => match probe(&native_target) {
+            Ok(physical) => Ok(Move {
+                pwd_value: shell_pwd_display_path(&physical.to_string_lossy()),
+                physical,
+                stayed_deleted_dot: None,
+            }),
+            Err(error) => deleted_dot_move(shell_pwd_display_path(&cwd.to_string_lossy()), error),
+        },
         Mode::Logical => {
             let logical_dest_display = logical_destination_display(&old_logical, target_display);
             let logical_probe_path = filesystem_path_for_display(&logical_dest_display, env_vars);
@@ -319,35 +360,7 @@ where
                         physical,
                         stayed_deleted_dot: None,
                     }),
-                    Err(error) => {
-                        // The remaining GNU success: a dot-only
-                        // operand in a DELETED cwd. chdir(".")
-                        // resolves through the cwd inode itself, so
-                        // the move succeeds without the directory
-                        // existing; resetpwd's getcwd then fails (the
-                        // diagnostic), and the logical value becomes
-                        // the uncanonicalized make_absolute form
-                        // (old logical value + "/" + operand).
-                        let cwd_error = cwd.canonicalize().err();
-                        if operand_is_dot_only(target_display) {
-                            if let Some(cwd_error) = cwd_error {
-                                let bind = format!(
-                                    "{}/{}",
-                                    logical_pwd_var_display(&old_logical),
-                                    target_display.to_string_lossy()
-                                );
-                                Ok(Move {
-                                    physical: cwd.clone(),
-                                    pwd_value: shell_pwd_display_path(&bind),
-                                    stayed_deleted_dot: Some(cwd_error),
-                                })
-                            } else {
-                                Err(error)
-                            }
-                        } else {
-                            Err(error)
-                        }
-                    }
+                    Err(error) => deleted_dot_move(logical_pwd_var_display(&old_logical), error),
                 },
             }
         }

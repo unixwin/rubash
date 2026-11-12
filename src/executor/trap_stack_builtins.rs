@@ -534,8 +534,34 @@ impl Executor {
             diag.flush_with(|| self.diagnostic_prolog());
             status?
         };
+        // GNU pushd.def:296-302 delegates the Dir operand to
+        // cd_builtin, so pushd/popd are cd-family movers: a move must
+        // maintain the same session cwd state cd maintains
+        // (rubash#3335) — the stored logical cwd
+        // (the_current_working_directory, builtins/common.c:589) and
+        // the cwd inode anchor (rubash#3198). Without the anchor, a
+        // later cd from a deleted cwd strands on the dead spelling
+        // (`cd ..` rc 1 after a pushd entry); without the logical
+        // value, the make_absolute base falls back to the physical
+        // spelling (a symlinked pushd entry binds "$R/a/real/."
+        // instead of "$R/link/."). -n moves nothing and dirs never
+        // moves, so both updates are gated on an actual move; the
+        // bound PWD is the logical value, exactly as cd's bindpwd
+        // binds it.
+        let moved = status == 0 && self.shell_state.cwd != cwd_before;
+        if moved {
+            if let Some(pwd) = self.shell_state.env_vars.get("PWD").cloned() {
+                self.shell_state.logical_cwd = Some(pwd);
+            }
+        }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.sync_cd_variables();
+        // rubash#3198: warm the cwd inode anchor at the moment the
+        // directory is entered, as execute_cd does, so a later unlink
+        // of the directory cannot strand the verbatim fallback. The
+        // gate is the move itself (rubash#3336), which subsumes the
+        // status-0 case: a readonly-bind failure still leaves the
+        // chdir standing.
         if self.shell_state.cwd != cwd_before {
             self.refresh_cwd_anchor();
         }
