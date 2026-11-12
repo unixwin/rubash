@@ -48,14 +48,6 @@ impl Scratch {
         std::fs::create_dir_all(&path).unwrap();
         Scratch { path }
     }
-
-    fn mkdir(&self, name: &str) {
-        std::fs::create_dir_all(self.path.join(name)).unwrap();
-    }
-
-    fn touch(&self, name: &str) {
-        std::fs::write(self.path.join(name), b"").unwrap();
-    }
 }
 
 impl Drop for Scratch {
@@ -80,7 +72,6 @@ fn rubash(script: &str) -> (String, String, Option<i32>) {
 #[test]
 fn bg_ls_in_cd_deleted_cwd_is_silent() {
     let d = Scratch::new("ls-cd");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // cd entry: the deleted directory is empty; GNU's background `ls`
     // child sits in the deleted inode and prints nothing. Before the
@@ -97,7 +88,6 @@ fn bg_ls_in_cd_deleted_cwd_is_silent() {
 #[test]
 fn bg_ls_in_pushd_deleted_cwd_is_silent() {
     let d = Scratch::new("ls-pushd");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // pushd entry: same shape as the cd entry — the entry funnel does
     // not matter, the anchor is warmed by every cwd move.
@@ -112,7 +102,6 @@ fn bg_ls_in_pushd_deleted_cwd_is_silent() {
 #[test]
 fn bg_ls_relative_redirects_from_deleted_inode() {
     let d = Scratch::new("ls-relredir");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // The job's own redirects are relative (`../out`): they resolve
     // from the deleted inode, where `..` still names the scratch dir.
@@ -128,7 +117,6 @@ fn bg_ls_relative_redirects_from_deleted_inode() {
 #[test]
 fn bg_ls_ghost_lands_in_old_inode() {
     let d = Scratch::new("ls-ghost");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // Ghost: the directory is deleted AND recreated at the same path
     // (with a marker in the new one) before the spawn. GNU's child
@@ -145,7 +133,6 @@ fn bg_ls_ghost_lands_in_old_inode() {
 #[test]
 fn bg_ls_in_alive_cwd_lists_marker() {
     let d = Scratch::new("ls-alive");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // Control: with the cwd alive the anchor and the spelling name the
     // same inode, so the background `ls` lists the marker on every
@@ -161,7 +148,6 @@ fn bg_ls_in_alive_cwd_lists_marker() {
 #[test]
 fn bg_false_in_deleted_cwd_keeps_command_rc() {
     let d = Scratch::new("false-deleted");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // Control: a background builtin never takes the direct external
     // spawn path, so its own rc 1 is reported with no chdir
@@ -177,7 +163,6 @@ fn bg_false_in_deleted_cwd_keeps_command_rc() {
 #[test]
 fn bg_missing_command_in_deleted_cwd_keeps_127() {
     let d = Scratch::new("missing-deleted");
-    d.mkdir("a");
     let dir = d.path.to_string_lossy();
     // Control: a background job naming a missing command still reports
     // 127 with the `command not found` diagnostic and no `chdir:`
