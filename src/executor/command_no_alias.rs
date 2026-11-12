@@ -49,18 +49,21 @@ impl Executor {
         // after the disabled fall-through and the loadable dispatch
         // above, mirroring the funnel's order (a disabled target
         // falls to the PATH lookup; a loadable runs first).
+        //
+        // rubash#3414: the gate exits through the shared
+        // `apply_builtin_help`, not an inline print. GNU runs the
+        // target's prologue before its option scan (bind.def:122-123
+        // warns `line editing not enabled`, hash.def:86-90 refuses
+        // the whole builtin when hashing is disabled), so a gate
+        // that prints the help itself swallows the bind warning and
+        // pre-empts the hash refusal. `apply_builtin_help` replays
+        // the prologue first (its stderr precedes the help text on
+        // a merged stream, and a fatal prologue aborts the dispatch
+        // with no help at all) and carries the SPECIAL-row marking,
+        // exactly as at the funnel and `builtin` gates.
         if let Some(row) = super::builtin_table::builtin_table_row(word) {
             if super::builtin_opt::help_opt_requested(row, &cmd.words[1..]) {
-                let mut stdout = Vec::new();
-                crate::builtins::help::print_builtin_help(row.name, &mut stdout)?;
-                self.write_buffered_builtin_output(cmd, &stdout, &[])?;
-                self.exit_code = 2;
-                if row
-                    .flags
-                    .contains(super::builtin_table::BuiltinFlags::SPECIAL)
-                {
-                    self.special_builtin_failed.set(true);
-                }
+                self.apply_builtin_help(cmd, row)?;
                 return Ok(());
             }
         }
