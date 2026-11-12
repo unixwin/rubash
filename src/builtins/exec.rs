@@ -4,7 +4,8 @@
 //! - builtins/exec.def (`exec_builtin`)
 
 use super::diagnostic::{diagnostic_prefix, sys_error_prefix};
-use std::io::{self, Write};
+use crate::executor::{ExecuteError, Executor};
+use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
 const EXECUTION_SUCCESS: i32 = 0;
@@ -230,22 +231,33 @@ pub(crate) fn replace_process_image(
     Some(Ok(status))
 }
 
+/// rubash#3401 (face 3): the simulated exec wait runs through the
+/// executor's draining wait, so a termsig delivered while the
+/// replacement child runs aborts the wait in GNU order
+/// (execute_cmd.c:6126 exec_builtin -> shell_execve has no
+/// simulated-wait layer; the wait is where GNU's wait_for observes
+/// CHECK_TERMSIG, jobs.c:3064). The executor is threaded through as
+/// the first parameter; the return type widens from `io::Result` so
+/// the termsig unwind (`ExecuteError::ExitCode(128+sig)`) propagates
+/// to the dispatcher instead of collapsing into a status.
 pub(crate) fn execute_with_io<W, E>(
+    executor: &mut Executor,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
     stdout: &mut W,
     stderr: &mut E,
     child_stdin: Stdio,
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
 {
-    execute_impl(args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
+    execute_impl(executor, args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
+    executor: &mut Executor,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -254,12 +266,13 @@ pub(crate) fn execute_with_child_stdio<W, E>(
     child_stdout: Stdio,
     child_stderr: Stdio,
     child_stdin: Stdio,
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
 {
     execute_impl(
+        executor,
         args,
         env_vars,
         cwd,
@@ -281,6 +294,7 @@ where
 /// (external_redirects.rs register_pre_exec_close).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_child_stdio_closing<W, E>(
+    executor: &mut Executor,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -290,12 +304,13 @@ pub(crate) fn execute_with_child_stdio_closing<W, E>(
     child_stderr: Stdio,
     child_stdin: Stdio,
     close_fds: &[u32],
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
 {
     execute_impl(
+        executor,
         args,
         env_vars,
         cwd,
@@ -308,6 +323,7 @@ where
 }
 
 fn execute_impl<W, E>(
+    executor: &mut Executor,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -316,7 +332,7 @@ fn execute_impl<W, E>(
     child_stdio: Option<(Stdio, Stdio)>,
     child_stdin: Stdio,
     close_fds: &[u32],
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
@@ -375,7 +391,8 @@ where
     };
 
     if command == Some("printenv") {
-        return run_printenv_fallback(operands, env_vars, clean_env, stdout);
+        return run_printenv_fallback(operands, env_vars, clean_env, stdout)
+            .map_err(ExecuteError::from);
     }
 
     if let Some(command) = command {
@@ -504,6 +521,7 @@ where
         };
         return match child_stdio {
             Some((child_stdout, child_stderr)) => run_external_exec_with_stdio(
+                executor,
                 &program,
                 command,
                 operands,
@@ -518,6 +536,7 @@ where
                 close_fds,
             ),
             None => run_external_exec(
+                executor,
                 &program,
                 command,
                 operands,
@@ -741,6 +760,7 @@ fn report_exec_spawn_failure<E: Write>(
 }
 
 fn run_external_exec<W, E>(
+    executor: &mut Executor,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -751,7 +771,7 @@ fn run_external_exec<W, E>(
     child_stdin: Stdio,
     stdout: &mut W,
     stderr: &mut E,
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     W: Write,
     E: Write,
@@ -774,29 +794,56 @@ where
     // endpoint 0.
     process.stdin(child_stdin);
 
-    let mut spawned_pid = 0;
-    match process
+    let mut child = match process
         .spawn()
         .inspect(|child| crate::executor::path::adopt_orphan_console(child.id()))
-        .and_then(|child| {
-            spawned_pid = child.id();
-            child.wait_with_output()
-        }) {
-        Ok(output) => {
-            record_exec_signal_death(spawned_pid, &output.status);
-            stdout.write_all(&output.stdout)?;
-            stderr.write_all(&output.stderr)?;
-            Ok(crate::executor::wait_status::process_exit_status(
-                &output.status,
-            ))
-        }
+    {
+        Ok(child) => child,
         Err(error) => {
-            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+            return report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+                .map_err(ExecuteError::from);
         }
-    }
+    };
+    let spawned_pid = child.id();
+    // rubash#3401 (face 3): `wait_with_output()` blocks in the OS wait
+    // with no observe point, and a piped child that fills its capture
+    // buffers blocks forever unless the pipes are drained — so drain
+    // both pipes on reader threads (std's `wait_with_output` shape) and
+    // wait through the draining wait. On a termsig the drain kills and
+    // reaps the child first and the unwind propagates with the output
+    // discarded (the shell is dying); the reader handles are dropped
+    // rather than joined there, so a grandchild holding a pipe open
+    // cannot stall the death — the threads finish on EOF in the
+    // background of the exiting process.
+    let stdout_reader = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_reader = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = pipe.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let status = crate::executor::wait_fg_child_draining(executor, &mut child)?;
+    let stdout_bytes = stdout_reader
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr_bytes = stderr_reader
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    record_exec_signal_death(spawned_pid, &status);
+    stdout.write_all(&stdout_bytes)?;
+    stderr.write_all(&stderr_bytes)?;
+    Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
 fn run_external_exec_with_stdio<E>(
+    executor: &mut Executor,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -809,7 +856,7 @@ fn run_external_exec_with_stdio<E>(
     child_stdin: Stdio,
     stderr: &mut E,
     close_fds: &[u32],
-) -> io::Result<i32>
+) -> Result<i32, ExecuteError>
 where
     E: Write,
 {
@@ -847,22 +894,24 @@ where
     // never the std default (rubash#575).
     process.stdin(child_stdin);
 
-    let mut spawned_pid = 0;
-    match process
+    let mut child = match process
         .spawn()
         .inspect(|child| crate::executor::path::adopt_orphan_console(child.id()))
-        .and_then(|mut child| {
-            spawned_pid = child.id();
-            child.wait()
-        }) {
-        Ok(status) => {
-            record_exec_signal_death(spawned_pid, &status);
-            Ok(crate::executor::wait_status::process_exit_status(&status))
-        }
+    {
+        Ok(child) => child,
         Err(error) => {
-            report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+            return report_exec_spawn_failure(program, command_name, env_vars, cwd, &error, stderr)
+                .map_err(ExecuteError::from);
         }
-    }
+    };
+    let spawned_pid = child.id();
+    // rubash#3401 (face 3): the bare `child.wait()` here had no observe
+    // point — a termsig rode out the whole child. Route the wait through
+    // the draining wait (10ms try_wait slices + the mailbox drain); on a
+    // termsig it kills and reaps the child first, then unwinds.
+    let status = crate::executor::wait_fg_child_draining(executor, &mut child)?;
+    record_exec_signal_death(spawned_pid, &status);
+    Ok(crate::executor::wait_status::process_exit_status(&status))
 }
 
 fn external_exec_process(

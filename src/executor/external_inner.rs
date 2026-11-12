@@ -5270,7 +5270,10 @@ pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintG
 /// form below: it forwards the recorded terminal SIGINT to the child
 /// instead of aborting the wait outright.
 #[cfg(unix)]
-pub(in crate::executor) fn wait_fg_child_draining(
+/// rubash#3401: widened from `pub(in crate::executor)` — the `exec`
+/// builtin's simulated wait (builtins::exec) is the same draining-wait
+/// shape and now calls this directly instead of a bare `child.wait()`.
+pub(crate) fn wait_fg_child_draining(
     executor: &mut Executor,
     child: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus, ExecuteError> {

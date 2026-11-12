@@ -1791,6 +1791,10 @@ impl Executor {
         // pipeline stage when this substitution runs inside one, leaking
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
+        // rubash#3401: arm the comsub conduit for the body span (the
+        // clone's blocked-wait drain notices a parent-death delivery
+        // and aborts the wait; the teardown below hands it back).
+        subshell.comsub_drain_permit.set(true);
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
             if dbg_trap_enabled() {
                 eprintln!(
@@ -1848,6 +1852,21 @@ impl Executor {
             }
             status
         });
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent for adjudication — re-queue the
+        // raw signal so the parent's next boundary poll (ast_exec,
+        // before the following command) takes it against the parent's
+        // own trap table and dies in GNU order (EXIT trap first, then
+        // death by the signal; jobs.c:3064 wait_for CHECK_TERMSIG).
+        // The clone never adjudicates: its table was reset for the
+        // subshell child. The mailbox is the chain through nesting —
+        // an outer clone's own drain re-records the re-queued delivery
+        // and its teardown re-queues it again, so the signal reaches
+        // the top shell whatever the nesting depth.
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         let mut output = subshell.stdout_capture.take().unwrap_or_default();
         output.extend_from_slice(&captured);
 
@@ -1972,6 +1991,21 @@ impl Executor {
             unit_expansion_error_discard: false,
             termsig_death_pending: None,
             termsig_death_trap_status: None,
+            // rubash#3401: the comsub conduit snapshot — the clone's own
+            // trap table is reset for the subshell child below, so its
+            // termsig_death_armed can never fire; snapshot the parent's
+            // EXIT-armed bit here (OR the outer clone's snapshot, so a
+            // nested comsub still knows the top shell is armed).
+            comsub_drain_permit: Cell::new(false),
+            comsub_parent_exit_armed: Cell::new(
+                self.comsub_parent_exit_armed.get()
+                    || crate::builtins::trap::get_trap_action(
+                        &self.shell_state.env_vars,
+                        "EXIT",
+                    )
+                    .is_some(),
+            ),
+            comsub_termsig_pending: Cell::new(None),
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout
             // (subshell_environment check); inherit the parent's latch so a
             // subshell logout cannot double-source it either.
@@ -2376,6 +2410,9 @@ impl Executor {
                 subshell.execute_ast(&ast)
             }
         };
+        // rubash#3401: arm the comsub conduit for the body span (same
+        // mechanism as the `$( )` typed site above).
+        subshell.comsub_drain_permit.set(true);
         let (result, captured) = if valsub {
             (run_body(&mut subshell), None)
         } else {
@@ -2386,6 +2423,14 @@ impl Executor {
             output.extend_from_slice(&thread_captured);
             (result, Some(output))
         };
+        subshell.comsub_drain_permit.set(false);
+        // rubash#3401 (face 1): hand a termsig death the conduit
+        // recorded back to the parent — re-queue the raw signal so the
+        // parent's next boundary poll adjudicates it (see the typed
+        // site for the full note).
+        if let Some(sig) = subshell.comsub_termsig_pending.get() {
+            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+        }
         if subshell.parse_error_occurred {
             self.latch_command_substitution_parse_error();
             // rubash#2751: propagate "already reported" (see the typed

@@ -1,6 +1,7 @@
 use super::command_registry::{comsub_front_slot, ComsubFrontSlot};
 use super::*;
 use crate::executor::markers::{DATA_DOLLAR, STORAGE_WORD_PREFIX};
+use std::io::Read;
 
 impl Executor {
     /// Expand one command-substitution argument word, applying pathname
@@ -1020,6 +1021,61 @@ impl Executor {
                 let _ = child_stdin.write_all(input);
             }
         }
+        // rubash#3401 (face 1): the fast path's `wait_with_output()`
+        // had no observe point — a termsig rode out the whole child.
+        // The pin shape `x=$(/usr/bin/sleep 5)` IS served here, not by
+        // the clone path: the dispatcher claims every
+        // single-external-command body before the clone fallback
+        // (command_substitution.rs:1310), so the clone conduit alone
+        // cannot make the pin green. Drain the capture pipe on a reader
+        // thread (std's `wait_with_output` shape) and poll the child in
+        // 10ms slices, classifying each mailbox delivery with the
+        // shared `&self` verdict (the fast path runs in `&self`
+        // expansion contexts and cannot lend a `&mut` receiver). On a
+        // death verdict the child is killed and reaped first, the raw
+        // signal is re-queued for the parent's next boundary poll
+        // (which adjudicates it — EXIT trap first, then death by the
+        // signal — before the next command runs), and the substitution
+        // yields empty output. The reader handle is dropped, not
+        // joined, there: a grandchild holding the pipe open must not
+        // stall the death. fd 2 is inherited live on this route
+        // (subst.c:7143; rubash#2086), so there is no stderr pipe to
+        // drain; the non-unix shape keeps the plain `wait_with_output`.
+        #[cfg(unix)]
+        let mut output = {
+            let stdout_reader = spawned.stdout.take().map(|mut pipe| {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    let _ = pipe.read_to_end(&mut buf);
+                    buf
+                })
+            });
+            let status = loop {
+                match spawned.try_wait() {
+                    Ok(Some(status)) => break status,
+                    Ok(None) => {
+                        if let Some(sig) = self.pending_termsig_verdict() {
+                            let _ = spawned.kill();
+                            let _ = spawned.wait();
+                            crate::builtins::kill::requeue_pending_signals(vec![sig]);
+                            self.last_command_substitution_status.set(Some(128 + sig));
+                            return Some(String::new());
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => return None,
+                }
+            };
+            let stdout_bytes = stdout_reader
+                .map(|handle| handle.join().unwrap_or_default())
+                .unwrap_or_default();
+            std::process::Output {
+                status,
+                stdout: stdout_bytes,
+                stderr: Vec::new(),
+            }
+        };
+        #[cfg(not(unix))]
         let mut output = spawned.wait_with_output().ok()?;
         output.stdout.extend(self.collect_dev_fd_capture(&dev_ops));
         if piped_stdin.is_some() && !fd_table_text_stdin {

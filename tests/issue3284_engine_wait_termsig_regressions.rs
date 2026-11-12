@@ -42,6 +42,20 @@ fn rubash_bin() -> String {
 /// exit and collect stdout through a chunked reader thread, draining
 /// briefly after death instead of waiting for EOF.
 fn run_script_timed(tag: &str, body: &str) -> (String, Option<i32>, Option<i32>, Duration) {
+    run_script_timed_with_stdin(tag, body, Stdio::inherit())
+}
+
+/// Same as `run_script_timed` but the child's stdin is caller-chosen.
+/// rubash#3401 face 2 passes `Stdio::piped()` and holds the write end
+/// open (never written, never closed) for the whole run, so a `read`
+/// from fd 0 blocks until the signal — the held write end must stay
+/// alive until after the child exits; dropping it early would EOF the
+/// read instead of blocking it.
+fn run_script_timed_with_stdin(
+    tag: &str,
+    body: &str,
+    stdin: Stdio,
+) -> (String, Option<i32>, Option<i32>, Duration) {
     let dir = std::env::temp_dir().join(format!("issue3284-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create temp dir");
@@ -51,10 +65,14 @@ fn run_script_timed(tag: &str, body: &str) -> (String, Option<i32>, Option<i32>,
     let mut child: Child = Command::new(rubash_bin())
         .arg(&path)
         .env("LC_ALL", "C.UTF-8")
+        .stdin(stdin)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn rubash");
+    // Held open until the child exits (face-2 shape): the write end of
+    // a piped stdin. For the inherited-stdin shape this is None.
+    let _held_stdin = child.stdin.take();
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let mut stdout_pipe = child.stdout.take().expect("stdout pipe");
     std::thread::spawn(move || {
@@ -164,18 +182,65 @@ fn issue3284_term_during_pipeline_wait_dies_promptly() {
     assert_prompt_termsig_death("term-pipe", &stdout, code, signal, elapsed, libc::SIGTERM);
 }
 
-// Gated pending #3401: the comsub clone layer never consumes the termsig
-// mailbox, so this cell stays red until the #3401 residual fix lands
-// (captain review of PR #3367, dossier section 6, face 1). Remove the
-// #[ignore] together with that fix.
+// rubash#3401 face 1: fixed by the comsub conduit (clone path) plus
+// the draining wait in the external-command fast path
+// (command_substitution_values.rs), which is the route the pin shape
+// `x=$(/usr/bin/sleep 5)` actually takes — the dispatcher claims every
+// single-external-command body before the clone fallback.
 #[test]
-#[ignore]
 fn issue3284_term_during_comsub_wait_dies_promptly() {
     let (stdout, code, signal, elapsed) = run_script_timed(
         "term-comsub",
         "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nx=$(/usr/bin/sleep 5)\necho unreachable\n",
     );
     assert_prompt_termsig_death("term-comsub", &stdout, code, signal, elapsed, libc::SIGTERM);
+}
+
+#[test]
+fn issue3401_term_during_blocking_read_dies_promptly() {
+    // rubash#3401 face 2: the `read` builtin's blocking fd-0 read had
+    // no observe point — a non-interactive script blocked forever in
+    // `read_some` (builtins/read.def:766 CHECK_TERMSIG after every read
+    // attempt). stdin is a pipe the harness holds open, never written
+    // and never EOF, so the read can only end by the signal.
+    let (stdout, code, signal, elapsed) = run_script_timed_with_stdin(
+        "term-read",
+        "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nread x\necho got\n",
+        Stdio::piped(),
+    );
+    assert_prompt_termsig_death("term-read", &stdout, code, signal, elapsed, libc::SIGTERM);
+}
+
+#[test]
+fn issue3401_term_during_blocking_read_with_timeout_dies_promptly() {
+    // rubash#3401 face 2, `-t` variant: the deadline loop
+    // (`read_wait_timed_out`) slices 50ms and drains the mailbox per
+    // slice, so a termsig inside the 10s deadline still kills the
+    // shell promptly instead of waiting the deadline out.
+    let (stdout, code, signal, elapsed) = run_script_timed_with_stdin(
+        "term-read-t",
+        "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nread -t 10 x\necho got\n",
+        Stdio::piped(),
+    );
+    assert_prompt_termsig_death("term-read-t", &stdout, code, signal, elapsed, libc::SIGTERM);
+}
+
+#[test]
+fn issue3401_term_during_simulated_exec_wait_dies_promptly() {
+    // rubash#3401 face 3: `exec` inside a command substitution cannot
+    // replace the image (the capture-bound fd table declines
+    // replace_process_image), so it spawns and waits in the exec
+    // builtin's simulated wait — whose bare `child.wait()` had no
+    // observe point. GNU exec.def -> shell_execve has no simulated
+    // layer; the wait is where wait_for observes CHECK_TERMSIG
+    // (jobs.c:3064). The `exec` builtin declines the fast path, so
+    // this shape runs the clone body and its wait goes through the
+    // comsub conduit.
+    let (stdout, code, signal, elapsed) = run_script_timed(
+        "term-sim-exec",
+        "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nx=$(exec /usr/bin/sleep 5)\necho unreachable\n",
+    );
+    assert_prompt_termsig_death("term-sim-exec", &stdout, code, signal, elapsed, libc::SIGTERM);
 }
 
 #[test]
@@ -187,9 +252,10 @@ fn issue3284_term_during_exec_wait_dies_promptly() {
     // it is replaced (GNU exec.def: the image is replaced, traps do
     // not run). Assert death form + timing only, no trap output.
     // The spawn-and-wait simulation face (library contexts, where
-    // execve is impossible) is a separate lane: it waits in
-    // run_external_exec_with_stdio without a mailbox drain, and needs
-    // the executor threaded through — owed, see the report.
+    // execve is impossible) is pinned by the term-sim-exec cell below:
+    // rubash#3401 threaded the executor through the exec builtin's
+    // simulated wait (run_external_exec_with_stdio now drains via
+    // wait_fg_child_draining).
     let (stdout, code, signal, elapsed) = run_script_timed(
         "term-exec",
         "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nexec /usr/bin/sleep 5\necho unreachable\n",

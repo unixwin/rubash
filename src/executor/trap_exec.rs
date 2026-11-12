@@ -121,27 +121,6 @@ impl std::io::Write for ExecDiagStderr<'_> {
     }
 }
 
-/// Run `body` with the exec spawn's stderr destination bound (see
-/// ExecDiagStderr). The capture slot is taken out for the call so the
-/// destination can borrow the buffer while the body also borrows the
-/// rest of the executor, then restored — including on the body's
-/// error path, so a failed spawn cannot orphan the capture.
-fn with_exec_diag_stderr<R>(
-    capture_slot: &mut Option<Vec<u8>>,
-    body: impl FnOnce(&mut ExecDiagStderr<'_>) -> Result<R, ExecuteError>,
-) -> Result<R, ExecuteError> {
-    let mut capture = capture_slot.take();
-    let result = {
-        let mut target = match capture.as_mut() {
-            Some(buffer) => ExecDiagStderr::Capture(buffer),
-            None => ExecDiagStderr::Process(std::io::stderr()),
-        };
-        body(&mut target)
-    };
-    *capture_slot = capture;
-    result
-}
-
 /// One std fd's binding for the exec spawn's ordered redirect walk
 /// (rubash#2821): the composition the walk — or, for slots the walk
 /// never touched, the ambient fd table — leaves for shell_execve.
@@ -2637,10 +2616,21 @@ impl Executor {
     /// background child observes its own mailbox even inside its subshell
     /// body.
     pub(crate) fn observe_signals_while_blocked(&mut self) -> Result<(), ExecuteError> {
+        // rubash#3401: the command-substitution conduit is exempt from
+        // the flat-layer guard below — a clone whose drain permit is
+        // set drains the shared mailbox only to hand a parent-death
+        // delivery back (see observe_signals_comsub_conduit), never to
+        // dispatch a trap.
         if self.signal_trap_running
-            || (self.shell_state.subshell_depth.get() > 0 && self.shell_pid == std::process::id())
+            || (!self.comsub_drain_permit.get()
+                && self.shell_state.subshell_depth.get() > 0
+                && self.shell_pid == std::process::id())
         {
             return Ok(());
+        }
+        #[cfg(unix)]
+        if self.comsub_drain_permit.get() {
+            return self.observe_signals_comsub_conduit();
         }
         let signals =
             crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
@@ -2713,6 +2703,118 @@ impl Executor {
             }
         }
         crate::builtins::kill::requeue_pending_signals(trapped);
+        Ok(())
+    }
+
+    /// rubash#3401 (face 1): the parent-side death verdict for a
+    /// command-substitution conduit — `termsig_death_armed` evaluated
+    /// against the snapshot the clone took at build time (the clone's
+    /// own trap table was reset for the subshell child, so its own
+    /// `termsig_death_armed` can never fire). Mirrors that helper
+    /// exactly: EXIT-armed plus `exit_reroutes`, or an interactive
+    /// SIGHUP; an interactive SIGINT is never armed.
+    #[cfg(unix)]
+    fn comsub_parent_termsig_armed(&self, signal: i32) -> bool {
+        if self.invocation_interactive() && signal == libc::SIGINT as i32 {
+            return false;
+        }
+        if self.invocation_interactive() && signal == libc::SIGHUP as i32 {
+            return true;
+        }
+        self.comsub_parent_exit_armed.get()
+            && crate::builtins::kill::exit_reroutes(signal)
+    }
+
+    /// rubash#3401: the shared termsig classifier for `&self` waits
+    /// (the comsub conduit and the external-command fast path). Drains
+    /// the mailbox once and sorts each delivery like the normal drain —
+    /// trapped ones re-queued, ignored / SIGCHLD / SIGQUIT dropped —
+    /// except an untrapped terminating delivery whose parent-side
+    /// verdict is death, which is returned raw for the caller to act
+    /// on (the caller re-queues it itself after killing its child, so
+    /// the parent's next boundary poll adjudicates it — EXIT trap
+    /// first, then death by the signal — before the next command
+    /// runs). `&self` only: the mailbox is process-global free fns
+    /// and the trap table is read through `&self`, so no `&mut`
+    /// receiver is needed — the fast path runs in `&self` expansion
+    /// contexts that cannot lend one
+    /// (expand_command_substitution_inner is `&self`).
+    #[cfg(unix)]
+    pub(in crate::executor) fn pending_termsig_verdict(&self) -> Option<i32> {
+        let signals = crate::builtins::kill::take_pending_signals_now(std::process::id())
+            .unwrap_or_default();
+        if signals.is_empty() {
+            return None;
+        }
+        let mut trapped = Vec::new();
+        let mut death = None;
+        for &signal in &signals {
+            if death.is_some() {
+                // A death verdict is already taken: preserve the rest
+                // for the next boundary poll rather than dropping them.
+                trapped.push(signal);
+                continue;
+            }
+            if !crate::builtins::kill::kernel_handler_installed(signal) {
+                continue;
+            }
+            let Some(signal_name) = signal_trap_name(signal) else {
+                continue;
+            };
+            let action =
+                crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, &signal_name);
+            match action {
+                Some(action) if !action.is_empty() => trapped.push(signal),
+                Some(_) => {}
+                None if signal == crate::builtins::kill::SIGCHLD_NUMBER => {}
+                // sig.c:333: every shell ignores SIGQUIT for itself; an
+                // untrapped delivery while blocked is dropped, not fatal.
+                None if signal == crate::builtins::kill::SIGQUIT_NUMBER => {}
+                None => {
+                    if self.comsub_parent_termsig_armed(signal) {
+                        death = Some(signal);
+                    } else {
+                        trapped.push(signal);
+                    }
+                }
+            }
+        }
+        crate::builtins::kill::requeue_pending_signals(trapped);
+        death
+    }
+
+    /// rubash#3401 (face 1): the command-substitution conduit drain.
+    /// A comsub clone shares this process, so GNU's model — the parent
+    /// waiting on its forked child observes the termsig in `wait_for`
+    /// (jobs.c:3064 CHECK_TERMSIG) and dies — has no direct analogue:
+    /// the clone IS the parent's wait. The clone therefore acts as a
+    /// conduit, not a judge: it drains the shared mailbox (which the
+    /// flat-layer guard otherwise forbids it to touch) and sorts each
+    /// delivery exactly like the normal drain — trapped ones re-queued
+    /// for the parent's boundary poll, ignored / SIGCHLD / SIGQUIT
+    /// dropped — except an untrapped terminating delivery whose
+    /// parent-side verdict is death. That one is recorded raw in
+    /// `comsub_termsig_pending` and aborts the clone's wait, so the
+    /// teardown can hand the signal to the parent for adjudication
+    /// against its own trap table. A delivery whose parent verdict is
+    /// NOT death is re-queued and the clone keeps waiting: the parent
+    /// adjudicates it at its boundary after the substitution completes,
+    /// exactly as on the base tree. A death already recorded aborts
+    /// the next wait at once, so a doomed clone's body never runs past
+    /// its verdict into a further long wait.
+    #[cfg(unix)]
+    fn observe_signals_comsub_conduit(&mut self) -> Result<(), ExecuteError> {
+        if let Some(sig) = self.comsub_termsig_pending.get() {
+            return Err(ExecuteError::ExitCode(128 + sig));
+        }
+        // The shared classifier already re-queued the trapped batch
+        // (an earlier form of this drain returned here without doing
+        // so, dropping them); the death signal itself is recorded raw
+        // — the teardown re-queues it for the parent's boundary poll.
+        if let Some(sig) = self.pending_termsig_verdict() {
+            self.comsub_termsig_pending.set(Some(sig));
+            return Err(ExecuteError::ExitCode(128 + sig));
+        }
         Ok(())
     }
 
@@ -3651,10 +3753,17 @@ impl Executor {
             self.execute_stdio_only_exec_redirect_scoped(cmd)?;
             let mut stdout = Vec::new();
             let mut stderr = Vec::new();
+            // rubash#3401 (face 3): the simulated-exec wait takes the
+            // executor, so the env/cwd borrows are cloned locals — the
+            // `&mut self` executor arg cannot share the call with
+            // `&self.shell_state.*` borrows.
+            let exec_env_vars = self.shell_state.env_vars.clone();
+            let exec_cwd = self.shell_state.cwd.clone();
             let status = crate::builtins::exec::execute_with_io(
+                self,
                 &cmd.words[1..],
-                &self.shell_state.env_vars,
-                &self.shell_state.cwd,
+                &exec_env_vars,
+                &exec_cwd,
                 &mut stdout,
                 &mut stderr,
                 // No spawn happens on this path (a bare `exec` with
@@ -4166,6 +4275,12 @@ impl Executor {
             },
         );
         let child_stdin = self.exec_inherited_stdin()?;
+        // rubash#3401 (face 3): the simulated-exec wait takes the
+        // executor, so the env/cwd borrows are cloned locals — the
+        // `&mut self` executor arg cannot share the call with
+        // `&self.shell_state.*` borrows.
+        let exec_env_vars = self.shell_state.env_vars.clone();
+        let exec_cwd = self.shell_state.cwd.clone();
         let status = if matches!(fd1, ExecSpawnBinding::Ambient(1))
             && self.fd_table.write_endpoint(1) == Some(FdWriteEndpoint::Stdout)
             && (self.stdout_capture.is_some()
@@ -4182,41 +4297,61 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_io(
+                        self,
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut crate::executor::GlobalStdout,
                         &mut diag,
                         child_stdin,
                     )?
                 }
                 ExecSpawnBinding::Ambient(1) => crate::builtins::exec::execute_with_io(
+                    self,
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
                     child_stdin,
                 )?,
                 ExecSpawnBinding::Closed => crate::builtins::exec::execute_with_io(
+                    self,
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut std::io::sink(),
                     child_stdin,
                 )?,
-                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                    crate::builtins::exec::execute_with_io(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut crate::executor::GlobalStdout,
-                        diag,
-                        child_stdin,
-                    )
-                    .map_err(ExecuteError::from)
-                })?,
+                _ => {
+                    // rubash#3401 (face 3): the diag-capture helper's
+                    // closure cannot carry the `&mut self` executor arg
+                    // while `self.stderr_capture` is mutably borrowed,
+                    // so the take/restore is inlined here.
+                    let mut capture = self.stderr_capture.take();
+                    // The slot is restored BEFORE the error propagates —
+                    // the old helper guaranteed this (a failed spawn must
+                    // not orphan the capture); a `?` inside the block
+                    // would skip the restore.
+                    let result = {
+                        let mut target = match capture.as_mut() {
+                            Some(buffer) => ExecDiagStderr::Capture(buffer),
+                            None => ExecDiagStderr::Process(std::io::stderr()),
+                        };
+                        crate::builtins::exec::execute_with_io(
+                            self,
+                            &exec_args,
+                            &exec_env_vars,
+                            &exec_cwd,
+                            &mut crate::executor::GlobalStdout,
+                            &mut target,
+                            child_stdin,
+                        )
+                    };
+                    self.stderr_capture = capture;
+                    result?
+                }
             }
         } else {
             // Direct composition: both std fds resolve to concrete
@@ -4264,9 +4399,10 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_child_stdio_closing(
+                        self,
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut stdout_writer,
                         &mut diag,
                         child_stdout,
@@ -4277,9 +4413,10 @@ impl Executor {
                 }
                 ExecSpawnBinding::Closed => {
                     crate::builtins::exec::execute_with_child_stdio_closing(
+                        self,
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut stdout_writer,
                         &mut std::io::sink(),
                         child_stdout,
@@ -4297,9 +4434,10 @@ impl Executor {
                             let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
                             let mut diag = crate::fd::handle_to_file(dup);
                             crate::builtins::exec::execute_with_child_stdio_closing(
+                                self,
                                 &exec_args,
-                                &self.shell_state.env_vars,
-                                &self.shell_state.cwd,
+                                &exec_env_vars,
+                                &exec_cwd,
                                 &mut stdout_writer,
                                 &mut diag,
                                 child_stdout,
@@ -4309,9 +4447,10 @@ impl Executor {
                             )?
                         }
                         _ => crate::builtins::exec::execute_with_child_stdio_closing(
+                            self,
                             &exec_args,
-                            &self.shell_state.env_vars,
-                            &self.shell_state.cwd,
+                            &exec_env_vars,
+                            &exec_cwd,
                             &mut stdout_writer,
                             &mut crate::executor::GlobalStdout,
                             child_stdout,
@@ -4321,20 +4460,34 @@ impl Executor {
                         )?,
                     }
                 }
-                _ => with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
-                    crate::builtins::exec::execute_with_child_stdio_closing(
-                        &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
-                        &mut stdout_writer,
-                        diag,
-                        child_stdout,
-                        child_stderr,
-                        child_stdin,
-                        &close_fds,
-                    )
-                    .map_err(ExecuteError::from)
-                })?,
+                _ => {
+                    // rubash#3401 (face 3): the diag-capture helper's
+                    // closure cannot carry the `&mut self` executor arg,
+                    // so the take/restore is inlined here. The slot is
+                    // restored BEFORE the error propagates — a `?` inside
+                    // the block would orphan the capture on a failed spawn.
+                    let mut capture = self.stderr_capture.take();
+                    let result = {
+                        let mut target = match capture.as_mut() {
+                            Some(buffer) => ExecDiagStderr::Capture(buffer),
+                            None => ExecDiagStderr::Process(std::io::stderr()),
+                        };
+                        crate::builtins::exec::execute_with_child_stdio_closing(
+                            self,
+                            &exec_args,
+                            &exec_env_vars,
+                            &exec_cwd,
+                            &mut stdout_writer,
+                            &mut target,
+                            child_stdout,
+                            child_stderr,
+                            child_stdin,
+                            &close_fds,
+                        )
+                    };
+                    self.stderr_capture = capture;
+                    result?
+                }
             }
         };
         self.finish_dev_fd_operands(dev_ops);
@@ -4406,15 +4559,21 @@ impl Executor {
             crate::executor::dev_fd_operands::DevOperandStdin::FdTable,
             crate::executor::dev_fd_operands::DevOperandStdout::FdTable,
         );
+        // rubash#3401 (face 3): same executor-threading borrow split as
+        // execute_exec_spawn above — the env/cwd borrows are cloned
+        // locals for the `&mut self` executor arg.
+        let exec_env_vars = self.shell_state.env_vars.clone();
+        let exec_cwd = self.shell_state.cwd.clone();
         let status = if fd1_lands_in_capture {
             // `exec cmd 2>&1` inside the substitution resolves fd 2 to the
             // same Stdout endpoint — its diagnostics join the capture too;
             // a plain fd 2 stays the terminal stream.
             if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
                 crate::builtins::exec::execute_with_io(
+                    self,
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
                     self.exec_inherited_stdin()?,
@@ -4427,17 +4586,29 @@ impl Executor {
                 // those bytes; writing them to the terminal dropped
                 // the stage's `2>/dev/null` on the floor).
                 let child_stdin = self.exec_inherited_stdin()?;
-                with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+                // rubash#3401 (face 3): the diag-capture helper's
+                // closure cannot carry the `&mut self` executor arg, so
+                // the take/restore is inlined here; the slot is restored
+                // BEFORE the error propagates (a `?` inside the block
+                // would orphan the capture on a failed spawn).
+                let mut capture = self.stderr_capture.take();
+                let result = {
+                    let mut target = match capture.as_mut() {
+                        Some(buffer) => ExecDiagStderr::Capture(buffer),
+                        None => ExecDiagStderr::Process(std::io::stderr()),
+                    };
                     crate::builtins::exec::execute_with_io(
+                        self,
                         &exec_args,
-                        &self.shell_state.env_vars,
-                        &self.shell_state.cwd,
+                        &exec_env_vars,
+                        &exec_cwd,
                         &mut crate::executor::GlobalStdout,
-                        diag,
+                        &mut target,
                         child_stdin,
                     )
-                    .map_err(ExecuteError::from)
-                })?
+                };
+                self.stderr_capture = capture;
+                result?
             }
         } else {
             // GNU exec.def: `exec cmd` runs cmd in the shell's current fd
@@ -4450,19 +4621,31 @@ impl Executor {
             let child_stdout = self.exec_inherited_stdio(1)?;
             let child_stderr = self.exec_inherited_stdio(2)?;
             let child_stdin = self.exec_inherited_stdin()?;
-            with_exec_diag_stderr(&mut self.stderr_capture, |diag| {
+            // rubash#3401 (face 3): the diag-capture helper's closure
+            // cannot carry the `&mut self` executor arg, so the
+            // take/restore is inlined here; the slot is restored BEFORE
+            // the error propagates (a `?` inside the block would orphan
+            // the capture on a failed spawn).
+            let mut capture = self.stderr_capture.take();
+            let result = {
+                let mut target = match capture.as_mut() {
+                    Some(buffer) => ExecDiagStderr::Capture(buffer),
+                    None => ExecDiagStderr::Process(std::io::stderr()),
+                };
                 crate::builtins::exec::execute_with_child_stdio(
+                    self,
                     &exec_args,
-                    &self.shell_state.env_vars,
-                    &self.shell_state.cwd,
+                    &exec_env_vars,
+                    &exec_cwd,
                     &mut crate::executor::GlobalStdout,
-                    diag,
+                    &mut target,
                     child_stdout,
                     child_stderr,
                     child_stdin,
                 )
-                .map_err(ExecuteError::from)
-            })?
+            };
+            self.stderr_capture = capture;
+            result?
         };
         self.finish_dev_fd_operands(dev_ops);
         Ok(status)
