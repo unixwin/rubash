@@ -5686,7 +5686,7 @@ unsafe fn raw_fork_async_child(
     // stays rubash-specific, it just no longer fires for a deleted
     // cwd whose inode the session still holds.
     let seated = match anchor_fd {
-        Some(fd) => unsafe { libc::fchdir(fd) } == 0,
+        Some(fd) => (unsafe { libc::fchdir(fd) }) == 0,
         None => false,
     };
     if !seated && unsafe { libc::chdir(cwd_c.as_ptr()) } != 0 {
