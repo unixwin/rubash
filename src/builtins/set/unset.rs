@@ -29,19 +29,23 @@ struct UnsetOptions {
 /// `PrologParts::Lib` composition: the same env cells the deleted
 /// local `diagnostic_prefix` read.
 fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
-    // rubash#3355: error_name follows the get_name_for_error chain
-    // (via builtin_diag::error_report_name), not the hardcoded
-    // "rubash" brand — an empty $0 prints an empty name.
+    // The name cells derive from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791): error_name follows the
+    // get_name_for_error chain via builtin_diag::error_report_name
+    // (rubash#3355: the presence-based $0 step — an empty $0
+    // prints an empty name, not the hard-coded "rubash" brand),
+    // while shell_basename keeps the shared basename derivation
+    // (the old cells printed the shell-name carrier VERBATIM as
+    // the interactive name and a hard-coded "rubash" as the error
+    // name, rubash#3256).
     let script_file = env_vars
         .get("__RUBASH_SCRIPT_NAME")
         .cloned()
         .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
+    let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: env_vars
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
         error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
         script_file,
         line: env_vars

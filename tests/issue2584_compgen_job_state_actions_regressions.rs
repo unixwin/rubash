@@ -20,7 +20,7 @@
 use std::process::{Command, Stdio};
 
 fn run_script(script: &str) -> (String, String, i32) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rubash"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .arg("-c")
         .arg(script)
         .stdin(Stdio::null())

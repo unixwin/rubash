@@ -2328,7 +2328,7 @@ impl Executor {
                 Err(_) => ProcsubPlanCapture::Failed,
             },
             ProcsubPlanMode::WriteTruncate => {
-                match self.create_redirect_output(target, redirect.clobber) {
+                match self.create_redirect_output_for(Some(redirect), target, redirect.clobber) {
                     Ok(file) => ProcsubPlanCapture::Captured(Rc::new(FileFd {
                         handle: crate::fd::into_handle(file),
                         path: session_target,

@@ -2872,13 +2872,7 @@ pub(super) fn unclosed_brace_eof_node(
     if let Some(rel) = first_mismatched_closer(region, "{") {
         return mismatched_closer_node(region, rel, diagnostic_text, line_offset);
     }
-    compound_eof_error_node(
-        "{",
-        brace_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, continuation),
-    )
+    compound_eof_error_node("{", brace_line, region, last_line, continuation)
 }
 
 /// `name() (` with no closing `)`: the same EOF reporting names the `(`.
@@ -2900,17 +2894,32 @@ pub(super) fn unclosed_paren_eof_node(
         .map(|token| token.position)
         .max()
         .unwrap_or(paren_line);
-    compound_eof_error_node(
-        "(",
-        paren_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, false),
-    )
+    compound_eof_error_node("(", paren_line, region, last_line, false)
 }
 
 fn eof_line_extra(last_line: usize, continuation: bool) -> usize {
     last_line + 1 + usize::from(continuation)
+}
+
+/// Whether the token region ends with a continuation pending at end of
+/// input: the last token's raw ends in an odd run of backslashes (the
+/// lexer surfaces a dangling `\` as its own token or as a word tail).
+/// Heredoc bodies are literal text — a trailing backslash there is
+/// data the reader never treats as a continuation.
+fn region_ends_with_continuation(region: &[Token]) -> bool {
+    let Some(last) = region.last() else {
+        return false;
+    };
+    if last.kind == TokenKind::HereDocBody {
+        return false;
+    }
+    let trailing = last
+        .raw
+        .bytes()
+        .rev()
+        .take_while(|byte| *byte == b'\\')
+        .count();
+    trailing % 2 == 1
 }
 
 /// GNU error_token_from_text (parse.y:6772-6808): the token
@@ -3064,13 +3073,7 @@ pub(super) fn unclosed_keyword_eof_node(
         .map(|token| token.position)
         .max()
         .unwrap_or(opener_line);
-    compound_eof_error_node(
-        opener,
-        opener_line,
-        region,
-        last_line,
-        eof_line_extra(last_line, false),
-    )
+    compound_eof_error_node(opener, opener_line, region, last_line, false)
 }
 
 /// GNU parse.y reserved-word grammar: while a keyword compound frame is
@@ -3486,8 +3489,20 @@ fn compound_eof_error_node(
     open_line: usize,
     region: &[Token],
     last_line: usize,
-    eof_line: usize,
+    continuation_hint: bool,
 ) -> CommandNode {
+    // GNU's reader counts one more line when input ends with a
+    // continuation pending: shell_getc's string-input exhaustion bumps
+    // line_number before the EOF report (parse.y:2504 region), so EVERY
+    // compound-EOF arm reports last_line + 2 when the final token is a
+    // dangling backslash, not just the collapsed-brace arm that used to
+    // compute this from its swallowed text (rubash#3183: `if true;
+    // then \', `g() { \' and `( \' all gain the line). The brace arm's
+    // text-derived signal survives as the hint; the region's last token
+    // is the general evidence (an odd trailing backslash run — an
+    // escaped `\\' is data, not a continuation).
+    let continuation = continuation_hint || region_ends_with_continuation(region);
+    let eof_line = eof_line_extra(last_line, continuation);
     let (name, name_line) =
         innermost_unclosed_compound(region).unwrap_or_else(|| (opener.to_string(), open_line));
 

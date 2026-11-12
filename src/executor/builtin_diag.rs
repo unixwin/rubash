@@ -146,22 +146,28 @@ impl PrologParts {
                 line: variables.get("__RUBASH_CURRENT_LINE").cloned(),
             },
             PrologParts::Lib => {
-                // rubash#3355: the lib flavor's error_name used to be
-                // the hardcoded "rubash" brand, so declare-family
+                // The name cells derive from the single argv[0]
+                // carrier chain (builtins::prefix, rubash#2791), as
+                // the Executor flavor's do through
+                // `interactive_shell_basename` / `error_report_name`:
+                // error_name is composed from the same
+                // get_name_for_error chain as the executor flavor
+                // (rubash#3355: the lib flavor's error_name used to
+                // be the hardcoded "rubash" brand, so declare-family
                 // diagnostics never followed $0 — under an empty
                 // argv[0] they printed "rubash: ..." instead of the
-                // empty name GNU prints. Compose it from the same
-                // get_name_for_error chain as the executor flavor.
+                // empty name GNU prints), while shell_basename keeps
+                // the shared basename derivation (the old cells
+                // printed the shell-name carrier VERBATIM as the
+                // interactive name, rubash#3256).
                 let script_file = variables
                     .get("__RUBASH_SCRIPT_NAME")
                     .cloned()
                     .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
+                let get = |key: &str| variables.get(key).cloned();
                 Prolog {
                     interactive: variables.get("__RUBASH_INTERACTIVE").is_some(),
-                    shell_basename: variables
-                        .get("__RUBASH_SHELL_NAME")
-                        .cloned()
-                        .unwrap_or_else(|| "rubash".to_string()),
+                    shell_basename: crate::builtins::prefix::shell_basename(&get),
                     error_name: error_report_name(&script_file, variables),
                     script_file,
                     line: variables
