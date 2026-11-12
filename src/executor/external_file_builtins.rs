@@ -440,11 +440,18 @@ impl Executor {
     /// operand-root convergence as the whole operand (the #3276
     /// cwd-anchor route for a deleted session cwd), and a
     /// single-level `create_dir` per prefix keeps the At arm's
-    /// mkdirat semantics. An EEXIST answer gets a follow-up stat:
-    /// a directory continues the walk, a non-directory is
-    /// ENOTDIR, and a stat failure (dangling symlink) keeps
-    /// GNU's EEXIST. An empty operand has no component to fail
-    /// on: GNU reports '' ENOENT.
+    /// mkdirat semantics. Any create failure gets a follow-up
+    /// stat, not just EEXIST: on the simulated (Windows) face a
+    /// bare create of an already-existing component — a drive
+    /// root such as `/c` above all — can answer EACCES instead,
+    /// while GNU's `-p` contract treats every pre-existing
+    /// component as success (the `golden_nvm_load` shape). The
+    /// stat decides: a directory continues the walk, a
+    /// non-directory is ENOTDIR, and a stat failure returns the
+    /// original create error (a dangling symlink keeps GNU's
+    /// EEXIST; a genuine failure keeps its own errno). An empty
+    /// operand has no component to fail on: GNU reports ''
+    /// ENOENT.
     fn mkdir_create_parents(&self, operand: &str) -> Result<(), (io::Error, String)> {
         if operand.is_empty() {
             // Portable construction: shared code names no `libc::`
@@ -471,7 +478,12 @@ impl Executor {
             let node = CpNode::at_root(self.cp_operand_root(&native, &joined));
             match node.create_dir() {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => match node.stat() {
+                // rubash#3333 rework (captain review §7.1): the
+                // follow-up stat runs on every create failure, not
+                // only EEXIST — see the fn doc comment. On unix an
+                // existing component always answers EEXIST, so the
+                // widened trigger is observably identical there.
+                Err(error) => match node.stat() {
                     Ok(stat) if stat.is_dir => {}
                     Ok(_) => {
                         return Err((
@@ -481,7 +493,6 @@ impl Executor {
                     }
                     Err(_) => return Err((error, prefix.to_string())),
                 },
-                Err(error) => return Err((error, prefix.to_string())),
             }
         }
         Ok(())
