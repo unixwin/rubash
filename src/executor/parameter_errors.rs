@@ -2687,7 +2687,19 @@ impl Executor {
                                 "parameter not set".to_string()
                             }
                         } else {
-                            self.expand_parameter_word(message)
+                            // rubash#3260: the `:?` message is display text,
+                            // not a value — GNU subst.c:8216
+                            // parameter_brace_expand_error expands the word
+                            // (expand_string, quote removal included) and
+                            // reports the plain text. `expand_parameter_word`
+                            // keeps quoted whitespace behind the IFS_GLUE
+                            // carrier for field splitting, so the message
+                            // must go through the sanctioned visible-text
+                            // decoder before it is reported, or the carrier
+                            // leaks into the diagnostic (`e\x1c f`).
+                            crate::locale::decode_to_visible_text(
+                                &self.expand_parameter_word(message),
+                            )
                         };
                         // GNU subst.c:8221 parameter_brace_expand_error →
                         // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
