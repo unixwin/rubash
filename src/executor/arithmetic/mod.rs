@@ -896,6 +896,28 @@ impl Executor {
         self.shell_state
             .env_vars
             .remove("__RUBASH_ARITH_SUBSCRIPT_EXPR");
+        // rubash#3251: a top-level `$name` read traps during GNU's
+        // expansion (subst.c:11023 `unbound_variable:` inside
+        // expand_arith_string), but this tree's embedded-parameter walk
+        // expands it to empty without trapping, so the post-expansion
+        // nounset scan below can never see the name (`(( $undef ))`
+        // went silent, rc 0). Scan the RAW text before any expansion
+        // pass erases it and record the leftmost trap in the #3199 S2
+        // slot, which the scan point below consults first. Only the
+        // expanding entries (`(( ))`, `$(( ))`, arith-for) run this:
+        // `let` operands arrive already expanded, so a `$name` there
+        // is evalexp data ("operand expected", not nounset).
+        if expand
+            && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset")
+        {
+            if let Some(name) = first_unbound_dollar_read_arith(
+                expression,
+                &self.shell_state.env_vars,
+                self.shell_state.positional_window().len(),
+            ) {
+                record_arith_subscript_unbound(name);
+            }
+        }
         // Associative subscripts are expanded first, in their own pass, and
         // replaced by an opaque literal (see expand_arithmetic_assoc_subscripts)
         // so the ordinary expansion below cannot expand them a second time and
@@ -1635,6 +1657,20 @@ impl Executor {
                 let _ = std::io::stderr().flush();
             }
             return None;
+        }
+        // rubash#3251: same raw-text `$` scan as the `(( ))` entry —
+        // the expansion below erases an unbound `$name` read before the
+        // nounset scan point can see it (`echo $(( $undef ))` went
+        // silent). Placed after the bad-substitution check so an
+        // unterminated `${` still owns that verdict.
+        if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+            if let Some(name) = first_unbound_dollar_read_arith(
+                expression,
+                &self.shell_state.env_vars,
+                self.shell_state.positional_window().len(),
+            ) {
+                record_arith_subscript_unbound(name);
+            }
         }
         // `$(( ))` is a reader entry: GNU's expand_subscript_string decodes
         // the raw `$'...'` spelling (issue rubash#828).
@@ -2662,7 +2698,12 @@ fn first_unbound_dollar_read(
                         // $0 is the program name; $1..$9 are positional.
                         let digit = c as usize - '0' as usize;
                         if digit >= 1 && digit > positional_count {
-                            return Some(digit.to_string());
+                            // GNU subst.c:10500-10512 param_expand: the
+                            // positional diagnostic names the parameter
+                            // `$1`-style (uerror = "$" + digit), while a
+                            // braced `${1}` read names the bare digit
+                            // (parameter_brace_expand; rubash#3251 q07).
+                            return Some(format!("${digit}"));
                         }
                         index += 2;
                     }
@@ -2675,6 +2716,98 @@ fn first_unbound_dollar_read(
         }
     }
     None
+}
+
+/// Blank out single-quoted spans that sit inside an array subscript
+/// (`name[...]`) of a raw arithmetic expression, replacing every byte
+/// of each span with a space (length-preserving, so positions of the
+/// surviving text do not shift). GNU expands an arithmetic expression
+/// with expand_arith_string (subst.c:3981) as if double-quoted, so a
+/// single quote at the TOP level is data and a `$` read inside it
+/// still traps (`(( '$undef' ))` → `undef: unbound variable`,
+/// rubash#3251 q01) — only spans inside a subscript are literal
+/// keys there: the subscript is expanded as a unit by
+/// array_expand_index (arrayfunc.c:1368-1378), where `'...'` quotes
+/// the key, so `b['$undef']` reaches evalexp as the junk token
+/// `$undef` ("operand expected", q02) and `A['$undef']` leaves the
+/// assoc-empty trap on `A` itself (q03). Double quotes never protect
+/// a `$` read, inside or outside a subscript (`b["$undef"]` traps,
+/// q11), so `"` spans are left alone. The walk skips `$(...)`,
+/// `` `...` ``, `${...}` and `$'...'`/`$"..."` spans so a quote
+/// inside one of them cannot start a mask span.
+fn mask_arith_subscript_single_quoted_spans(expression: &str) -> String {
+    let bytes = expression.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut index = 0usize;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'`' => index = skip_arith_backquote_span(bytes, index),
+            b'$' => match bytes.get(index + 1) {
+                Some(b'(') => index = skip_arith_paren_span(bytes, index + 1),
+                Some(b'{') => {
+                    match crate::executor::parameter_ops::matching_parameter_brace(
+                        &expression[index + 2..],
+                    ) {
+                        Some(end) => index += end + 3,
+                        None => index = bytes.len(),
+                    }
+                }
+                Some(b'\'') | Some(b'"') => {
+                    index = skip_arith_quoted_span(bytes, index + 1, bytes[index + 1], true)
+                }
+                _ => index += 1,
+            },
+            b'"' if depth > 0 => index = skip_arith_quoted_span(bytes, index, b'"', true),
+            b'[' => {
+                depth += 1;
+                index += 1;
+            }
+            b']' if depth > 0 => {
+                depth -= 1;
+                index += 1;
+            }
+            b'\'' if depth > 0 => {
+                let end = skip_arith_quoted_span(bytes, index, b'\'', false);
+                for slot in masked.iter_mut().take(end).skip(index) {
+                    *slot = b' ';
+                }
+                index = end;
+            }
+            _ => index += 1,
+        }
+    }
+    // Only ASCII bytes are replaced with ASCII spaces, so the result
+    // stays valid UTF-8; fall back to the input on any surprise.
+    String::from_utf8(masked).unwrap_or_else(|_| expression.to_string())
+}
+
+/// The first unbound `$` read in a RAW arithmetic expression, for the
+/// `(( ))` / `$(( ))` entries whose expansion runs before evaluation
+/// (GNU execute_cmd.c:3936 expand_arith_string, then evalexp; the
+/// `$(( ))` entry is the same via eval_arith_for_expr at
+/// execute_cmd.c:3171). The expansion erases an unbound read to empty
+/// text (subst.c:11023 `unbound_variable:` traps inside param_expand,
+/// but this tree's embedded-parameter walk swallows it), so the
+/// post-expansion scan can never see the name; the read must be found
+/// here, on the raw text, under the same param_expand rules as
+/// [`first_unbound_dollar_read`] — with single-quoted subscript keys
+/// masked out first (see
+/// [`mask_arith_subscript_single_quoted_spans`]). The caller records
+/// the name in the #3199 S2 slot, so the existing post-expansion scan
+/// point reports it with the same diagnostic and precedence (the scan
+/// returns the leftmost trap in textual order, which is the order
+/// GNU's expansion walks, so first-wins recording is correct).
+/// `let` operands must NOT use this: they arrive already expanded
+/// (EXP_EXPANDED), so a `$name` there is evalexp data, not a read.
+fn first_unbound_dollar_read_arith(
+    expression: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+    positional_count: usize,
+) -> Option<String> {
+    let masked = mask_arith_subscript_single_quoted_spans(expression);
+    first_unbound_dollar_read(&masked, env_vars, positional_count)
 }
 
 /// The unbound read inside one `${...}` body (`inner` excludes the
