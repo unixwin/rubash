@@ -27,6 +27,12 @@
 #   TIMING      timeout/hang/missing-notice under parallel load; adjudication
 #               owed: serial re-run to separate flake from product
 #   FIXTURE     harness/fixture missing on the runner, not product behaviour
+# SECOND RUN (CI run 43234272221, 2026-11-12, merge commit vs master ffc09fb7):
+# 1287 stems ran (1376 in tree - 89 excluded), 8311 tests, 8309 passed /
+# 2 failed / 4 skipped. The 2 failures are both in one stem,
+# issue2836_emulated_cat_job_control_regressions, which PASSED all 3 tests
+# in run 1 -- a parallel-load timing flake, triaged below as TIMING. The
+# only tree change between the runs (PR #3390, new stem issue3329) passed.
 # The 83 closed-issue reds need a captain adjudication wave (serial re-runs
 # on a Linux box, then fix / re-pin / file residuals). This file is the
 # triage record, not a burial ground: an entry without a recorded reason
@@ -39,7 +45,7 @@
 issue2769_death_notice_line_stamp_regressions pins-first, fix pending (rubash#2769 OPEN; GNU-stamped line expectations)
 issue2777_stopped_job_state_regressions pins-first, fix pending (rubash#2777 OPEN; GNU JSTOPPED expectations)
 
-# First-census triage (87 stems, 283 tests; see header).
+# First-census triage (87 stems, 283 tests) + run-2 flake (1 stem, 2 tests); see header.
 issue1025_1026_1068_1103_1359_redirect_fd_regressions PRODUCT/TIMING: #1967 CLOSED; 2 tests fail; dev/tcp cells get 0 connections delivered on plain `>` redirect; needs serial re-run (product vs timing)
 issue1038_gnu_errfmt_prefix PRODUCT: #1038 CLOSED; 1 test fails; redirect-open-failure diagnostic prefix wording; fix 6c6d523f landed; stale pin vs regression
 issue1046_groups_variable_regressions ENV: #1046 CLOSED; 1 test fails; runner group set differs from expectation (GROUPS=(1000)); environment (runner group set)
@@ -89,6 +95,7 @@ issue2747_function_body_attribution_regressions MISMATCH: #2747 CLOSED; 7 tests 
 issue2750_conditional_followon_attribution_regressions MISMATCH: #2750 CLOSED; 19 tests fail; attribution family, F4 fix 30b1b51c landed but cells still fail; fix-vs-pin mismatch, adjudication owed; folds into #3111 after #3141 merges
 issue2754_eof_line_attribution_regressions MISMATCH: #2754 CLOSED; 1 test fails; attribution family, F4 fix 30b1b51c landed but cell still fails; fix-vs-pin mismatch, adjudication owed
 issue2803_exec_dup_redirects PRODUCT: #2803 CLOSED; 1 test fails; exec dup redirects rc; last touch F2 d4f7d94b; product divergence
+issue2836_emulated_cat_job_control_regressions TIMING: #2836 CLOSED; 2 tests fail; PTY foreground cat/sed ^Z: timed out (22s) waiting for '[1]+  Stopped'; fix e3fcff67 (#2842) landed; FLAKE EVIDENCE: all 3 tests PASSED in census run 1 (2.5-3.8s) and 2 failed in run 2 on the same product code — parallel-load timing; serial re-run owed
 issue2836_pipeline_subshell_job_control_regressions TIMING: #2836 CLOSED; 6 tests fail; PTY pipeline/subshell job control, stopped notice missing; fix 585107c4 (#2854) landed; serial re-run to separate timing from product
 issue2838_loop_stop_break_regressions TIMING: #2838 CLOSED; 6 tests fail; PTY loop stop, stopped notice missing; fix 082030f2 (#2845) landed; serial re-run to separate timing from product
 issue2851_subshell_loop_stop_regressions TIMING: #2851 CLOSED; 7 tests fail; PTY subshell loop stop, stopped notice missing; fix 061364cd (#2870) landed; serial re-run to separate timing from product
