@@ -6958,38 +6958,47 @@ impl Executor {
         let pattern_substitutions = if pattern.raw_text.contains("<(")
             || pattern.raw_text.contains(">(")
         {
-            crate::parser::WordMetadata::new(
-                0,
-                pattern.raw_text.clone(),
-                pattern.raw_text.clone(),
-            )
-            .process_substitutions
+            crate::parser::WordMetadata::new(0, pattern.raw_text.clone(), pattern.raw_text.clone())
+                .process_substitutions
         } else {
             Vec::new()
         };
+        // rubash#2764 (F2 rework): materialize ONCE per attempt, on
+        // the branch that consumes it. The two expansion branches
+        // below consume disjoint strings (the quote-free branch
+        // expands `pattern.text`, the quoted branch expands
+        // `pattern.raw_text`), and a spliced fd path contains no
+        // quotes, so deciding the branch on the ORIGINAL raw text
+        // gives the same branch as deciding after materialization.
+        // Materializing both strings eagerly spawned/registered
+        // every body twice (input bodies ran twice — no per-source
+        // dedup in spawn_input_process_substitution_child; output
+        // bodies registered two different fd-words and both
+        // finished); GNU runs each body once per attempt
+        // (subst.c:6362 process_substitute, per pattern attempt).
+        let quoted = case_pattern_raw_has_quotes(&pattern.raw_text);
         let materialized_text;
         let materialized_raw;
-        let pattern_text: &str = if pattern_substitutions.is_empty() {
-            &pattern.text
-        } else {
-            materialized_text = self
-                .materialize_for_list_process_substitutions(
-                    &pattern.text,
-                    &pattern_substitutions,
-                )
-                .unwrap_or_else(|_| pattern.text.clone());
-            &materialized_text
-        };
-        let pattern_raw: &str = if pattern_substitutions.is_empty() {
-            &pattern.raw_text
-        } else {
+        let pattern_text: &str;
+        let pattern_raw: &str;
+        if pattern_substitutions.is_empty() {
+            pattern_text = &pattern.text;
+            pattern_raw = &pattern.raw_text;
+        } else if quoted {
             materialized_raw = self
                 .materialize_for_list_process_substitutions(
                     &pattern.raw_text,
                     &pattern_substitutions,
                 )
                 .unwrap_or_else(|_| pattern.raw_text.clone());
-            &materialized_raw
+            pattern_text = &pattern.text;
+            pattern_raw = &materialized_raw;
+        } else {
+            materialized_text = self
+                .materialize_for_list_process_substitutions(&pattern.text, &pattern_substitutions)
+                .unwrap_or_else(|_| pattern.text.clone());
+            pattern_text = &materialized_text;
+            pattern_raw = &pattern.raw_text;
         };
         const PROTECTED_CASE_PATTERN_BACKSLASH: char =
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;

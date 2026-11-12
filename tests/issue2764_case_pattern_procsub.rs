@@ -74,8 +74,15 @@ fn run_rubash(dir: &Path, script: &str) -> (String, String, Option<i32>) {
 
 fn assert_script(dir: &Path, script: &str, expected_stdout: &str) {
     let (stdout, stderr, code) = run_rubash(dir, script);
-    assert_eq!(code, Some(0), "script rc: {code:?}\nscript:\n{script}\nstdout:\n{stdout}\nstderr:\n{stderr}");
-    assert_eq!(stderr, "", "script stderr must be empty\nscript:\n{script}\nstdout:\n{stdout}\nstderr:\n{stderr}");
+    assert_eq!(
+        code,
+        Some(0),
+        "script rc: {code:?}\nscript:\n{script}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stderr, "",
+        "script stderr must be empty\nscript:\n{script}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
     assert_eq!(
         stdout, expected_stdout,
         "script stdout\nscript:\n{script}\nstderr:\n{stderr}"
@@ -246,5 +253,47 @@ fn issue2764_case_pattern_procsub_extglob_alternative() {
         &dir.0,
         "shopt -s extglob\ncase /dev/fd/63 in <(true)|/dev/fd/64) echo MATCH;; *) echo NOMATCH;; esac\n",
         "MATCH\n",
+    );
+}
+
+/// rubash#2764 F2 rework — count-in (probe-threeway.sh): the
+/// `<(...)` body runs exactly ONCE per attempt. GNU 5.3.20: `N|1`.
+/// The first-round code materialized both `pattern.text` and
+/// `pattern.raw_text`, so the body ran twice (`cnt` held 2 lines).
+#[test]
+fn issue2764_case_pattern_procsub_counted_once_input() {
+    let dir = scratch("count-in");
+    assert_script(
+        &dir.0,
+        "rm -f cnt\ncase x in <(echo x >> cnt)) echo M;; *) echo N;; esac\nsleep 1\ntest -e cnt && wc -l < cnt || echo 0\n",
+        "N\n1\n",
+    );
+}
+
+/// rubash#2764 F2 rework — count-out (probe-threeway.sh): the
+/// `>(...)` body runs exactly ONCE per attempt. GNU 5.3.20: `N|1`.
+/// The first-round code registered two different fd-words for the
+/// same body and finished both (`cnt` held 2 lines).
+#[test]
+fn issue2764_case_pattern_procsub_counted_once_output() {
+    let dir = scratch("count-out");
+    assert_script(
+        &dir.0,
+        "rm -f cnt\ncase x in >(echo x >> cnt)) echo M;; *) echo N;; esac\nsleep 1\ntest -e cnt && wc -l < cnt || echo 0\n",
+        "N\n1\n",
+    );
+}
+
+/// rubash#2764 F2 rework — count-two-arms (probe-threeway.sh):
+/// a word matching no arm still expands EVERY arm's pattern, but
+/// each arm's body runs exactly once. GNU 5.3.20:
+/// `N|c1=1 c2=1`.
+#[test]
+fn issue2764_case_pattern_procsub_counted_once_two_arms() {
+    let dir = scratch("count-two-arms");
+    assert_script(
+        &dir.0,
+        "rm -f c1 c2\ncase y in <(echo x >> c1)) echo A1;; <(echo x >> c2)) echo A2;; *) echo N;; esac\nsleep 1\necho \"c1=$(test -e c1 && wc -l < c1 || echo 0) c2=$(test -e c2 && wc -l < c2 || echo 0)\"\n",
+        "N\nc1=1 c2=1\n",
     );
 }
