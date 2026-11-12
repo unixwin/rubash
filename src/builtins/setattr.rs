@@ -26,17 +26,25 @@ pub(crate) const EX_USAGE: i32 = 2;
 /// same simplification declare took in Phase 4 (E1/E2 run script
 /// files, where script + line are present).
 fn diag_prolog(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    // The name cells derive from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791): error_name follows the
+    // get_name_for_error chain via builtin_diag::error_report_name
+    // (rubash#3355: the presence-based $0 step — an empty $0
+    // prints an empty name, not the hard-coded "rubash" brand),
+    // while shell_basename keeps the shared basename derivation
+    // (the old cells printed the shell-name carrier VERBATIM as
+    // the interactive name and a hard-coded "rubash" as the error
+    // name, rubash#3256).
+    let script_file = env_vars
+        .get("__RUBASH_SCRIPT_NAME")
+        .cloned()
+        .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok());
+    let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: env_vars
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: env_vars
-            .get("__RUBASH_SCRIPT_NAME")
-            .cloned()
-            .or_else(|| std::env::var("__RUBASH_SCRIPT_NAME").ok()),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
+        error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
+        script_file,
         line: env_vars
             .get("__RUBASH_CURRENT_LINE")
             .cloned()
@@ -64,15 +72,23 @@ fn bare_diag_line(diag: &mut Diag, env_vars: &crate::shell::var_table::VarTable,
 /// re-homed on the `Diag` (the caller supplies the rendered prefix
 /// to `Diag::err_readonly`).
 fn readonly_error_prefix(env_vars: &crate::shell::var_table::VarTable) -> String {
-    if let (Some(script), Some(line)) = (
-        env_vars.get("__RUBASH_SCRIPT_NAME"),
-        env_vars.get("__RUBASH_CURRENT_LINE"),
-    ) {
-        if crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt") {
-            return format!("{script}:{line}: ");
-        }
+    // Interactive shells report base_pathname(shell_name) alone
+    // (error.c:98's guard in get_name_for_error) — the composed
+    // prolog's interactive arm renders exactly that.
+    if env_vars.get("__RUBASH_INTERACTIVE").is_some() {
+        return diag_prolog(env_vars).render();
     }
-    diag_prolog(env_vars).render()
+    // Every other arm is the chain's err_readonly renderer
+    // (builtins::prefix, rubash#2791): the frame file and line when
+    // both are present (gnu_errfmt honored), the file alone, the
+    // derived name with a line, or the derived name alone — the
+    // arms the old fall-through to the composed prolog rendered
+    // through its hard-coded error name (rubash#3256).
+    let get = |key: &str| env_vars.get(key).cloned();
+    crate::builtins::prefix::readonly_error_prefix(
+        &get,
+        crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt"),
+    )
 }
 
 const EXPORTED_VARS: &str = "__RUBASH_EXPORTED_VARS";

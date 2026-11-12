@@ -607,6 +607,20 @@ impl Executor {
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
         let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        // rubash#3287: the three arithmetic error flags are ONE error
+        // record — the expansion-error latch, the fatal severity and the
+        // nonfatal severity — and this boundary is where the record is
+        // consumed (the caller adjudicates from `arithmetic_error`).
+        // The old code left `arithmetic_fatal_error` standing, so a
+        // fatal `$(( ))` on an assignment RHS leaked into the NEXT
+        // command: `eval_arithmetic_command_value_with_flags` bails
+        // out early on a set fatal flag, and the `(( ))` / `let` /
+        // `for (( ))` after a fatal fast assignment was silently
+        // skipped. GNU has no cross-command error state at all
+        // (expr.c:1525 evalerror longjmps out of the failing
+        // evaluation only), so a consumed record must not survive
+        // its own command.
+        self.shell_state.arithmetic_fatal_error.set(false);
         AssignmentExpansionResult {
             value: expanded,
             substitution_status,
@@ -626,6 +640,10 @@ impl Executor {
         self.last_command_substitution_status.set(None);
         let arithmetic_error = self.shell_state.arithmetic_expansion_error.replace(false);
         let arithmetic_nonfatal_error = self.shell_state.arithmetic_nonfatal_error.replace(false);
+        // rubash#3287: same one-record consumption as the _with_raw
+        // sibling above — the fatal flag must not outlive the
+        // expansion whose error it records.
+        self.shell_state.arithmetic_fatal_error.set(false);
         AssignmentExpansionResult {
             value: expanded,
             substitution_status,

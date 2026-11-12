@@ -251,15 +251,6 @@ impl Executor {
         command: &CommandNode,
         error: &std::io::Error,
     ) -> Result<(), ExecuteError> {
-        let mut stderr = Vec::new();
-        // GNU redir.c:135 redirection_error (internal_error family) honors
-        // gnu_errfmt (rubash#1038).
-        writeln!(
-            &mut stderr,
-            "{}{}",
-            self.error_prefix(),
-            crate::posix_errors::message(error)
-        )?;
         let mut owner = command;
         loop {
             if let Some(inner) = &owner.inverted_command {
@@ -272,6 +263,60 @@ impl Executor {
                 break;
             }
         }
+        // GNU execute_cmd.c:854 do_redirections runs BEFORE the switch
+        // stamps the command's own line — only cm_cond / cm_arith /
+        // cm_arith_for report through executing_line_number's own-line
+        // special case (execute_cmd.c:412-428) — so a compound command's
+        // own redirect-open failure reports the AMBIENT line (the
+        // enclosing frame's pinned line), not the compound's first line
+        // the funnel stamped into CURRENT_LINE (rubash#3183: a multiline
+        // top-level `for' reports its `done' line; inside `( ... )' the
+        // subshell's `)' line; inside a function the definition's body
+        // line). The cm_arith / cm_cond owners excluded from the
+        // ambient class report at their COMPLETION line instead (their
+        // parser stamp lands on the closing token). Try the
+        // specially-composed message first for either class; when
+        // identification fails the original composition below runs
+        // byte-identical, so non-redirect IoErrors and simple commands
+        // are untouched.
+        let report_line = if super::command_text::compound_redirect_error_is_ambient(owner) {
+            self.ambient_line.get().or(owner.end_line).or(owner.line)
+        } else if super::command_text::redirect_error_uses_completion_line(owner) {
+            owner.end_line.or(owner.line)
+        } else {
+            None
+        };
+        if let Some(line) = report_line {
+            let prefix = self.error_prefix_at_line(line);
+            let mut ambient_stderr = Vec::new();
+            writeln!(
+                &mut ambient_stderr,
+                "{}{}",
+                prefix,
+                crate::posix_errors::message(error)
+            )?;
+            if self
+                .failing_open_redirect_index_with_prefix(owner, &ambient_stderr, &prefix)
+                .is_some()
+            {
+                let _ = self.write_redirect_diagnostic_routed_with_prefix(
+                    owner,
+                    &ambient_stderr,
+                    &prefix,
+                );
+                self.exit_code = 1;
+                return Ok(());
+            }
+        }
+        let mut stderr = Vec::new();
+        // GNU redir.c:135 redirection_error (internal_error family) honors
+        // gnu_errfmt (rubash#1038).
+        writeln!(
+            &mut stderr,
+            "{}{}",
+            self.error_prefix(),
+            crate::posix_errors::message(error)
+        )?;
         if self.failing_open_redirect_index(owner, &stderr).is_some() {
             // A routed write that itself fails (closed fd 2) is lost like
             // GNU's builtin_error — never a second diagnostic (rubash#699).
