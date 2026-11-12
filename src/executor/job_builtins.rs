@@ -857,9 +857,18 @@ impl Executor {
         }
 
         if !bg_operands.is_empty()
-            && bg_operands
-                .iter()
-                .any(|operand| self.resolve_background_job(operand).is_some())
+            && bg_operands.iter().any(|operand| {
+                // rubash#2777: a retired `%N` (job already notified
+                // and cleaned up, status saved in `completed_statuses`)
+                // counts as resolvable for the operand-wait route —
+                // the live-table check alone would drop it to the
+                // single-word fallback below, which can only answer
+                // 127. The retired link is consulted only here and
+                // inside `wait_for_background_operands`, never by
+                // kill/fg/bg.
+                self.resolve_background_job(operand).is_some()
+                    || self.retired_job_pid_for_wait_operand(operand).is_some()
+            })
         {
             // GNU wait.def:338-339: -p binds the pid of the LAST operand
             // waited for (pstat.pid; NO_PID when the last operand
