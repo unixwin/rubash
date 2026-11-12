@@ -105,7 +105,7 @@ fn arith_multiline_input_redirect_after_assignment_sibling_reports_completion_li
         "x=1\n(( y = 2 \\\n)) < /nonexistent-xyz/file\necho after=$?\n",
         0,
         "after=1\n",
-        "case.sh: line 2: /nonexistent-xyz/file: No such file or directory\n",
+        "case.sh: line 3: /nonexistent-xyz/file: No such file or directory\n",
     );
 }
 
