@@ -699,6 +699,25 @@ fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
         && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
 }
 
+/// rubash#3434: true when a redirect entry (re)binds fd 2 — the only
+/// redirects that may decline the #2483 live-stderr channel (see
+/// pipeline_stage_stderr_may_stream). An entry claims fd 2 when its fd
+/// is literally 2 (any kind, including `2>&-` / `2<&1`), when it is a
+/// combined-output redirect (`&>f` / `&>>f`, which binds fd 1 and fd 2
+/// together), or when its target fd is dynamic (`{var}`, unknowable
+/// statically — decline conservatively). Every other entry (`3>&1`,
+/// `>f`, `3>file`, `<f`) leaves fd 2's disposition untouched, so the
+/// stage's diagnostics may still stream live.
+fn redirect_claims_fd2(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_some()
+        || matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend
+        )
+        || redirect.fd == Some(2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -1740,6 +1759,23 @@ impl Executor {
                         .time_command
                         .as_ref()
                         .is_some_and(|time| time.command.coproc_command.is_some()));
+            // rubash#3434: arm the #2483 live-stderr channel for this
+            // stage when its fd 2 is live (see
+            // pipeline_stage_stderr_may_stream): a compound/function
+            // stage's diagnostics otherwise sit in the whole-stage
+            // stderr capture until the stage completes, while its
+            // stdout streams live (final member, #1605) or escapes
+            // live through a dup'd fd (`>&3`), so the error that
+            // execution order puts first prints last (GNU forks the
+            // element with the shell's own fd 2, execute_cmd.c:2620,
+            // and builtin_error writes it as produced,
+            // builtins/common.c:98). Restored right after the
+            // dispatch, on both exits; the coproc/lastpipe arms never
+            // consult the flag (they run on this executor, not a
+            // stage subshell), and a nested pipeline inside the stage
+            // body starts from a fresh executor with the flag clear.
+            let saved_stderr_live = self.pipeline_stage_stderr_live;
+            self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(stage);
             let Some((mut next_input, mut next_stderr, mut next_status)) = (if stage_is_coproc_tail
             {
                 if pipeline_inverted {
@@ -1786,11 +1822,13 @@ impl Executor {
                     )
                 })?
             }) else {
+                self.pipeline_stage_stderr_live = saved_stderr_live;
                 super::shell_options::end_capture_timing();
                 self.timed_stdin = entry_timed_stdin.clone();
                 self.defer_stage_time_report = false;
                 return Ok(None);
             };
+            self.pipeline_stage_stderr_live = saved_stderr_live;
             self.pipeline_final_stage.set(false);
             super::shell_options::end_capture_timing();
             // GNU: each element's own redirections run inside the element's
@@ -2530,11 +2568,14 @@ impl Executor {
     /// pipeline's fd 2 must resolve to the process stderr (an ambient
     /// `2>&1` rebinds it to fd 1's object, a case the merged-stream
     /// machinery owns), and no enclosing stderr capture may be armed.
+    /// rubash#3434: only redirects that (re)bind fd 2 decline —
+    /// redirect_claims_fd2 — so a `3>&1` dup (which leaves fd 2 alone)
+    /// no longer forfeits the live channel for the whole stage.
     fn pipeline_stage_stderr_may_stream(&self, command: &CommandNode) -> bool {
         if self.stderr_capture.is_some()
             || command.redirect_err.is_some()
             || command.redirect_err_append.is_some()
-            || !command.redirects.is_empty()
+            || command.redirects.iter().any(redirect_claims_fd2)
         {
             return false;
         }
