@@ -27,7 +27,6 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 struct Outcome {
-    stdout: String,
     stderr: String,
     rc: i32,
 }
@@ -42,7 +41,6 @@ fn run(root: &Path, body: &str) -> Outcome {
         .output()
         .expect("run rubash");
     Outcome {
-        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         rc: out.status.code().unwrap_or(-1),
     }
