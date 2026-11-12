@@ -3978,6 +3978,52 @@ fn arith_internal_frame(stack: &[(usize, usize, OpenerKind)], pos: usize, chars:
         })
 }
 
+/// The operator token starting at `chars[i]`, maximal-munch per GNU
+/// read_token (parse.y:3630-3800), or None when the character starts no
+/// operator. Spelling table byte-verified against GNU bash 5.3.20
+/// (rubash#3405): `;;`/`;&`/`;;&`, `||`/`|&`, `&&`/`&>>`/`&>`,
+/// `>>`/`>&`/`>|`, `<<<`/`<<-`/`<<`/`<>`/`<&`. Note `>>|` names `>>`
+/// (the `|` is a separate token) and `>>>` names `>>`.
+fn operator_token_at(chars: &[char], i: usize) -> Option<String> {
+    let c = *chars.get(i)?;
+    let n = |j: usize| chars.get(j).copied();
+    let text: &str = match c {
+        ';' => match (n(i + 1), n(i + 2)) {
+            (Some(';'), Some('&')) => ";;&",
+            (Some(';'), _) => ";;",
+            (Some('&'), _) => ";&",
+            _ => ";",
+        },
+        '|' => match n(i + 1) {
+            Some('|') => "||",
+            Some('&') => "|&",
+            _ => "|",
+        },
+        '&' => match (n(i + 1), n(i + 2)) {
+            (Some('&'), _) => "&&",
+            (Some('>'), Some('>')) => "&>>",
+            (Some('>'), _) => "&>",
+            _ => "&",
+        },
+        '>' => match n(i + 1) {
+            Some('>') => ">>",
+            Some('&') => ">&",
+            Some('|') => ">|",
+            _ => ">",
+        },
+        '<' => match (n(i + 1), n(i + 2)) {
+            (Some('<'), Some('<')) => "<<<",
+            (Some('<'), Some('-')) => "<<-",
+            (Some('<'), _) => "<<",
+            (Some('>'), _) => "<>",
+            (Some('&'), _) => "<&",
+            _ => "<",
+        },
+        _ => return None,
+    };
+    Some(text.to_string())
+}
+
 /// The token a yacc error names for a `(` in invalid position: the grammar
 /// shifts the paren (function-definition candidate) and fails on the NEXT
 /// token — EOF/newline is reported as `newline' (GNU probe p14: `eval
@@ -3999,6 +4045,17 @@ fn token_after_paren(chars: &[char], open_idx: usize) -> String {
         // rest of the line, so the next token the grammar sees is the
         // newline / end of string.
         return "newline".to_string();
+    }
+    // GNU read_token's operator lexing (parse.y:3630-3800): the token after
+    // an invalid `(` can itself be an operator — `>`, `;`, `|`, `&&` and
+    // their compounds name themselves (rubash#3405: `x=$(echo (>` names
+    // `>`, `x=$(echo (&&` names `&&`). The word scan below stops at the
+    // first operator character and would return an empty token, so
+    // operators take their own maximal-munch arm before it; a digit-led
+    // word (`2>`) still falls through to the word scan, which names the
+    // digits alone.
+    if let Some(op) = operator_token_at(chars, i) {
+        return op;
     }
     let start = i;
     while i < chars.len()

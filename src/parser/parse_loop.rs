@@ -2654,10 +2654,35 @@ fn push_unclosed_paren_error(state: &mut ParseState, tokens: &[Token], start: us
     //       line echo (`((X=([a]))]`, `( (echo hi) x`).
     //
     // Scan left to right; the earliest event owns the diagnostic.
+    // rubash#3405: a dangling redirection inside the unclosed `(` is the
+    // same token-level verdict the keyword-EOF arms already report via
+    // `dangling_redirect_in_region` (parse.y:532 `redirection: '>' WORD`
+    // + parse.y:6833 report_syntax_error): the operator's successor —
+    // `newline' at end of input, a closer, ... — is the first offending
+    // token, and it preempts the pure-EOF report exactly when it precedes
+    // every #413 event below. The scan returns whichever event its token
+    // position reaches first, so the dangling candidate is consulted at
+    // the top of each iteration by absolute token index.
+    let (dangling_at, mut dangling_node) = match dangling_redirect_in_region(
+        &tokens[start + 1..],
+        state.diagnostic_text.as_deref(),
+        state.source_line_offset,
+    ) {
+        Some((offending, node)) => (Some(start + 1 + offending), Some(node)),
+        None => (None, None),
+    };
     {
         let mut depth = 1usize;
         let mut scan = start + 1;
         while scan < tokens.len() {
+            if dangling_at == Some(scan) {
+                state.ast.commands.push(
+                    dangling_node
+                        .take()
+                        .expect("dangling node travels with its index"),
+                );
+                return tokens.len();
+            }
             let token = &tokens[scan];
             if token.compound_unclosed {
                 state.current_cmd.line = Some(token.position);

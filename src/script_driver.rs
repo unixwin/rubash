@@ -3635,6 +3635,25 @@ fn command_paren_verdict_disproved_by_parser(input: &str, parse_posix: bool) -> 
                 .any(command_tree_has_non_cond_parse_error);
     }
     if !ast.commands.iter().any(command_tree_has_parse_error) {
+        // rubash#3405: the real parser stays silent when the offending
+        // `(` hides inside a comsub word — the lexer swallows the whole
+        // body into the word token, so no marker is raised — but the
+        // body's own nested yyparse still dies on the token after it
+        // (parse.y:4549-4555 parse_comsub, 6858-6859). A
+        // ComsubBodyTokenError verdict is therefore NOT disproved by the
+        // main parse's silence: let the unclosed route run and print it.
+        // Every other shape keeps the disproof (notably the matched-pair
+        // EOF, whose `$( (` subshell root the #516/q1, `((` and
+        // `for ((` guards already keep out of this class).
+        if matches!(
+            crate::lexer::unclosed_comsub_eof_shape(input, crate::lexer::parse_extended_glob()),
+            Some((
+                crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                _
+            ))
+        ) {
+            return false;
+        }
         return true;
     }
     // rubash#413: GNU's parser reports the FIRST offending event inside the
@@ -4630,7 +4649,29 @@ fn run_source_impl_inner_body(
                 // end of file from `(' command on line N" — while
                 // `$(`/`$((`/array/quote matched pairs keep the "matching
                 // `X'" wording.
-                if close == ')' && command {
+                // rubash#3405: when the shape scan positively identifies
+                // a token-level error inside the comsub body, the
+                // command-position branch must NOT claim the input for
+                // its subshell-EOF fallthrough — the `else if` arm below
+                // renders that verdict (with the matching suffix), and
+                // the MainLevel/dparen arms inside this branch have no
+                // verdict for it. The shape's own guards (#516/q1,
+                // `((` arithmetic root, `for ((` pair) already keep
+                // those families out of the ComsubBodyTokenError class,
+                // so only genuine body token errors defer.
+                if close == ')'
+                    && command
+                    && !matches!(
+                        crate::lexer::unclosed_comsub_eof_shape(
+                            input,
+                            crate::lexer::parse_extended_glob()
+                        ),
+                        Some((
+                            crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { .. },
+                            _
+                        ))
+                    )
+                {
                     // Issue #516 (F181 class): a `(` that follows word
                     // text — any second word, a redirect or an assignment
                     // prefix before it — is a yacc token error at the
