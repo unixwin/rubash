@@ -4568,6 +4568,12 @@ impl Executor {
             // same Stdout endpoint — its diagnostics join the capture too;
             // a plain fd 2 stays the terminal stream.
             if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
+                // The stdin resolve is hoisted out of the call's argument
+                // list: `Some(&mut *self)` activates its mutable reborrow
+                // at once (no two-phase borrow through `Some`), so a later
+                // `self.exec_inherited_stdin()?` argument would be E0502
+                // — the else branch below hoists it the same way.
+                let child_stdin = self.exec_inherited_stdin()?;
                 crate::builtins::exec::execute_with_io(
                     Some(&mut *self),
                     &exec_args,
@@ -4575,7 +4581,7 @@ impl Executor {
                     &exec_cwd,
                     &mut crate::executor::GlobalStdout,
                     &mut crate::executor::GlobalStdout,
-                    self.exec_inherited_stdin()?,
+                    child_stdin,
                 )?
             } else {
                 // rubash#2395: the child's piped stderr belongs to the
