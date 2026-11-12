@@ -28,7 +28,13 @@ pub(super) fn parse_case_command(
     if !is_keyword(tokens, i, "in") {
         match tokens.get(i) {
             None => {
-                let command = super::parse_loop::unclosed_keyword_eof_node(tokens, start, "case");
+                let command = super::parse_loop::unclosed_keyword_eof_node(
+                    tokens,
+                    start,
+                    "case",
+                    source.as_deref(),
+                    source_line_offset,
+                );
                 return Some((command, tokens.len()));
             }
             Some(_) => {
