@@ -4491,6 +4491,41 @@ impl Executor {
     /// stdin to Stdio::null() unless .stdin() is set, so this channel must
     /// be resolved and passed explicitly at every exec spawn site.
     fn exec_inherited_stdin(&self) -> Result<Stdio, ExecuteError> {
+        // rubash#3046: a live fd-table File endpoint on slot 0 outranks
+        // the FUNCTION_STDIN mirror. GNU runs the element's own
+        // do_redirections AFTER do_piping (execute_cmd.c:5520-5522
+        // execute_subshell_builtin_or_function: do_piping, then
+        // do_redirections (redirects, RX_ACTIVE)), so the element's
+        // own `< file` / `< /dev/char` replaces the pipe on fd 0, and
+        // redir.c redir_open opens the target uniformly — the file
+        // TYPE of the stdin target is never consulted. rubash's text
+        // channel deliberately declines character devices
+        // (shell_options.rs stdin_string_for_command: a device has no
+        // EOF to slurp, "the caller binds the live fd instead"), and
+        // execute_exec's bind_command_fd0_input does bind that live
+        // FileFd — but this function used to consult the mirror first,
+        // so a stage-0 mirror (empty: no producer) handed the child
+        // Stdio::null() (0 bytes), and a later stage's mirror handed
+        // it the upstream pipe bytes (`echo hi | exec dd </dev/urandom`
+        // read "hi\n"), in both cases shadowing the redirect the
+        // shell had just bound. The mirror is fd 0's binding only
+        // while fd 0 itself is unbound — the same precedence the
+        // codebase already states in function_stdin_is_command_source
+        // (shell_options.rs) and in stdin_string_for_command's tail
+        // ("an exec-installed fd 0 in the fd table shadows the
+        // ambient FUNCTION_STDIN buffer"). The bind's text branch
+        // removes the fd-table entry when it stages text
+        // (heredoc / here-string / procsub), so no stale File
+        // endpoint can coexist with a text mirror installed by the
+        // same bind; a File endpoint found here is the command's own
+        // redirect (or an enclosing scope's bind the command did not
+        // supersede, which GNU likewise leaves in place).
+        if let Some(FdReadEndpoint::File(file))
+        | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) = self.fd_table.read_endpoint(0)
+        {
+            let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
+            return Ok(Stdio::from(crate::fd::handle_to_file(dup)));
+        }
         // FUNCTION_STDIN stages bound virtual text (command_input_scope's
         // bind_command_fd0_input, pipeline staging); the unread remainder
         // is what the exec'd image would read off fd 0. background_stdio
@@ -4501,11 +4536,6 @@ impl Executor {
             return Ok(file.map(Stdio::from).unwrap_or(Stdio::null()));
         }
         match self.fd_table.read_endpoint(0) {
-            Some(FdReadEndpoint::File(file))
-            | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
-                let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
-                Ok(Stdio::from(crate::fd::handle_to_file(dup)))
-            }
             // Virtual descriptors have no OS handle: materialize the unread
             // remainder on a temp file — the shared-open-file-description
             // shape GNU's dup2 hands the image.
