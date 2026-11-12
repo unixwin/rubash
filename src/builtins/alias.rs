@@ -29,12 +29,25 @@ const EX_USAGE: i32 = 2;
 /// (including the interactive arm, whose carrier never reaches
 /// the process env — rubash#2259).
 fn diag_prolog() -> Prolog {
+    // rubash#3355 + the #3356 carrier-chain convergence, merged:
+    // error_name follows the get_name_for_error chain, not the
+    // hardcoded "rubash" brand — an empty $0 prints an empty name.
+    // alias takes no variable table, so the chain is composed here
+    // from the process-env carriers (the script-file arm, else
+    // prefix::fallback_error_name's presence-based $0 step), while
+    // shell_basename keeps the shared basename derivation (the
+    // verbatim carrier printed a renamed shell's full path).
     let get = |key: &str| std::env::var(key).ok();
+    let script_file = std::env::var("__RUBASH_SCRIPT_NAME").ok();
+    let error_name = match script_file.as_deref().filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => crate::builtins::prefix::fallback_error_name(&get),
+    };
     Prolog {
         interactive: std::env::var("__RUBASH_INTERACTIVE").is_ok(),
         shell_basename: crate::builtins::prefix::shell_basename(&get),
-        error_name: crate::builtins::prefix::fallback_error_name(&get),
-        script_file: std::env::var("__RUBASH_SCRIPT_NAME").ok(),
+        error_name,
+        script_file,
         line: std::env::var("__RUBASH_CURRENT_LINE").ok(),
     }
 }

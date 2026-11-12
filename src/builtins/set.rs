@@ -127,16 +127,21 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
 fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
     // The name cells derive from the single argv[0] carrier chain
     // (builtins::prefix, rubash#2791), as in shopt's twin of this
-    // composition: the old cells printed the shell-name carrier
-    // VERBATIM as the interactive name (a renamed shell invoked by
-    // path reported its full path) and a hard-coded "rubash" as the
-    // error name (rubash#3256).
+    // composition: error_name follows the get_name_for_error chain
+    // via builtin_diag::error_report_name (rubash#3355: the
+    // presence-based $0 step — an empty $0 prints an empty name,
+    // not the hard-coded "rubash" brand), while shell_basename
+    // keeps the shared basename derivation (the old cells printed
+    // the shell-name carrier VERBATIM as the interactive name —
+    // a renamed shell invoked by path reported its full path —
+    // and a hard-coded "rubash" as the error name, rubash#3256).
+    let script_file = env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
     let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
         shell_basename: crate::builtins::prefix::shell_basename(&get),
-        error_name: crate::builtins::prefix::fallback_error_name(&get),
-        script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+        error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
+        script_file,
         line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
     }
 }

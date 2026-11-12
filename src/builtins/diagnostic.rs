@@ -58,6 +58,11 @@ pub(crate) fn diagnostic_prefix(env_vars: &HashMap<String, String>) -> String {
     if let Some(name) = interactive_name(env_vars) {
         return format!("{name}: ");
     }
+    // rubash#3355: the line-without-file arm (the -c face when $0
+    // is empty) renders through the chain's fallback_error_name,
+    // whose presence-based $0 step makes an empty $0 print an
+    // empty name (error.c:90-120) — the delegation below carries
+    // that arm; no "rubash" literal remains on this face.
     super::prefix::diagnostic_prefix(&map_get(env_vars))
 }
 
@@ -71,6 +76,12 @@ pub(crate) fn sys_error_prefix(env_vars: &HashMap<String, String>) -> String {
     if let Some(name) = interactive_name(env_vars) {
         return format!("{name}: ");
     }
+    // rubash#3355: the no-file arm is get_name_for_error alone
+    // (error.c:275-281 sys_error) — the $0 verdict, not the brand:
+    // an empty $0 prints an empty name. The delegation below
+    // routes that arm through the chain's fallback_error_name
+    // (presence-based $0 step); the interactive arm above keeps
+    // the shared basename shape.
     super::prefix::sys_error_prefix(&map_get(env_vars))
 }
 
@@ -81,6 +92,11 @@ pub(crate) fn readonly_error_prefix(env_vars: &HashMap<String, String>) -> Strin
     if let Some(name) = interactive_name(env_vars) {
         return format!("{name}: ");
     }
+    // rubash#3355: same $0-verdict arm as diagnostic_prefix above —
+    // a line but no file is the -c face with an empty $0, whose
+    // name is empty (error.c:90-120); the delegation below renders
+    // it (honoring gnu_errfmt) through the chain's
+    // fallback_error_name.
     super::prefix::readonly_error_prefix(
         &map_get(env_vars),
         crate::builtins::shopt::option_enabled(env_vars, "gnu_errfmt"),
