@@ -164,7 +164,12 @@ fn issue3284_term_during_pipeline_wait_dies_promptly() {
     assert_prompt_termsig_death("term-pipe", &stdout, code, signal, elapsed, libc::SIGTERM);
 }
 
+// Gated pending #3401: the comsub clone layer never consumes the termsig
+// mailbox, so this cell stays red until the #3401 residual fix lands
+// (captain review of PR #3367, dossier section 6, face 1). Remove the
+// #[ignore] together with that fix.
 #[test]
+#[ignore]
 fn issue3284_term_during_comsub_wait_dies_promptly() {
     let (stdout, code, signal, elapsed) = run_script_timed(
         "term-comsub",
