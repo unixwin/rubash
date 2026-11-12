@@ -1,0 +1,136 @@
+# rubash#3430: stems excluded from the dynamic pin-stem CI run
+# (scripts/ci-run-pin-stems.sh). One stem per line; the first token is
+# the stem name, the rest of the line is its reason. Full-line comments
+# start with '#'.
+#
+# An entry is allowed ONLY for a stem that is red on master for a
+# recorded reason: a pins-first stem whose fix has not landed yet, or
+# a known-red stem triaged from the first full census. The script fails
+# the job if an entry goes stale (stem renamed or removed), so this file
+# tracks the tree. When the fix for an excluded stem lands, delete its
+# line here in the same PR -- the stem then runs by default.
+#
+# FIRST CENSUS (CI run 43229859742, 2026-11-12, base 52eee03f):
+# 1373 stems ran, 9063 tests, 8780 passed / 283 failed / 5 skipped.
+# 87 stems were red; 83 of them name CLOSED issues -- the census surfaced
+# a known-red baseline, not a new breakage. Each entry below names the
+# issue, its state, the failing-test count, the last-touch class and the
+# failure-signature class, and what adjudication is still owed. Classes:
+#   PINS-FIRST  issue OPEN, fix not landed yet (4 stems)
+#   PRODUCT     CLOSED, fix landed, assertion diff shows rubash != expected;
+#               adjudication owed: stale pin vs regression (serial re-run)
+#   MISMATCH    CLOSED, fix landed, but the pin still fails on the very face
+#               the fix claimed (fix-vs-pin mismatch); adjudication owed
+#   ENV         failure signature is environment-shaped (PTY/TTY, runner
+#               ulimit/group set, /proc restrictions, locale availability,
+#               Windows-oriented sim layer on Linux CI, missing fixture)
+#   TIMING      timeout/hang/missing-notice under parallel load; adjudication
+#               owed: serial re-run to separate flake from product
+#   FIXTURE     harness/fixture missing on the runner, not product behaviour
+# SECOND RUN (CI run 43234272221, 2026-11-12, merge commit vs master ffc09fb7):
+# 1287 stems ran (1376 in tree - 89 excluded), 8311 tests, 8309 passed /
+# 2 failed / 4 skipped. The 2 failures are both in one stem,
+# issue2836_emulated_cat_job_control_regressions, which PASSED all 3 tests
+# in run 1 -- a parallel-load timing flake, triaged below as TIMING. The
+# only tree change between the runs (PR #3390, new stem issue3329) passed.
+# The 83 closed-issue reds need a captain adjudication wave (serial re-runs
+# on a Linux box, then fix / re-pin / file residuals). This file is the
+# triage record, not a burial ground: an entry without a recorded reason
+# is a bug in this file.
+#
+# J1 pins-first (wave-2 pins #3180): both stems assert GNU behavior
+# that is a recorded product defect, still OPEN, with no fix landed.
+# - #2769: EOF death-notice delivery race (notice absent on failure).
+# - #2777: post-kill wait-status reads return 127/147/148, never 137; stopped jobs reported as Running.
+issue2769_death_notice_line_stamp_regressions pins-first, fix pending (rubash#2769 OPEN; GNU-stamped line expectations)
+issue2777_stopped_job_state_regressions pins-first, fix pending (rubash#2777 OPEN; GNU JSTOPPED expectations)
+
+# First-census triage (87 stems, 283 tests) + run-2 flake (1 stem, 2 tests); see header.
+issue1025_1026_1068_1103_1359_redirect_fd_regressions PRODUCT/TIMING: #1967 CLOSED; 2 tests fail; dev/tcp cells get 0 connections delivered on plain `>` redirect; needs serial re-run (product vs timing)
+issue1038_gnu_errfmt_prefix PRODUCT: #1038 CLOSED; 1 test fails; redirect-open-failure diagnostic prefix wording; fix 6c6d523f landed; stale pin vs regression
+issue1046_groups_variable_regressions ENV: #1046 CLOSED; 1 test fails; runner group set differs from expectation (GROUPS=(1000)); environment (runner group set)
+issue1100_printf_option_parsing PRODUCT: #1100 CLOSED; 5 tests fail; printf option-parsing diagnostics; fix 63172b5e landed; stale pin vs regression
+issue1175_exec_image_regressions PRODUCT: #1175 CLOSED; 2 tests fail; exec image/pid; pin-only last touch ee83063d; product divergence
+issue1252_interactive_defaults_regressions PRODUCT: #1252 CLOSED; 1 test fails; rubash parser rejects probe script `$( [[ -d /etc/fs ]] )` (syntax error at `]]`); product-vs-probe, needs valid-bash check
+issue1369_command_builtin_time_regressions PRODUCT: #1369 CLOSED; 1 test fails; `time` rc matrix; pin-only last touch dd8c4fa2; product divergence
+issue1496_write_error_diag_regressions PRODUCT: #1496 CLOSED; 1 test fails; write-error diagnostic wording; pin-only last touch 732a9c8f; product divergence
+issue1520_parsetime_posix_time_regressions PRODUCT: #1520 CLOSED; 3 tests fail; `time` output format; last touch test-hygiene ac6b176f; product divergence
+issue1596_external_stderr_no_shell_envelope PRODUCT: #1596 CLOSED; 1 test fails; external stderr envelope; fix 23cf817f landed; stale pin vs regression
+issue1606_ansic_unicode_above_max_regressions PRODUCT: #1606 CLOSED; 1 test fails; $'\U' above U+10FFFF bytes; fix 2434b08d landed; stale pin vs regression
+issue160_unclosed_quote_command_string PRODUCT: #160 CLOSED; 6 tests fail; unclosed-quote diagnostic; pin-only last touch bfff4425; product divergence
+issue1636_sim_layer_decline_regressions ENV: #1636 CLOSED; 1 test fails; sim-layer emulated `tty` decline wording; Windows-oriented sim layer, red on Linux CI
+issue1639_1640_interactive_sigint_regressions TIMING: #1639/#1640 CLOSED; 3 tests fail; PTY Ctrl-C discard ran despite ^C; last touch f5b34c13 (PIN-wrong battery repair); serial re-run to separate timing from product
+issue1639_read_loop_eval_discard_regressions TIMING: #1639 CLOSED; 3 tests fail; PTY Ctrl-C discard; last touch 48c3086e (PTY pin fix); serial re-run to separate timing from product
+issue1692_setlocale_warning PRODUCT: #1692 CLOSED; 2 tests fail; setlocale warning wording; fix 6537b06c landed; stale pin vs regression (runner locale availability may contribute)
+issue1768_diagnostic_prefix_matrix_regressions MISMATCH: #1768 CLOSED; 2 tests fail; diagnostic-prefix matrix; expectation wording is a captain-retained adjudication item (pin may be wrong, not product); last touch WIP 16a19ac5
+issue1806_prefix_env_composition_regressions PRODUCT: #1806 CLOSED; 1 test fails; internal FD vars (__RUBASH_FD_HANDLE_*) leak into child `env`; last touch WIP c9c99d16; product divergence
+issue1825_wait_sigint_discard_regressions TIMING: #1825 CLOSED; 2 tests fail; wait/sigint discard PTY; fix caec1c78 landed; serial re-run to separate timing from product
+issue1832_exec_replace_tail_shlvl_regressions PRODUCT: #1832 CLOSED; 3 tests fail; exec-replace tail SHLVL; last touch WIP c9c99d16; product divergence
+issue1842_comsub_herestring_carrier_regressions PRODUCT: #1842 CLOSED; 2 tests fail; herestring carrier parse rejected (`echo <<(printf ...)` syntax error at newline); fix 46452a9e (#1865) landed; stale pin vs regression
+issue1846_sim_diagnostics_channel_regressions ENV: #1846 CLOSED; 1 test fails; sim-layer rm/touch diagnostic channel; WIP f78396f3; Windows-oriented sim layer, red on Linux CI
+issue1941_1948_sim_layer_option_regressions ENV: #1941/#1948 CLOSED; 1 test fails; sim-layer option handling (mkdir/rmdir/mknod); last touch test-hygiene 4b755467; Windows-oriented sim layer, red on Linux CI
+issue1990_1991_signal_job_regressions TIMING: #1990/#1991 CLOSED; 2 tests fail; PTY job-control timed out waiting for 'after' marker; last touch fix 864a9b72 (#2954); serial re-run (parallel-load timing)
+issue2042_proc_write_einval_regressions ENV: #2042 CLOSED; 3 tests fail; /proc write returns Permission denied on runner, not EINVAL; fix 22d046a1 landed; environment (runner /proc restrictions) vs product
+issue2136_respawn_provenance PRODUCT: #2136 CLOSED; 1 test fails; respawn provenance pid mismatch; fix 13392b9f landed; stale pin vs regression
+issue2246_compound_redirect_entry_binding_regressions PRODUCT: #2246 CLOSED; 2 tests fail; compound redirect entry binding; last touch pin-shape fix bc6909c4; product divergence
+issue2259_interactive_marker_leak_regressions PRODUCT: #2259 CLOSED; 1 test fails; marker (__RUBASH_CURRENT_LINE) leaks into children; last touch pin fix 2cdd8e02; product divergence
+issue2272_fdvar_spawn_delivery_regressions PRODUCT: #2272 CLOSED; 1 test fails; fd-var spawn delivery; last touch pin correction a93eb18d; product divergence
+issue2281_pending_close_positions TIMING: #2281 CLOSED; 1 test fails; `cat: -: Resource temporarily unavailable` (EAGAIN) under parallel load; serial re-run
+issue2282_applier_own_slots PRODUCT: #2282 CLOSED; 1 test fails; fd applier own slots; fix a0e23841 landed; stale pin vs regression
+issue2316_spelling_gate_position_regressions PRODUCT: #2316 CLOSED; 2 tests fail; /dev/fd spelling gate; fix e9aea269 landed; stale pin vs regression
+issue2322_close_position_regressions PRODUCT: #2322 CLOSED; 3 tests fail; close-position; last touch fmt 6c31956b; product divergence
+issue2368_foreign_spawn_post_wait_trunc_regressions PRODUCT: #2368 CLOSED; 3 tests fail; foreign-spawn post-wait truncation; pin-only last touch 8181d928; product divergence
+issue2398_jobstop_regressions TIMING: #2398 CLOSED; 1 test fails; PTY jobstop timed out waiting for stopped notice; last touch pin restructure 58b87464; serial re-run (parallel-load timing)
+issue2550_devfull_ambient PRODUCT: #2550 CLOSED; 4 tests fail; ambient /dev/full binding; fix 7f6076db landed; stale pin vs regression
+issue2578_comp_wordbreaks_regressions PRODUCT: #2578 CLOSED; 1 test fails; completion wordbreaks; fix 44de2345 landed; stale pin vs regression
+issue2599_procsub_producer_varfd_regressions PRODUCT: #2599 CLOSED; 3 tests fail; procsub producer varfd; fix 1814bb67 landed; stale pin vs regression
+issue2622_fg_bg_group_sigcont_regressions TIMING: #2622 CLOSED; 2 tests fail; PTY fg/bg timed out waiting for stopped-notice line; last touch pin fix b20d2d18; serial re-run (parallel-load timing)
+issue2624_kill_jobspec_group_delivery_regressions TIMING: #2624 CLOSED; 4 tests fail; PTY kill/jobspec timed out waiting for stopped-notice line; last touch fmt 6c31956b; serial re-run (parallel-load timing)
+issue2634_extdebug_bash_argc_sticky PINS-FIRST: #2634 OPEN; 6 tests fail; fix PR #3427 in review, unmerged
+issue2662_read_high_byte_delimiter PRODUCT: #2662 CLOSED; 1 test fails; read -d high-byte delimiter rc; fix 947bbc9f (#3142) landed; stale pin vs regression
+issue2697_subshell_member_death_notice_regressions PINS-FIRST: #2697 OPEN; 2 tests fail; J1 pins-first, jobs-side adjudication owed
+issue2739_continuation_error_attribution_regressions MISMATCH: #2739 CLOSED; 1 test fails; attribution family, F4 fix 30b1b51c landed but cell still fails; fix-vs-pin mismatch, adjudication owed
+issue2741_2742_if_loop_head_attribution_regressions MISMATCH: #2741/#2742 CLOSED; 7 tests fail; attribution family, F4 fix 30b1b51c landed but cells still fail; fix-vs-pin mismatch, adjudication owed
+issue2747_function_body_attribution_regressions MISMATCH: #2747 CLOSED; 7 tests fail; attribution family, F4 fix 30b1b51c landed but cells still fail; fix-vs-pin mismatch, adjudication owed
+issue2750_conditional_followon_attribution_regressions MISMATCH: #2750 CLOSED; 19 tests fail; attribution family, F4 fix 30b1b51c landed but cells still fail; fix-vs-pin mismatch, adjudication owed; folds into #3111 after #3141 merges
+issue2754_eof_line_attribution_regressions MISMATCH: #2754 CLOSED; 1 test fails; attribution family, F4 fix 30b1b51c landed but cell still fails; fix-vs-pin mismatch, adjudication owed
+issue2803_exec_dup_redirects PRODUCT: #2803 CLOSED; 1 test fails; exec dup redirects rc; last touch F2 d4f7d94b; product divergence
+issue2836_emulated_cat_job_control_regressions TIMING: #2836 CLOSED; 2 tests fail; PTY foreground cat/sed ^Z: timed out (22s) waiting for '[1]+  Stopped'; fix e3fcff67 (#2842) landed; FLAKE EVIDENCE: all 3 tests PASSED in census run 1 (2.5-3.8s) and 2 failed in run 2 on the same product code — parallel-load timing; serial re-run owed
+issue2836_pipeline_subshell_job_control_regressions TIMING: #2836 CLOSED; 6 tests fail; PTY pipeline/subshell job control, stopped notice missing; fix 585107c4 (#2854) landed; serial re-run to separate timing from product
+issue2838_loop_stop_break_regressions TIMING: #2838 CLOSED; 6 tests fail; PTY loop stop, stopped notice missing; fix 082030f2 (#2845) landed; serial re-run to separate timing from product
+issue2851_subshell_loop_stop_regressions TIMING: #2851 CLOSED; 7 tests fail; PTY subshell loop stop, stopped notice missing; fix 061364cd (#2870) landed; serial re-run to separate timing from product
+issue2886_disown_stopped_current_regressions TIMING: #2886 CLOSED; 1 test fails; PTY bare disown transcript; fix 5761a4da (#2951) landed; serial re-run to separate timing from product
+issue2906_mvdan_sh_execution_differential PINS-FIRST: #2906 OPEN; 5 tests fail; mvdan/sh execution differential vs GNU ledger, fix pending
+issue297_300_interactive_init_regressions ENV: #297/#300 CLOSED; 7 tests fail; PTY 'cannot set terminal process group ... Inappropriate ioctl' (needs controlling terminal); last touch f5b34c13 (PIN-wrong battery repair); environment (PTY)
+issue3009_printf_v_locale_warning PRODUCT: #3009 CLOSED; 2 tests fail; printf -v locale warning wording; fix 963f8a3a (#3057) landed; stale pin vs regression (runner locale availability may contribute)
+issue3046_exec_pipeline_chardev_stdin PINS-FIRST: #3046 OPEN; 5 tests fail; W2b pins-first, fix gated on #3424 merge
+issue3059_arith_locale_warning PRODUCT: #3059 CLOSED; 1 test fails; arithmetic locale warning wording; fix 45235a82 (#3064) landed; stale pin vs regression
+issue3060_for_loop_locale_warning PRODUCT: #3060 CLOSED; 1 test fails; for-loop locale warning wording; fix 7f6a8ea8 (#3062) landed; stale pin vs regression
+issue3209_function_body_first_redirect_stamp PRODUCT: #3209 CLOSED; 1 test fails; function-body first redirect stamp; last touch d7a37258 (#3266); product divergence
+issue327_empty_brace_body_regressions PRODUCT: #327 CLOSED; 4 tests fail; empty brace body; fix 87385688 landed; stale pin vs regression
+issue3284_engine_wait_termsig_regressions TIMING: #3284 CLOSED; 1 test fails; 'must die by signal: Some(0)' (child exited 0 before signal, timing race); fix 82244adb (#3367) landed; #3401 covers #3284 residuals; serial re-run
+issue332_extglob_gate_paren_regressions PRODUCT: #332 CLOSED; 10 tests fail; extglob gate paren; fix 402d1d53 landed; stale pin vs regression
+issue353_ansi_u_readtime_locale_regressions PRODUCT: #353 CLOSED; 4 tests fail; ANSI-U readtime locale bytes; last touch fix d5d66428 (#355 followup); product divergence
+issue358_set_bundled_flags_regressions PRODUCT: #358 CLOSED; 1 test fails; set bundled flags; last touch test fix 225eb9e9 (#766); product divergence
+issue360_parser_overlax_regressions PRODUCT: #360 CLOSED; 3 tests fail; parser overlax; fix 7c4d580d landed; stale pin vs regression
+issue377_unquoted_at_list_fanout_glob_regressions PRODUCT: #377 CLOSED; 1 test fails; unquoted @ fanout glob; fix a8eb9e93 landed; stale pin vs regression
+issue381_empty_case_stray_delimiter_regressions PRODUCT: #381 CLOSED; 3 tests fail; empty case stray delimiter; fix 600cf42c landed; stale pin vs regression
+issue390_parse_error_wording_regressions PRODUCT: #390 CLOSED; 8 tests fail; parse error wording; fix 815802eb landed; stale pin vs regression
+issue391_compound_bracket_elements_regressions PRODUCT: #391 CLOSED; 3 tests fail; compound bracket elements; fix d47cef6f landed; stale pin vs regression
+issue413_caseerr_batch2_regressions PRODUCT: #413 CLOSED; 4 tests fail; case err batch 2; fix cc5495a8 landed; stale pin vs regression
+issue423_interactive_cd_child_cwd_regressions TIMING: #423 CLOSED; 2 tests fail; interactive cd child cwd, expected/got look byte-identical in the message (invisible CR/newline difference); fix 39ea0519 landed; PTY-shaped, serial re-run
+issue431_prompt_marker_render_regressions ENV: #431 CLOSED; 1 test fails; PTY 'cannot set terminal process group ... Inappropriate ioctl'; last touch f5b34c13; environment (PTY)
+issue518_redirect_message_regressions PRODUCT: #518 CLOSED; 3 tests fail; redirect message; last touch Wave3 P3 8453879e (#569); product divergence
+issue590_dollar0_invocation_face_regressions FIXTURE: #590 CLOSED; 5 tests fail; 'copy shim under face name: No such file or directory' — face-name shim fixture missing on runner; harness/fixture, not product
+issue635_export_abort_regressions PRODUCT: #635 CLOSED; 6 tests fail; export abort; fix 3696f3ae (#677) landed; stale pin vs regression
+issue636_atstar_compound PRODUCT: #636 CLOSED; 6 tests fail; [@]/[*] compound; fix 01db0a35 (#656) landed; stale pin vs regression
+issue637_eval_discard PRODUCT: #637 CLOSED; 5 tests fail; eval discard; fix d4d8dc4a (#657) landed; stale pin vs regression
+issue639_nounset_subscript PRODUCT: #639 CLOSED; 9 tests fail; nounset subscript; fix ea9c18e8 (#654) landed; stale pin vs regression
+issue705_error_branding PRODUCT: #705 CLOSED; 9 tests fail; error branding; last touch test-hygiene ac6b176f; product divergence
+issue705_nounset_errexit_status PRODUCT: #705 CLOSED; 1 test fails; nounset errexit status; fix c4ca8eb6 (#778) landed; stale pin vs regression
+issue723_streaming_tail_multi_prefix TIMING: #723 CLOSED; 1 test fails; `seq 100000 | while read` did not terminate within 20s (unbounded-producer hang); fix 98dea1dd landed; serial re-run (parallel-load timing)
+issue773_fd_table_capacity_regressions ENV: #773 CLOSED; 1 test fails; runner fd limit 65536, expects unlimited; last touch f5b34c13; environment (runner ulimit)
+issue804_restricted_redirect_command_regressions PRODUCT: #804 CLOSED; 1 test fails; restricted redirect diagnostic printed twice; last touch test-hygiene ac6b176f; product divergence
+issue826_compound_redirect_diag_route_regressions PRODUCT: #826 CLOSED; 9 tests fail; compound redirect diag route; fix 5daa47c4 landed; stale pin vs regression
+issue856_script_pua_literal_regressions PRODUCT: #856 CLOSED; 3 tests fail; script PUA literal bytes; fix a692b20c (#946) landed; stale pin vs regression
+issue860_assoc_empty_key_regressions PRODUCT: #860 CLOSED; 11 tests fail; assoc empty key; last touch test correction 66efaa47; product divergence
