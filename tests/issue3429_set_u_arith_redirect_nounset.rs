@@ -7,14 +7,22 @@
 //! cm_arith / cm_group, :479-495; err_unboundvar, error.c:447).
 //!
 //! rubash's reject gate classified by the node's synthetic words:
-//! `(( ... ))` records words `["((", "<expr>", "))"]` and a brace
-//! group records no words at all, so both read as a forked-child
-//! (external) target and the fatal jump was contained — the walker
-//! reported `name: unbound variable` and set status 1, yet the script
-//! kept running. The fix teaches
-//! `heredoc_error_command_runs_in_main_shell` that an arithmetic or
-//! brace-group node runs in the main shell (unless backgrounded or
-//! pipelined, which still fork first).
+//! `(( ... ))` records words `["((", "<expr>", "))"]`, so it read as
+//! a forked-child (external) target and the fatal jump was contained
+//! — the walker reported `name: unbound variable` and set status 1,
+//! yet the script kept running. The first fix teaches
+//! `heredoc_error_command_runs_in_main_shell` that an arithmetic
+//! command node runs in the main shell (unless backgrounded or
+//! pipelined, which still fork first). A brace group never reaches
+//! that gate — its redirects run through the compound prologue arms
+//! (`prepare_brace_group_redirects` / `with_command_input_redirects`),
+//! which expand the target with no nounset gate — so the rework adds
+//! `brace_group_redirect_nounset_fatal`, a prologue preflight that
+//! scans the group's own redirect list with the walker's nounset arm
+//! before any prepare/bind side effect and unwinds as ExitCode(1).
+//! (Rework: the a-sub cell below is a sixth fix cell, not a control —
+//! on the base the subshell prints `inner`, on the head it does not;
+//! see REPORT §3.)
 //!
 //! Expectations are the GNU bash 5.3.20 oracle outputs for the lane
 //! probe matrix (probe-3429-gnu.sh, 18 shapes), compared byte-exact
@@ -124,6 +132,22 @@ fn inverted_arith_output_redirect_word_is_fatal() {
     );
 }
 
+// Rework: a sixth fix cell, mislabeled a control at first filing —
+// on the base the subshell prints `inner` (the containment swallows
+// the fatal jump and the subshell continues); on the head the Err
+// unwinds to the subshell boundary and folds into its status, so
+// `inner` never prints (GNU: same).
+#[test]
+fn arith_output_redirect_word_subshell_stays_contained() {
+    assert_case(
+        "a-sub",
+        "set -u\n( (( x = 1 )) > $undefined_target_xyz; echo inner )\necho after=$?\n",
+        0,
+        "after=1\n",
+        "case.sh: line 2: undefined_target_xyz: unbound variable\n",
+    );
+}
+
 // ---- Controls: faces that already agreed with GNU. ----
 
 #[test]
@@ -155,17 +179,6 @@ fn arith_output_redirect_word_pipeline_stays_contained() {
         "set -u\n(( x = 1 )) > $undefined_target_xyz | cat\necho after=$?\n",
         0,
         "after=0\n",
-        "case.sh: line 2: undefined_target_xyz: unbound variable\n",
-    );
-}
-
-#[test]
-fn arith_output_redirect_word_subshell_stays_contained() {
-    assert_case(
-        "a-sub",
-        "set -u\n( (( x = 1 )) > $undefined_target_xyz; echo inner )\necho after=$?\n",
-        0,
-        "after=1\n",
         "case.sh: line 2: undefined_target_xyz: unbound variable\n",
     );
 }

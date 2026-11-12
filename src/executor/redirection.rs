@@ -1560,6 +1560,103 @@ impl Executor {
         Ok(None)
     }
 
+    /// rubash#3429 (rework): whether THIS brace group's own redirect
+    /// list carries an unbound variable under `set -u`. The compound
+    /// prologue's brace arms (`prepare_brace_group_redirects` /
+    /// `with_command_input_redirects`) expand the target word with no
+    /// nounset gate, so `$nope` silently becomes the empty string and
+    /// the group reports an empty-name diagnostic (`: Is a directory` /
+    /// `: No such file or directory`) and continues — while GNU's
+    /// compound prologue (execute_cmd.c:854 `do_redirections`,
+    /// RX_ACTIVE|RX_UNDOABLE, shared by cm_group, :479-495) fails the
+    /// expansion with `name: unbound variable` (error.c:447
+    /// err_unboundvar) and aborts the script. The scan is the walker's
+    /// own nounset arm (reject_invalid_redirects above):
+    /// process-substitution spans and single-quoted spans masked,
+    /// heredoc / here-string targets skipped, the first hit in list
+    /// order reported through the fd-2 bindings in force at its
+    /// position. Only a brace-group node on a main-shell dispatch
+    /// fires: backgrounded (`&`) and pipelined stages keep the first
+    /// fix's fork-first containment (the classifier's guard in
+    /// heredoc_error_command_runs_in_main_shell), and if/while/for/
+    /// case/`[[]]` are rubash#3454's faces, not this gate's — they
+    /// never reach this helper because only
+    /// execute_brace_group_pipeline calls it.
+    pub(in crate::executor) fn brace_group_redirect_nounset_fatal(
+        &mut self,
+        cmd: &CommandNode,
+    ) -> Result<bool, ExecuteError> {
+        if cmd.brace_group.is_none()
+            || cmd.background
+            || cmd.background_command.is_some()
+            || cmd.pipe.is_some()
+            || cmd.pipeline_command.is_some()
+        {
+            return Ok(false);
+        }
+        if !crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
+            return Ok(false);
+        }
+        // Candidate list: the walker's construction — `redirects`
+        // first, then the mirror fields, one occurrence per semantic
+        // key (the mirrors are projections of list entries, not list
+        // members; when the list itself is empty the mirrors are the
+        // only representation and do form the list).
+        let semantic_key = |redirect: &Redirect| {
+            format!(
+                "{:?}\x1f{}\x1f{:?}\x1f{}",
+                redirect.kind, redirect.operator, redirect.fd, redirect.target
+            )
+        };
+        let mut candidates: Vec<&Redirect> = cmd.redirects.iter().collect();
+        let mut seen_keys: std::collections::HashSet<String> = candidates
+            .iter()
+            .map(|redirect| semantic_key(redirect))
+            .collect();
+        for redirect in [
+            cmd.redirect_in.as_deref(),
+            cmd.redirect_out.as_deref(),
+            cmd.append.as_deref(),
+            cmd.redirect_err.as_deref(),
+            cmd.redirect_err_append.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if seen_keys.insert(semantic_key(redirect)) {
+                candidates.push(redirect);
+            }
+        }
+        for (index, redirect) in candidates.iter().enumerate() {
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) {
+                continue;
+            }
+            // rubash#1915/#1930: judge the raw target with the
+            // recorded process-substitution spans and the single-quoted
+            // spans masked, exactly like the walker does.
+            let masked_target = Self::mask_recorded_process_substitutions(
+                &redirect.target_metadata.raw,
+                &redirect.target_metadata.process_substitutions,
+            );
+            let masked_target = mask_redirect_target_quoted_spans(&masked_target);
+            if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
+                let mut stderr = Vec::new();
+                writeln!(
+                    &mut stderr,
+                    "{}{name}: unbound variable",
+                    self.compound_redirect_error_prefix(cmd)
+                )?;
+                self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
+                self.exit_code = 1;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The dup bad-fd rejection. GNU `>&7-`/`<&7-` with fd 7 closed fails
     /// in TWO steps (verified against WSL GNU 5.3.0, rubash#263/#266):
     /// redir.c:1137-1143's add_undo_redirect of the moved fd sys_errors
