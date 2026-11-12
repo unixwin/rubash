@@ -2712,7 +2712,15 @@ impl Executor {
     /// own trap table was reset for the subshell child, so its own
     /// `termsig_death_armed` can never fire). Mirrors that helper
     /// exactly: EXIT-armed plus `exit_reroutes`, or an interactive
-    /// SIGHUP; an interactive SIGINT is never armed.
+    /// SIGHUP; an interactive SIGINT is never armed. EXIT-armed has
+    /// TWO sources: the clone's snapshot Cell AND the live trap table.
+    /// The Cell is the clone's only source, but on the parent executor
+    /// it is always false — initialised false, only ever set when a
+    /// clone is built — so the fast path (which runs on the parent)
+    /// must also consult the live table, exactly like
+    /// `termsig_death_armed`. Without the live read the verdict never
+    /// returns death on the fast path and the wait rides out the whole
+    /// child (pin term-comsub died at 5.05s on head ddd41e5c).
     #[cfg(unix)]
     fn comsub_parent_termsig_armed(&self, signal: i32) -> bool {
         if self.invocation_interactive() && signal == libc::SIGINT as i32 {
@@ -2721,7 +2729,10 @@ impl Executor {
         if self.invocation_interactive() && signal == libc::SIGHUP as i32 {
             return true;
         }
-        self.comsub_parent_exit_armed.get() && crate::builtins::kill::exit_reroutes(signal)
+        let exit_armed = self.comsub_parent_exit_armed.get()
+            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT")
+                .is_some();
+        exit_armed && crate::builtins::kill::exit_reroutes(signal)
     }
 
     /// rubash#3401: the shared termsig classifier for `&self` waits
