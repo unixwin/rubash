@@ -4536,6 +4536,22 @@ impl Executor {
             return Ok(file.map(Stdio::from).unwrap_or(Stdio::null()));
         }
         match self.fd_table.read_endpoint(0) {
+            // rubash#3046 (rework): the File / CoprocStdout arms are
+            // required for exhaustiveness (E0004) and bind the live fd
+            // exactly as the early return above does
+            // (open_fd_read_endpoint_stream, shell_options.rs:1182/1194:
+            // a File or coproc-pipe read end is handle-backed; duplicate
+            // the handle and hand the child the live fd). They are
+            // unreachable while the early return stands, but they keep
+            // the match total — and semantically identical — if that
+            // return is ever restructured. Never collapse these into a
+            // wildcard: the live fd must win over the mirror, not fall
+            // through to Stdio::null().
+            Some(FdReadEndpoint::File(file))
+            | Some(FdReadEndpoint::CoprocStdout { fd: file, .. }) => {
+                let dup = crate::fd::duplicate_handle_inheritable(file.handle)?;
+                Ok(Stdio::from(crate::fd::handle_to_file(dup)))
+            }
             // Virtual descriptors have no OS handle: materialize the unread
             // remainder on a temp file — the shared-open-file-description
             // shape GNU's dup2 hands the image.
