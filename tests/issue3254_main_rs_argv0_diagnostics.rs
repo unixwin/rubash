@@ -28,7 +28,15 @@
 //!   nailed here; only the program NAME of the product diagnostic is
 //!   in scope for the init-file arm.
 //!
-//! Every expectation below is the GNU byte; the base prints the
+//! Every expectation below is the GNU byte — EXCEPT the usage-block
+//! cells, which assert the product's deliberately normalized form
+//! (captain ruling (b), re-review round 3): `show_shell_usage`
+//! prints `{name} [GNU long option] ...` with no `Usage:\t` prefix
+//! and no second-line tab, per the base comment at
+//! `src/main.rs:1389-1393` (upstream suites sed the prefix away, so
+//! the product prints the normalized form directly). The name
+//! derivation in the block is what the pin tests; the raw-vs-normalized
+//! format question is a separate product decision. The base prints the
 //! literal instead, so each test fails on the base (fail-first by
 //! construction — the expected strings differ literally from the
 //! base's hardcoded literals) and passes after the fix.
@@ -111,11 +119,25 @@ impl Drop for Scratch {
 }
 
 fn assert_usage_block(stderr: &str, name: &str) {
+    // rubash#3254 re-review round 3, captain ruling (b): the usage block
+    // asserts the product's DELIBERATE normalized form, NOT GNU's raw
+    // `Usage:\t{name} ...` form. Base `src/main.rs:1389-1393`
+    // (show_shell_usage) documents the choice: GNU prints
+    // `Usage:\tbash ...` but the upstream suites sed that prefix away,
+    // so the product prints the normalized form directly. The name
+    // derivation is what this pin tests; the raw-vs-normalized format
+    // question is a separate product decision, not this PR's scope.
+    // (The --help path in `src/usage.rs` prints the raw form — that
+    // internal inconsistency is likewise out of scope here.)
     assert!(
         stderr.contains(&format!(
-            "Usage:\t{name} [GNU long option] [option] ...\n\t{name} [GNU long option] [option] script-file ...\n"
+            "{name} [GNU long option] [option] ...\n{name} [GNU long option] [option] script-file ...\n"
         )),
         "usage block must carry {name:?}: {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("Usage:\t"),
+        "usage block must be the normalized form (no Usage: prefix): {stderr:?}"
     );
     assert!(
         stderr.contains("GNU long options:\n"),
@@ -179,10 +201,16 @@ fn issue3254_dash_o_bad_name_uses_argv0() {
     let s = Scratch::new("dash-o");
     let (_out, err, rc) = s.run_argv0("myname", &["-o", "badname"]);
     assert_eq!(rc, 2, "stderr: {err}");
-    assert_eq!(err, "myname: line 0: myname: badname: invalid option name\n");
+    assert_eq!(
+        err,
+        "myname: line 0: myname: badname: invalid option name\n"
+    );
     let (_out, err, rc) = s.run_argv0("myname", &["+o", "badname"]);
     assert_eq!(rc, 2, "stderr: {err}");
-    assert_eq!(err, "myname: line 0: myname: badname: invalid option name\n");
+    assert_eq!(
+        err,
+        "myname: line 0: myname: badname: invalid option name\n"
+    );
 }
 
 #[test]
@@ -243,7 +271,10 @@ fn issue3254_profile_output_without_argument_uses_argv0() {
     let s = Scratch::new("profile-output");
     let (_out, err, rc) = s.run_argv0("myname", &["--profile-output"]);
     assert_eq!(rc, 2, "stderr: {err}");
-    assert_eq!(err, "myname: --profile-output: option requires an argument\n");
+    assert_eq!(
+        err,
+        "myname: --profile-output: option requires an argument\n"
+    );
 }
 
 #[test]
@@ -292,7 +323,10 @@ fn issue3254_debugger_missing_starter_uses_script_name() {
     let script_arg = script.to_str().unwrap().to_string();
     let (out, err, rc) = s.run_argv0("myname", &["--debugger", &script_arg]);
     assert_eq!(rc, 0, "stderr: {err}");
-    assert_eq!(out, format!("script-0={script_arg}\n"), "stderr: {err}");
+    // finish() normalizes stdout (scratch dir -> $S), so the stdout
+    // expectation must use the normalized $S/script.sh path, not the
+    // raw script_arg (re-review round 3: the raw path was the bug).
+    assert_eq!(out, "script-0=$S/script.sh\n", "stderr: {err}");
     assert_eq!(
         err,
         "$S/script.sh: /usr/local/share/bashdb/bashdb-main.inc: No such file or directory\n\
@@ -329,8 +363,10 @@ fn issue3254_empty_argv0_diagnostic_empty_but_usage_bash() {
     );
     // shell.c set_shell_name rescues an empty shell_name to PROGRAM,
     // so the usage block — unlike the diagnostic — prints `bash`.
+    // Normalized form per the captain ruling (b): no `Usage:\t` prefix,
+    // no second-line tab (see assert_usage_block).
     assert!(
-        err.contains("Usage:\tbash [GNU long option] [option] ...\n\tbash [GNU long option] [option] script-file ...\n"),
+        err.contains("bash [GNU long option] [option] ...\nbash [GNU long option] [option] script-file ...\n"),
         "usage block must rescue to bash: {err:?}"
     );
 }
