@@ -188,7 +188,10 @@ fn bg_missing_command_in_deleted_cwd_keeps_127() {
     ));
     assert_eq!(code, Some(0));
     assert_eq!(stderr, "");
-    assert!(stdout.contains("bg-rc=127"), "job rc should be 127, got: {stdout}");
+    assert!(
+        stdout.contains("bg-rc=127"),
+        "job rc should be 127, got: {stdout}"
+    );
     assert!(
         stdout.contains("command not found"),
         "missing command should be diagnosed, got: {stdout}"
