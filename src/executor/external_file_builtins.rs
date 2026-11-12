@@ -1615,15 +1615,22 @@ impl Executor {
             return Ok(true);
         }
 
-        if effective.len() > 2 && !destination.exists() {
-            let _ = writeln!(
-                stderr,
-                "cp: target '{}': No such file or directory",
-                destination_word
-            );
-            self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
-            self.exit_code = 1;
-            return Ok(true);
+        if effective.len() > 2 {
+            // GNU cp stats the target operand: a missing target is
+            // ENOENT, but a target spelled through a regular file is
+            // the walk's ENOTDIR — the classified stat keeps the two
+            // apart (rubash#3416).
+            if let Err(error) = destination.stat_classified() {
+                let _ = writeln!(
+                    stderr,
+                    "cp: target '{}': {}",
+                    destination_word,
+                    crate::posix_errors::message(&error)
+                );
+                self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
+                self.exit_code = 1;
+                return Ok(true);
+            }
         }
 
         // rubash#1941: --preserve=links bookkeeping for this whole
@@ -1813,11 +1820,12 @@ impl Executor {
                     (destination.clone(), destination_word.clone())
                 };
 
-                if !source.exists() {
+                if let Err(error) = source.stat_classified() {
                     let _ = writeln!(
                         stderr,
-                        "cp: cannot stat '{}': No such file or directory",
-                        source_word
+                        "cp: cannot stat '{}': {}",
+                        source_word,
+                        crate::posix_errors::message(&error)
                     );
                     status = 1;
                     continue;
@@ -2326,7 +2334,7 @@ impl Executor {
                             && !t.starts_with("<(")
                             && !t.starts_with(">(")
                         {
-                            let _ = self.create_redirect_output(&t, r.clobber);
+                            let _ = self.create_redirect_output_for(Some(r), &t, r.clobber);
                         }
                     } else {
                         seen_last = true;
@@ -2343,7 +2351,8 @@ impl Executor {
                     self.exit_code = 0;
                     return Ok(true);
                 }
-                let file = self.create_redirect_output(&target, redirect.clobber)?;
+                let file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 crate::fd::write_file_all(&file, &output)?;
                 self.exit_code = 0;
                 return Ok(true);
@@ -4276,6 +4285,75 @@ impl CpNode {
                 use std::os::unix::io::AsRawFd;
                 let st = cp_fstatat(dir.as_raw_fd(), &self.at_rel(), follow)?;
                 Ok(cp_stat_from_libc(&st))
+            }
+        }
+    }
+
+    /// `stat()` with the failure reclassified to the verdict the
+    /// path walk actually reached (rubash#3416). A walk dies
+    /// ENOTDIR at the first intermediate component that is not a
+    /// directory and ENOENT only when every intermediate component
+    /// is a directory; the kernel reports that distinction
+    /// natively (std carries it as ErrorKind::NotADirectory on
+    /// unix), but the Windows face answers ERROR_PATH_NOT_FOUND
+    /// for both shapes, and a diagnostic that collapses the raw
+    /// error into a hardcoded ENOENT — as external_cp's operand
+    /// gates did — prints the wrong class for `file/child`. When
+    /// the raw error is a bare NotFound, re-derive the verdict:
+    /// walk the node's proper ancestors deepest-first; the first
+    /// one that stats as a NON-directory is where the walk died,
+    /// while an existing directory ancestor means the missing
+    /// component hangs directly under a directory and the raw
+    /// NotFound stands.
+    pub(in crate::executor) fn stat_classified(&self) -> io::Result<CpStat> {
+        match self.stat() {
+            Ok(stat) => Ok(stat),
+            Err(error) => Err(self.classify_stat_error(error)),
+        }
+    }
+
+    fn classify_stat_error(&self, error: io::Error) -> io::Error {
+        if error.kind() != io::ErrorKind::NotFound {
+            return error;
+        }
+        let not_a_directory = || io::Error::new(io::ErrorKind::NotADirectory, "Not a directory");
+        match &self.root {
+            CpRoot::Plain(_) => {
+                let path = self.eff_path();
+                for ancestor in path.ancestors().skip(1) {
+                    match fs::metadata(ancestor) {
+                        Ok(metadata) => {
+                            return if metadata.is_dir() {
+                                error
+                            } else {
+                                not_a_directory()
+                            };
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                error
+            }
+            #[cfg(unix)]
+            CpRoot::At { dir, .. } => {
+                use std::os::unix::io::AsRawFd;
+                // Proper prefixes of the anchor-relative path,
+                // deepest first; running out of prefixes means no
+                // existing ancestor contradicts the raw verdict
+                // (the anchor itself is a directory by
+                // construction), so the raw error stands.
+                let mut prefix = self.at_rel();
+                while prefix.pop() {
+                    match cp_fstatat(dir.as_raw_fd(), &prefix, true) {
+                        Ok(st) => {
+                            let is_dir = u32::from(st.st_mode) & u32::from(libc::S_IFMT)
+                                == u32::from(libc::S_IFDIR);
+                            return if is_dir { error } else { not_a_directory() };
+                        }
+                        Err(_) => continue,
+                    }
+                }
+                error
             }
         }
     }

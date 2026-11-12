@@ -2500,7 +2500,11 @@ impl Executor {
                         // child; this redirect stays in its source.
                         continue;
                     } else {
-                        match self.create_redirect_output(&target, redirect.clobber) {
+                        match self.create_redirect_output_for(
+                            Some(redirect),
+                            &target,
+                            redirect.clobber,
+                        ) {
                             Ok(file) => BackgroundStdio::File(file),
                             Err(_) => continue,
                         }
@@ -2606,7 +2610,7 @@ impl Executor {
                                 &self.shell_state.env_vars,
                             )))
                         } else {
-                            self.create_redirect_output(&target, false)
+                            self.create_redirect_output_for(Some(redirect), &target, false)
                         };
                         match opened {
                             Ok(file) => file,
@@ -3828,6 +3832,16 @@ impl Executor {
         // `break` was treated as in-loop and aborted the rest of the script
         // (arith-for.tests: `for ((j=;;))` with `j=` empty RHS). Match GNU.
         self.shell_state.loop_depth -= 1;
+        // rubash#3287: a fatal arithmetic expansion error raised while
+        // evaluating a `for (( ))` header (a nested `$(( 1/0 ))` in
+        // init/test/update) must be consumed HERE, by the same compound
+        // consumer the case/loop-word paths already use — a plain
+        // evaluation failure (e.g. `for (( i=1/0; ...))`) sets no flag
+        // so the call is a no-op and the status stays 1, while a nested
+        // fatal yields the DISCARD (rest of line abandoned, script
+        // continues on the next line) and clears both flags. Without
+        // this the stale fatal flag poisoned the NEXT command.
+        self.abandon_on_arithmetic_expansion_error()?;
         Ok(())
     }
 
@@ -6175,7 +6189,8 @@ impl Executor {
             match redirect.kind {
                 crate::parser::RedirectKind::Output
                 | crate::parser::RedirectKind::ClobberOutput => {
-                    let file = self.create_redirect_output(&target, redirect.clobber)?;
+                    let file =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                     let fd = redirect.fd.unwrap_or(1);
                     match fd {
                         1 => {
@@ -6254,7 +6269,8 @@ impl Executor {
                     }
                 }
                 crate::parser::RedirectKind::CombinedOutput => {
-                    let file = self.create_redirect_output(&target, redirect.clobber)?;
+                    let file =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                     let shared = file.try_clone()?;
                     replace_coproc_out_spec(
                         &mut out_spec,
@@ -6453,7 +6469,11 @@ impl Executor {
                         // operator's `&` (like the compound
                         // arms); strip it for the open.
                         let path = target.strip_prefix('&').unwrap_or(&target);
-                        let file = self.create_redirect_output(path, redirect.clobber)?;
+                        let file = self.create_redirect_output_for(
+                            Some(redirect),
+                            path,
+                            redirect.clobber,
+                        )?;
                         let shared = file.try_clone()?;
                         replace_coproc_out_spec(
                             &mut out_spec,
@@ -7194,7 +7214,7 @@ impl Executor {
         {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         } else if let Some(redirect) = cmd
             .append
@@ -7211,7 +7231,7 @@ impl Executor {
         {
             let target = self.expand_redirect_target(redirect);
             if redirect_target_fd(&target).is_none() && !is_null_device(&target) {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         } else if let Some(redirect) = cmd
             .redirect_err_append
@@ -7686,6 +7706,37 @@ fn case_pattern_raw_has_quotes(raw: &str) -> bool {
 /// never opens single-quote state). Unlike the pattern twin this applies
 /// no glob-literal escaping: the case word is the *subject* of
 /// strmatch(), not a pattern (execute_cmd.c:3727-3730).
+/// Expand one cooked double-quoted case-word segment (rubash#3084).
+///
+/// The walker above consumed the segment's quotes, so the bare cooked
+/// fragment has lost its double-quote provenance: the assignment
+/// pre-scan (apply_parameter_assignment_expansions_in_word) derives
+/// each `${...}` fragment's quote context from the word text itself
+/// and reads the fragment as UNQUOTED — so `"${v=a\ b}"` assigned
+/// `a b`, eating a backslash GNU keeps (parse.y read_token_word's
+/// double-quote scanner makes `\` an escape only before `$`, backtick,
+/// `"`, `\` or newline, and subst.c:7663 parameter_brace_expand_word
+/// applies that rule inside the `${...}` word too). Restore the
+/// provenance with the lexer's own spelling for a wholly-quoted word
+/// carrying a `${...}` (lexer/word.rs: STORAGE_WORD_PREFIX): the
+/// pre-scan then seeds its quote-state walk inside double quotes and
+/// the render takes the DoubleQuoted parameter-word path, exactly as
+/// for a quoted word that never went through this walker. Fragments
+/// without a `${` have no quote-context-sensitive consumer and keep
+/// the plain cooked path (the lexer's own admission rule for the
+/// marker is likewise `${`-carrying words only).
+fn expand_case_dq_segment(expand_word: &mut impl FnMut(&str) -> String, cooked: &str) -> String {
+    if cooked.contains("${") {
+        let marked = format!(
+            "{}{cooked}",
+            crate::executor::markers::STORAGE_WORD_PREFIX_STR
+        );
+        expand_word(&marked)
+    } else {
+        expand_word(cooked)
+    }
+}
+
 fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String) -> String {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut output = String::new();
@@ -7705,7 +7756,7 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // resolve as double-quote escapes and `'` travels as
                     // DATA_SQUOTE data.
                     let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
-                    output.push_str(&expand_word(&cooked));
+                    output.push_str(&expand_case_dq_segment(&mut expand_word, &cooked));
                 }
                 index = end + 1;
                 continue;
@@ -7737,7 +7788,7 @@ fn quote_aware_case_word(raw: &str, mut expand_word: impl FnMut(&str) -> String)
                     // grammar (parse.y:3877 parse_matched_pair) and stay
                     // raw through the cooker (rubash#258 BUG_PSUBSQUOT).
                     let cooked = crate::lexer::quotes::cook_double_quoted_segment(&body);
-                    output.push_str(&expand_word(&cooked));
+                    output.push_str(&expand_case_dq_segment(&mut expand_word, &cooked));
                 }
                 index = end + 1;
                 continue;

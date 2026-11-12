@@ -128,7 +128,6 @@ fn entry_names(root: &Path) -> Vec<Vec<u8>> {
 struct Outcome {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
-    rc: i32,
 }
 
 /// Run one probe script (written into the fixture root) with the
@@ -147,7 +146,6 @@ fn run(root: &Path, body: &str) -> Outcome {
     Outcome {
         stdout: out.stdout,
         stderr: out.stderr,
-        rc: out.status.code().unwrap_or(-1),
     }
 }
 

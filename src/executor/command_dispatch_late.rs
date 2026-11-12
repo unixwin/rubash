@@ -428,8 +428,12 @@ impl Executor {
                 // `((a+=1)) 2>&1` reports on stdout (rubash#1127). Bind the
                 // output redirects in the fd table around the evaluation;
                 // the diagnostic printers route through fd 2 (arith_diag).
+                // rubash#3287: execute_arithmetic_command returns
+                // Err(ExpansionFailure) when this `(( ))`'s own expansion
+                // failed fatally — propagate it so the DISCARD abandons
+                // the rest of the line.
                 let arith_status = self.with_compound_output_redirects(cmd, |executor| {
-                    Ok(executor.execute_arithmetic_command(cmd))
+                    executor.execute_arithmetic_command(cmd)
                 })?;
                 self.exit_code = arith_status;
                 // GNU expr.c:1190-1216: an unbound variable under `set -u`

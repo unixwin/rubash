@@ -2249,27 +2249,93 @@ impl Executor {
     }
 
     /// The filesystem path for an expanded redirect target. When the
-    /// target's expansion carried raw-byte transport (recorded by
-    /// expand_redirect_operand_fields in `redirect_target_had_transport`),
-    /// its byte chars emit raw bytes — GNU redir.c:298 opens the name
-    /// bytes verbatim, so a folded U+009C must reach the disk as 0x9C,
-    /// not re-encoded as UTF-8 C2 9C. Any other target takes the
-    /// existing shell-name funnel unchanged, so a genuine non-ASCII
-    /// name keeps its UTF-8 bytes. (rubash#3104 p23)
+    /// target's expansion carried raw-byte transport, its byte
+    /// spelling was recorded at expansion time
+    /// (`redirect_target_transport_spellings`): GNU redir.c:298 opens
+    /// the name bytes verbatim, so a folded U+009C must reach the disk
+    /// as 0x9C, not re-encoded as UTF-8 C2 9C — while a genuine char
+    /// in the same name keeps its UTF-8 bytes, which only the
+    /// pre-fold spelling knows (rubash#3218). Any target without a
+    /// recorded spelling takes the existing shell-name funnel
+    /// unchanged, so a genuine non-ASCII name keeps its UTF-8 bytes.
+    /// (rubash#3104 p23, rubash#3218)
     pub(in crate::executor) fn redirect_target_filesystem_path(
         &self,
         target: &str,
     ) -> std::path::PathBuf {
         let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
-        if self.redirect_target_had_transport.borrow().contains(target) {
+        let spelling = self
+            .redirect_target_transport_spellings
+            .borrow()
+            .get(target)
+            .cloned();
+        match spelling {
+            Some(spelling) => Self::transport_spelling_path(&spelling, &normalized),
+            None => normalized,
+        }
+    }
+
+    /// Node-aware form of [`Self::redirect_target_filesystem_path`]:
+    /// the redirect walks hold the node, and two redirects in one
+    /// command can fold to the same string with different transport
+    /// verdicts — both expansions are recorded before either open
+    /// runs — so the node's own recorded spelling is authoritative:
+    /// present, it decides; absent, the target takes the plain funnel
+    /// and NEVER the string-keyed record, which may belong to a
+    /// different redirect that folded to the same string
+    /// (rubash#3218 face 2). (rubash#3218)
+    pub(in crate::executor) fn redirect_target_filesystem_path_for(
+        &self,
+        redirect: &crate::parser::Redirect,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let key = Self::redirect_target_memo_key(redirect);
+        let spelling = self
+            .redirect_target_node_spellings
+            .borrow()
+            .get(&key)
+            .cloned();
+        let normalized = shell_path_to_windows(target, &self.shell_state.env_vars);
+        match spelling {
+            Some(spelling) => Self::transport_spelling_path(&spelling, &normalized),
+            None => normalized,
+        }
+    }
+
+    /// The path for a recorded transport spelling: on unix the
+    /// spelling IS the name's byte sequence (GNU redir.c:298 opens
+    /// the bytes verbatim); elsewhere the folded-name conversion
+    /// stands in, as it did before spellings were recorded.
+    fn transport_spelling_path(
+        spelling: &[u8],
+        normalized: &std::path::Path,
+    ) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            std::path::PathBuf::from(std::ffi::OsStr::from_bytes(spelling))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = spelling;
             crate::executor::path::path_buf_from_folded_name(&normalized.to_string_lossy())
-        } else {
-            normalized
         }
     }
 
     pub(in crate::executor) fn create_redirect_output(
         &self,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<File> {
+        self.create_redirect_output_for(None, target, clobber)
+    }
+
+    /// [`Self::create_redirect_output`] with the redirect node, so a
+    /// recorded transport spelling is resolved per-node
+    /// (rubash#3218).
+    pub(in crate::executor) fn create_redirect_output_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
@@ -2358,7 +2424,11 @@ impl Executor {
             };
         }
         let target = self.redirect_output_path_target(target);
-        let path = self.session_path(self.redirect_target_filesystem_path(&target));
+        let fs_path = match redirect {
+            Some(redirect) => self.redirect_target_filesystem_path_for(redirect, &target),
+            None => self.redirect_target_filesystem_path(&target),
+        };
+        let path = self.session_path(fs_path.clone());
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
             && !Self::noclobber_target_is_device_like(&path)
@@ -2369,7 +2439,7 @@ impl Executor {
             // out of the inode walk itself).
             #[cfg(unix)]
             {
-                let fs_operand = self.redirect_target_filesystem_path(&target);
+                let fs_operand = fs_path.clone();
                 if fs_operand.is_relative() {
                     if let Some(result) = self.open_via_cwd_anchor(
                         &fs_operand,
@@ -2443,7 +2513,7 @@ impl Executor {
         // consume the bind's rendezvous (rubash#1820).
         #[cfg(unix)]
         {
-            let fs_operand = self.redirect_target_filesystem_path(&target);
+            let fs_operand = fs_path.clone();
             if fs_operand.is_relative() {
                 let is_fifo = matches!(
                     self.fstatat_via_cwd_anchor(&fs_operand),
@@ -2474,6 +2544,18 @@ impl Executor {
     /// command just created.
     pub(in crate::executor) fn create_redirect_output_prepared(
         &self,
+        target: &str,
+        clobber: bool,
+    ) -> io::Result<File> {
+        self.create_redirect_output_prepared_for(None, target, clobber)
+    }
+
+    /// [`Self::create_redirect_output_prepared`] with the redirect
+    /// node, so the create resolves a recorded transport spelling
+    /// per-node (rubash#3218).
+    pub(in crate::executor) fn create_redirect_output_prepared_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
         target: &str,
         clobber: bool,
     ) -> io::Result<File> {
@@ -2520,7 +2602,7 @@ impl Executor {
                 }
             }
         }
-        let file = self.create_redirect_output(target, clobber)?;
+        let file = self.create_redirect_output_for(redirect, target, clobber)?;
         if !clobber
             && crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "noclobber")
         {
