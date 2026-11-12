@@ -100,10 +100,7 @@ fn div_by_zero(path: &str, line: u32) -> String {
 fn issue3382_canary_next_command_runs() {
     // The issue's canary: GNU prints `after` after the diagnostic;
     // the pre-fix binary discards the echo (rc=1, empty stdout).
-    let (path, stdout, stderr, code) = run_script(
-        "canary",
-        "[[ $(( 1/0 )) = x ]]\necho after\n",
-    );
+    let (path, stdout, stderr, code) = run_script("canary", "[[ $(( 1/0 )) = x ]]\necho after\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -114,10 +111,8 @@ fn issue3382_bracket_status_is_one() {
     // The error makes the test fail, not "0=0 true": GNU reports
     // status 1 for the `[[ ]]` itself. Pre-fix the echo that reads
     // `$?` was itself discarded, so nothing printed at all.
-    let (path, stdout, stderr, code) = run_script(
-        "status1",
-        "[[ $(( 1/0 )) = 0 ]]\necho \"rc=$?\"\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("status1", "[[ $(( 1/0 )) = 0 ]]\necho \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -144,10 +139,8 @@ fn issue3382_and_chain_branch_skipped_after_runs() {
     // `[[ ... ]] && echo AND` — the AND branch is on the discarded
     // line, `echo after` on the next line runs. Pre-fix both were
     // discarded (empty stdout, rc=1).
-    let (path, stdout, stderr, code) = run_script(
-        "andchain",
-        "[[ $(( 1/0 )) = x ]] && echo AND\necho after\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("andchain", "[[ $(( 1/0 )) = x ]] && echo AND\necho after\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -159,10 +152,8 @@ fn issue3382_or_chain_branch_skipped_after_runs() {
     // line, `echo after` on the next line runs. Already correct
     // pre-fix (the stale flags discarded the OR echo and were
     // consumed by it); it pins the `||` line boundary.
-    let (path, stdout, stderr, code) = run_script(
-        "orchain",
-        "[[ $(( 1/0 )) = x ]] || echo OR\necho after\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("orchain", "[[ $(( 1/0 )) = x ]] || echo OR\necho after\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -188,10 +179,8 @@ fn issue3382_set_e_discard_does_not_exit() {
     // rubash#1518: the arithmetic evalerror DISCARD bypasses the
     // errexit epilogue — under `set -e` the script continues on the
     // next line. Pre-fix the script exited 1 with no `after-e`.
-    let (path, stdout, stderr, code) = run_script(
-        "sete",
-        "set -e\n[[ $(( 1/0 )) = x ]]\necho after-e\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("sete", "set -e\n[[ $(( 1/0 )) = x ]]\necho after-e\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after-e\n");
     assert_eq!(stderr, div_by_zero(&path, 2));
@@ -221,10 +210,8 @@ fn issue3382_set_u_nounset_still_fatal() {
     // script-fatal (FORCE_EOF) — the fix must NOT convert it to a
     // line-skip. Both GNU and the pre-fix binary exit 1 here with
     // no `after-u`.
-    let (path, stdout, stderr, code) = run_script(
-        "setu",
-        "set -u\n[[ $(( b )) = x ]]\necho after-u\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("setu", "set -u\n[[ $(( b )) = x ]]\necho after-u\n");
     assert_eq!(code, Some(1));
     assert_eq!(stdout, "");
     assert_eq!(stderr, format!("{path}: line 2: b: unbound variable\n"));
@@ -234,10 +221,7 @@ fn issue3382_set_u_nounset_still_fatal() {
 fn issue3382_right_operand_fatal_leak() {
     // The fatal expansion on the RIGHT operand leaks the same way.
     // Pre-fix `echo after` was discarded (rc=1, empty stdout).
-    let (path, stdout, stderr, code) = run_script(
-        "rightop",
-        "[[ x = $(( 1/0 )) ]]\necho after\n",
-    );
+    let (path, stdout, stderr, code) = run_script("rightop", "[[ x = $(( 1/0 )) ]]\necho after\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -247,10 +231,8 @@ fn issue3382_right_operand_fatal_leak() {
 fn issue3382_negated_fatal_leak() {
     // The negated form `[[ ! ... ]]` leaks the same way.
     // Pre-fix `echo after` was discarded (rc=1, empty stdout).
-    let (path, stdout, stderr, code) = run_script(
-        "negated",
-        "[[ ! $(( 1/0 )) = x ]]\necho after\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("negated", "[[ ! $(( 1/0 )) = x ]]\necho after\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "after\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
@@ -304,10 +286,8 @@ fn issue3382_next_let_runs() {
     // `let` takes the same evaluator entry as `(( ))`, so the same
     // stale-flag skip hit it pre-fix. After the fix it evaluates
     // normally (rc=0).
-    let (path, stdout, stderr, code) = run_script(
-        "nextlet",
-        "[[ $(( 1/0 )) = x ]]\nlet x=1\necho \"rc=$?\"\n",
-    );
+    let (path, stdout, stderr, code) =
+        run_script("nextlet", "[[ $(( 1/0 )) = x ]]\nlet x=1\necho \"rc=$?\"\n");
     assert_eq!(code, Some(0));
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, div_by_zero(&path, 1));
