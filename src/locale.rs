@@ -1998,14 +1998,20 @@ mod tests {
         // carries it at a decode boundary is a diagnostic word recorded
         // pre-walk (bad_substitution_display) — and the decoder drops it,
         // the same treatment as the sibling U+E31A marker.
-        assert_eq!(super::decode_to_visible_text("a\u{E31B}b"), "ab");
-        assert_eq!(super::decode_to_visible_text("a\u{E31B}${-x}"), "a${-x}");
+        // The site char is spelled via the registry const: the marker
+        // lint forbids raw U+E31B literals outside markers.rs.
+        let site = crate::executor::markers::QUOTED_EXPANSION_SITE;
+        assert_eq!(super::decode_to_visible_text(&format!("a{site}b")), "ab");
+        assert_eq!(
+            super::decode_to_visible_text(&format!("a{site}${{-x}}")),
+            "a${-x}"
+        );
         // An E400-escaped occurrence is user data (push_literal_char) and
         // must still round-trip: the E400 arm above restores it before the
         // drop arm can see it.
         assert_eq!(
-            super::decode_to_visible_text("a\u{E400}\u{E31B}b"),
-            "a\u{E31B}b"
+            super::decode_to_visible_text(&format!("a\u{E400}{site}b")),
+            &format!("a{site}b")
         );
     }
 
