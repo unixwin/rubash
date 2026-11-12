@@ -61,8 +61,9 @@
 //! physical landings), never timing. Failure cells assert the
 //! failure SIDE (stderr family), not verbatim diagnostic text where
 //! the emulation's wording legitimately differs from coreutils
-//! (e.g. `mkdir -p` names the first dead component in GNU, the
-//! operand word in rubash). Unix only: the cwd anchor is a Unix
+//! (e.g. before rubash#3333, `mkdir -p` named the operand word
+//! where GNU names the first dead component). Unix only: the cwd
+//! anchor is a Unix
 //! directory handle; off Unix there is no anchor and the face
 //! keeps its pre-fix shape.
 
