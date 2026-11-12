@@ -780,7 +780,16 @@ fn run_script_grouped_at_line_offset(
         // errexit — the inverted command's status is exempt.
         let last_inverted = executor.last_command_inverted();
         let errexit_stop = errexit_break_verdict(executor, status);
-        if parse_error || exit_jump || errexit_stop {
+        // rubash#2652: an armed errexit unwind is itself a stop —
+        // the inner gates already made the context-aware decision
+        // (execute_command_internal, execute_cmd.c:624), and the
+        // decomposition above deliberately keeps it out of
+        // `exit_jump`, so the verdict is the only other stop
+        // signal. A verdict suppressed by the stale-terminal
+        // record must not swallow a real unwind (`false || false`:
+        // the last `false` raised, the verdict reads the first
+        // `false`'s exemption).
+        if parse_error || exit_jump || errexit_unwind || errexit_stop {
             // GAP-1 (unixwin/niubash#863): the run's classification is
             // adjudicated HERE, from these same verdicts — the
             // decomposition of the stop bool below, computed once.
@@ -796,7 +805,7 @@ fn run_script_grouped_at_line_offset(
                 last_inverted,
                 stop: if exit_jump && !parse_error {
                     Some(GroupedRunStop::ExitJump)
-                } else if errexit_stop {
+                } else if errexit_unwind || errexit_stop {
                     Some(GroupedRunStop::ErrexitBreak)
                 } else {
                     None
@@ -2259,6 +2268,14 @@ fn run_history_group(
             }
         } else {
             for text in record_texts.iter().flatten() {
+                // bashhist.c:643 pre_process_line records only
+                // `*return_value`: a line that expanded to exactly
+                // empty is never recorded (rubash#3329). Whitespace-
+                // only texts pass — GNU records them, subject only to
+                // check_history_control inside record().
+                if text.is_empty() {
+                    continue;
+                }
                 let was_recorded = session
                     .borrow_mut()
                     .record(text, &control, &ignore, histsize);
@@ -2513,7 +2530,15 @@ pub fn stdin_script_errexit_enabled(executor: &Executor) -> bool {
 /// jump or a signal discard preempts it), which the call sites
 /// combine with this verdict — in the same order everywhere.
 pub fn errexit_break_verdict(executor: &Executor, status: i32) -> bool {
-    status != 0 && stdin_script_errexit_enabled(executor) && !executor.last_command_inverted()
+    status != 0
+        && stdin_script_errexit_enabled(executor)
+        && !executor.last_command_inverted()
+        // rubash#2652: a terminal status produced while errexit was
+        // suppressed (a CMD_IGNORE_RETURN position) is exempt —
+        // GNU's -e decision was already made per command inside
+        // execute_command_internal (execute_cmd.c:624) and the
+        // reader must not re-fire on it.
+        && !executor.errexit_suppressed_terminal()
 }
 
 pub fn stdin_source_needs_more(source: &str) -> bool {
@@ -4158,6 +4183,14 @@ fn run_source_impl(
     // runs below) must never consume the root transport. The prior
     // value is restored on exit; this wrapper is the single exit.
     let source_run_prior = executor.source_run_active.get();
+    // rubash#2652: the suppressed-terminal record lives exactly one
+    // outermost unit — clear it here, where outermost is known.
+    // Nested units must not clear it: a suppressed failure recorded
+    // earlier in the enclosing unit (e.g. the `false` of
+    // `false && eval 'true'`) is still that unit's terminal fact.
+    if !source_run_prior {
+        executor.clear_errexit_suppressed_terminal();
+    }
     executor.source_run_active.set(true);
     let status = run_source_impl_inner(
         executor,
@@ -5856,7 +5889,10 @@ pub fn run_interactive_stdin(executor: &mut Executor) -> i32 {
                 if (exit_jump && !parse_error)
                     || (status != 0
                         && stdin_script_errexit_enabled(executor)
-                        && !executor.last_command_inverted())
+                        && !executor.last_command_inverted()
+                        // rubash#2652: terminal status produced in a
+                        // CMD_IGNORE_RETURN position is exempt.
+                        && !executor.errexit_suppressed_terminal())
                 {
                     eof = true;
                 }
@@ -7904,7 +7940,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
                 // execute_cmd.c:652-656: `! CMD` status is errexit-exempt.
-                && !executor.last_command_inverted())
+                && !executor.last_command_inverted()
+                // rubash#2652: terminal status produced in a
+                // CMD_IGNORE_RETURN position is exempt.
+                && !executor.errexit_suppressed_terminal())
         {
             break;
         }
@@ -7946,7 +7985,10 @@ pub fn run_stdin_script(executor: &mut Executor) -> i32 {
             || executor.take_exit_jump_pending()
             || (status != 0
                 && stdin_script_errexit_enabled(executor)
-                && !executor.last_command_inverted())
+                && !executor.last_command_inverted()
+                // rubash#2652: terminal status produced in a
+                // CMD_IGNORE_RETURN position is exempt.
+                && !executor.errexit_suppressed_terminal())
         {
             pending.clear();
         }

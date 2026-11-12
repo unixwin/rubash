@@ -36,7 +36,12 @@ fn test_builtin_cd_invokes_cd_builtin() {
     // path-domain work, not the Windows argv spelling.
     assert!(result.is_ok());
     assert_eq!(executor.last_exit_code(), 0);
-    let expected = dest_display.replacen("D:/", "/d/", 1).to_ascii_lowercase();
+    // #2631: only the drive-letter segment is normalized — the rest of
+    // the path keeps its on-disk spelling. The old
+    // `.to_ascii_lowercase()` lowercased the whole expectation, so a
+    // worktree path containing uppercase letters (e.g. `fix-B5`)
+    // false-redded against `pwd`'s real spelling `fix-B5`.
+    let expected = dest_display.replacen("D:/", "/d/", 1);
     assert_eq!(
         fs::read_to_string(&output_path).unwrap(),
         format!("{expected}\n")
@@ -108,7 +113,14 @@ fn test_cd_redirects_stderr() {
     assert_eq!(executor.last_exit_code(), 0);
     assert_eq!(fs::read_to_string(status_path).unwrap(), "1\n");
     let error = fs::read_to_string(error_path).unwrap();
-    assert!(error.contains("rubash: cd:"));
+    // The bare Executor::new() embedding carries a line but no
+    // file/name carrier, so the shared chain renders its line-only
+    // arm from the terminal fallback, GNU's PROGRAM "bash" — the
+    // same shape the executor's own prefix locks for this
+    // embedding. The old expectation encoded the builtin layer's
+    // hard-coded "rubash: " fallback, removed by the rubash#3256
+    // (b) migration.
+    assert!(error.contains("bash: line 1: cd:"));
     assert!(error.contains("rubash-cd-no-such-dir"));
     let _ = fs::remove_file(error_path);
     let _ = fs::remove_file(status_path);
@@ -133,7 +145,9 @@ fn test_cd_appends_stderr() {
     assert_eq!(executor.last_exit_code(), 1);
     let error = fs::read_to_string(error_path).unwrap();
     assert!(error.starts_with("before\n"));
-    assert!(error.contains("rubash: cd:"));
+    // Chain line-only arm for this embedding, as in
+    // test_cd_redirects_stderr above (rubash#3256 (b)).
+    assert!(error.contains("bash: line 1: cd:"));
     assert!(error.contains("rubash-cd-no-such-dir"));
     let _ = fs::remove_file(error_path);
 }
