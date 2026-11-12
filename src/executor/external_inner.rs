@@ -1202,7 +1202,16 @@ impl Executor {
             if let Some((message, status)) =
                 slash_command_execve_error_message(&cmd.words[0], &self.shell_state.env_vars)
             {
-                writeln!(&mut stderr, "{error_prefix}{name}: {message}",)?;
+                // GNU's file_error (execute_cmd.c:6126-6159) prints the
+                // filename with a raw %s — the printable_filename
+                // quoting the not-found face uses ($'\ooo' for a
+                // non-printable name in a single-byte locale) is
+                // findcmd's renderer, not shell_execve's. The raw name
+                // still passes the one statutory decoder so marker
+                // transports render as their source characters
+                // (rubash#3182).
+                let raw_name = crate::locale::decode_to_visible_text(&cmd.words[0]);
+                writeln!(&mut stderr, "{error_prefix}{raw_name}: {message}",)?;
                 self.finish_external_error(cmd, &stderr, status)?;
                 return Ok(());
             }
@@ -1837,11 +1846,16 @@ impl Executor {
     /// the next command boundary (execute_cmd.c:643 run_pending_traps —
     /// bash manual, SIGNALS: the trap "will not be executed until the
     /// command completes"); an untrapped terminating signal kills the shell
-    /// mid-wait through SIG_DFL. The mailbox port slices the kernel wait
-    /// (fd wait_child_slice) and records deliveries between slices with the
-    /// same deferral (trap_exec observe_signals_while_blocked); on unix the
-    /// kernel backend already records arrivals during the plain blocking
-    /// wait.
+    /// mid-wait through SIG_DFL — and where GNU catches the delivery
+    /// (an EXIT trap is armed, or an interactive SIGHUP), CHECK_TERMSIG
+    /// (quit.h:53) inside the wait loop calls sig.c:590 termsig_handler
+    /// at once instead of waiting for the job to end. The mailbox port
+    /// records such a delivery instead of dying, so the engine must
+    /// drain the mailbox between slices (trap_exec
+    /// observe_signals_while_blocked); on unix the kernel backend
+    /// records arrivals, but a plain blocking wait never observes them
+    /// (rubash#3284) — hence the sliced draining wait below, and the
+    /// same discipline in the pipeline waits.
     fn wait_external_child(
         &mut self,
         child: &mut std::process::Child,
@@ -1884,11 +1898,13 @@ impl Executor {
             // rubash#1990: with the guard armed (interactive, untrapped),
             // wait in slices so a recorded terminal SIGINT can be
             // forwarded to a child the group delivery never reached;
-            // unarmed waits keep the plain blocking waitpid.
+            // unarmed waits drain the mailbox between slices instead
+            // (rubash#3284: a plain blocking waitpid never observes a
+            // recorded terminating delivery until the child ends).
             let status = if sigint_guard.is_armed() {
                 wait_fg_child_sliced(child, &sigint_guard)?
             } else {
-                child.wait().map_err(ExecuteError::IoError)?
+                wait_fg_child_draining(self, child)?
             };
             // rubash#1639: the foreground job died by SIGINT in an
             // interactive reader session with SIGINT untrapped — GNU
@@ -3482,11 +3498,11 @@ impl Executor {
             } else {
                 let opened = if write {
                     if redirect.append {
-                        open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(&target)),
-                        )
+                        open_redirect_append(&self.session_path(
+                            self.redirect_target_filesystem_path_for(redirect, &target),
+                        ))
                     } else {
-                        self.create_redirect_output(&target, redirect.clobber)
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)
                             .map_err(|error| crate::posix_errors::path_error(&target, error))
                     }
                 } else if readwrite {
@@ -5227,6 +5243,52 @@ pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintG
     epoch_moved
 }
 
+/// rubash#3284: unix sliced form of the UNARMED foreground wait —
+/// the shared draining wait for every foreground child wait that has
+/// no SIGINT guard to arm (non-interactive shells, trapped SIGINT).
+/// GNU jobs.c:3064 wait_for runs CHECK_TERMSIG (quit.h:53) inside its
+/// wait loop: a terminating delivery the shell catches (an EXIT trap
+/// is armed, or an interactive SIGHUP) calls sig.c:590
+/// termsig_handler at once — EXIT trap, then sig.c:650 kill_shell
+/// re-raises the signal so the shell dies BY it mid-wait, never at
+/// the job's natural end. The mailbox port records such a delivery
+/// instead of dying (the handler cannot run the EXIT trap from signal
+/// context), so the engine must drain the mailbox between slices
+/// (observe_signals_while_blocked); a plain blocking waitpid never
+/// observes it, which is the 2.4s-vs-0.05s gap in the issue. Unix has
+/// no slice primitive (fd::wait_child_slice blocks), so this loop
+/// polls try_wait — the same shape wait_fg_child_sliced below uses.
+/// On an untrapped terminating delivery observe records the
+/// termsig-death mark and unwinds ExitCode(128+sig); the child is
+/// killed and reaped first so the shell's prompt death is observable
+/// (a lingering child would hold the shell's stdout pipe open past
+/// its death) — the same abort model the non-unix branch of
+/// wait_external_child and the pipeline waits use. Trapped
+/// deliveries are re-queued by observe and deferred to the command
+/// boundary, GNU's trap-completes-first rule (execute_cmd.c:643
+/// run_pending_traps). The SIGINT-guarded wait keeps its own sliced
+/// form below: it forwards the recorded terminal SIGINT to the child
+/// instead of aborting the wait outright.
+#[cfg(unix)]
+pub(in crate::executor) fn wait_fg_child_draining(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(10);
+    loop {
+        if let Some(status) = child.try_wait().map_err(ExecuteError::IoError)? {
+            return Ok(status);
+        }
+        if let Err(error) = executor.observe_signals_while_blocked() {
+            let _ = child.kill();
+            let _ = child.wait();
+            super::read_helpers::note_reaped_child_cpu(child);
+            return Err(error);
+        }
+        std::thread::sleep(SLICE);
+    }
+}
+
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
 /// needs to forward: its children lead their own process groups and
 /// the terminal's group delivery reaches them directly, so wait_for
@@ -5940,8 +6002,10 @@ pub(in crate::executor) fn is_enoexec_candidate(program: &std::path::Path) -> bo
 /// MSYS-like host). Such a name is never PATH-searched (findcmd.c:385-386
 /// search_for_command), so its failure text is classified by the execve
 /// result, not by the PATH miss: execute_cmd.c:6126-6159 shell_execve —
-/// ENOENT ("No such file or directory", 127), a directory (EISDIR text,
-/// 126), an unexecutable file ("Permission denied", 126). Returns None for
+/// ENOENT ("No such file or directory", 127), ENOTDIR ("Not a
+/// directory", 126, when a path component is a regular file), a
+/// directory (EISDIR text, 126), an unexecutable file ("Permission
+/// denied", 126). Returns None for
 /// slash-free names, which keep the "command not found" PATH wording
 /// (execute_cmd.c:5910 notfound_str).
 pub(crate) fn slash_command_execve_error_message(
@@ -5968,11 +6032,30 @@ pub(crate) fn slash_command_execve_error_message(
         return None;
     }
     let candidate = crate::executor::path::shell_path_to_windows(name, env_vars);
-    let metadata = std::fs::metadata(&candidate)
-        .or_else(|_| std::fs::metadata(name))
-        .ok();
+    let (metadata, probe_error) = match std::fs::metadata(&candidate) {
+        Ok(metadata) => (Some(metadata), None),
+        Err(_) => match std::fs::metadata(name) {
+            Ok(metadata) => (Some(metadata), None),
+            Err(error) => (None, Some(error)),
+        },
+    };
     match metadata {
-        None => Some(("No such file or directory", 127)),
+        None => {
+            // The metadata probe must not flatten every failure into
+            // ENOENT: when a path COMPONENT is a regular file, stat
+            // fails ENOTDIR and GNU's classification (the execve errno
+            // via file_error, execute_cmd.c:6126-6159) is
+            // "Not a directory" with 126, not 127 (`zz/x` with `zz` a
+            // plain file, rubash#3182). The kind comparison is the
+            // portable form of the errno test: std maps ENOTDIR to
+            // NotADirectory on unix, and the shared code must not
+            // name the unix-only libc crate (Windows E0433).
+            if probe_error.is_some_and(|error| error.kind() == std::io::ErrorKind::NotADirectory) {
+                Some(("Not a directory", 126))
+            } else {
+                Some(("No such file or directory", 127))
+            }
+        }
         Some(metadata) if metadata.is_dir() => Some(("Is a directory", 126)),
         Some(_) => Some(("Permission denied", 126)),
     }
