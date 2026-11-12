@@ -2730,8 +2730,7 @@ impl Executor {
             return true;
         }
         let exit_armed = self.comsub_parent_exit_armed.get()
-            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT")
-                .is_some();
+            || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT").is_some();
         exit_armed && crate::builtins::kill::exit_reroutes(signal)
     }
 
