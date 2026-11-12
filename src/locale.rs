@@ -1047,6 +1047,11 @@ pub fn init_locale() {
 /// | `U+E31A` | COMPOUND_ASSIGNMENT_MARKER (compound assignment tag;
 /// whitelisted carrier — the interactive line-editing boundary delivers
 /// it inside pre-execution AST words, #802) | nothing |
+/// | `U+E31B` | QUOTED_EXPANSION_SITE (quoted expansion-site verdict;
+/// a bare occurrence is protocol — the walkers consume it on sight, and
+/// the only text that still carries it at a decode boundary is a
+/// diagnostic word recorded pre-walk, rubash#3433 — while an E400-escaped
+/// occurrence is user data, restored by the E400 arm below) | nothing |
 /// | `__RUBASH_CA1__`/`__RUBASH_HD1__`/`__RUBASH_CSB1_` | the retired
 /// (pre-#1634) ASCII compound-assignment prefix, QUOTED_HEREDOC_MARKER
 /// and the retired (pre-#840) ASCII comsub payload prefix — the live
@@ -1143,6 +1148,7 @@ pub fn decode_to_visible_text(text: &str) -> String {
             | PARAM_NAME_END_MARKER
             | QUOTED_NULL_MARKER
             | crate::executor::markers::COMPOUND_ASSIGNMENT_MARKER_CHAR
+            | crate::executor::markers::QUOTED_EXPANSION_SITE
             | COMPOUND_EXPANSION_WS_TAG
             | crate::executor::markers::QUOTED_WORD_PREFIX
             | crate::executor::markers::IFS_GLUE
@@ -1983,6 +1989,24 @@ mod tests {
         assert_eq!(super::decode_to_visible_text("a\u{E308}b"), "a\\b");
         // Old DATA_* codepoints are plain byte-chars now: E101 = byte 0x01.
         assert_eq!(super::decode_to_visible_text("a\u{e101}b"), "a\u{1}b");
+    }
+
+    #[test]
+    fn decode_to_visible_text_drops_quoted_expansion_site() {
+        // rubash#3433: a bare QUOTED_EXPANSION_SITE (U+E31B) is protocol —
+        // the walkers consume it on sight, so the only text that still
+        // carries it at a decode boundary is a diagnostic word recorded
+        // pre-walk (bad_substitution_display) — and the decoder drops it,
+        // the same treatment as the sibling U+E31A marker.
+        assert_eq!(super::decode_to_visible_text("a\u{E31B}b"), "ab");
+        assert_eq!(super::decode_to_visible_text("a\u{E31B}${-x}"), "a${-x}");
+        // An E400-escaped occurrence is user data (push_literal_char) and
+        // must still round-trip: the E400 arm above restores it before the
+        // drop arm can see it.
+        assert_eq!(
+            super::decode_to_visible_text("a\u{E400}\u{E31B}b"),
+            "a\u{E31B}b"
+        );
     }
 
     #[test]
