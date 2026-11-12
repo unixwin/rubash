@@ -158,6 +158,30 @@ fn enable_after_first_call_chain() {
     );
 }
 
+#[test]
+fn enable_inside_function_latches_call_args() {
+    // GNU's enable path (shopt_set_debug_mode -> init_bash_argv) has
+    // no variable_context == 0 guard, so an enable inside a function
+    // latches that call's arguments as the bottom frame and the frame
+    // survives the return.
+    expect(
+        "f(){ shopt -s extdebug; declare -p BASH_ARGC; }; f a b; declare -p BASH_ARGC",
+        b"declare -a BASH_ARGC=([0]=\"2\")\ndeclare -a BASH_ARGC=([0]=\"2\")\n",
+        "enable inside f latches f's args, visible after return",
+    );
+}
+
+#[test]
+fn enable_disable_inside_function_feeds_later_call() {
+    // Enable + disable inside f, then a later call in g observes the
+    // latched frame (count and reversed argv).
+    expect(
+        "f(){ shopt -s extdebug; shopt -u extdebug; }; f a b; g(){ declare -p BASH_ARGC; declare -p BASH_ARGV; }; g x",
+        b"declare -a BASH_ARGC=([0]=\"2\")\ndeclare -a BASH_ARGV=([0]=\"b\" [1]=\"a\")\n",
+        "enable+disable inside f, read in later g",
+    );
+}
+
 // ---------------------------------------------------------------------
 // Regression locks: neighbouring materialization paths that already
 // agree with GNU on the base tree and must not move.
