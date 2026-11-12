@@ -699,17 +699,35 @@ impl Executor {
                 .next()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(1);
+            // rubash#3405: GNU's suffix rule (parse.y:6858-6859) adds
+            // "while looking for matching" only when the offending
+            // token is NOT the sub-parse's EOF token. A missing-target
+            // error whose operator is the body's LAST token — no
+            // physical newline follows it inside the body text — died
+            // on the comsub's own `)' (the stream's EOF token,
+            // parse.y:4519): name it, without the suffix. An operator
+            // followed by a real newline inside the body keeps
+            // `newline' with the suffix.
+            let died_on_body_eof = token == "newline"
+                && body_text.is_some_and(|text| {
+                    let trimmed = text.trim_end_matches([' ', '\t', '\r']);
+                    !trimmed.ends_with('\n')
+                        && matches!(trimmed.chars().last(), Some('>' | '<' | '&' | '|'))
+                });
+            let (token, suffix) = if died_on_body_eof {
+                (")".to_string(), "")
+            } else {
+                (token, " while looking for matching `)'")
+            };
             self.write_diagnostic_fd2(
                 format!(
-                    "{}syntax error near unexpected token `{token}' while looking for matching `)'\n",
+                    "{}syntax error near unexpected token `{token}'{suffix}\n",
                     self.parser_error_prefix_for_line(line)
                 )
                 .as_bytes(),
             );
             self.record_run_diagnostic(
-                format!(
-                    "syntax error near unexpected token `{token}' while looking for matching `)'"
-                ),
+                format!("syntax error near unexpected token `{token}'{suffix}"),
                 Some(line),
             );
             if self.errexit_active_at_diagnostic() {

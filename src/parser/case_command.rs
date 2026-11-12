@@ -32,7 +32,7 @@ pub(super) fn parse_case_command(
                     tokens,
                     start,
                     "case",
-                    source.as_deref(),
+                    source.map(|v| &**v),
                     source_line_offset,
                 );
                 return Some((command, tokens.len()));

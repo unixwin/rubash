@@ -3563,7 +3563,7 @@ pub(super) fn mismatched_closer_node(
 /// whichever offending token comes earlier wins (rubash#3405).
 pub(super) fn preempting_token_error_node(
     region: &[Token],
-    opener: &str,
+    opener: &'static str,
     diagnostic_text: Option<&str>,
     line_offset: usize,
 ) -> Option<CommandNode> {

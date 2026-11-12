@@ -4743,6 +4743,43 @@ fn run_source_impl_inner_body(
                             Some(global_eof),
                         );
                     }
+                } else if let Some((
+                    crate::lexer::UnclosedComsubShape::ComsubBodyTokenError { line, token },
+                    _,
+                )) = crate::lexer::unclosed_comsub_eof_shape(
+                    input,
+                    crate::lexer::parse_extended_glob(),
+                ) {
+                    // rubash#3405: a token-level error inside the
+                    // unclosed comsub's body preempts the matched-pair
+                    // EOF report in file mode too — GNU's nested
+                    // yyparse (parse.y:4549-4555) fails on the offending
+                    // token before EOF is reached, and
+                    // report_syntax_error (parse.y:6833-6865) names it
+                    // with the matching suffix plus the offending line.
+                    let report = line + line_offset;
+                    let prefix = executor.parser_error_prefix_for_line(report);
+                    unclosed_report!(
+                        "{prefix}syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                    );
+                    if !suppress_unclosed_diagnostic {
+                        executor.record_run_diagnostic(
+                            format!(
+                                "syntax error near unexpected token `{token}' while looking for matching `{close}'"
+                            ),
+                            Some(report),
+                        );
+                    }
+                    if !executor.invocation_interactive() {
+                        let offending = input
+                            .lines()
+                            .nth(line.saturating_sub(1))
+                            .unwrap_or_default();
+                        unclosed_report!("{prefix}`{offending}'");
+                    }
+                    executor.errexit_live_at_diagnostic();
+                    executor.set_last_exit_code(2);
+                    return 2;
                 } else {
                     let reported = if report_open { global_open } else { global_eof };
                     unclosed_report!(
