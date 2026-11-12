@@ -359,8 +359,6 @@ fn wait_for_windows_pipeline_member(
     process: &mut std::process::Child,
     downstream: Option<&mut std::process::Child>,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
-    #[cfg(unix)]
-    let _ = executor;
     // Bash waits for the pipeline job to publish each member's status
     // (execute_cmd.c:2620 execute_pipeline forks every left element on
     // pipe(2); jobs.c:3064 wait_for blocks with no wall-clock cap) and never
@@ -429,16 +427,18 @@ fn wait_for_windows_pipeline_member(
         // wait_for installs wait_sigint_handler (jobs.c:3090-3101, handler at
         // jobs.c:2908) for the wait so a ^C recorded by trap.c:545
         // trap_handler is OBSERVED while the shell is blocked instead of
-        // sleeping through it, and the job settles 128+SIGINT. The unix
-        // kernel already records group deliveries during a plain wait, so
-        // this poll is Windows-only (unix-face behavior unchanged): the
-        // console event lands in the mailbox (kill.rs note_console_ctrl_c)
-        // but kills no member, so without the poll a pure-external pipeline
-        // ran to natural end before settling. Trapped deliveries are
+        // sleeping through it, and the job settles 128+SIGINT. rubash#3284:
+        // the poll is unix too now — the unix kernel does deliver group
+        // signals to the members, but a delivery the shell CATCHES (an
+        // EXIT trap is armed, or the host mailbox) is only recorded, and
+        // the plain poll loop never observes the record until the member
+        // ends (the 5s-vs-0.05s gap in the issue). Trapped deliveries are
         // re-queued by observe and deferred to the command boundary
         // (execute_cmd.c:643 run_pending_traps), exactly GNU's
-        // trap-completes-first rule.
-        #[cfg(not(unix))]
+        // trap-completes-first rule. The try_wait above runs first in
+        // every iteration, so a member the group delivery already
+        // killed still reports its own signal death before the drain
+        // can adjudicate the shell's copy.
         if let Err(error) = executor.observe_signals_while_blocked() {
             // Untrapped terminating delivery: GNU's ^C is a process-group
             // signal — every pipeline member dies of it and wait_for
@@ -473,9 +473,14 @@ fn wait_for_windows_pipeline_member(
 /// on Windows — the same leg `wait_external_child` already serves for a
 /// single foreground external (#1996's face): jobs.c:3064 wait_for stays
 /// interruptible for a recorded ^C, and the job settles 128+SIGINT
-/// instead of running to the member's natural end. On unix the kernel
-/// delivers the group signal to the members themselves, so the plain
-/// blocking wait stays (unix-face behavior unchanged).
+/// instead of running to the member's natural end. rubash#3284: the
+/// unix face gets the same drain — the kernel delivers group signals
+/// to the members themselves, but a delivery the shell CATCHES (an
+/// EXIT trap is armed, or the host mailbox) is only recorded, and a
+/// plain blocking wait never observes the record until the member
+/// ends. The unix branch therefore runs the shared draining wait
+/// (wait_fg_child_draining): try_wait slices, mailbox drain between
+/// them, termsig-death abort with the member killed and reaped first.
 #[cfg(any(windows, unix))]
 pub(in crate::executor) fn wait_pipeline_member_interruptibly(
     executor: &mut Executor,
@@ -506,8 +511,15 @@ pub(in crate::executor) fn wait_pipeline_member_interruptibly(
     }
     #[cfg(unix)]
     {
-        let _ = executor;
-        process.wait().map_err(ExecuteError::IoError)
+        // rubash#3284: the same draining wait as the single
+        // foreground external (wait_external_child): a plain blocking
+        // wait never observes a mailbox-recorded terminating delivery
+        // (EXIT trap armed, or the host mailbox), so the job settles
+        // only at the member's natural end. The draining wait slices
+        // with try_wait and aborts on the termsig-death unwind,
+        // killing and reaping the member first — the non-unix branch's
+        // abort model, with the unix slice primitive.
+        super::external_inner::wait_fg_child_draining(executor, process)
     }
 }
 
@@ -516,8 +528,10 @@ pub(in crate::executor) fn wait_pipeline_member_interruptibly(
 /// `wait_with_output` shape. The Windows face replaces the inline blocking
 /// drain (the parent used to sit in `read_to_end` for the member's whole
 /// lifetime, where a recorded ^C was never observed — rubash#2020) with a
-/// `spawn_pipe_drain` pair plus `wait_pipeline_member_interruptibly`; on
-/// unix the plain `wait_with_output` stays byte-for-byte.
+/// `spawn_pipe_drain` pair plus `wait_pipeline_member_interruptibly`;
+/// rubash#3284 gives the unix face the same interruptible wait — the
+/// drains already run on threads, so the sliced mailbox drain fits
+/// without changing the collected bytes.
 #[cfg(any(windows, unix))]
 pub(in crate::executor) fn wait_pipeline_stage_output(
     executor: &mut Executor,
@@ -551,12 +565,12 @@ pub(in crate::executor) fn wait_pipeline_stage_output(
     }
     #[cfg(unix)]
     {
-        let _ = executor;
         // `wait_with_output` consumes the child, but this signature only
         // borrows it, so spell out that call's own recipe instead: take
-        // both pipes, drain them on reader threads, wait, then join. The
-        // observable behavior is unchanged — the plain blocking
-        // drain-and-wait, with no mailbox polling on this face.
+        // both pipes, drain them on reader threads, wait, then join.
+        // rubash#3284: the wait is the interruptible one, not a plain
+        // blocking wait — the drains run on threads, so the sliced
+        // mailbox drain fits exactly as on the non-unix face.
         let stdout_drain = child
             .stdout
             .take()
@@ -565,12 +579,14 @@ pub(in crate::executor) fn wait_pipeline_stage_output(
             .stderr
             .take()
             .map(|reader| spawn_pipe_drain(reader, PipelineDrainTarget::Collect));
-        let status = match child.wait() {
+        let status = match wait_pipeline_member_interruptibly(executor, child) {
             Ok(status) => status,
             Err(error) => {
+                // The tree-kill above closed the pipes, so both drains
+                // are already at EOF; fold them away before unwinding.
                 let _ = join_pipe_drain(stdout_drain);
                 let _ = join_pipe_drain(stderr_drain);
-                return Err(ExecuteError::IoError(error));
+                return Err(error);
             }
         };
         Ok(std::process::Output {
@@ -585,13 +601,16 @@ pub(in crate::executor) fn wait_pipeline_stage_output(
 /// (fd 1 and fd 2 on one open description — `2>&1 |`, `|&`) drains on a
 /// reader thread, and hand back (status, merged bytes) in true write
 /// order. The Windows face is rubash#2020's (see
-/// `wait_pipeline_stage_output`); on unix the plain blocking
-/// read-to-EOF-then-wait stays byte-for-byte.
+/// `wait_pipeline_stage_output`); rubash#3284 gives the unix face the
+/// same interruptible wait — the read moves onto the drain thread so
+/// the sliced mailbox drain can run while the pipe fills, instead of
+/// the blocking read-to-EOF-then-wait that never observes a recorded
+/// terminating delivery.
 #[cfg(any(windows, unix))]
 pub(in crate::executor) fn wait_pipeline_stage_merged_output(
     executor: &mut Executor,
     child: &mut std::process::Child,
-    mut reader: impl std::io::Read + Send + 'static,
+    reader: impl std::io::Read + Send + 'static,
 ) -> Result<(std::process::ExitStatus, Vec<u8>), ExecuteError> {
     #[cfg(not(unix))]
     {
@@ -607,13 +626,17 @@ pub(in crate::executor) fn wait_pipeline_stage_merged_output(
     }
     #[cfg(unix)]
     {
-        let _ = executor;
-        let mut merged = Vec::new();
-        reader
-            .read_to_end(&mut merged)
-            .map_err(ExecuteError::IoError)?;
-        let status = child.wait().map_err(ExecuteError::IoError)?;
-        Ok((status, merged))
+        let drain = spawn_pipe_drain(reader, PipelineDrainTarget::Collect);
+        let status = match wait_pipeline_member_interruptibly(executor, child) {
+            Ok(status) => status,
+            Err(error) => {
+                // The tree-kill above closed the pipe, so the drain is
+                // already at EOF; fold it away before unwinding.
+                let _ = join_pipe_drain(Some(drain));
+                return Err(error);
+            }
+        };
+        Ok((status, join_pipe_drain(Some(drain))?))
     }
 }
 use crate::executor::command_prepare::mixed_assignment_statement_admission;
@@ -5442,8 +5465,14 @@ impl Executor {
                 );
             }
         }
-        let last = processes.pop().expect("pipeline has at least two stages");
-        let output = last.wait_with_output()?;
+        let mut last = processes.pop().expect("pipeline has at least two stages");
+        // rubash#3284: the last member's wait is the interruptible
+        // one, not a plain blocking wait_with_output — the capture
+        // drains run on threads inside wait_pipeline_stage_output,
+        // so the sliced mailbox drain fits and a recorded terminating
+        // delivery aborts the wait instead of waiting for the member's
+        // natural end.
+        let output = wait_pipeline_stage_output(self, &mut last)?;
         results.push((
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stdout),
             crate::executor::substitution_metadata::bytes_to_shell_text(&output.stderr),
@@ -5481,7 +5510,13 @@ impl Executor {
                     // kernel's SIGPIPE on its own (SIGPIPE is SIG_DFL
                     // process-wide since rubash#1333), so a genuine 141
                     // still arrives — as a reaped status, not a synthesis.
-                    let status = process.wait().map_err(ExecuteError::IoError)?;
+                    // rubash#3284: the wait is the draining one — the
+                    // member is still only killed on a recorded
+                    // terminating delivery (observe's termsig abort),
+                    // never for being slow; without the drain a delivery
+                    // landing here would sit until the member's natural
+                    // end, the same gap as the single foreground wait.
+                    let status = super::external_inner::wait_fg_child_draining(self, &mut process)?;
                     super::read_helpers::note_reaped_child_cpu(&process);
                     status
                 }
