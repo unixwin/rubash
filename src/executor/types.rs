@@ -56,6 +56,20 @@ pub const FD_PIPE_PREFIX: &str = "__RUBASH_FD_PIPE_";
 /// tombstone: /proc/self/fd/N is gone and every predicate fails.
 pub const FD_TARGET_PREFIX: &str = "__RUBASH_FD_TARGET_";
 pub const FD_ACCESS_PREFIX: &str = "__RUBASH_FD_ACCESS_";
+/// rubash#3432: the fd-alias fact the binary file operators
+/// (`-ef`/`-nt`/`-ot`) consume. A File-bound fd carries its target
+/// path in `FD_TARGET_PREFIX`, but a path re-stat is not enough: the
+/// shell's OS fd namespace is shifted (the cwd anchor holds OS fd 3,
+/// so user fd N's file lands on OS fd N+1 and up), and a pipe, socket,
+/// device, or deleted file has no re-stat-able path at all. The sync
+/// therefore also mints `__RUBASH_FD_STAT_<fd>` — `"<dev> <ino>
+/// <mtime_sec> <mtime_nsec>"` from fstat(2) on the entry's kernel
+/// handle, unix only — the identity/mtime of the bound open file
+/// description itself. GNU's sh_stat (lib/sh/eaccess.c:80) stats the
+/// descriptor the process holds; in GNU the shell's OS fd N IS user
+/// fd N, so the plain stat lands right, while here only the fstat
+/// of the table entry's handle names the same file.
+pub const FD_STAT_PREFIX: &str = "__RUBASH_FD_STAT_";
 /// rubash#1902 (stage face): "1" while a pipeline stage's fd 0 is the
 /// staged FUNCTION_STDIN mirror standing in for the inter-stage pipe
 /// (GNU execute_cmd.c:2620 execute_pipeline + do_piping,
