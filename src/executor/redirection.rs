@@ -871,10 +871,13 @@ impl Executor {
                 let masked_target = mask_redirect_target_quoted_spans(&masked_target);
                 if let Some(name) = self.nounset_unbound_parameter(&masked_target) {
                     let mut stderr = Vec::new();
+                    // rubash#3406: a redirection_expand failure inside
+                    // the walk is the same do_redirections moment as
+                    // reject_redirect_at — same class prefix.
                     writeln!(
                         &mut stderr,
                         "{}{name}: unbound variable",
-                        self.error_prefix()
+                        self.compound_redirect_error_prefix(cmd)
                     )?;
                     self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
                     self.exit_code = 1;
@@ -1583,10 +1586,13 @@ impl Executor {
             )?;
         }
         let name = dup_bad_fd_name(raw_word, redirector, fd);
+        // rubash#3406: this second line is GNU's redirection_error for
+        // the same entry (redir.c), so it carries the same class prefix
+        // as every other walk rejection — see reject_redirect_at.
         writeln!(
             &mut stderr,
             "{}{name}: Bad file descriptor",
-            self.error_prefix()
+            self.compound_redirect_error_prefix(cmd)
         )?;
         self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
         self.exit_code = 1;
@@ -1600,7 +1606,21 @@ impl Executor {
         text: &str,
     ) -> Result<(), ExecuteError> {
         let mut stderr = Vec::new();
-        writeln!(&mut stderr, "{}{text}", self.error_prefix())?;
+        // rubash#3406: the validation walk IS GNU's do_redirections
+        // moment for these entries (execute_cmd.c:854 runs before the
+        // dispatch stamps any line), so its rejections carry the same
+        // class prefix the post-dispatch paths already use: ambient
+        // line for plain compounds, the node's completion line for
+        // cm_arith / cm_cond, the command's own line otherwise
+        // (compound_redirect_error_prefix, rubash#3183). Rendering with
+        // the plain funnel prefix reported a multi-line (( )) command's
+        // failing input open at its FIRST line where GNU reports the
+        // completion line.
+        writeln!(
+            &mut stderr,
+            "{}{text}",
+            self.compound_redirect_error_prefix(cmd)
+        )?;
         self.write_redirect_diagnostic_at(cmd, index, &stderr)?;
         self.exit_code = 1;
         Ok(())
