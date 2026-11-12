@@ -317,7 +317,8 @@ impl Executor {
             } else if redirect_target_fd(&target) == Some(1) {
                 super::write_stdout_bytes(&stdout)?;
             } else {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stdout)?;
             }
         } else if let Some(redirect) = &cmd.append {
@@ -366,7 +367,8 @@ impl Executor {
                     super::write_stdout_bytes(&stderr)?;
                 }
             } else if !is_null_device(&target) {
-                let mut file = self.create_redirect_output(&target, redirect.clobber)?;
+                let mut file =
+                    self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                 file.write_all(&stderr)?;
             }
         } else if let Some(redirect) = &cmd.redirect_err_append {
@@ -497,6 +499,27 @@ impl Executor {
             .unwrap_or_else(|| panic!("{name} row in BUILTIN_TABLE"));
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
+        // rubash#3336: pushd/popd move the session cwd exactly the way
+        // cd does — every GNU route goes through cd_builtin
+        // (builtins/pushd.def:298 the Dir operand, :265/:284 the
+        // rotations via change_to_temp -> cd_to_string, :400 popd's
+        // top via cd_to_string), and cd_builtin moves the PROCESS cwd
+        // with chdir (builtins/cd.def:600 change_to_directory), so a
+        // GNU child simply inherits it (execute_cmd.c:5771
+        // execute_disk_command forks via make_child, no chdir). Under
+        // G-02 the process never chdirs, so the spawn stamp can only
+        // place a child in a deleted directory through the cwd-anchor
+        // fd — and the anchor is warmed by the cd funnels only. A
+        // pushd-entered directory therefore left the anchor naming the
+        // pre-pushd directory; once the entered directory was deleted,
+        // the stamp found no anchor for the session cwd and fell
+        // through unstamped, running children in the process (startup)
+        // cwd. Warm the anchor whenever the builtin moved the session
+        // cwd, mirroring execute_cd — gated on the move, not the
+        // status, because a readonly-bind failure still leaves the
+        // chdir standing (pushd.rs G-02), and a no-move success
+        // (pushd -n, dirs) needs no refresh.
+        let cwd_before = self.shell_state.cwd.clone();
         let status = {
             let mut diag = super::builtin_diag::Diag::new(row, &mut stderr);
             let status = crate::builtins::pushd::execute_with_io(
@@ -511,8 +534,37 @@ impl Executor {
             diag.flush_with(|| self.diagnostic_prolog());
             status?
         };
+        // GNU pushd.def:296-302 delegates the Dir operand to
+        // cd_builtin, so pushd/popd are cd-family movers: a move must
+        // maintain the same session cwd state cd maintains
+        // (rubash#3335) — the stored logical cwd
+        // (the_current_working_directory, builtins/common.c:589) and
+        // the cwd inode anchor (rubash#3198). Without the anchor, a
+        // later cd from a deleted cwd strands on the dead spelling
+        // (`cd ..` rc 1 after a pushd entry); without the logical
+        // value, the make_absolute base falls back to the physical
+        // spelling (a symlinked pushd entry binds "$R/a/real/."
+        // instead of "$R/link/."). -n moves nothing and dirs never
+        // moves, so both updates are gated on an actual move; the
+        // bound PWD is the logical value, exactly as cd's bindpwd
+        // binds it.
+        let moved = status == 0 && self.shell_state.cwd != cwd_before;
+        if moved {
+            if let Some(pwd) = self.shell_state.env_vars.get("PWD").cloned() {
+                self.shell_state.logical_cwd = Some(pwd);
+            }
+        }
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.sync_cd_variables();
+        // rubash#3198: warm the cwd inode anchor at the moment the
+        // directory is entered, as execute_cd does, so a later unlink
+        // of the directory cannot strand the verbatim fallback. The
+        // gate is the move itself (rubash#3336), which subsumes the
+        // status-0 case: a readonly-bind failure still leaves the
+        // chdir standing.
+        if self.shell_state.cwd != cwd_before {
+            self.refresh_cwd_anchor();
+        }
         Ok(status)
     }
 }

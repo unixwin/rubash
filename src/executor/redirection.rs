@@ -1646,9 +1646,16 @@ impl Executor {
         // and its state is discarded. The executing path reports a
         // failed open itself; a report here double-prints (rubash#1844).
         state.diagnostics_muted = true;
-        if !self.apply_ordered_output_redirects(cmd, &mut state)? {
-            return Ok(None);
-        }
+        // rubash#3308: apply_ordered_output_redirects reports whether
+        // the LIST held an output redirect — a stage with none returns
+        // false, which this probe read as "unresolvable" and answered
+        // None, so the spawner defaulted fd 2 to the ambient Stderr and
+        // an enclosing `2>file` / `2>/dev/null` / `exec 2>...` / `2>&1`
+        // binding was silently dropped (the child inherited the process
+        // stderr). The seeded state already carries the fd-table
+        // ambient bindings, so no list redirect means the seeded
+        // targets stand; only a failed open declines.
+        self.apply_ordered_output_redirects(cmd, &mut state)?;
         // A stage whose own output open failed is not routable from the
         // resolved targets (the failed fd never bound): decline so the
         // sequential stage executor reports the failure per element
@@ -1766,6 +1773,23 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Option<usize> {
+        let prefix = self.error_prefix();
+        self.failing_open_redirect_index_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `failing_open_redirect_index` with the diagnostic prefix given
+    /// explicitly: the identification strips the prefix from `message`
+    /// before matching the `{target}: ` head, so a caller that composed
+    /// the message under a different line's prefix (a compound's own
+    /// redirect errors report the ambient line, rubash#3183) must hand
+    /// that same prefix over, or the strip misses and the entry is
+    /// never located.
+    pub(in crate::executor) fn failing_open_redirect_index_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Option<usize> {
         use crate::parser::RedirectKind;
         let by_target = cmd.redirects.iter().position(|redirect| {
             let opens_path = match redirect.kind {
@@ -1791,9 +1815,8 @@ impl Executor {
                 return false;
             }
             let head = format!("{}: ", target.strip_prefix('&').unwrap_or(&target));
-            let prefix = self.error_prefix();
             std::str::from_utf8(message).is_ok_and(|text| {
-                text.strip_prefix(prefix.as_str())
+                text.strip_prefix(prefix)
                     .is_some_and(|rest| rest.starts_with(&head))
             })
         });
@@ -1808,7 +1831,7 @@ impl Executor {
         // whose effective redirector equals the named number (file
         // arms), or whose dup source does (dup arms).
         let text = std::str::from_utf8(message).ok()?;
-        let rest = text.strip_prefix(self.error_prefix().as_str())?;
+        let rest = text.strip_prefix(prefix)?;
         let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
         if digits.is_empty() || !rest[digits.len()..].starts_with(": Bad file descriptor") {
             return None;
@@ -1855,7 +1878,22 @@ impl Executor {
         cmd: &CommandNode,
         message: &[u8],
     ) -> Result<(), ExecuteError> {
-        let failed_index = self.failing_open_redirect_index(cmd, message);
+        let prefix = self.error_prefix();
+        self.write_redirect_diagnostic_routed_with_prefix(cmd, message, &prefix)
+    }
+
+    /// `write_redirect_diagnostic_routed` with the diagnostic prefix
+    /// given explicitly, for messages composed under a different
+    /// line's prefix than the funnel-stamped one (rubash#3183 ambient
+    /// redirect reports): the failing-entry identification inside must
+    /// strip the same prefix the message was composed with.
+    pub(in crate::executor) fn write_redirect_diagnostic_routed_with_prefix(
+        &mut self,
+        cmd: &CommandNode,
+        message: &[u8],
+        prefix: &str,
+    ) -> Result<(), ExecuteError> {
+        let failed_index = self.failing_open_redirect_index_with_prefix(cmd, message, prefix);
         let mut state = self.command_output_fd_state();
         match failed_index {
             Some(index) => {
@@ -3240,7 +3278,8 @@ impl Executor {
             // marker probe standing in for access(2).
             #[cfg(any(unix, windows))]
             let fifo_validation: Option<Result<(), std::io::Error>> = {
-                let path = self.session_path(self.redirect_target_filesystem_path(&target));
+                let path =
+                    self.session_path(self.redirect_target_filesystem_path_for(redirect, &target));
                 crate::executor::shell_options::redirect_path_is_fifo(&path).then(|| {
                     match crate::executor::shell_options::redirect_fifo_access_error(&path, true) {
                         Some(error) => Err(crate::posix_errors::path_error(&target, error)),
@@ -3286,7 +3325,7 @@ impl Executor {
                         .map_err(|e| crate::posix_errors::path_error(&target, e))
                 }
                 None => self
-                    .create_redirect_output(&target, redirect.clobber)
+                    .create_redirect_output_for(Some(redirect), &target, redirect.clobber)
                     .map(|_| ()),
             };
             if let Err(error) = open_result {

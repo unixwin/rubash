@@ -778,6 +778,14 @@ impl Executor {
         self.suppress_errexit += 1;
         let result = body(self);
         self.suppress_errexit -= 1;
+        // rubash#2652: record whether this suppressed execution is
+        // what produced the terminal status — a nonzero status left
+        // by a CMD_IGNORE_RETURN position (execute_cmd.c's
+        // ignore_return arms) is errexit-exempt, and the
+        // driver-level verdict must not re-fire on it. A success
+        // clears the record: the terminal status is no longer the
+        // suppressed failure's.
+        self.errexit_suppressed_terminal.set(self.exit_code != 0);
         result
     }
 
