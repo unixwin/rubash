@@ -86,6 +86,40 @@ impl Executor {
         status
     }
 
+    /// rubash#3382: consume a fatal arithmetic evalerror latched while
+    /// expanding this `[[ ]]` command's operands, and arm the DISCARD
+    /// class for the list loop. Returns true when a fatal record was
+    /// consumed. GNU has no cross-command error state at all: expr.c's
+    /// evalerror jumps DISCARD for the CURRENT command only, so the
+    /// `[[ ]]` command itself must own the failure — the flags may
+    /// not survive into the next command (where `abort_on_expansion_errors`
+    /// would discard an innocent command instead). Nounset is excluded:
+    /// it has its own FORCE_EOF path (`[[ $((b)) = x ]]` under `set -u`
+    /// aborts the script, and the next command's abort check is what
+    /// fires it today). Nonfatal arith errors (e.g. a ternary
+    /// assignment error) do not fire this check — they print and the
+    /// command continues with status 1.
+    pub(super) fn take_conditional_arith_evalerror(&mut self) -> bool {
+        if self.shell_state.arithmetic_expansion_error.get()
+            && self.shell_state.arithmetic_fatal_error.get()
+            && !self.shell_state.arithmetic_nounset_error.get()
+        {
+            self.shell_state.arithmetic_expansion_error.set(false);
+            self.shell_state.arithmetic_fatal_error.set(false);
+            // A nonfatal flag latched by this command's operands
+            // belongs to this command too; leaving it standing would
+            // let the next command's funnel misread it as its own.
+            self.shell_state.arithmetic_nonfatal_error.set(false);
+            // rubash#1518: the arithmetic evalerror class — the
+            // reader's errexit promotion skips it, so the DISCARD
+            // does not exit the script under `set -e`.
+            self.evalerror_arith_pending.set(true);
+            true
+        } else {
+            false
+        }
+    }
+
     /// rubash#1915: mask the process-substitution spans the parser
     /// recorded for THIS conditional word out of the text a `[[ ]]`
     /// nounset scan is about to judge. The lookup is by the word's
