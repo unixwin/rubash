@@ -59,9 +59,13 @@ pub fn execute(args: &[String], env_vars: &crate::shell::var_table::VarTable) ->
     // past a downstream pipe element.
     let mut stdout = crate::executor::GlobalStdout;
     let mut stderr = io::stderr().lock();
-    // Standalone entry (no session): the process cwd is the only cwd.
+    // Standalone entry (no session): the process cwd is the only cwd,
+    // and there is no executor — so the wait runs bare (`None`): with
+    // no mailbox to defer it, a termsig is SIG_DFL and kills the
+    // process at delivery, exactly as GNU does for an untrapped termsig.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
     execute_with_child_stdio(
+        None,
         args,
         env_vars,
         &cwd,
@@ -71,6 +75,14 @@ pub fn execute(args: &[String], env_vars: &crate::shell::var_table::VarTable) ->
         Stdio::inherit(),
         Stdio::inherit(),
     )
+    .map_err(|error| match error {
+        ExecuteError::IoError(error) => error,
+        // The standalone entry has no session, so the chain can only
+        // fail with an I/O error here (spawn/write/wait); any other
+        // variant would come from a session wait, which `None` never
+        // takes. Map it to a generic I/O error rather than panicking.
+        other => io::Error::new(io::ErrorKind::Other, other.to_string()),
+    })
 }
 
 pub(crate) fn replaces_shell(args: &[String]) -> bool {
@@ -237,11 +249,15 @@ pub(crate) fn replace_process_image(
 /// (execute_cmd.c:6126 exec_builtin -> shell_execve has no
 /// simulated-wait layer; the wait is where GNU's wait_for observes
 /// CHECK_TERMSIG, jobs.c:3064). The executor is threaded through as
-/// the first parameter; the return type widens from `io::Result` so
-/// the termsig unwind (`ExecuteError::ExitCode(128+sig)`) propagates
-/// to the dispatcher instead of collapsing into a status.
+/// the first parameter, as `Option<&mut Executor>`: `Some` on the
+/// engine path, `None` on the standalone entry (`execute`), which has
+/// no session — there the bare wait is correct, because no mailbox
+/// defers the signal and the disposition is SIG_DFL. The return type
+/// widens from `io::Result` so the termsig unwind
+/// (`ExecuteError::ExitCode(128+sig)`) propagates to the dispatcher
+/// instead of collapsing into a status.
 pub(crate) fn execute_with_io<W, E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -253,11 +269,21 @@ where
     W: Write,
     E: Write,
 {
-    execute_impl(executor, args, env_vars, cwd, stdout, stderr, None, child_stdin, &[])
+    execute_impl(
+        executor,
+        args,
+        env_vars,
+        cwd,
+        stdout,
+        stderr,
+        None,
+        child_stdin,
+        &[],
+    )
 }
 
 pub(crate) fn execute_with_child_stdio<W, E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -294,7 +320,7 @@ where
 /// (external_redirects.rs register_pre_exec_close).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_with_child_stdio_closing<W, E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -323,7 +349,7 @@ where
 }
 
 fn execute_impl<W, E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     args: &[String],
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
@@ -760,7 +786,7 @@ fn report_exec_spawn_failure<E: Write>(
 }
 
 fn run_external_exec<W, E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -829,7 +855,14 @@ where
             buf
         })
     });
-    let status = crate::executor::wait_fg_child_draining(executor, &mut child)?;
+    // With a session executor, wait through the draining wait; without
+    // one (the standalone entry) the bare wait is correct — no mailbox
+    // defers the signal and the disposition is SIG_DFL, so the process
+    // dies at delivery exactly as GNU does for an untrapped termsig.
+    let status = match executor {
+        Some(executor) => crate::executor::wait_fg_child_draining(executor, &mut child)?,
+        None => child.wait().map_err(ExecuteError::from)?,
+    };
     let stdout_bytes = stdout_reader
         .map(|handle| handle.join().unwrap_or_default())
         .unwrap_or_default();
@@ -843,7 +876,7 @@ where
 }
 
 fn run_external_exec_with_stdio<E>(
-    executor: &mut Executor,
+    executor: Option<&mut Executor>,
     program: &std::path::Path,
     command_name: &str,
     operands: &[String],
@@ -909,7 +942,14 @@ where
     // point — a termsig rode out the whole child. Route the wait through
     // the draining wait (10ms try_wait slices + the mailbox drain); on a
     // termsig it kills and reaps the child first, then unwinds.
-    let status = crate::executor::wait_fg_child_draining(executor, &mut child)?;
+    // With a session executor, wait through the draining wait; without
+    // one (the standalone entry) the bare wait is correct — no mailbox
+    // defers the signal and the disposition is SIG_DFL, so the process
+    // dies at delivery exactly as GNU does for an untrapped termsig.
+    let status = match executor {
+        Some(executor) => crate::executor::wait_fg_child_draining(executor, &mut child)?,
+        None => child.wait().map_err(ExecuteError::from)?,
+    };
     record_exec_signal_death(spawned_pid, &status);
     Ok(crate::executor::wait_status::process_exit_status(&status))
 }

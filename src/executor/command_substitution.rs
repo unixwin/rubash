@@ -1999,11 +1999,8 @@ impl Executor {
             comsub_drain_permit: Cell::new(false),
             comsub_parent_exit_armed: Cell::new(
                 self.comsub_parent_exit_armed.get()
-                    || crate::builtins::trap::get_trap_action(
-                        &self.shell_state.env_vars,
-                        "EXIT",
-                    )
-                    .is_some(),
+                    || crate::builtins::trap::get_trap_action(&self.shell_state.env_vars, "EXIT")
+                        .is_some(),
             ),
             comsub_termsig_pending: Cell::new(None),
             // GNU exit.def bash_logout: subshells never source ~/.bash_logout

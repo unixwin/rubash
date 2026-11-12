@@ -2721,8 +2721,7 @@ impl Executor {
         if self.invocation_interactive() && signal == libc::SIGHUP as i32 {
             return true;
         }
-        self.comsub_parent_exit_armed.get()
-            && crate::builtins::kill::exit_reroutes(signal)
+        self.comsub_parent_exit_armed.get() && crate::builtins::kill::exit_reroutes(signal)
     }
 
     /// rubash#3401: the shared termsig classifier for `&self` waits
@@ -2741,8 +2740,8 @@ impl Executor {
     /// (expand_command_substitution_inner is `&self`).
     #[cfg(unix)]
     pub(in crate::executor) fn pending_termsig_verdict(&self) -> Option<i32> {
-        let signals = crate::builtins::kill::take_pending_signals_now(std::process::id())
-            .unwrap_or_default();
+        let signals =
+            crate::builtins::kill::take_pending_signals_now(std::process::id()).unwrap_or_default();
         if signals.is_empty() {
             return None;
         }
@@ -3760,7 +3759,7 @@ impl Executor {
             let exec_env_vars = self.shell_state.env_vars.clone();
             let exec_cwd = self.shell_state.cwd.clone();
             let status = crate::builtins::exec::execute_with_io(
-                self,
+                Some(&mut *self),
                 &cmd.words[1..],
                 &exec_env_vars,
                 &exec_cwd,
@@ -4297,7 +4296,7 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_io(
-                        self,
+                        Some(&mut *self),
                         &exec_args,
                         &exec_env_vars,
                         &exec_cwd,
@@ -4307,7 +4306,7 @@ impl Executor {
                     )?
                 }
                 ExecSpawnBinding::Ambient(1) => crate::builtins::exec::execute_with_io(
-                    self,
+                    Some(&mut *self),
                     &exec_args,
                     &exec_env_vars,
                     &exec_cwd,
@@ -4316,7 +4315,7 @@ impl Executor {
                     child_stdin,
                 )?,
                 ExecSpawnBinding::Closed => crate::builtins::exec::execute_with_io(
-                    self,
+                    Some(&mut *self),
                     &exec_args,
                     &exec_env_vars,
                     &exec_cwd,
@@ -4340,7 +4339,7 @@ impl Executor {
                             None => ExecDiagStderr::Process(std::io::stderr()),
                         };
                         crate::builtins::exec::execute_with_io(
-                            self,
+                            Some(&mut *self),
                             &exec_args,
                             &exec_env_vars,
                             &exec_cwd,
@@ -4399,7 +4398,7 @@ impl Executor {
                 ExecSpawnBinding::File(file, _) => {
                     let mut diag = file.as_ref().try_clone()?;
                     crate::builtins::exec::execute_with_child_stdio_closing(
-                        self,
+                        Some(&mut *self),
                         &exec_args,
                         &exec_env_vars,
                         &exec_cwd,
@@ -4413,7 +4412,7 @@ impl Executor {
                 }
                 ExecSpawnBinding::Closed => {
                     crate::builtins::exec::execute_with_child_stdio_closing(
-                        self,
+                        Some(&mut *self),
                         &exec_args,
                         &exec_env_vars,
                         &exec_cwd,
@@ -4434,7 +4433,7 @@ impl Executor {
                             let dup = crate::fd::duplicate_handle_inheritable(file_fd.handle)?;
                             let mut diag = crate::fd::handle_to_file(dup);
                             crate::builtins::exec::execute_with_child_stdio_closing(
-                                self,
+                                Some(&mut *self),
                                 &exec_args,
                                 &exec_env_vars,
                                 &exec_cwd,
@@ -4447,7 +4446,7 @@ impl Executor {
                             )?
                         }
                         _ => crate::builtins::exec::execute_with_child_stdio_closing(
-                            self,
+                            Some(&mut *self),
                             &exec_args,
                             &exec_env_vars,
                             &exec_cwd,
@@ -4473,7 +4472,7 @@ impl Executor {
                             None => ExecDiagStderr::Process(std::io::stderr()),
                         };
                         crate::builtins::exec::execute_with_child_stdio_closing(
-                            self,
+                            Some(&mut *self),
                             &exec_args,
                             &exec_env_vars,
                             &exec_cwd,
@@ -4570,7 +4569,7 @@ impl Executor {
             // a plain fd 2 stays the terminal stream.
             if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
                 crate::builtins::exec::execute_with_io(
-                    self,
+                    Some(&mut *self),
                     &exec_args,
                     &exec_env_vars,
                     &exec_cwd,
@@ -4598,7 +4597,7 @@ impl Executor {
                         None => ExecDiagStderr::Process(std::io::stderr()),
                     };
                     crate::builtins::exec::execute_with_io(
-                        self,
+                        Some(&mut *self),
                         &exec_args,
                         &exec_env_vars,
                         &exec_cwd,
@@ -4633,7 +4632,7 @@ impl Executor {
                     None => ExecDiagStderr::Process(std::io::stderr()),
                 };
                 crate::builtins::exec::execute_with_child_stdio(
-                    self,
+                    Some(&mut *self),
                     &exec_args,
                     &exec_env_vars,
                     &exec_cwd,

@@ -240,7 +240,14 @@ fn issue3401_term_during_simulated_exec_wait_dies_promptly() {
         "term-sim-exec",
         "trap 'echo EXIT-TRAP' EXIT\nme=$$\n( sleep 0.3; kill -TERM \"$me\" ) &\nx=$(exec /usr/bin/sleep 5)\necho unreachable\n",
     );
-    assert_prompt_termsig_death("term-sim-exec", &stdout, code, signal, elapsed, libc::SIGTERM);
+    assert_prompt_termsig_death(
+        "term-sim-exec",
+        &stdout,
+        code,
+        signal,
+        elapsed,
+        libc::SIGTERM,
+    );
 }
 
 #[test]
