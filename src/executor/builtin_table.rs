@@ -534,6 +534,19 @@ pub(crate) fn is_table_builtin_name(name: &str) -> bool {
     builtin_table_row(name).is_some()
 }
 
+/// Builtin-table names GNU bash does not ship as builtins: the
+/// rubash extension builtins, currently only `env` — the in-process
+/// coreutils-env implementation that exists because Windows has no
+/// /usr/bin/env (docs/builtins.md §2; the #2036 S2/KD-1 unified
+/// projection keeps it in every face). The faces split on this set
+/// wherever GNU's table is the contract: the builtin group of
+/// `compgen -A command` filters it out (#2538), and the describe
+/// faces off Windows report these names as PATH files (#2642,
+/// completing #2514 — GNU `describe_command`,
+/// builtins/type.def:211, knows no env builtin). Dispatch, `enable`,
+/// `compgen -b` and `builtin env` keep the full table.
+pub(crate) const NON_GNU_BUILTIN_NAMES: &[&str] = &["env"];
+
 /// Whether `name` is a POSIX special builtin — the table half of
 /// `command_registry::SPECIAL_BUILTINS` membership (pinned equal by
 /// `table_special_names_match_special_builtins`).

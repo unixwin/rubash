@@ -31,13 +31,17 @@ rubash 对一个命令词按优先级做三层处理：
    Windows 上 describe 严格按 GNU `describe_command`
    （builtins/type.def:211）作答——可解析即报告 PATH 文件本身
    （`command -v` 给全路径、`type -t` 给 `file`），不可解析即未找到，
-   与执行面是否接管无关。
+   与执行面是否接管无关。**#2642（2026-11-12）**：`env` 这一唯一的
+   扩展 builtin 同样适用——非 Windows 上 `type env` / `command -v env`
+   报告 PATH 文件；执行面与 `enable` / `compgen -b` 仍走统一投影。
 3. **外部命令**：沿 PATH 查找，由 winuxcmd 提供。
 
 ## 二、真 builtin 清单（62 项）
 
 GNU Bash 5.3 的 61 个 builtin **全部覆盖，无缺失**；唯一加粗的扩展是 `env`
-（rubash#759 item 4 起不再携带 zsh 兼容别名）。另有 Windows 专属 `sudo`
+（rubash#759 item 4 起不再携带 zsh 兼容别名）。`env` 的 describe 面例外：
+非 Windows 上 `type env` / `command -v env` 按 GNU 报告 PATH 文件（#2642），
+仅 Windows 产品面报告为 builtin。另有 Windows 专属 `sudo`
 作为**隐藏 host builtin** 不计入 62（见第三节说明）。
 
 <!-- builtins-list
@@ -144,8 +148,9 @@ stty
 | `arch` | `builtins/uname.rs`（`uname -m` 语义） | 无 | 同上 |
 | `stty` | `builtins/stty.rs`（`execute_console_mode_tool`） | `execute_external`（stand-down 时） | 控制台模式工具，与 uname/arch 同族（#154）；stand_down=Replace 为已裁保持——用户 2026-10-29 确认 stty 暂用内建、不翻 Yield，评估格就此关闭，有实测问题再重评 |
 
-`env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，`type env` 报告为
-builtin），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
+`env` 是唯一的混合形态：它在白名单内（属第二节真 builtin，Windows 上
+`type env` 报告为 builtin；非 Windows 上 describe 按 GNU 报告 PATH 文件，
+#2642），但实现是进程内执行 coreutils 语义、**没有外部回退路径**。它不进
 本清单，因为白名单归属与 fast-path 判定互斥，文档同步测试会拒绝两边都出现
 的名字。
 
