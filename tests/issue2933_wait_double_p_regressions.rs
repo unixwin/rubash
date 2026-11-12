@@ -10,7 +10,6 @@ use std::process::Command;
 
 struct Run {
     status: i32,
-    stdout: String,
     stderr: String,
     dir: PathBuf,
 }
@@ -29,7 +28,6 @@ fn run_script(body: &str) -> Run {
         .expect("run rubash");
     Run {
         status: output.status.code().unwrap_or(-1),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         dir,
     }
