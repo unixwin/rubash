@@ -447,7 +447,17 @@ impl Executor {
     /// on: GNU reports '' ENOENT.
     fn mkdir_create_parents(&self, operand: &str) -> Result<(), (io::Error, String)> {
         if operand.is_empty() {
-            return Err((io::Error::from_raw_os_error(libc::ENOENT), String::new()));
+            // Portable construction: shared code names no `libc::`
+            // constant (E0433 on Windows, where this file has no
+            // unconditional libc import). Kind + GNU strerror text
+            // via io::Error::new — the shape used across the crate
+            // (command_input_scope.rs, shell_options.rs) — and the
+            // diagnostic rendered by posix_errors::message stays
+            // byte-identical to the raw-errno form.
+            return Err((
+                io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
+                String::new(),
+            ));
         }
         // An operand of only slashes ("/", "//") names the root
         // itself: one prefix, the whole operand.
@@ -465,7 +475,7 @@ impl Executor {
                     Ok(stat) if stat.is_dir => {}
                     Ok(_) => {
                         return Err((
-                            io::Error::from_raw_os_error(libc::ENOTDIR),
+                            io::Error::new(io::ErrorKind::NotADirectory, "Not a directory"),
                             prefix.to_string(),
                         ));
                     }
@@ -583,7 +593,7 @@ impl Executor {
                 // below would answer EEXIST against the session
                 // cwd itself.
                 Err((
-                    io::Error::from_raw_os_error(libc::ENOENT),
+                    io::Error::new(io::ErrorKind::NotFound, "No such file or directory"),
                     expanded.to_string(),
                 ))
             } else {
