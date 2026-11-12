@@ -1,0 +1,18 @@
+# rubash#3430: stems excluded from the dynamic pin-stem CI run
+# (scripts/ci-run-pin-stems.sh). One stem per line; the first token is
+# the stem name, the rest of the line is its reason. Full-line comments
+# start with '#'.
+#
+# An entry is allowed ONLY for a stem that is red on master for a
+# recorded reason: a pins-first stem whose fix has not landed yet, or
+# a known-red stem with an open issue. The script fails the job if an
+# entry goes stale (stem renamed or removed), so this file tracks the
+# tree. When the fix for an excluded stem lands, delete its line here
+# in the same PR — the stem then runs by default.
+#
+# J1 pins-first (wave-2 pins #3180): both stems assert GNU behavior
+# that is a recorded product defect, still OPEN, with no fix landed.
+# - #2769: EOF death-notice delivery race (notice absent on failure).
+issue2769_death_notice_line_stamp_regressions pins-first, fix pending (rubash#2769 OPEN; GNU-stamped line expectations)
+# - #2777: post-kill wait-status reads return 127/147/148, never 137; stopped jobs reported as Running.
+issue2777_stopped_job_state_regressions pins-first, fix pending (rubash#2777 OPEN; GNU JSTOPPED expectations)
