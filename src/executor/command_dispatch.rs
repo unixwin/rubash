@@ -904,7 +904,7 @@ impl Executor {
         if let PreHelpOutcome::Abort(status) =
             self.run_pre_help_prologue(row, &mut prologue_stderr)?
         {
-            self.write_buffered_builtin_output_stderr_first(cmd, &[], &prologue_stderr)?;
+            self.write_buffered_builtin_output(cmd, &[], &prologue_stderr)?;
             self.exit_code = status;
             return Ok(());
         }
@@ -914,8 +914,15 @@ impl Executor {
         // output flushes at builtin exit (the #1134 printf rule),
         // so the prologue's stderr precedes the help text on a
         // merged stream (`bind --help 2>&1` shows the warning
-        // first).
-        self.write_buffered_builtin_output_stderr_first(cmd, &stdout, &prologue_stderr)?;
+        // first). The ordered-chunk log below is the mechanism that
+        // preserves that stderr-first order (union #3399 + #3385).
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
+        {
+            use std::io::Write;
+            let _ = log.stderr_writer().write_all(&prologue_stderr);
+            let _ = log.stdout_writer().write_all(&stdout);
+        }
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         self.exit_code = 2;
         if row
             .flags

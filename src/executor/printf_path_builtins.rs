@@ -44,20 +44,25 @@ impl Executor {
             }
             scan += 1;
         }
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
+        // rubash#3324: run against the ordered log (#2699) and route
+        // the chunks in production order — GNU line-buffers stdout
+        // (shell.c:1921-1922 sh_setlinebuf), so a conversion
+        // diagnostic lands between the values around it in a merged
+        // stream (`printf '%d\n' 5 bad 7` -> 5, diagnostic, 0, 7).
+        // The old pair route emitted all of stderr first (the #1134
+        // model, built on full stdio buffering — wrong for multi-arg
+        // shapes; the single-arg case it pinned still holds, since
+        // the diagnostic for a conversion precedes that conversion's
+        // own value).
+        let log = super::trap_stack_builtins::OrderedOutputLog::new();
         let status = crate::builtins::printf::execute_with_io_and_store(
             words.iter().map(String::as_str),
             &mut self.shell_state.env_vars,
             Some(&mut self.shell_state.variables),
-            &mut stdout,
-            &mut stderr,
+            &mut log.stdout_writer(),
+            &mut log.stderr_writer(),
         )?;
-        // GNU printf.def emits conversion diagnostics through
-        // builtin_error (unbuffered) while the converted output sits in
-        // stdout's stdio buffer until the builtin returns: in a merged
-        // 2>&1 stream the diagnostics come first (rubash#1134).
-        self.write_buffered_builtin_output_stderr_first(cmd, &stdout, &stderr)?;
+        self.write_buffered_builtin_output_chunks(cmd, &log)?;
         // GNU builtins/printf.def printf_builtin returns
         // sh_chkwrite(format/operands success): a failed flush (a closed
         // stdout fd) folds the write failure into the builtin's status —

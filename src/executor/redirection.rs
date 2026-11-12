@@ -1949,7 +1949,7 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, false)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false)
     }
 
     /// Post-external variant of the buffered route: the child already
@@ -1969,19 +1969,21 @@ impl Executor {
         stdout: &[u8],
         stderr: &[u8],
     ) -> Result<bool, ExecuteError> {
-        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, false, true)
+        self.route_builtin_buffered_output_ordered(cmd, stdout, stderr, true)
     }
 
-    /// `stderr_first` swaps the final ordered walk: printf's GNU model
-    /// emits builtin_error diagnostics unbuffered while its converted
-    /// output flushes only when the builtin returns, so in a merged
-    /// stream the diagnostics precede the output (rubash#1134).
+    /// The final ordered walk writes stdout, then stderr (rubash#3324:
+    /// the old stderr-first swap encoded the #1134 model — diagnostics
+    /// unbuffered while output flushes at builtin exit — but GNU
+    /// line-buffers stdout, shell.c:1921-1922, so diagnostics
+    /// interleave with output in production order; builtins with a
+    /// cross-stream order route their ordered log through
+    /// route_builtin_buffered_output_chunks instead).
     pub(in crate::executor) fn route_builtin_buffered_output_ordered(
         &mut self,
         cmd: &CommandNode,
         stdout: &[u8],
         stderr: &[u8],
-        stderr_first: bool,
         resolve_only_numbered: bool,
     ) -> Result<bool, ExecuteError> {
         self.last_builtin_write_failed.set(false);
@@ -2099,13 +2101,8 @@ impl Executor {
         // untouched. GNU builtins/common.c:320 sh_chkwrite folds only
         // stdout's ferror into the builtin status; builtin_error's failed
         // fd-2 write is lost.
-        if stderr_first {
-            self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
-            self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
-        } else {
-            self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
-            self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
-        }
+        self.write_state_output_or_diagnostic(cmd, &state, 1, stdout)?;
+        self.write_state_output_or_diagnostic(cmd, &state, 2, stderr)?;
         Ok(true)
     }
 
@@ -2188,7 +2185,26 @@ impl Executor {
                 self.write_state_output_or_diagnostic(cmd, &state, 2, &stderr)?;
                 return Ok(true);
             }
-            return Ok(false);
+            // rubash#3324: a decline here used to mean "no output
+            // redirects on this command", and the caller degraded to
+            // the pair-block write (whole stdout, then whole stderr).
+            // That is still right when the walk failed (redirect_failed
+            // / first_open_error keep the old fallback), but a pipeline
+            // stage's clone has its output redirects STRIPPED — the
+            // driver applies them once to the captured streams
+            // (execute_builtin_pipeline_stage, #2106) — so the walk
+            // legitimately sees nothing to apply while the fd table
+            // already carries the merged bindings (the #2689 pre-wire
+            // bound fd 2 onto fd 1's capture for `2>&1`). Falling back
+            // to the pair block there reordered the stage's merged
+            // stream (stdout block before the stderr block). Fall
+            // through to the chunk walk instead: the seeded state IS
+            // the resolved state, and the chunks route in log order
+            // through it — exactly like the direct path, where the
+            // command's own redirects make the walk succeed.
+            if state.redirect_failed || state.first_open_error.borrow().is_some() {
+                return Ok(false);
+            }
         }
         if let Some((kind, message)) = state.first_open_error.borrow_mut().take() {
             return Err(ExecuteError::IoError(std::io::Error::new(kind, message)));
@@ -3542,6 +3558,10 @@ impl Executor {
         // payloads, and a pass that declines or fails must not leak
         // them into a later stage's routing.
         let dup_payloads = std::mem::take(&mut *self.stage_dup_channel_payloads.borrow_mut());
+        // rubash#3324: same take-up-front rule for the stage's
+        // ordered output chunks — a pass that declines or fails must
+        // not leak them into a later stage's routing.
+        let ordered_chunks = std::mem::take(&mut *self.pipeline_stage_ordered_chunks.borrow_mut());
         if cmd.redirect_out.is_none()
             && cmd.append.is_none()
             && cmd.redirect_err.is_none()
@@ -3578,6 +3598,46 @@ impl Executor {
         // fd2-to-Stdout merge lands in the post-redirect pipe content.
         let stdout_target = state.fds.get(&1).cloned().unwrap_or(OutputTarget::Stdout);
         let stderr_target = state.fds.get(&2).cloned().unwrap_or(OutputTarget::Stderr);
+        // rubash#3324: when both streams resolve to the SAME sink
+        // (`2>&1`, `1>&2`, `>f 2>&1`), the split pair cannot express
+        // the production order — GNU forks the element
+        // (execute_cmd.c:2620) and the element's own do_redirections
+        // binds the descriptors, so the merged stream IS the
+        // element's write order. Rebuild it from the stage's ordered
+        // log and route it once through the shared sink; the other
+        // leg is empty, so its arm below is a no-op. When the
+        // targets differ, or the stage recorded no log, the pair
+        // routes exactly as before.
+        //
+        // The same sink wears two variants: `1>&2` dups fd 1 onto
+        // the ambient fd 2, which the walk records as the
+        // ProcessStderr snapshot (#279), while fd 2 itself stays
+        // the Stderr default — both are the shell's stderr, so
+        // they merge (the symmetric case is the same sink reached
+        // from the other side). The merged text rides the Stderr
+        // leg when fd 2 IS Stderr, so it stays in the driver's
+        // string channel instead of the raw channel; otherwise it
+        // rides the stdout leg.
+        let same_sink = stdout_target == stderr_target
+            || (stdout_target == OutputTarget::ProcessStderr
+                && stderr_target == OutputTarget::Stderr)
+            || (stdout_target == OutputTarget::Stderr
+                && stderr_target == OutputTarget::ProcessStderr);
+        if same_sink {
+            if let Some(chunks) = ordered_chunks {
+                let mut merged = String::new();
+                for (_, text) in &chunks {
+                    merged.push_str(text);
+                }
+                if stderr_target == OutputTarget::Stderr {
+                    *stderr = merged;
+                    stdout.clear();
+                } else {
+                    *stdout = merged;
+                    stderr.clear();
+                }
+            }
+        }
         match &stdout_target {
             OutputTarget::Stdout => {}
             OutputTarget::Stderr => {

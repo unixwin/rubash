@@ -6237,6 +6237,13 @@ impl Executor {
         streaming_stdin: bool,
         live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#3324: an inline arm records its ordered output
+        // chunks here for the driver's merge (see the field doc); a
+        // stage that records none must not inherit the previous
+        // stage's log, so clear it up front. This is the single
+        // dispatch point for the slot arms (the outer wrapper and
+        // the redirect-carrier path both come through here).
+        self.pipeline_stage_ordered_chunks.borrow_mut().take();
         // rubash#1540: entry snapshot for the post-scan adjudication
         // below — the no-fields scan expands every word with the full
         // walker, and the arithmetic verdict flags / brace latch it
@@ -6900,14 +6907,32 @@ impl Executor {
             Some(PipelineSlot::Printf) => {
                 let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
                 let mut env_vars = self.shell_state.env_vars.clone();
-                let mut output = Vec::new();
-                let mut stderr = Vec::new();
+                // rubash#3324: same ordered-log treatment as the Trap
+                // arm below — printf interleaves its values with its
+                // diagnostics (e.g. `printf '%d\n' 5 bad 7` prints 5,
+                // the `bad: invalid number` diagnostic, then 0, 7), and
+                // the two-Vec split loses that order.
+                let log = super::trap_stack_builtins::OrderedOutputLog::new();
                 let status = crate::builtins::printf::execute_with_io(
                     args.iter().map(String::as_str),
                     &mut env_vars,
-                    &mut output,
-                    &mut stderr,
+                    &mut log.stdout_writer(),
+                    &mut log.stderr_writer(),
                 )?;
+                let mut output = Vec::new();
+                let mut stderr = Vec::new();
+                let mut chunks = Vec::new();
+                for (fd, bytes) in log.chunks().iter() {
+                    match fd {
+                        1 => output.extend_from_slice(bytes),
+                        _ => stderr.extend_from_slice(bytes),
+                    }
+                    chunks.push((
+                        *fd,
+                        crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                    ));
+                }
+                *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
                 Ok(Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output),
                     crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),
@@ -6956,19 +6981,40 @@ impl Executor {
                     }
                 }
                 let mut env_vars = self.shell_state.env_vars.clone();
-                let mut output = Vec::new();
-                let mut stderr = Vec::new();
+                // rubash#3324: run the handler against the ordered log
+                // (#2699) instead of two separate Vecs — the log keeps
+                // the listing/diagnostic production order (GNU's
+                // display_traps writes both to the element's own
+                // descriptors, builtins/trap.def:333) so the driver's
+                // merge can interleave the streams when the stage
+                // merges them (`2>&1`). The split pair below stays the
+                // stage's result for the unmerged legs.
+                let log = super::trap_stack_builtins::OrderedOutputLog::new();
                 let status = crate::builtins::trap::execute_with_io(
                     &args,
                     &mut env_vars,
-                    &mut output,
-                    &mut stderr,
+                    &mut log.stdout_writer(),
+                    &mut log.stderr_writer(),
                 )?;
                 // The POSIX reset-by-name usage failure returns GNU's raw
                 // internal EX_USAGE (258) for the execute_trap wrapper's
                 // special_builtin_failed gate; a pipeline stage surfaces the
                 // user-visible conversion instead (execute_cmd.c:4886-4888).
                 let status = if status > 256 { 2 } else { status };
+                let mut output = Vec::new();
+                let mut stderr = Vec::new();
+                let mut chunks = Vec::new();
+                for (fd, bytes) in log.chunks().iter() {
+                    match fd {
+                        1 => output.extend_from_slice(bytes),
+                        _ => stderr.extend_from_slice(bytes),
+                    }
+                    chunks.push((
+                        *fd,
+                        crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                    ));
+                }
+                *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
                 Ok(Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output),
                     crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),
