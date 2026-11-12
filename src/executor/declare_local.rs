@@ -609,11 +609,23 @@ impl Executor {
                 let array_exists = is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, lhs)
                     || is_marked_var(&self.shell_state.env_vars, ARRAY_VARS, lhs);
                 let declare_family = !matches!(command_name, "export" | "readonly");
-                let is_compound = paren_value
-                    && (w_compassign
-                        || assoc_hint
-                        || array_hint
-                        || (declare_family && array_exists));
+                // GNU parse.y:5648-5657 token_is_assignment + subst.c:12949
+                // expand_declaration_argument: a `(...)` operand binds as a
+                // compound assignment only when the LHS is a valid identifier
+                // — an invalid name (rubash#3186) takes the plain word path,
+                // so the builtin's InvalidId diagnostic quotes the plain
+                // expanded word instead of the marker/quoted compound
+                // expansion. The `w_compassign` arm needs no extra gate:
+                // the parser only sets the marker for a
+                // valid_compound_assignment_lhs LHS (token_actions.rs), which
+                // after its own tightening is a strict identifier (modulo a
+                // `[sub]` head).
+                let lhs_base = lhs.split('[').next().unwrap_or(lhs);
+                let lhs_base_valid = is_shell_name(lhs_base);
+                let hint_compound =
+                    assoc_hint || array_hint || (declare_family && array_exists);
+                let is_compound =
+                    paren_value && (w_compassign || (lhs_base_valid && hint_compound));
                 // GNU subst.c:12949-13036 expand_declaration_argument: a
                 // W_COMPASSIGN operand of an assignment builtin is bound by
                 // a nested declare_builtin during word expansion, with the
