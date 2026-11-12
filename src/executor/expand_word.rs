@@ -1533,14 +1533,27 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
 
 /// RAII scope arm: records `word` as the enclosing word for the duration of
 /// one `${}` fragment in a walker, restoring the previous record on drop.
+/// The record is install-if-absent: an outer record belongs to a word the
+/// caller is already expanding (rubash#3441: the assignment split in
+/// `expand_word_mut_with_context` expands the RHS as a fresh word, so
+/// without this the RHS walker's `${` arm would re-root the diagnostic at
+/// the RHS — GNU subst.c:10278 names the whole word `expand_word_internal`
+/// was expanding). A nested fragment still keeps its own word: the outer
+/// fragment's gate evaluation consumes the record (take) before any nested
+/// operator word expands, so the slot is empty again by then.
 pub(in crate::executor) struct PendingDiagnosticWordGuard {
     previous: Option<(*const u8, usize)>,
 }
 
 impl PendingDiagnosticWordGuard {
     pub(in crate::executor) fn new(word: &str) -> Self {
-        let previous =
-            PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
+        let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
+            let previous = slot.get();
+            if previous.is_none() {
+                slot.set(Some((word.as_ptr(), word.len())));
+            }
+            previous
+        });
         Self { previous }
     }
 }
