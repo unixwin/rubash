@@ -1794,12 +1794,55 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
 /// are consumed as part of a WORD token, so control operators inside
 /// them are NOT syntax errors at the compound-assignment level. This
 /// scanner must skip those constructs the same way.
-fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
+/// The token text GNU's yyerror names when read_token (parse.y
+/// read_token's operator table) produces an operator at byte `i` of a
+/// compound-assignment element: the FULL operator (`<>' / `>>' / `;&' /
+/// `<<<' ...), never its first byte alone. A `<`/`>` immediately after
+/// a word consisting solely of digits is read as the IO_NUMBER token
+/// first (parse.y read_token's io_number production), so the digits are
+/// the named token (`a=( 2> )` names `2'). `word_begin` is the byte
+/// index where the current element word started.
+fn ctrl_op_token_text(bytes: &[u8], i: usize, word_begin: usize) -> String {
+    let c = bytes[i];
+    if (c == b'<' || c == b'>')
+        && i > word_begin
+        && bytes[word_begin..i]
+            .iter()
+            .all(|byte| byte.is_ascii_digit())
+    {
+        return String::from_utf8_lossy(&bytes[word_begin..i]).into_owned();
+    }
+    let rest = &bytes[i..];
+    let candidates: &[&[u8]] = match c {
+        b'<' => &[b"<<-", b"<<<", b"<<", b"<&", b"<>"],
+        b'>' => &[b">>", b">&", b">|"],
+        b'&' => &[b"&>>", b"&>", b"&&"],
+        b'|' => &[b"||", b"|&"],
+        b';' => &[b";;&", b";;", b";&"],
+        _ => &[],
+    };
+    for candidate in candidates {
+        if rest.starts_with(candidate) {
+            return String::from_utf8_lossy(candidate).into_owned();
+        }
+    }
+    // `c` is one of the ASCII operator bytes matched above (or the
+    // caller's `(`), so the one-byte slice is always valid UTF-8.
+    std::str::from_utf8(&bytes[i..i + 1])
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<String> {
     let bytes = value.as_bytes();
     let mut i = 0;
     if i < bytes.len() && bytes[i] == b'(' {
         i += 1;
     }
+    // Byte index where the current element word began (after the last
+    // blank or the opening paren) — the io_number look-back in
+    // ctrl_op_token_text reads the digit run from here.
+    let mut word_begin = i;
     let mut in_single = false;
     let mut in_double = false;
     let mut escaped = false;
@@ -1908,7 +1951,7 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
                 continue;
             }
             b'&' | b'|' | b';' | b'<' | b'>' if !in_single && !in_double => {
-                return Some(c as char);
+                return Some(ctrl_op_token_text(bytes, i, word_begin));
             }
             // GNU parse.y:7104-7160 parse_compound_assignment's element
             // loop accepts only WORD and ASSIGNMENT_WORD tokens: a `('
@@ -1944,11 +1987,14 @@ fn find_unquoted_ctrl_op(value: &str, extglob: bool) -> Option<char> {
                     word_start = false;
                     continue;
                 }
-                return Some('(');
+                return Some("(".to_string());
             }
             _ => {}
         }
         word_start = matches!(c, b' ' | b'\t' | b'\n' | b'\r');
+        if word_start {
+            word_begin = i + 1;
+        }
         if !word_start {
             prev_word_byte = c;
         } else {

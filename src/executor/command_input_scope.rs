@@ -856,7 +856,12 @@ impl Executor {
                     other => other.to_string(),
                 };
                 let mut stderr = Vec::new();
-                let _ = writeln!(&mut stderr, "{}{}", self.error_prefix(), message.trim_end());
+                let _ = writeln!(
+                    &mut stderr,
+                    "{}{}",
+                    self.compound_redirect_error_prefix(cmd),
+                    message.trim_end()
+                );
                 self.write_redirected_command_stderr(cmd, &stderr)?;
                 self.exit_code = 1;
                 // rubash#2659: same adjudication as the fd-0 open
@@ -2931,7 +2936,7 @@ impl Executor {
             ) {
                 return Some(format!(
                     "{}{target}: No such file or directory",
-                    self.error_prefix()
+                    self.compound_redirect_error_prefix(cmd)
                 ));
             }
             return None;
@@ -2972,7 +2977,7 @@ impl Executor {
         {
             return Some(format!(
                 "{}{}",
-                self.error_prefix(),
+                self.compound_redirect_error_prefix(cmd),
                 crate::posix_errors::path_error(
                     &target,
                     std::io::Error::new(std::io::ErrorKind::NotFound, "No such file or directory",),
@@ -3028,7 +3033,7 @@ impl Executor {
             // redirection_error (redir.c:135) prints the strerror text.
             Some(error) => Some(format!(
                 "{}{}",
-                self.error_prefix(),
+                self.compound_redirect_error_prefix(cmd),
                 crate::posix_errors::path_error(&target, error)
             )),
         }

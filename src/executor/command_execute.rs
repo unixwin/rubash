@@ -4,6 +4,20 @@ use crate::executor::markers::{PARSE_ERROR_FIELD_SEP, STORAGE_WORD_PREFIX};
 impl Executor {
     /// Execute an AST
     pub fn execute_command(&mut self, cmd: &CommandNode) -> Result<(), ExecuteError> {
+        // rubash#2652: a command dispatched outside suppression owns
+        // the terminal status from here — clear any stale
+        // suppressed-terminal record from an earlier command in the
+        // unit, so it cannot exempt this command's own failure (the
+        // `false || false` shape: the first `false` records the
+        // exemption, the last `false` must clear it before its own
+        // gate fires). A command dispatched under suppression keeps
+        // the record: its `with_errexit_suppressed` wrapper
+        // re-records it from the outcome. A pass-through compound
+        // clears here too, then re-records inside its body if its
+        // terminal failure was suppressed.
+        if self.suppress_errexit == 0 {
+            self.errexit_suppressed_terminal.set(false);
+        }
         // rubash#545 (cell 2): the command owns every input-procsub fd its
         // words materialize — expansion registers them into the scoped vec
         // and the close below runs at the command's very end, giving the
@@ -53,7 +67,10 @@ impl Executor {
         // re-executed node (loop body, function body) expands fresh.
         self.redirect_target_memo.borrow_mut().clear();
         self.redirect_target_single_glob_match.borrow_mut().clear();
-        self.redirect_target_had_transport.borrow_mut().clear();
+        self.redirect_target_transport_spellings
+            .borrow_mut()
+            .clear();
+        self.redirect_target_node_spellings.borrow_mut().clear();
         self.assignment_expansion_memo.borrow_mut().clear();
         // Commit any deferred arithmetic writes queued by `&self` redirect
         // target expansion during the previous command (GNU redirection_expand
@@ -626,14 +643,45 @@ impl Executor {
                 let mut stderr = Vec::new();
                 // GNU redir.c:135 redirection_error is internal_error
                 // (error.c:149-176) via error_prolog: the prefix honors
-                // gnu_errfmt (rubash#1038).
-                writeln!(
-                    &mut stderr,
-                    "{}{}",
-                    self.error_prefix(),
-                    crate::posix_errors::message(&error)
-                )?;
-                self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
+                // gnu_errfmt (rubash#1038). The LINE in the prolog is the
+                // one do_redirections sees (execute_cmd.c:854): the
+                // ambient line for a compound in the ambient class, the
+                // completion line for cm_arith / cm_cond — see
+                // Executor::compound_redirect_error_prefix (rubash#3183).
+                // When the special prefix's identification fails the
+                // funnel-stamped composition below runs unchanged.
+                let special_prefix = self.compound_redirect_error_prefix(&cmd);
+                let mut special_handled = false;
+                if special_prefix != self.error_prefix() {
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        special_prefix,
+                        crate::posix_errors::message(&error)
+                    )?;
+                    if self
+                        .failing_open_redirect_index_with_prefix(&cmd, &stderr, &special_prefix)
+                        .is_some()
+                    {
+                        let _ = self.write_redirect_diagnostic_routed_with_prefix(
+                            &cmd,
+                            &stderr,
+                            &special_prefix,
+                        );
+                        special_handled = true;
+                    } else {
+                        stderr.clear();
+                    }
+                }
+                if !special_handled {
+                    writeln!(
+                        &mut stderr,
+                        "{}{}",
+                        self.error_prefix(),
+                        crate::posix_errors::message(&error)
+                    )?;
+                    self.write_redirect_diagnostic_routed(&cmd, &stderr)?;
+                }
                 self.exit_code = 1;
                 // rubash#2082: GNU execute_cmd.c:4865-4875 — the failure
                 // above is execute_builtin_or_function's do_redirections

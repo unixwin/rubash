@@ -14,14 +14,12 @@
 //! Every expectation below was cross-checked byte-for-byte against
 //! GNU bash 5.3.20 (script-file probes).
 
-use std::path::PathBuf;
 use std::process::Command;
 
 struct Run {
     status: i32,
     stdout: String,
     stderr: String,
-    dir: PathBuf,
 }
 
 fn run_script(body: &str) -> Run {
@@ -40,7 +38,6 @@ fn run_script(body: &str) -> Run {
         status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        dir,
     }
 }
 
