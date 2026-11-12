@@ -401,7 +401,16 @@ pub(in crate::executor) fn execute_history_session(
                 shell.timestamps.pop();
             }
             let command = operands.join(" ");
-            if !command.is_empty() {
+            // history.def:175-178: bare `history -s` (no remaining
+            // words, list == NULL) is a no-op success — push_history
+            // is only called `if (list)`. But a present operand list
+            // is pushed even when it joins to the empty string:
+            // string_list (subst.c:2854) keeps empty words, and
+            // check_add_history has no emptiness check, so
+            // `history -s ''` is a real (empty) entry (rubash#3329).
+            // The gate is therefore on the operand list, not the
+            // joined string.
+            if !operands.is_empty() {
                 let control = executor.get_env("HISTCONTROL").unwrap_or_default();
                 let ignore = executor.get_env("HISTIGNORE").unwrap_or_default();
                 let was_recorded = shell.record(&command, &control, &ignore, histsize);
