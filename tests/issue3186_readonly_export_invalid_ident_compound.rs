@@ -66,10 +66,7 @@ fn run_script(dir: &Path, script: &str) -> (String, String) {
 #[test]
 fn readonly_a_invalid_compound_subject_is_plain_word() {
     let dir = scratch("ro-a");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "readonly -a 'invalid+ident=(x)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "readonly -a 'invalid+ident=(x)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -80,10 +77,7 @@ fn readonly_a_invalid_compound_subject_is_plain_word() {
 #[test]
 fn export_cap_a_invalid_compound_subject_is_plain_word() {
     let dir = scratch("ex-a");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "export -A 'invalid+ident=(k v)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "export -A 'invalid+ident=(k v)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -94,10 +88,7 @@ fn export_cap_a_invalid_compound_subject_is_plain_word() {
 #[test]
 fn declare_a_invalid_compound_subject_is_plain_word() {
     let dir = scratch("decl-a");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "declare -a 'invalid+ident=(x)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "declare -a 'invalid+ident=(x)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -119,10 +110,7 @@ fn declare_a_digit_leading_compound_unquoted_is_invalid_id() {
 #[test]
 fn readonly_a_invalid_compound_expands_double_quoted_value() {
     let dir = scratch("v6");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "x='a b'\nreadonly -a \"b+d6=($x)\"\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "x='a b'\nreadonly -a \"b+d6=($x)\"\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -133,10 +121,7 @@ fn readonly_a_invalid_compound_expands_double_quoted_value() {
 #[test]
 fn readonly_a_invalid_compound_keeps_single_quoted_text() {
     let dir = scratch("v7");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "readonly -a 'b+d7=(\"a b\" c)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "readonly -a 'b+d7=(\"a b\" c)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -147,10 +132,7 @@ fn readonly_a_invalid_compound_keeps_single_quoted_text() {
 #[test]
 fn readonly_a_invalid_compound_does_not_expand_single_quoted_dollar() {
     let dir = scratch("v15");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "x='a b'\nreadonly -a 'b+d15=($x)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "x='a b'\nreadonly -a 'b+d15=($x)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -161,10 +143,7 @@ fn readonly_a_invalid_compound_does_not_expand_single_quoted_dollar() {
 #[test]
 fn readonly_a_invalid_compound_keeps_backslash_and_subscripts() {
     let dir = scratch("v14");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "readonly -a 'b+d14=(a\\b c)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "readonly -a 'b+d14=(a\\b c)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -175,10 +154,7 @@ fn readonly_a_invalid_compound_keeps_backslash_and_subscripts() {
 #[test]
 fn readonly_a_invalid_compound_indexed_elements_verbatim() {
     let dir = scratch("v9");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "readonly -a 'b+d9=([0]=x [5]=y)'\necho \"rc=$?\"\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "readonly -a 'b+d9=([0]=x [5]=y)'\necho \"rc=$?\"\n");
     assert_eq!(stdout, "rc=1\n");
     assert_eq!(
         stderr,
@@ -254,10 +230,7 @@ fn invalid_compound_continues_to_later_operands() {
 #[test]
 fn local_empty_subscript_bare_diagnostic_in_function() {
     let dir = scratch("empty-local");
-    let (stdout, stderr) = run_script(
-        &dir,
-        "g() { local 'a[]=x'; echo \"rc=$?\"; }\ng\n",
-    );
+    let (stdout, stderr) = run_script(&dir, "g() { local 'a[]=x'; echo \"rc=$?\"; }\ng\n");
     assert_eq!(stdout, "rc=1\n");
     assert!(
         stderr.contains("a[]: bad array subscript"),
