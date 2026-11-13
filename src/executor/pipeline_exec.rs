@@ -1769,66 +1769,83 @@ impl Executor {
             // execution order puts first prints last (GNU forks the
             // element with the shell's own fd 2, execute_cmd.c:2620,
             // and builtin_error writes it as produced,
-            // builtins/common.c:98). Restored right after the
-            // dispatch, on both exits; the coproc/lastpipe arms never
-            // consult the flag (they run on this executor, not a
-            // stage subshell), and a nested pipeline inside the stage
-            // body starts from a fresh executor with the flag clear.
+            // builtins/common.c:98). The flag is restored unconditionally
+            // right after the dispatch: the dispatch runs inside a
+            // closure returning Result, so a `?` inside it can only
+            // return into the closure — an Err exit cannot skip the
+            // restore the way it could if the `?` sat in this
+            // function's own scrutinee (all three exits — Some, None,
+            // Err — pass through the restore below, cf. the
+            // shell-writer and sandwich paths). The coproc/lastpipe
+            // arms never consult the flag (they run on this executor,
+            // not a stage subshell), and a nested pipeline inside the
+            // stage body starts from a fresh executor with the flag
+            // clear.
             let saved_stderr_live = self.pipeline_stage_stderr_live;
             self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(stage);
-            let Some((mut next_input, mut next_stderr, mut next_status)) = (if stage_is_coproc_tail
-            {
-                if pipeline_inverted {
-                    self.with_errexit_suppressed(|executor| {
-                        executor.execute_coproc_pipeline_tail(stage).map(Some)
-                    })?
-                } else {
-                    Some(self.execute_coproc_pipeline_tail(stage)?)
-                }
-            } else if pipeline_inverted {
-                self.with_errexit_suppressed(|executor| {
-                    if last_stage && executor.lastpipe_enabled() {
-                        executor.execute_lastpipe_stage(stage, &input).map(Some)
-                    } else {
-                        executor.execute_pipeline_stage(
+            // Sandwich form: capture the dispatch result with no `?`
+            // between the set above and the unconditional restore
+            // below; only then propagate or handle it.
+            let dispatch_result: Result<Option<(String, String, i32)>, ExecuteError> =
+                (|| -> Result<Option<(String, String, i32)>, ExecuteError> {
+                    Ok(if stage_is_coproc_tail {
+                        if pipeline_inverted {
+                            self.with_errexit_suppressed(|executor| {
+                                executor.execute_coproc_pipeline_tail(stage).map(Some)
+                            })?
+                        } else {
+                            Some(self.execute_coproc_pipeline_tail(stage)?)
+                        }
+                    } else if pipeline_inverted {
+                        self.with_errexit_suppressed(|executor| {
+                            if last_stage && executor.lastpipe_enabled() {
+                                executor.execute_lastpipe_stage(stage, &input).map(Some)
+                            } else {
+                                executor.execute_pipeline_stage(
+                                    stage,
+                                    &input,
+                                    stage0_stdin_inherit,
+                                    stage0_stdin_live,
+                                )
+                            }
+                        })?
+                    } else if last_stage && self.lastpipe_enabled() {
+                        Some(self.execute_lastpipe_stage(stage, &input)?)
+                    } else if last_stage || preserve_compound_errexit {
+                        // Compound and function stages inherit the pipeline
+                        // command's ignore_return (the current suppress_errexit
+                        // depth) instead of being wrapped in extra suppression:
+                        // execute_cmd.c:2702-2708 propagates the flag into every
+                        // element, so `! { false; echo A $?; } | cat` reaches the
+                        // echo while top-level `{ false; echo x; } | cat` still
+                        // dies on `false` under -e.
+                        self.execute_pipeline_stage(
                             stage,
                             &input,
                             stage0_stdin_inherit,
                             stage0_stdin_live,
-                        )
-                    }
-                })?
-            } else if last_stage && self.lastpipe_enabled() {
-                Some(self.execute_lastpipe_stage(stage, &input)?)
-            } else if last_stage || preserve_compound_errexit {
-                // Compound and function stages inherit the pipeline
-                // command's ignore_return (the current suppress_errexit
-                // depth) instead of being wrapped in extra suppression:
-                // execute_cmd.c:2702-2708 propagates the flag into every
-                // element, so `! { false; echo A $?; } | cat` reaches the
-                // echo while top-level `{ false; echo x; } | cat` still
-                // dies on `false` under -e.
-                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit, stage0_stdin_live)?
-            } else {
-                // Non-final simple pipeline stages never trigger errexit
-                // (bash manual: "any command in a pipeline but the
-                // last").
-                self.with_errexit_suppressed(|executor| {
-                    executor.execute_pipeline_stage(
-                        stage,
-                        &input,
-                        stage0_stdin_inherit,
-                        stage0_stdin_live,
-                    )
-                })?
-            }) else {
-                self.pipeline_stage_stderr_live = saved_stderr_live;
+                        )?
+                    } else {
+                        // Non-final simple pipeline stages never trigger errexit
+                        // (bash manual: "any command in a pipeline but the
+                        // last").
+                        self.with_errexit_suppressed(|executor| {
+                            executor.execute_pipeline_stage(
+                                stage,
+                                &input,
+                                stage0_stdin_inherit,
+                                stage0_stdin_live,
+                            )
+                        })?
+                    })
+                })();
+            self.pipeline_stage_stderr_live = saved_stderr_live;
+            let Some((mut next_input, mut next_stderr, mut next_status)) = dispatch_result? else {
                 super::shell_options::end_capture_timing();
                 self.timed_stdin = entry_timed_stdin.clone();
                 self.defer_stage_time_report = false;
                 return Ok(None);
             };
-            self.pipeline_stage_stderr_live = saved_stderr_live;
             self.pipeline_final_stage.set(false);
             super::shell_options::end_capture_timing();
             // GNU: each element's own redirections run inside the element's

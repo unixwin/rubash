@@ -38,7 +38,6 @@ fn rubash_bin() -> String {
 
 struct MergedRun {
     merged: String,
-    code: i32,
     dir: PathBuf,
 }
 
@@ -51,7 +50,7 @@ fn merged_child_output(tag: &str, script: &str) -> MergedRun {
     let path = dir.join("merged.txt");
     let stdout_file = File::create(&path).expect("create merged file");
     let stderr_file = stdout_file.try_clone().expect("clone merged file");
-    let status = Command::new(rubash_bin())
+    Command::new(rubash_bin())
         .args(["-c", script])
         .env("LC_ALL", "C.UTF-8")
         .stdin(Stdio::null())
@@ -61,7 +60,6 @@ fn merged_child_output(tag: &str, script: &str) -> MergedRun {
         .expect("spawn rubash");
     MergedRun {
         merged: fs::read_to_string(&path).expect("read merged file"),
-        code: status.code().unwrap_or(-1),
         dir,
     }
 }
@@ -182,7 +180,7 @@ fn issue3434_stage_stderr_redirect_still_wins() {
     fs::create_dir_all(&dir).expect("create temp dir");
     let err_path = dir.join("err.txt");
     let script = format!(
-        "printf \"v\\n\" | {{ read -- -n; echo after=$?; }} 2>{}",
+        "printf \"v\\n\" | {{ read -- -n; echo after=$?; }} 2>\"{}\"",
         err_path.to_string_lossy()
     );
     let run = merged_child_output("stderr-file", &script);
