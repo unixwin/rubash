@@ -699,6 +699,25 @@ fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
         && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
 }
 
+/// rubash#3434: true when a redirect entry (re)binds fd 2 — the only
+/// redirects that may decline the #2483 live-stderr channel (see
+/// pipeline_stage_stderr_may_stream). An entry claims fd 2 when its fd
+/// is literally 2 (any kind, including `2>&-` / `2<&1`), when it is a
+/// combined-output redirect (`&>f` / `&>>f`, which binds fd 1 and fd 2
+/// together), or when its target fd is dynamic (`{var}`, unknowable
+/// statically — decline conservatively). Every other entry (`3>&1`,
+/// `>f`, `3>file`, `<f`) leaves fd 2's disposition untouched, so the
+/// stage's diagnostics may still stream live.
+fn redirect_claims_fd2(redirect: &crate::parser::Redirect) -> bool {
+    redirect.fd_var.is_some()
+        || matches!(
+            redirect.kind,
+            crate::parser::RedirectKind::CombinedOutput
+                | crate::parser::RedirectKind::CombinedAppend
+        )
+        || redirect.fd == Some(2)
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_and_or_list_command(
         &mut self,
@@ -1740,52 +1759,88 @@ impl Executor {
                         .time_command
                         .as_ref()
                         .is_some_and(|time| time.command.coproc_command.is_some()));
-            let Some((mut next_input, mut next_stderr, mut next_status)) = (if stage_is_coproc_tail
-            {
-                if pipeline_inverted {
-                    self.with_errexit_suppressed(|executor| {
-                        executor.execute_coproc_pipeline_tail(stage).map(Some)
-                    })?
-                } else {
-                    Some(self.execute_coproc_pipeline_tail(stage)?)
-                }
-            } else if pipeline_inverted {
-                self.with_errexit_suppressed(|executor| {
-                    if last_stage && executor.lastpipe_enabled() {
-                        executor.execute_lastpipe_stage(stage, &input).map(Some)
-                    } else {
-                        executor.execute_pipeline_stage(
+            // rubash#3434: arm the #2483 live-stderr channel for this
+            // stage when its fd 2 is live (see
+            // pipeline_stage_stderr_may_stream): a compound/function
+            // stage's diagnostics otherwise sit in the whole-stage
+            // stderr capture until the stage completes, while its
+            // stdout streams live (final member, #1605) or escapes
+            // live through a dup'd fd (`>&3`), so the error that
+            // execution order puts first prints last (GNU forks the
+            // element with the shell's own fd 2, execute_cmd.c:2620,
+            // and builtin_error writes it as produced,
+            // builtins/common.c:98). The flag is restored unconditionally
+            // right after the dispatch: the dispatch runs inside a
+            // closure returning Result, so a `?` inside it can only
+            // return into the closure — an Err exit cannot skip the
+            // restore the way it could if the `?` sat in this
+            // function's own scrutinee (all three exits — Some, None,
+            // Err — pass through the restore below, cf. the
+            // shell-writer and sandwich paths). The coproc/lastpipe
+            // arms never consult the flag (they run on this executor,
+            // not a stage subshell), and a nested pipeline inside the
+            // stage body starts from a fresh executor with the flag
+            // clear.
+            let saved_stderr_live = self.pipeline_stage_stderr_live;
+            self.pipeline_stage_stderr_live = self.pipeline_stage_stderr_may_stream(stage);
+            // Sandwich form: capture the dispatch result with no `?`
+            // between the set above and the unconditional restore
+            // below; only then propagate or handle it.
+            let dispatch_result: Result<Option<(String, String, i32)>, ExecuteError> =
+                (|| -> Result<Option<(String, String, i32)>, ExecuteError> {
+                    Ok(if stage_is_coproc_tail {
+                        if pipeline_inverted {
+                            self.with_errexit_suppressed(|executor| {
+                                executor.execute_coproc_pipeline_tail(stage).map(Some)
+                            })?
+                        } else {
+                            Some(self.execute_coproc_pipeline_tail(stage)?)
+                        }
+                    } else if pipeline_inverted {
+                        self.with_errexit_suppressed(|executor| {
+                            if last_stage && executor.lastpipe_enabled() {
+                                executor.execute_lastpipe_stage(stage, &input).map(Some)
+                            } else {
+                                executor.execute_pipeline_stage(
+                                    stage,
+                                    &input,
+                                    stage0_stdin_inherit,
+                                    stage0_stdin_live,
+                                )
+                            }
+                        })?
+                    } else if last_stage && self.lastpipe_enabled() {
+                        Some(self.execute_lastpipe_stage(stage, &input)?)
+                    } else if last_stage || preserve_compound_errexit {
+                        // Compound and function stages inherit the pipeline
+                        // command's ignore_return (the current suppress_errexit
+                        // depth) instead of being wrapped in extra suppression:
+                        // execute_cmd.c:2702-2708 propagates the flag into every
+                        // element, so `! { false; echo A $?; } | cat` reaches the
+                        // echo while top-level `{ false; echo x; } | cat` still
+                        // dies on `false` under -e.
+                        self.execute_pipeline_stage(
                             stage,
                             &input,
                             stage0_stdin_inherit,
                             stage0_stdin_live,
-                        )
-                    }
-                })?
-            } else if last_stage && self.lastpipe_enabled() {
-                Some(self.execute_lastpipe_stage(stage, &input)?)
-            } else if last_stage || preserve_compound_errexit {
-                // Compound and function stages inherit the pipeline
-                // command's ignore_return (the current suppress_errexit
-                // depth) instead of being wrapped in extra suppression:
-                // execute_cmd.c:2702-2708 propagates the flag into every
-                // element, so `! { false; echo A $?; } | cat` reaches the
-                // echo while top-level `{ false; echo x; } | cat` still
-                // dies on `false` under -e.
-                self.execute_pipeline_stage(stage, &input, stage0_stdin_inherit, stage0_stdin_live)?
-            } else {
-                // Non-final simple pipeline stages never trigger errexit
-                // (bash manual: "any command in a pipeline but the
-                // last").
-                self.with_errexit_suppressed(|executor| {
-                    executor.execute_pipeline_stage(
-                        stage,
-                        &input,
-                        stage0_stdin_inherit,
-                        stage0_stdin_live,
-                    )
-                })?
-            }) else {
+                        )?
+                    } else {
+                        // Non-final simple pipeline stages never trigger errexit
+                        // (bash manual: "any command in a pipeline but the
+                        // last").
+                        self.with_errexit_suppressed(|executor| {
+                            executor.execute_pipeline_stage(
+                                stage,
+                                &input,
+                                stage0_stdin_inherit,
+                                stage0_stdin_live,
+                            )
+                        })?
+                    })
+                })();
+            self.pipeline_stage_stderr_live = saved_stderr_live;
+            let Some((mut next_input, mut next_stderr, mut next_status)) = dispatch_result? else {
                 super::shell_options::end_capture_timing();
                 self.timed_stdin = entry_timed_stdin.clone();
                 self.defer_stage_time_report = false;
@@ -2530,11 +2585,14 @@ impl Executor {
     /// pipeline's fd 2 must resolve to the process stderr (an ambient
     /// `2>&1` rebinds it to fd 1's object, a case the merged-stream
     /// machinery owns), and no enclosing stderr capture may be armed.
+    /// rubash#3434: only redirects that (re)bind fd 2 decline —
+    /// redirect_claims_fd2 — so a `3>&1` dup (which leaves fd 2 alone)
+    /// no longer forfeits the live channel for the whole stage.
     fn pipeline_stage_stderr_may_stream(&self, command: &CommandNode) -> bool {
         if self.stderr_capture.is_some()
             || command.redirect_err.is_some()
             || command.redirect_err_append.is_some()
-            || !command.redirects.is_empty()
+            || command.redirects.iter().any(redirect_claims_fd2)
         {
             return false;
         }
