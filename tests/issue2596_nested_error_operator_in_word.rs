@@ -152,3 +152,172 @@ fn issue2596_nested_in_error_message_inner_set() {
     assert_eq!(stdout, "", "the command must abort, got: {stdout}");
     assert!(stderr.contains("u: deep"), "stderr: {stderr}");
 }
+
+// Subscript remainder of the same issue: a `:?` nested inside an
+// array SUBSCRIPT was swallowed by the same pre-scan — it consumed
+// the outer `${...}` span whole and never adjudicated the nested
+// expansion, so `a=(x y); echo ${a[${b:?e}]}` printed `x` with
+// exit 0 where GNU aborts with `b: e`. GNU law: the fetch expands
+// the subscript (parameter_brace_expand, subst.c:9777, via
+// expand_subscript_string, subst.c:11063) before any operator,
+// transform, length or indirect adjudication, so the subscript
+// error pre-empts them all. Expectations below were verified
+// against GNU bash 5.2.21 (script files); the word cases above
+// were verified against GNU bash 5.3.20.
+
+#[test]
+fn issue2596_nested_in_subscript_inner_unset() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b:?e}]}; echo alive");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_inner_set() {
+    let (stdout, stderr, code) = rubash("a=(x y); b=1; echo ${a[${b:?e}]}");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "y\n");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_element_unset() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b[0]:?e}]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b[0]: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_element_set() {
+    // The subscript expands to `p`; indexed arithmetic reads the
+    // unset name `p` as 0, so the element is a[0].
+    let (stdout, stderr, code) = rubash("a=(x y); b=(p q); echo ${a[${b[0]:?e}]}");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "x\n");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_outer_default_word() {
+    // The subscript fires before the `:-` dispatch.
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b:?e}]:-d}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_outer_alternate_word() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b:?e}]:+alt}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_word_not_selected() {
+    // u is set, so the `:-` word — subscript included — is never
+    // expanded: no error from inside it.
+    let (stdout, stderr, code) = rubash("a=(x y); u=ok; echo ${u:-${a[${b:?e}]}}; echo alive");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "ok\nalive\n");
+    assert_eq!(stderr, "");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_word_selected() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${u:-${a[${b:?e}]}}; echo alive");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_assoc() {
+    let (stdout, stderr, code) = rubash("declare -A A=([k]=v); echo ${A[${b:?e}]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_double_nested() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b[${c:?e}]}]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("c: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_nested_default() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b:-${c:?e}}]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("c: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_double_quoted() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[\"${b:?e}\"]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_single_quoted() {
+    // GNU expands the nested expansion even in single quotes
+    // inside a subscript (the quotes survive into the arithmetic
+    // evaluation); the scan is quote-transparent here.
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a['${b:?e}']}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_comsub_contained() {
+    // A `:?` inside a `$(...)` in the subscript belongs to the
+    // inner command: it is reported by the child while the outer
+    // command continues with the substituted (empty) subscript.
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[$(echo ${b:?e})]}; echo alive2");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "x\nalive2\n");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_set_u() {
+    // The `:?` wins over nounset: GNU reports `b: e`, not
+    // `b: unbound variable`.
+    let (stdout, stderr, code) = rubash("set -u; a=(x y); echo ${a[${b:?e}]}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_assignment_value() {
+    let (stdout, stderr, code) = rubash("a=(x y); x=${a[${b:?e}]}; echo alive");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_substring() {
+    let (stdout, stderr, code) = rubash("a=(x y); echo ${a[${b:?e}]:1:2}");
+    assert_ne!(code, Some(0));
+    assert_eq!(stdout, "", "the command must abort, got: {stdout}");
+    assert!(stderr.contains("b: e"), "stderr: {stderr}");
+}
+
+#[test]
+fn issue2596_nested_in_subscript_variable_set() {
+    let (stdout, stderr, code) = rubash("i=1; a=(x y); echo ${a[${i:?e}]}");
+    assert_eq!(code, Some(0));
+    assert_eq!(stdout, "y\n");
+    assert_eq!(stderr, "");
+}

@@ -995,8 +995,9 @@ impl Executor {
                 // the closure runs only in the forked child before
                 // exec and only dup2/closes raw descriptors.
                 unsafe {
-                    process
-                        .pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+                    process.pre_exec(move || {
+                        super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                    });
                 }
             }
         }

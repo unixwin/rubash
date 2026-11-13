@@ -1584,7 +1584,18 @@ impl Executor {
                 // named print lookup, then restore — bare list mode stays
                 // untouched (GNU excludes the invisible array there) and
                 // assignments stay blocked (is_noassign_bash_array).
+                // rubash#2770: the named form now renders from the
+                // dynamic view; the seed stays for the subscript
+                // operands (`FUNCNAME[0]` has no view) — but never for
+                // a lifetime-unset cell (variables.c:3839 unbind):
+                // seeding one would fabricate a `declare -a FUNCNAME`
+                // GNU reports as not found.
                 let funcname_print_operand = declare_args_request_print(&args)
+                    && !is_marked_var(
+                        &self.shell_state.env_vars,
+                        crate::executor::UNSET_DYNAMIC_VARS,
+                        "FUNCNAME",
+                    )
                     && args
                         .iter()
                         .any(|arg| arg == "FUNCNAME" || arg.starts_with("FUNCNAME["));
@@ -1705,7 +1716,12 @@ impl Executor {
                         // contents; the env cells for these two only
                         // refresh at source-frame push/pop and would
                         // list a returned function's frozen frame.
-                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO"] {
+                        // rubash#2770: FUNCNAME joins the same VISIBLE
+                        // class — its env mirror is a birth snapshot
+                        // ("", init.rs) that function entry never
+                        // refreshes, so listings rendered the stale
+                        // valueless cell instead of the live stack.
+                        for name in ["GROUPS", "BASH_SOURCE", "BASH_LINENO", "FUNCNAME"] {
                             push_registry(name);
                         }
                         // rubash#1363 + rubash#2973: GNU enumerates a
