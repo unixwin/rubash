@@ -701,14 +701,14 @@ impl Executor {
     /// dynamic_declaration_view's render arms encode (integer:
     /// RANDOM/SECONDS/SRANDOM/BASHPID/HISTCMD via their att_integer
     /// registration, variables.c:1858-1875; array: the stack/group
-    /// carriers). Listing filters adjudicate dynamic names by this
-    /// class (rubash#2700).
+    /// carriers, FUNCNAME included — its INIT_DYNAMIC_ARRAY_VAR cell
+    /// carries att_array, variables.c:1835-1839). Listing filters
+    /// adjudicate dynamic names by this class (rubash#2700).
     pub(in crate::executor) fn dynamic_declaration_class(name: &str) -> (bool, bool) {
         match name {
             "RANDOM" | "SECONDS" | "SRANDOM" | "BASHPID" | "HISTCMD" => (true, false),
-            "GROUPS" | "PIPESTATUS" | "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO" => {
-                (false, true)
-            }
+            "GROUPS" | "PIPESTATUS" | "BASH_ARGC" | "BASH_ARGV" | "BASH_SOURCE" | "BASH_LINENO"
+            | "FUNCNAME" => (false, true),
             _ => (false, false),
         }
     }
@@ -727,7 +727,11 @@ impl Executor {
     /// bindings the table walk already owns. The invisible provider
     /// scalars never appear in print_var_list (their cells are
     /// value-less until read, and print_assignment skips unset-valued
-    /// cells), so they stay out of this supply.
+    /// cells), so they stay out of this supply. FUNCNAME joins the
+    /// supply on the same rule GNU's print_var_list applies
+    /// (variables.c:1066-1073 skips att_invisible cells): at depth 0
+    /// the array is invisible and empty, so no line; inside a
+    /// function the live stack renders (rubash#2770).
     pub(in crate::executor) fn dynamic_set_views(
         &self,
     ) -> Vec<crate::builtins::set::DynamicSetView> {
@@ -751,6 +755,25 @@ impl Executor {
                 name: name.to_string(),
                 storage: format_indexed_array_values(values),
             });
+        }
+        // rubash#2770: FUNCNAME is invisible (and empty) at depth 0,
+        // so the assignment form shows no line there — only a live,
+        // non-empty stack renders, exactly when GNU's print_var_list
+        // stops skipping the cell (make_funcname_visible,
+        // variables.c:1812-1824). An empty storage would print a
+        // phantom `FUNCNAME=()` the oracle never shows.
+        if !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, "FUNCNAME")
+            && !self.dynamic_name_shadowed("FUNCNAME")
+        {
+            let values = self
+                .dynamic_stack_array_values("FUNCNAME")
+                .unwrap_or_default();
+            if !values.is_empty() {
+                views.push(crate::builtins::set::DynamicSetView {
+                    name: "FUNCNAME".to_string(),
+                    storage: format_indexed_array_values(values),
+                });
+            }
         }
         if matches!(
             self.shell_state.pipestatus_shape,
@@ -822,7 +845,8 @@ impl Executor {
             {
                 return None;
             }
-            "PIPESTATUS" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV" => {
+            "PIPESTATUS" | "BASH_SOURCE" | "BASH_LINENO" | "BASH_ARGC" | "BASH_ARGV"
+            | "FUNCNAME" => {
                 return self.dynamic_view(name);
             }
             "GROUPS" => {
@@ -994,6 +1018,45 @@ impl Executor {
                 .join(" ");
             return Some(format!(
                 "declare -a{readonly}{exported} {name}=({elements})"
+            ));
+        }
+        // rubash#2770: FUNCNAME is the same class — a dynamic stack
+        // array (variables.c:1835-1839 init_funcname_var:
+        // INIT_DYNAMIC_ARRAY_VAR with att_invisible|att_noassign);
+        // make_funcname_visible (variables.c:1812-1824) clears
+        // att_invisible at function entry. GNU show_var_attributes
+        // (builtins/setattr.def:510-511) prints an invisible array
+        // as its bare name (`declare -a FUNCNAME` at depth 0), and
+        // with elements once visible. Render from the composed view
+        // element reads use, before the scalar gate below — the
+        // scalar getter is element 0, so the declaration match would
+        // otherwise fall through (the named-print seed covered only
+        // the named form; listings never saw the live stack).
+        if name == "FUNCNAME" {
+            let exported = if is_marked_var(&self.shell_state.env_vars, EXPORTED_VARS, name) {
+                "x"
+            } else {
+                ""
+            };
+            let readonly = if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, name) {
+                "r"
+            } else {
+                ""
+            };
+            let values = self
+                .dynamic_stack_array_values("FUNCNAME")
+                .unwrap_or_default();
+            if values.is_empty() {
+                return Some(format!("declare -a{readonly}{exported} FUNCNAME"));
+            }
+            let elements = values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| format!("[{index}]={}", sh_double_quote_text(value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            return Some(format!(
+                "declare -a{readonly}{exported} FUNCNAME=({elements})"
             ));
         }
         let value = match self.dynamic_parameter_value(name) {

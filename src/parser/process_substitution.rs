@@ -293,6 +293,26 @@ fn embedded_procsub_close(chars: &[char], open: usize) -> Option<usize> {
             index += 1;
             continue;
         }
+        if !single && ch == '`' {
+            // A backquote unit is opaque at this span's level
+            // (backquote_group_end, the lexer's own backquote walker
+            // from PR #3351): its interior — an unmatched `(` or a
+            // quote that would corrupt this walker's quote state —
+            // belongs to the inner command text, never to this
+            // span's paren depth (GNU parse.y:3877
+            // parse_matched_pair consumes nested quote units whole
+            // via the shellquote arm; subst.c:1311
+            // extract_process_subst -> xparse_dolparen (parse.y:4686)
+            // re-parses the body with the real parser, rubash#3354).
+            // The gate is `!single` only, like the sibling scans in
+            // this file: a backquote group stays active inside
+            // double quotes. An unclosed group falls through to the
+            // plain walk below.
+            if let Some(end) = backquote_group_end(&chars, index) {
+                index = end;
+                continue;
+            }
+        }
         if !single && !double {
             if ch == '(' {
                 depth += 1;
