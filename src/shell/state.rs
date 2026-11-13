@@ -988,6 +988,18 @@ impl ShellState {
         // this process, and only a snapshot taken NOW lets the
         // restore put the parent's limits back (see the field docs).
         saved.fork_saved_process_rlimits = crate::builtins::ulimit::snapshot_process_rlimits();
+        // rubash#3387: the fork boundary also snapshots the process's
+        // raw rusage — the child face's `times` reads current minus
+        // this baseline (GNU's forked child starts near zero;
+        // builtins/times.def:65-84). Popped by restore_flat_subshell
+        // (or the direct-assignment restore in external_finish.rs)
+        // when the stack top is this boundary at the same depth;
+        // `saved` carries the entry depth, which is the depth the
+        // boundary was entered from.
+        crate::executor::read_helpers::push_times_baseline(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved.subshell_depth.get(),
+        );
         saved
     }
 

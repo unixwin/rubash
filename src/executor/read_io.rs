@@ -1940,6 +1940,14 @@ impl Executor {
         // stage when this substitution runs inside one; give the body its
         // own capture.
         let timing_recorder = crate::executor::shell_options::begin_capture_timing();
+        // rubash#3387: the process-substitution body runs in a forked
+        // child (GNU subst.c:6362 process_substitute) — its `times`
+        // reads from this body's entry baseline. The guard lives for
+        // the body execution below and pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (thread_captured, result) =
             crate::executor::shell_options::capture_stdout(|| subshell.execute_ast(&ast));
         crate::executor::shell_options::end_capture_timing();

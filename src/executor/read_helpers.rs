@@ -1,5 +1,6 @@
 use super::*;
 use crate::executor::builtin_diag::Diag;
+use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug)]
 pub(in crate::executor) struct TimeCommandMetrics {
@@ -190,6 +191,114 @@ fn rusage_counters() -> RusageCounters {
     counters
 }
 
+/// Fork-face baseline for the `times` builtin (rubash#3387).
+///
+/// GNU forks every subshell / command-substitution / pipeline element
+/// (builtins/times.def:65-84 reads getrusage(RUSAGE_SELF) in the
+/// forked child, so the child sees its own near-zero clocks;
+/// execute_cmd.c:1576 execute_in_subshell, subst.c:7143
+/// command_substitute, subst.c:6362 process_substitute,
+/// execute_cmd.c:2620 execute_pipeline). rubash runs those faces
+/// in-process on the host's rusage, so `times` printed the host's
+/// accumulated counters there. Each fork face therefore snapshots
+/// the process's raw counters at entry; `process_times` reports the
+/// current counters minus the innermost snapshot (saturating).
+/// The `time` keyword is unaffected: it reads `rusage_counters()`
+/// differentially and never goes through this stack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TimesBaselineKind {
+    /// `( )` flat region / in-place comsub fast path / fresh-shell
+    /// child script — pushed by `ShellState::clone_for_child_save`,
+    /// popped by `restore_flat_subshell` (or the direct-assignment
+    /// restore in external_finish.rs) when the stack top is this
+    /// boundary at the same depth.
+    CloneBoundary,
+    /// One `execute_pipeline_stage` call — the guard at its top
+    /// pushes, its `Drop` pops. The lastpipe last element never
+    /// comes through that funnel (execute_lastpipe_stage), so its
+    /// `times` keeps the accumulated reading (execute_cmd.c:2758).
+    PipelineStage,
+    /// A `$( )` / `${ }` / `<( )` body running on a
+    /// `command_substitution_executor` clone — the guard around the
+    /// body execution pushes, its `Drop` pops.
+    ComsubBody,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TimesBaseline {
+    kind: TimesBaselineKind,
+    depth: usize,
+    self_user: std::time::Duration,
+    self_sys: std::time::Duration,
+    child_user: std::time::Duration,
+    child_sys: std::time::Duration,
+}
+
+thread_local! {
+    static TIMES_BASELINES: RefCell<Vec<TimesBaseline>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Snapshot the current raw counters as a fork-face baseline
+/// (rubash#3387). `depth` is the `subshell_depth` the face was
+/// entered from — the pop side matches on (kind, depth) so a
+/// restore belonging to another boundary can never pop this entry.
+pub(crate) fn push_times_baseline(kind: TimesBaselineKind, depth: usize) {
+    let (self_user, self_sys, child_user, child_sys) = raw_process_times();
+    TIMES_BASELINES.with(|stack| {
+        stack.borrow_mut().push(TimesBaseline {
+            kind,
+            depth,
+            self_user,
+            self_sys,
+            child_user,
+            child_sys,
+        });
+    });
+}
+
+/// Pop the innermost baseline iff it is the named boundary at the
+/// given depth; returns whether anything was popped. A mismatch
+/// means the matching push never happened (or an inner face is
+/// still live) — the stack is left untouched, so a stray restore
+/// cannot eat an outer face's baseline.
+pub(crate) fn pop_times_baseline_if(kind: TimesBaselineKind, depth: usize) -> bool {
+    TIMES_BASELINES.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if stack
+            .last()
+            .is_some_and(|top| top.kind == kind && top.depth == depth)
+        {
+            stack.pop();
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// RAII fork-face baseline (rubash#3387): pushes on creation, pops
+/// on drop iff the stack top is still this entry (the same (kind,
+/// depth) predicate as `pop_times_baseline_if`). The guard must
+/// live exactly for the face's body — a guard that outlives its
+/// face would keep subtracting after the parent resumes.
+pub(crate) struct TimesBaselineGuard {
+    kind: TimesBaselineKind,
+    depth: usize,
+}
+
+impl TimesBaselineGuard {
+    pub(crate) fn enter(kind: TimesBaselineKind, depth: usize) -> Self {
+        push_times_baseline(kind, depth);
+        Self { kind, depth }
+    }
+}
+
+impl Drop for TimesBaselineGuard {
+    fn drop(&mut self) {
+        pop_times_baseline_if(self.kind, self.depth);
+    }
+}
+
 /// The four counters the `times` builtin prints, kept SEPARATE
 /// (rubash#2932): GNU builtins/times.def:65-88 calls
 /// getrusage(RUSAGE_SELF) for the first line and
@@ -198,7 +307,44 @@ fn rusage_counters() -> RusageCounters {
 /// not merge here. Returns (self_user, self_sys, child_user,
 /// child_sys). On Windows the children half is the reap accumulator's
 /// current sum — the same source rusage_counters merges in.
+/// A live fork-face baseline (rubash#3387) is subtracted from each
+/// half (saturating), so `times` inside a subshell, a command
+/// substitution, or a pipeline element reads that face's own clocks.
 pub(crate) fn process_times() -> (
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+    std::time::Duration,
+) {
+    let (self_user, self_sys, child_user, child_sys) = raw_process_times();
+    let (base_self_user, base_self_sys, base_child_user, base_child_sys) =
+        TIMES_BASELINES.with(|stack| match stack.borrow().last() {
+            Some(top) => (
+                top.self_user,
+                top.self_sys,
+                top.child_user,
+                top.child_sys,
+            ),
+            None => (
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+            ),
+        });
+    (
+        self_user.saturating_sub(base_self_user),
+        self_sys.saturating_sub(base_self_sys),
+        child_user.saturating_sub(base_child_user),
+        child_sys.saturating_sub(base_child_sys),
+    )
+}
+
+/// The process's current raw counters in `process_times` order
+/// (self user/sys, children user/sys) — the snapshot source for the
+/// fork-face baselines, factored out of `process_times` so the push
+/// and the read cannot drift apart.
+fn raw_process_times() -> (
     std::time::Duration,
     std::time::Duration,
     std::time::Duration,

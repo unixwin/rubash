@@ -2345,6 +2345,15 @@ impl Executor {
         // rubash#2897: the depth this restore returns to — an in-place
         // `( )` region's process save is tagged with exactly it.
         let saved_depth = saved_state.subshell_depth.get();
+        // rubash#3387: pop the CloneBoundary baseline this boundary's
+        // clone_for_child_save pushed — only when the stack top is
+        // that boundary (same kind and depth). A restore whose save
+        // came from a plain clone (no push) must not eat an outer
+        // face's baseline.
+        crate::executor::read_helpers::pop_times_baseline_if(
+            crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+            saved_depth,
+        );
         let process_save = if self
             .subshell_process_saves
             .last()
