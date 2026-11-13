@@ -4872,7 +4872,9 @@ impl Executor {
             use std::os::unix::process::CommandExt;
             let pins = ambient_pins;
             unsafe {
-                child.pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+                child.pre_exec(move || {
+                    super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                });
             }
         }
         match child.spawn() {
