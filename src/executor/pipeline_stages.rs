@@ -6,7 +6,7 @@ use crate::executor::pipeline_exec::command_is_compound_pipeline_stage;
 /// niubash#345: adopt a duplicated host handle as a child's `Stdio`. The
 /// caller hand-duplicates the pipeline write end so the child owns a private
 /// copy (the parent keeps its own until the producer stage returns).
-fn stdio_from_fd_handle(handle: crate::fd::HANDLE) -> Stdio {
+pub(in crate::executor) fn stdio_from_fd_handle(handle: crate::fd::HANDLE) -> Stdio {
     #[cfg(windows)]
     {
         use std::os::windows::io::FromRawHandle;
