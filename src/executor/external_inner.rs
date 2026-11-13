@@ -4690,12 +4690,11 @@ impl Executor {
                     let status = self.wait_external_child(&mut child)?;
                     if let Some(signal) = crate::executor::wait_status::exit_status_signal(&status)
                     {
-                        self.note_child_signal_death(
+                        self.print_fg_signal_notice_now(
                             foreground_pid,
                             signal,
                             self.signal_notice_command_text(cmd),
-                            true,
-                        );
+                        )?;
                     }
                     self.run_sigchld_trap_for_reaped_child()?;
                     let merged = drain.join().map_err(|_| {
@@ -4734,12 +4733,11 @@ impl Executor {
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
-                            self.note_child_signal_death(
+                            self.print_fg_signal_notice_now(
                                 foreground_pid,
                                 signal,
                                 self.signal_notice_command_text(cmd),
-                                true,
-                            );
+                            )?;
                         }
                         self.run_sigchld_trap_for_reaped_child()?;
                         // Route the merged stream into the capture the
@@ -4781,12 +4779,11 @@ impl Executor {
                         if let Some(signal) =
                             crate::executor::wait_status::exit_status_signal(&status)
                         {
-                            self.note_child_signal_death(
+                            self.print_fg_signal_notice_now(
                                 foreground_pid,
                                 signal,
                                 self.signal_notice_command_text(cmd),
-                                true,
-                            );
+                            )?;
                         }
                         self.exit_code = crate::executor::wait_status::process_exit_status(&status);
                         // A reaped foreground child delivers SIGCHLD in
@@ -4800,18 +4797,18 @@ impl Executor {
                     match child.wait_with_output() {
                         Ok(output) => {
                             self.exit_code = 0;
-                            // rubash#229: a foreground child killed by a
-                            // signal gets the jobs.c notify_of_job_status
-                            // stderr notice at the reader boundary.
+                            // rubash#229/#2769: a foreground child killed by
+                            // a signal gets the jobs.c notify_of_job_status
+                            // stderr notice synchronously at its wait
+                            // (jobs.c:3385), not at the reader boundary.
                             if let Some(signal) =
                                 crate::executor::wait_status::exit_status_signal(&output.status)
                             {
-                                self.note_child_signal_death(
+                                self.print_fg_signal_notice_now(
                                     foreground_pid,
                                     signal,
                                     self.signal_notice_command_text(cmd),
-                                    true,
-                                );
+                                )?;
                             }
                             // A reaped foreground child delivers SIGCHLD in
                             // GNU bash; a set trap runs once at this
@@ -4855,17 +4852,17 @@ impl Executor {
                     let wait_result = self.wait_external_child(&mut child);
                     match wait_result {
                         Ok(status) => {
-                            // rubash#229: queue the signal-death notice for
-                            // the reader boundary.
+                            // rubash#229/#2769: print the signal-death
+                            // notice synchronously at the wait
+                            // (jobs.c:3385), not at the reader boundary.
                             if let Some(signal) =
                                 crate::executor::wait_status::exit_status_signal(&status)
                             {
-                                self.note_child_signal_death(
+                                self.print_fg_signal_notice_now(
                                     foreground_pid,
                                     signal,
                                     self.signal_notice_command_text(cmd),
-                                    true,
-                                );
+                                )?;
                             }
                             self.exit_code =
                                 crate::executor::wait_status::process_exit_status(&status);
