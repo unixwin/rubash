@@ -1757,7 +1757,7 @@ impl Executor {
         // consumer needs a `|&` special case.
         let normalized: Vec<CommandNode> = pipeline
             .iter()
-            .map(|command| normalize_pipeerr_stage(command))
+            .map(|command| fold_trivial_group_stderr(normalize_pipeerr_stage(command)))
             .collect();
         let commands: Vec<&CommandNode> = normalized.iter().collect();
         let first = commands[0];
@@ -4464,22 +4464,15 @@ impl Executor {
             }
         }
 
-        let (tail_out, tail_err, tail_status) = match tail_result? {
+        let mut tail_result = match tail_result? {
             Some(triple) => triple,
             None => (String::new(), String::new(), 0),
         };
-        statuses.push(tail_status);
-
-        self.write_pipeline_output(tail, &tail_out, false)?;
-        if !tail_err.is_empty() {
-            // rubash#3308: the tail's collected stderr is the shell's
-            // fd-2 output — route it through the fd-table binding
-            // instead of the raw process stderr (a failing relay write
-            // must not fail the pipeline; GNU has no relay).
-            let _ = self.write_default_stderr(
-                &crate::executor::substitution_metadata::shell_text_to_raw_bytes(&tail_err),
-            );
-        }
+        // The in-shell tail's own fd-2 redirects (`2>/dev/null`, `2>file`,
+        // `2>&1`) are routed here; the prefix producers already died on the
+        // tail's dropped fd 0, so a discarded diagnostic cannot deadlock.
+        self.write_concurrent_pipeline_output(tail, &mut tail_result)?;
+        statuses.push(tail_result.2);
         self.exit_code = self.pipeline_exit_status(&statuses);
         self.set_pipestatus(statuses);
         Ok(Some(()))
@@ -4977,11 +4970,12 @@ impl Executor {
     /// `:`, `false`, `echo`, `printf`, `read`), or a compound body (a loop, a
     /// brace group, an `if`/`case`, a subshell) whose inner readers pull the
     /// same fd 0 — so `yes | while read; do break; done` stops the producer
-    /// exactly when `break` ends the body. Redirects/tempenv/heredocs/procsubs
-    /// on the tail force the existing executor.
+    /// exactly when `break` ends the body. A tail's own fd-2 redirect is
+    /// allowed and routed after the body; redirects that change fd 0/1,
+    /// tempenv, heredocs and procsubs still force the sequential executor.
     #[cfg(any(windows, unix))]
     fn streaming_builtin_tail(&self, command: &CommandNode) -> bool {
-        if !pipeline_streaming_plain_stage(command) {
+        if !pipeline_streaming_tail_stage(command) {
             return false;
         }
         if command_is_compound_pipeline_stage(command) {
@@ -9008,6 +9002,31 @@ fn pipeline_streaming_plain_stage(command: &CommandNode) -> bool {
         && !command_has_pipeline_process_substitution(command)
 }
 
+/// A streaming tail may carry its own fd-2 destination: the tail runs
+/// in-shell, and its captured stderr is routed after the body
+/// (write_concurrent_pipeline_output). Anything that changes fd 0/1 or the
+/// body's shape still forces the sequential executor.
+fn pipeline_streaming_tail_stage(command: &CommandNode) -> bool {
+    command.time_command.is_none()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_in.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command
+            .redirects
+            .iter()
+            .all(|redirect| redirect.is_output_side() && redirect.fd == Some(2))
+        && command.assignments.is_empty()
+        && command.process_substitutions.is_empty()
+        && !command.inverted
+        && command.inverted_command.is_none()
+        && command.background_command.is_none()
+        && command.coproc_command.is_none()
+        && !command_has_pipeline_process_substitution(command)
+}
+
 /// rubash#761: a streaming-tail PREFIX member — a plain external command (no
 /// compound/subshel/brace shape, non-empty words). Prefix members are spawned
 /// as real external children, so only `pipeline_streaming_plain_stage` plus
@@ -9316,6 +9335,70 @@ fn normalize_pipeerr_stage(command: &CommandNode) -> CommandNode {
     normalized.redirects.push(dup.clone());
     normalized.redirect_err = Some(Box::new(dup));
     normalized
+}
+
+/// Fold `{ cmd; } 2>here` (single simple body, otherwise inert wrapper)
+/// into `cmd 2>here` at pipeline normalization. GNU applies the group's
+/// redirections before the body runs (redir.c do_redirections walks the
+/// compound's list first), so prepending them to the body's ordered list is
+/// observably identical — and it lets the concurrent drivers, which admit
+/// external members rather than brace groups, keep streaming an unbounded
+/// producer. Only fd-2 redirects fold; fd 0/1 or a multi-command body keep
+/// the group node for the shell-aware executor.
+fn fold_trivial_group_stderr(command: CommandNode) -> CommandNode {
+    let Some(group) = command.brace_group.as_ref() else {
+        return command;
+    };
+    let inert = command.words.is_empty()
+        && command.assignments.is_empty()
+        && command.redirect_out.is_none()
+        && command.append.is_none()
+        && command.redirect_in.is_none()
+        && command.heredoc.is_none()
+        && command.heredoc_redirects.is_empty()
+        && command.here_string.is_none()
+        && command.process_substitutions.is_empty()
+        && command.time_command.is_none()
+        && !command.subshell
+        && !command.inverted
+        && command.inverted_command.is_none();
+    if !inert || group.body.len() != 1 {
+        return command;
+    }
+    // Every wrapper redirect must be an fd-2 destination; anything else
+    // changes the group's fd 0/1 and needs the group executor.
+    if !command
+        .redirects
+        .iter()
+        .all(|redirect| redirect.is_output_side() && redirect.fd == Some(2))
+    {
+        return command;
+    }
+    // A closed fd cannot be modeled by the concurrent spawners.
+    if command
+        .redirects
+        .iter()
+        .any(|redirect| is_closed_redirect_target(&redirect.target))
+    {
+        return command;
+    }
+    let group_stderr: Vec<_> = command.redirects.iter().cloned().collect();
+    if group_stderr.is_empty() {
+        return command;
+    }
+    let inner = &group.body[0];
+    if inner.brace_group.is_some()
+        || inner.subshell
+        || inner.subshell_command.is_some()
+        || command_is_compound_pipeline_stage(inner)
+    {
+        return command;
+    }
+    let mut folded = inner.clone();
+    let mut redirects = group_stderr;
+    redirects.append(&mut folded.redirects);
+    folded.redirects = redirects;
+    folded
 }
 
 /// Parse the inline grep fast-path argument list: options from the set

@@ -127,6 +127,22 @@ fn interim_stderr_file_receives_the_members_own_diagnostics() {
 }
 
 #[test]
+fn infinite_producer_terminates_with_shell_side_tail_redirect() {
+    let s = Scratch::new("tail");
+    let (out, err, rc) = run(&s, "yes | true 2>/dev/null");
+    assert_eq!(rc, 0, "stderr: {err}");
+    assert_eq!(out, "");
+}
+
+#[test]
+fn infinite_producer_terminates_with_brace_group_tail_redirect() {
+    let s = Scratch::new("group");
+    let (out, err, rc) = run(&s, "yes | { head -3; } 2>/dev/null | cat");
+    assert_eq!(rc, 0, "stderr: {err}");
+    assert_eq!(out, "y\ny\ny\n");
+}
+
+#[test]
 fn pipestatus_reports_the_sigpipe_shaped_producer() {
     let s = Scratch::new("ps");
     let (out, err, rc) = run(
