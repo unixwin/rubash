@@ -1,5 +1,21 @@
 use super::*;
 
+/// Split a W_ARRAYREF operand `name[sub]` at the first `[` and the LAST
+/// `]`, with no quote/escape/backquote scan: GNU tokenize_array_reference
+/// with VA_ONEWORD (builtins/common.c:1040) binds the subscript verbatim
+/// (arrayfunc.c:1166), so the expanded text's quoting bytes are literal
+/// key data - a `]` inside the key (`a]b`) is data, never the closer, and
+/// an empty subscript is not a reference (arrayfunc.c:1322 len == 1).
+/// None when there is no `[`, no trailing `]`, or an empty subscript.
+fn split_oneword_array_subscript(name: &str) -> Option<(&str, &str)> {
+    let (base, rest) = name.split_once('[')?;
+    let sub = rest.strip_suffix(']')?;
+    if sub.is_empty() {
+        return None;
+    }
+    Some((base, sub))
+}
+
 impl Executor {
     pub(in crate::executor) fn execute_unset(
         &mut self,
@@ -242,7 +258,7 @@ impl Executor {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
-                    if let Some(status) = self.unset_array_element(&name, true, &mut diag) {
+                    if let Some(status) = self.unset_array_element(&name, true, true, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
@@ -283,7 +299,7 @@ impl Executor {
                 &self.shell_state.env_vars,
                 "array_expand_once",
             );
-            if let Some(status) = self.unset_array_element(&name, verbatim, &mut diag) {
+            if let Some(status) = self.unset_array_element(&name, verbatim, false, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -545,7 +561,9 @@ impl Executor {
                 .cloned()
                 .unwrap_or_default();
             if parse_array_subscript(&cell).is_some() {
-                return self.unset_array_element(&cell, false, diag).or(Some(0));
+                return self
+                    .unset_array_element(&cell, false, false, diag)
+                    .or(Some(0));
             }
             // GNU set.def:936-937 + 962-966: the resolved referent is
             // unbound by name; a readonly referent is an error on the
@@ -591,7 +609,7 @@ impl Executor {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"), false, diag)
+        self.unset_array_element(&format!("{cell}[{subscript}]"), false, false, diag)
             .or(Some(0))
     }
 
@@ -699,9 +717,33 @@ impl Executor {
         &mut self,
         name: &str,
         arrayref: bool,
+        oneword: bool,
         diag: &mut crate::executor::builtin_diag::Diag,
     ) -> Option<u8> {
-        let Some((array_name, subscript)) = parse_array_subscript(name) else {
+        // rubash#2657: a W_ARRAYREF word (oneword) binds its subscript
+        // verbatim - GNU tokenize_array_reference with VA_ONEWORD takes
+        // everything up to the LAST `]` (arrayfunc.c:1166, akey = sub
+        // verbatim), so the expanded text's quote, backslash and
+        // backtick bytes are literal key data, not syntax. The
+        // quote-aware parse_array_subscript scan misreads them: a lone
+        // quote opens a span that never closes, a backslash escapes the
+        // closer, a backtick opens a span - all three fail the scan and
+        // the element survives (the quote/backslash cases via the
+        // `not a valid identifier` gate below, the backtick silently
+        // via the lib fallback). The verbatim split applies only when
+        // the base is an associative array: GNU rejects the same
+        // spellings for indexed arrays and scalars with
+        // `not a valid identifier` (oracle probes 2026-11-13), and the
+        // quote-aware path already produces exactly that - keep it. It
+        // also stays off for the array_expand_once (VA_NOEXPAND-only,
+        // no VA_ONEWORD) call: only W_ARRAYREF gets the last-`]` close.
+        let Some((array_name, subscript)) = (if oneword {
+            split_oneword_array_subscript(name)
+                .filter(|(base, _)| is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, *base))
+                .or_else(|| parse_array_subscript(name))
+        } else {
+            parse_array_subscript(name)
+        }) else {
             return None;
         };
         if array_name == "BASH_ALIASES" {
