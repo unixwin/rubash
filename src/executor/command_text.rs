@@ -291,23 +291,7 @@ pub(in crate::executor) fn compound_redirect_error_is_ambient(cmd: &CommandNode)
 /// text count as the floor/fallback for unstamped nodes.
 pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode) -> Option<usize> {
     let start = cmd.line?;
-    let simple = cmd.for_command.is_none()
-        && cmd.select_command.is_none()
-        && cmd.loop_command.is_none()
-        && cmd.if_command.is_none()
-        && cmd.case_command.is_none()
-        && cmd.function_command.is_none()
-        && cmd.brace_group.is_none()
-        && cmd.subshell_command.is_none()
-        && cmd.coproc_command.is_none()
-        && cmd.conditional_command.is_none()
-        && cmd.arithmetic_command.is_none()
-        && cmd.pipeline_command.is_none()
-        && cmd.and_or_list.is_none()
-        && cmd.background_command.is_none()
-        && cmd.inverted_command.is_none()
-        && cmd.time_command.is_none();
-    if !simple {
+    if !command_is_plain_simple(cmd) {
         return Some(start);
     }
     let first_word_newlines = if !cmd.assignments.is_empty() {
@@ -337,6 +321,30 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
     }
 }
 
+/// Whether `cmd` is a plain simple command — no compound payload and
+/// no wrapper payload (the exact predicate
+/// `simple_command_first_word_end_line` used inline before rubash#3299;
+/// extracted so the procsub seed can share the classification without
+/// drifting from it).
+fn command_is_plain_simple(cmd: &CommandNode) -> bool {
+    cmd.for_command.is_none()
+        && cmd.select_command.is_none()
+        && cmd.loop_command.is_none()
+        && cmd.if_command.is_none()
+        && cmd.case_command.is_none()
+        && cmd.function_command.is_none()
+        && cmd.brace_group.is_none()
+        && cmd.subshell_command.is_none()
+        && cmd.coproc_command.is_none()
+        && cmd.conditional_command.is_none()
+        && cmd.arithmetic_command.is_none()
+        && cmd.pipeline_command.is_none()
+        && cmd.and_or_list.is_none()
+        && cmd.background_command.is_none()
+        && cmd.inverted_command.is_none()
+        && cmd.time_command.is_none()
+}
+
 /// rubash#3210: the process-substitution body seed line — the enclosing
 /// simple command's first-element end line (GNU execute_cmd.c:936
 /// `SET_LINE_NUMBER (command->value.Simple->line)`), which the fork
@@ -344,13 +352,34 @@ pub(in crate::executor) fn simple_command_first_word_end_line(cmd: &CommandNode)
 /// (evalstring.c:315). This is the value `set_current_line` already
 /// computes; spawn sites that pass `cmd.line` (the command's START
 /// line) under-report split first elements (d8: 1 instead of 2).
-/// Falls back to `cmd.line` when no stamp exists. Non-simple commands
-/// (compounds) return their start line here — GNU leaves those on the
-/// ambient line instead (execute_cmd.c:854), a separate residual family,
-/// so this helper must NOT be used to seed compound stdin procsubs
-/// beyond the start line it already returns.
-pub(in crate::executor) fn procsub_body_seed_line(cmd: &CommandNode) -> Option<usize> {
-    simple_command_first_word_end_line(cmd).or(cmd.line)
+/// Falls back to `cmd.line` when no stamp exists.
+///
+/// rubash#3299: a subshell keeps its `(` line (execute_cmd.c:696
+/// `SET_LINE_NUMBER (command->value.Subshell->line)` before the fork,
+/// so the re-executed do_redirections inherits it); every other
+/// non-simple shape expands its redirections under the ambient
+/// `line_number` — execute_cmd.c:854 `do_redirections` runs before
+/// the dispatch switch stamps anything, so `for`/`select`/`case`/
+/// arith/cond stamp their own `->line` only for the BODY, never for
+/// the command's own redirects. The ambient is the enclosing frame's
+/// frozen line (`ambient`, the executor's `ambient_line` cell: the
+/// top-level command's parse-end line, or the enclosing compound's
+/// established line inside a pre-parsed body), falling back to the
+/// command's own parse-end line (`cmd.end_line`) and then its start
+/// line — the same chain `set_current_line` uses for ambient
+/// commands. A subshell's own line is its start line, so it keeps
+/// `cmd.line` here, not the ambient.
+pub(in crate::executor) fn procsub_body_seed_line(
+    cmd: &CommandNode,
+    ambient: Option<usize>,
+) -> Option<usize> {
+    if command_is_plain_simple(cmd) {
+        return simple_command_first_word_end_line(cmd).or(cmd.line);
+    }
+    if cmd.subshell_command.is_some() {
+        return cmd.line;
+    }
+    ambient.or(cmd.end_line).or(cmd.line)
 }
 
 /// GNU print_cmd.c prints the command node's OWN redirection list. A

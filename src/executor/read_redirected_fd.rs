@@ -36,8 +36,8 @@ impl Executor {
 
         self.read_redirected_fd_entry(
             redirect,
-            // rubash#3210: body seed is the first-element end line.
-            super::command_text::procsub_body_seed_line(cmd),
+            // rubash#3210/#3299: body seed is procsub_body_seed_line (first-element end line for simple commands, ambient line for compounds).
+            super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
             delimiter,
             char_limit,
             exact_char_limit,
@@ -76,8 +76,8 @@ impl Executor {
             })?;
         self.read_redirected_fd_entry(
             redirect,
-            // rubash#3210: body seed is the first-element end line.
-            super::command_text::procsub_body_seed_line(cmd),
+            // rubash#3210/#3299: body seed is procsub_body_seed_line (first-element end line for simple commands, ambient line for compounds).
+            super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
             delimiter,
             char_limit,
             exact_char_limit,

@@ -5639,7 +5639,7 @@ impl Executor {
                         if self.bind_input_process_substitution_child(
                             fd,
                             source,
-                            super::command_text::procsub_body_seed_line(cmd),
+                            super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                         ) {
                             continue;
                         }
