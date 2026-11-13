@@ -114,6 +114,12 @@ src/executor/pipeline_exec.rs::\|byte\| byte as char
 # construction — never a UTF-8 continuation byte. The widened char is
 # collected into storage text, never passed to a predicate.
 src/executor/read_split.rs::\(\*byte as char\)\.to_string\(\)
+# read_helpers.rs: `StdinCharDecoder::next_unit` (#3334) widens `byte` only
+# in the `if byte < 0x80` arm (the else arm routes >= 0x80 bytes to
+# `raw_byte_unit`), so the widened byte is ASCII by construction — never
+# a UTF-8 continuation byte. The widened char is a unit value, never
+# passed to a predicate.
+src/executor/read_helpers.rs::StdinUnit::Char\(byte as char\)
 src/executor/shift_echo_builtins.rs::\+ 0x40\) as char
 # windows_drive.rs: bare `D:` command rewritten to the `D:/` drive root
 # (niubash#481/#483); the same `bytes[0].is_ascii_alphabetic()` guard pins the

@@ -445,9 +445,11 @@ pub(in crate::executor) enum StdinUnit {
 /// Incremental UTF-8 decoder for byte-wise process-stdin reads (the `read`
 /// builtin's unbuffered path and the inherited-stdin fallback). Widening
 /// each byte with `byte as char` Latin-1-encodes multibyte input and lets a
-/// `-n`/`char_limit` break land mid-character; this decoder instead reads a
-/// lead byte, waits for its continuation bytes, and surfaces undecodable
-/// bytes as raw-byte markers. `lookahead` holds at most a few bytes that
+/// `-n`/`char_limit` break land mid-character; in a multibyte locale this
+/// decoder instead reads a lead byte, waits for its continuation bytes,
+/// and surfaces undecodable bytes as raw-byte markers, while in a
+/// single-byte locale one byte is one unit (rubash#3334: GNU never groups
+/// bytes there, read.def:874). `lookahead` holds at most a few bytes that
 /// could not join the pending sequence, so at most the bytes of one
 /// character are ever consumed ahead of the current unit.
 pub(in crate::executor) struct StdinCharDecoder {
@@ -487,8 +489,11 @@ impl StdinCharDecoder {
     /// decoder surfaced each byte of the run separately and a `-n`
     /// budget therefore stopped inside it. A run whose fate is not
     /// yet decided (a proper prefix of a sequence) still waits for
-    /// more bytes. Single-byte locales keep the historical
-    /// byte-at-a-time decoding below unchanged.
+    /// more bytes. In a single-byte locale there is no grouping at
+    /// all: GNU builtins/read.def:874 only calls read_mbchar when
+    /// `mb_cur_max > 1`, so with MB_CUR_MAX == 1 every byte is one
+    /// unit (`nr++` per byte, read.def:880-886) and `read -n 1` over
+    /// `é` (c3 a9) takes just the lead byte (rubash#3334).
     pub(in crate::executor) fn next_unit(&mut self) -> Option<StdinUnit> {
         if crate::locale::is_multi_byte() {
             let mut avail = std::mem::take(&mut self.pending);
@@ -534,47 +539,23 @@ impl StdinCharDecoder {
                 }
             };
         }
-        if !self.pending.is_empty() {
-            match self.lookahead.front() {
-                Some(&next) if (next & 0xC0) == 0x80 => {
-                    self.pending.push(next);
-                    self.lookahead.pop_front();
-                }
-                Some(_) => {
-                    let head = self.pending.remove(0);
-                    return Some(Self::raw_byte_unit(head));
-                }
-                None => {}
-            }
-        }
-        if self.pending.is_empty() {
-            let byte = self.lookahead.pop_front()?;
-            self.pending.push(byte);
-        }
-        match std::str::from_utf8(&self.pending) {
-            Ok(text) => {
-                let ch = text.chars().next().expect("pending is non-empty");
-                self.pending.drain(..ch.len_utf8());
-                Some(StdinUnit::Char(ch))
-            }
-            Err(error) => {
-                let valid = error.valid_up_to();
-                if valid > 0 {
-                    let ch = std::str::from_utf8(&self.pending[..valid])
-                        .expect("valid prefix")
-                        .chars()
-                        .next()
-                        .expect("non-empty valid prefix");
-                    self.pending.drain(..ch.len_utf8());
-                    return Some(StdinUnit::Char(ch));
-                }
-                if error.error_len().is_some() {
-                    let head = self.pending.remove(0);
-                    return Some(Self::raw_byte_unit(head));
-                }
-                None
-            }
-        }
+        // rubash#3334: single-byte locale — one byte is one unit
+        // (read.def:874-886, see the doc comment above). The historical
+        // branch grouped a valid UTF-8 sequence into one Char unit, so
+        // `read -n 1` over `é` took both bytes; ASCII bytes stay Char
+        // and high bytes ride as raw-byte units, whose marker text
+        // re-emits the original byte (and which stdin_unit_is_delimiter
+        // compares by first byte, exactly like the Char form).
+        let byte = if self.pending.is_empty() {
+            self.lookahead.pop_front()?
+        } else {
+            self.pending.remove(0)
+        };
+        Some(if byte < 0x80 {
+            StdinUnit::Char(byte as char)
+        } else {
+            Self::raw_byte_unit(byte)
+        })
     }
 
     /// Drain any bytes still pending at end of input (a truncated UTF-8
