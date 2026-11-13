@@ -1827,6 +1827,14 @@ impl Executor {
         // clone's blocked-wait drain notices a parent-death delivery
         // and aborts the wait; the teardown below hands it back).
         subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the body runs in a forked child (GNU subst.c:7143
+        // command_substitute) — its `times` reads from this body's entry
+        // baseline. The guard lives for the body execution below and
+        // pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
             if dbg_trap_enabled() {
                 eprintln!(
@@ -2446,6 +2454,14 @@ impl Executor {
         // rubash#3401: arm the comsub conduit for the body span (same
         // mechanism as the `$( )` typed site above).
         subshell.comsub_drain_permit.set(true);
+        // rubash#3387: the funsub body runs in a forked child (GNU
+        // subst.c:7101 "nofork comsub") — its `times` reads from this
+        // body's entry baseline. The guard lives for the body
+        // execution below and pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (result, captured) = if valsub {
             (run_body(&mut subshell), None)
         } else {
