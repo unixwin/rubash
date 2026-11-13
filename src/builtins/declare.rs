@@ -1060,6 +1060,33 @@ where
                 continue;
             }
         }
+        // GNU declare.def:613 + arrayfunc.c:359 assign_array_element: an
+        // assignment to an EMPTY subscript (`declare 'a[]=x'`, also -a/-A,
+        // `+=`, typeset, local-in-function) reports the bare
+        // `a[]: bad array subscript` (err_badarraysub, error.c:440-443),
+        // status failure, and the command continues to later operands
+        // (rubash#3186). The -p face stays `not found` (declare.def:389-406
+        // pflag branch runs before the making-variables machinery), the
+        // no-assignment `declare 'a[]'` stays InvalidId, and
+        // export/readonly keep InvalidId (setattr.def never splits
+        // subscripts).
+        if !print && name.contains('=') {
+            if let Some((assign_lhs, _)) = name.split_once('=') {
+                let assign_lhs = assign_lhs.strip_suffix('+').unwrap_or(assign_lhs);
+                if let Some(base) = assign_lhs.strip_suffix("[]") {
+                    if valid_identifier(base) {
+                        bare_diag_line(
+                            diag,
+                            prolog,
+                            variables,
+                            &format!("{base}[]: bad array subscript"),
+                        );
+                        attr_status = EXECUTION_FAILURE;
+                        continue;
+                    }
+                }
+            }
+        }
         if !valid_declare_name(name) {
             // GNU declare.def:389-406: with -p the operand is a NAME to
             // print, `=` included — `declare -p dv=6` reports `dv=6: not
