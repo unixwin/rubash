@@ -103,6 +103,15 @@ jobs:
       - name: Run issue2250 PIPESTATUS wait-race pins
         run: cargo nextest run --test issue2250_pipestatus_wait_race_regressions --profile ci
 
+      # rubash#2770: the FUNCNAME listing pins
+      # (tests/issue2770_funcname_listing_regressions.rs) assert the
+      # dynamic-array listing views (declare -p/-a, bare declare/set)
+      # render the live call stack. The stem sits outside every CI
+      # lane otherwise (rubash#3430), so it runs as a named target
+      # here.
+      - name: Run FUNCNAME listing regressions
+        run: cargo nextest run --test issue2770_funcname_listing_regressions --profile ci
+
       # rubash#2237: the test-builtin word-expansion pins. The
       # issue1467 target sat outside every CI lane from 2026-10-25 on,
       # which is exactly how its red stayed invisible until the #2172
