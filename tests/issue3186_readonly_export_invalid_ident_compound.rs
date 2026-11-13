@@ -41,6 +41,31 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
+/// Every spelling under which `path` may surface in rubash's output:
+/// the native spelling, the forward-slash spelling, and — on Windows —
+/// the translated `/<drive>/...` form rubash prints in diagnostics
+/// (e.g. the script path as `/c/Users/...` in stderr, the scratch dir
+/// as `C:/Users/...` in stdout). On unix the extra spellings coincide
+/// with the native one, so this is a no-op there.
+fn path_variants(path: &Path) -> Vec<String> {
+    let native = path.to_string_lossy().into_owned();
+    let mut variants = vec![native.clone()];
+    let forward = native.replace('\\', "/");
+    if forward != native {
+        variants.push(forward.clone());
+    }
+    if forward.len() >= 2
+        && forward.as_bytes()[1] == b':'
+        && forward.as_bytes()[0].is_ascii_alphabetic()
+    {
+        let rest = &forward[2..];
+        let drive = forward.as_bytes()[0] as char;
+        variants.push(format!("/{}{rest}", drive.to_ascii_lowercase()));
+        variants.push(format!("/{drive}{rest}"));
+    }
+    variants
+}
+
 /// Run `script` as a script FILE; return (stdout, stderr) with the
 /// scratch path normalized to WORK and the script path to SCRIPT.
 fn run_script(dir: &Path, script: &str) -> (String, String) {
@@ -54,8 +79,14 @@ fn run_script(dir: &Path, script: &str) -> (String, String) {
         .output()
         .expect("run rubash");
     let normalize = |text: &str| {
-        text.replace(&script_path.to_string_lossy().into_owned(), "SCRIPT")
-            .replace(&dir.to_string_lossy().into_owned(), "WORK")
+        let mut out = text.to_string();
+        // Script path first: it contains the scratch dir as a prefix.
+        for (path, token) in [(script_path.as_path(), "SCRIPT"), (dir, "WORK")] {
+            for variant in path_variants(path) {
+                out = out.replace(&variant, token);
+            }
+        }
+        out
     };
     (
         normalize(&String::from_utf8_lossy(&output.stdout)),
