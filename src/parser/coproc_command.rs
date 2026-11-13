@@ -307,11 +307,27 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
     }
 
     // Simple command: collect remaining tokens as words
+    // (rubash#3267). GNU's simple_command is redirections + words
+    // in any order (parse.y:1125-1175 `COPROC simple_command`,
+    // parse.y:532-575 redirection productions), so a redirect may
+    // LEAD the body (`coproc >x foooo`), sit between words
+    // (`coproc foooo >y bar`), or both. The old loop collected
+    // WORD tokens only and let finish_compound_command eat a
+    // leading redirect, stranding the first word with no separator
+    // — the main loop then blamed it as an unexpected token.
+    // The outer node is built up front so the redirect arm below
+    // can attach leading/intermixed redirections to it with the
+    // same collector the finish path uses; the trailing path is
+    // unchanged (finish still collects what the loop leaves).
     let mut words = Vec::new();
     // Explicit element type: the rubash#1983 index-1 check below
     // reads word_metadata[0].raw before the first push, which
     // leaves the element type ambiguous to inference (E0282).
     let mut word_metadata: Vec<WordMetadata> = Vec::new();
+    let mut command = CommandNode::new();
+    command.line = tokens.get(start).map(|t| t.position);
+    command.logical_line = tokens.get(start).map(|t| t.logical_line);
+    let mut saw_redirect = false;
     while i < tokens.len() {
         // rubash#1652 (continued): GNU also rejects `!` as the
         // SECOND word of the coproc's simple command (`coproc a !
@@ -319,6 +335,16 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // commits to the named form and demands a shell_command,
         // so a `!` there is a syntax error — while a `!` after two
         // or more words is a plain word (`coproc a b ! c` parses).
+        //
+        // rubash#3267 refinement: the rejection fires only while
+        // NO redirection has been consumed yet in this simple
+        // command. Once a redirection precedes the `!` anywhere —
+        // before the first word (`coproc >x foo ! bar`) or between
+        // the first word and the `!` (`coproc foo >y ! bar`) — GNU
+        // takes the `COPROC simple_command` branch and the `!` is
+        // a plain word (both rc 0, `foo: command not found`,
+        // bash 5.3.20 oracle). Without the gate the redirect-first
+        // arm above would strand `!` as a second-word error.
         // The body-position check above covers index 0; this
         // covers index 1. (A quoted "!" is a real word and never
         // reaches this arm: is_keyword only matches the bare
@@ -339,6 +365,7 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // decides: a quoted name (`"X"=1`) is not an assignment
         // word in GNU either.
         if words.len() == 1
+            && !saw_redirect
             && !coproc_word_is_assignment(&word_metadata[0].raw)
             && is_keyword(tokens, i, "!")
         {
@@ -353,7 +380,74 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         if !words.is_empty() && is_keyword(tokens, i, "(") && is_keyword(tokens, i + 1, ")") {
             return Some(coproc_funcdef_error(tokens, start, i + 1));
         }
+        // A redirection operator here is a simple_command element,
+        // not the end of the body: consume it (and any immediately
+        // following redirects) onto the node with the shared
+        // collector and keep collecting words after it. A redirect
+        // the collector cannot advance past has no target
+        // (`coproc >`, `coproc >x >`) — stop and let the
+        // words.is_empty() arm / finish machinery report the
+        // missing target exactly as before.
+        if matches!(
+            tokens[i].kind,
+            TokenKind::RedirectIn
+                | TokenKind::RedirectOut
+                | TokenKind::Append
+                | TokenKind::RedirectErr
+                | TokenKind::RedirectErrAppend
+                | TokenKind::HereDoc
+                | TokenKind::HereString
+        ) {
+            let before = i;
+            collect_trailing_redirections(tokens, &mut i, &mut command);
+            if i == before {
+                break;
+            }
+            saw_redirect = true;
+            continue;
+        }
+        // No compound body may follow a leading redirect: GNU's
+        // `COPROC shell_command` production carries no leading
+        // redirection (`coproc >x { ...; }` / `( ... )` / `if ...`
+        // are syntax errors there), and the base already reports
+        // them rc 2 via the main loop's unexpected-token path once
+        // the redirect-only coproc is built — so stop here with no
+        // words collected and let that path fire with its blame
+        // token unchanged. After the first word a compound starter
+        // is a plain word (`coproc foo {` runs `foo` with `{` as
+        // an argument), so the guard only applies pre-word.
+        if words.is_empty()
+            && saw_redirect
+            && (tokens.get(i).is_some_and(is_brace_group_token)
+                || is_keyword(tokens, i, "{")
+                || is_keyword(tokens, i, "(")
+                || is_coproc_shell_command_start(tokens, i))
+        {
+            break;
+        }
         if let Some((word, next_i)) = collect_compound_or_keyword_word_value(tokens, i) {
+            // GNU read_token_word (parse.y:5821-5843): a `{varname}`
+            // word immediately followed by a redirection operator is
+            // a REDIR_WORD claimed by the redirect (fd_var), never
+            // a command word — the main loop's token_actions arm
+            // applies the same rule, so `coproc {var}>x foooo`
+            // runs `foooo`, not `{var}`.
+            if next_i == i + 1
+                && tokens.get(next_i).is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        TokenKind::RedirectIn
+                            | TokenKind::RedirectOut
+                            | TokenKind::Append
+                            | TokenKind::HereDoc
+                            | TokenKind::HereString
+                    )
+                })
+                && redirect_fd_var_prefix(tokens, next_i).is_some()
+            {
+                i = next_i;
+                continue;
+            }
             let raw = if next_i == i + 1 {
                 tokens[i].raw.as_str()
             } else {
@@ -378,21 +472,25 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         // words is a redirection-only simple command (`coproc > file'),
         // which GNU accepts — build it and let the finish machinery
         // attach the redirections.
-        if tokens.get(i).is_some_and(|token| {
-            matches!(
-                token.kind,
-                TokenKind::RedirectIn
-                    | TokenKind::RedirectOut
-                    | TokenKind::Append
-                    | TokenKind::RedirectErr
-                    | TokenKind::RedirectErrAppend
-                    | TokenKind::HereDoc
-                    | TokenKind::HereString
-            )
-        }) {
-            let mut command = CommandNode::new();
-            command.line = tokens.get(start).map(|t| t.position);
-            command.logical_line = tokens.get(start).map(|t| t.logical_line);
+        // rubash#3267: `saw_redirect` covers the redirects the
+        // loop already consumed onto the node (`coproc >x foooo`
+        // reaches here with i past `x`); the token check below
+        // covers the redirect the loop could not consume
+        // (`coproc >` — no target, i still on the operator).
+        if saw_redirect
+            || tokens.get(i).is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::RedirectIn
+                        | TokenKind::RedirectOut
+                        | TokenKind::Append
+                        | TokenKind::RedirectErr
+                        | TokenKind::RedirectErrAppend
+                        | TokenKind::HereDoc
+                        | TokenKind::HereString
+                )
+            })
+        {
             command.coproc_command = Some(coproc_command(
                 name,
                 words,
@@ -406,9 +504,6 @@ pub(super) fn parse_coproc_command(tokens: &[Token], start: usize) -> Option<(Co
         return Some(coproc_missing_command_error(tokens, start, i));
     }
 
-    let mut command = CommandNode::new();
-    command.line = tokens.get(start).map(|t| t.position);
-    command.logical_line = tokens.get(start).map(|t| t.logical_line);
     command.coproc_command = Some(coproc_command(
         name,
         words,
