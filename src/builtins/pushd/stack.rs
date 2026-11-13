@@ -126,15 +126,24 @@ pub(super) fn dir_operand_error_text(
 
 /// Resolve a directory operand to the logical name stored in the stack.
 ///
-/// Relative operands are resolved against the shell logical PWD. This lexical
-/// step stays separate from Windows filesystem mapping so POSIX paths remain
-/// visible as POSIX paths.
-pub(super) fn normalize_stack_dir(dir: &str, env_vars: &HashMap<String, String>) -> String {
+/// Relative operands are resolved against the VALIDATED logical cwd:
+/// $PWD only while it still names the working directory, the physical
+/// session cwd otherwise (cd/paths.rs validated_logical_pwd, rubash#2143).
+/// That is the G-02 analogue of GNU's getcwd base: pushd.def:296-302
+/// delegates the Dir operand to cd_builtin, whose change_to_directory
+/// (cd.def:522ff) chdirs the operand as-is, so the kernel resolves a
+/// relative operand against the real cwd, never $PWD (builtins/common.c:592
+/// get_working_directory is getcwd). Joining onto the raw $PWD made
+/// `unset PWD; pushd a` look up `/a` and `PWD=/wrong; pushd a` look up
+/// `/wrong/a` (rubash#3396). This lexical step stays separate from
+/// Windows filesystem mapping so POSIX paths remain visible as POSIX paths.
+pub(super) fn normalize_stack_dir(
+    dir: &str,
+    env_vars: &HashMap<String, String>,
+    cwd: &Path,
+) -> String {
     let dir = dir.replace('\\', "/");
-    let base = env_vars
-        .get("PWD")
-        .map(|value| value.replace('\\', "/"))
-        .unwrap_or_else(|| "/".to_string());
+    let base = shell_pwd_display_path(&validated_logical_pwd(env_vars, cwd).to_string_lossy());
     let absolute = dir.starts_with('/') || is_drive_absolute(&dir);
     let combined = if absolute {
         dir.clone()
