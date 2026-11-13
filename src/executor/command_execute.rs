@@ -544,8 +544,36 @@ impl Executor {
         // with the same expand_word_error classification. Expand once here
         // and mark the results so the stdin paths return them verbatim
         // instead of re-running embedded substitutions.
-        self.preexpand_command_stdin(&mut cmd);
+        let heredoc_forked_exit = self.preexpand_command_stdin(&mut cmd);
+        // rubash#2763: take the main-shell latch NOW, before
+        // abort_on_expansion_errors can return early — otherwise a
+        // funsub `exit` latched by a main-shell body would leak into
+        // the next command on the arithmetic-error path.
+        let heredoc_main_shell_exit = self.current_shell_substitution_exit.take();
         self.abort_on_expansion_errors()?;
+        if let Some(code) = heredoc_main_shell_exit {
+            // A `${ ...; exit N; }` inside a heredoc body that expands
+            // in the MAIN shell (builtin/function target,
+            // execute_cmd.c:5606 execute_builtin_or_function) aborts
+            // the enclosing shell with N (GNU probes A/C: `read x` /
+            // `:` print nothing further, rc 42). The latch's consume
+            // point is the command carrying the body, right after its
+            // stdin pre-expansion (the GNU do_redirections point,
+            // redir.c:348) — not the next command.
+            self.exit_code = code;
+            return Err(ExecuteError::ExitCode(code));
+        }
+        if let Some(code) = heredoc_forked_exit {
+            // A `${ ...; exit N; }` inside a heredoc body that expands
+            // in the FORKED child (disk command, execute_cmd.c:5522
+            // execute_disk_command) kills the child during
+            // do_redirections before the command execs (GNU probe G:
+            // `cat` never prints the body's `hello`), so the command
+            // never runs and N is its status; the script continues
+            // (GNU probe B: B2 prints status=42, B3 runs).
+            self.exit_code = code;
+            return Ok(());
+        }
 
         if alias_expansion_changed_words
             && !original_words_had_command_substitution
@@ -2124,7 +2152,15 @@ impl Executor {
         result
     }
 
-    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) {
+    /// Returns the exit code a `${ ...; exit N; }` funsub latched while
+    /// a fork-context command's bodies expanded inside the fork
+    /// boundary, if any — the child died with N during do_redirections
+    /// (execute_cmd.c:5522) before the command execed, so N is the
+    /// command's status, not a shell abort. `None` when the bodies
+    /// expanded in the main shell (or no funsub exited): a main-shell
+    /// latch stays on `current_shell_substitution_exit` for the caller
+    /// to consume as a shell abort.
+    fn preexpand_command_stdin(&mut self, cmd: &mut CommandNode) -> Option<i32> {
         // rubash#2681: for a command GNU forks, the bodies expand in
         // the child — run the whole pre-expansion (every body of the
         // command, in redirect order, so later bodies still see
@@ -2133,12 +2169,23 @@ impl Executor {
         let has_bodies =
             cmd.heredoc.is_some() || !cmd.heredoc_redirects.is_empty() || cmd.here_string.is_some();
         if has_bodies && self.heredoc_bodies_expand_in_fork_context(cmd) {
+            // rubash#2763: with_forked_heredoc_expansion restores the
+            // exit code and substitution bookkeeping but NOT
+            // current_shell_substitution_exit, so a funsub `exit` inside
+            // a forked body used to leak the latch into the NEXT
+            // command. Take back only what the child latched and
+            // restore whatever the parent held (normally nothing — the
+            // word-expansion consumer above already took it).
+            let saved_latch = self.current_shell_substitution_exit.take();
             self.with_forked_heredoc_expansion(|executor| {
                 executor.preexpand_command_stdin_bodies(cmd)
             });
-            return;
+            let forked_latch = self.current_shell_substitution_exit.take();
+            self.current_shell_substitution_exit.set(saved_latch);
+            return forked_latch;
         }
         self.preexpand_command_stdin_bodies(cmd);
+        None
     }
 
     fn preexpand_command_stdin_bodies(&mut self, cmd: &mut CommandNode) {
