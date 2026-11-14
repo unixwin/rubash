@@ -879,12 +879,17 @@ fn external_exec_process(
     // a script run through `exec` reports the absolute path as its $0 (the
     // ENOEXEC re-entry at execute_cmd.c:6252 passes `command` as the new
     // script name). Non-script targets keep the dispatcher word form.
-    let mut process = if let Some((command, _)) = crate::executor::path::shell_wrapped_command(
-        program,
-        &full_pathname_word(program, cwd),
-        operands,
-        env_vars,
-    ) {
+    // rubash#3415: a resolvable non-shell `#!` interpreter is spawned
+    // directly (GNU execute_shell_script, execute_cmd.c:6001-6043) before
+    // the shell wrap below can run the script as bash.
+    let zero_word = full_pathname_word(program, cwd);
+    let mut process = if let Some((command, _)) =
+        crate::executor::path::shebang_interpreter_command(program, &zero_word, operands, env_vars)
+    {
+        command
+    } else if let Some((command, _)) =
+        crate::executor::path::shell_wrapped_command(program, &zero_word, operands, env_vars)
+    {
         command
     } else {
         // Non-script targets get the command word as typed for argv[0]

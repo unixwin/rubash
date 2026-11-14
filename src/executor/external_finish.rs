@@ -235,6 +235,22 @@ impl Executor {
                     self.finish_external_error(cmd, &stderr, status)?;
                     return Ok(true);
                 }
+                // rubash#3415: a `#!` line naming a resolvable NON-shell
+                // interpreter is not a shell script — decline so the
+                // ordinary disk-command path spawns the interpreter (the
+                // MSYS/Git Bash model; GNU execute_shell_script,
+                // execute_cmd.c:6001-6043, re-execs through the NAMED
+                // interpreter). Running it here would parse a node body
+                // as bash (syntax error, rc 2) and let a shebang-only
+                // file exit 0 in silence.
+                if crate::executor::path::foreign_shebang_interpreter(
+                    &script_path,
+                    &self.shell_state.env_vars,
+                )
+                .is_some()
+                {
+                    return Ok(false);
+                }
                 // Exec model, like GNU: a `#!` script is exec'd by the
                 // kernel as a NEW interpreter process, and a shebangless
                 // text file hits execute_cmd.c:6237-6260's ENOEXEC tail,

@@ -2019,6 +2019,15 @@ pub fn external_command_for_named_program_with_exec_name(
         // from the typed word; the resolved Windows PathBuf would leak a
         // backslash path as $0 instead.
         let zero_word = script_zero_word(program, command_name);
+        // rubash#3415: a resolvable non-shell `#!` interpreter is
+        // spawned directly (the MSYS model) before the shell wrap
+        // below can swallow the script as bash.
+        if let Some((mut command, used_shell)) =
+            shebang_interpreter_command(program, &zero_word, &native_args, env_vars)
+        {
+            arm_child_signal_reset(&mut command);
+            return (command, used_shell);
+        }
         if let Some((mut command, used_shell)) =
             shell_wrapped_command(program, &zero_word, &native_args, env_vars)
         {
@@ -2362,6 +2371,155 @@ pub fn shell_wrapped_command(
         return Some((command, true));
     }
     None
+}
+
+/// Whether a shebang interpreter word names a shell: the same name set
+/// `exec_format_refusal` treats as the shell-script fallback
+/// (sh/bash/dash/rubash, by basename or a `/sh` or `/bash` suffix).
+fn is_shell_interpreter_name(name: &str) -> bool {
+    let base = Path::new(name)
+        .file_name()
+        .and_then(|base| base.to_str())
+        .unwrap_or(name);
+    matches!(base, "sh" | "bash" | "dash" | "rubash")
+        || name.ends_with("/sh")
+        || name.ends_with("/bash")
+}
+
+/// The first line of `program` (up to the first LF, capped at 512 bytes —
+/// a `#!` line is 128 bytes at most on the hosts GNU supports) as text.
+/// None when the file cannot be read or has no `#!` line.
+fn read_shebang_line(program: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(program).ok()?;
+    let mut head = [0u8; 512];
+    let read = file.read(&mut head).unwrap_or(0);
+    let line_end = head[..read]
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .unwrap_or(read);
+    let line = &head[..line_end];
+    if !line.starts_with(b"#!") {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&line[2..]).into_owned())
+}
+
+/// Mirror of the funnel's dispatcher insertion
+/// (`external_command_for_named_program_with_exec_name`): a
+/// WinuxCmd-dispatcher program takes the applet name as its first
+/// argument, so a dispatcher-resolved interpreter is spawned with
+/// `word`'s applet name ahead of `leading`.
+fn dispatch_prefixed(program: &Path, word: &str, mut leading: Vec<String>) -> Vec<String> {
+    if is_winuxcmd_dispatcher(program) {
+        let name = dispatcher_command_name(word);
+        if !matches!(
+            name.to_ascii_lowercase().as_str(),
+            "winuxcmd" | "winuxcmd.exe"
+        ) {
+            leading.insert(0, name);
+        }
+    }
+    leading
+}
+
+/// rubash#3415: the interpreter a directly-executed script's `#!` line
+/// names when that interpreter is NOT a shell, as
+/// `(resolved interpreter program, leading argv words)`.
+///
+/// GNU anchor: on a host with hash-bang exec the kernel execs the named
+/// interpreter (execute_cmd.c:6126 shell_execve execs first and only
+/// falls back to shell execution for a shebangless text file, :6225-6260);
+/// where the OS has no hash-bang exec, GNU re-execs through the NAMED
+/// interpreter (execute_shell_script, execute_cmd.c:6001-6043: the word
+/// after `#!` is the interpreter, one optional argument word follows,
+/// and the script name becomes its operand). Windows has no kernel `#!`,
+/// so this is the stand-in for both: resolve the named interpreter and
+/// spawn it with the script as its operand, exactly as the MSYS/Git Bash
+/// runtime does. A shell interpreter (sh/bash/dash/rubash, incl. the
+/// `/usr/bin/env sh` launcher shape) answers None — those keep the
+/// shell-script path — as does an unresolvable interpreter, whose
+/// refusal (`exec_format_refusal`: bad interpreter 126, env 127) runs
+/// upstream of every caller. The `should_run_with_shell` gate makes the
+/// helper Windows-only in effect: unix never enters it, so the kernel
+/// keeps owning `#!` there.
+pub(crate) fn foreign_shebang_interpreter(
+    program: &Path,
+    env_vars: &HashMap<String, String>,
+) -> Option<(PathBuf, Vec<String>)> {
+    if !should_run_with_shell(program) {
+        return None;
+    }
+    let line = read_shebang_line(program)?;
+    // getinterp (execute_cmd.c:5969): skip blanks after `#!`, take one
+    // whitespace-delimited word; execute_shell_script takes exactly one
+    // optional argument word the same way. split_whitespace matches both
+    // and the refusal classifier's parse (which also folds a trailing CR,
+    // the MSDOS-branch STRINGCHAR behavior, execute_cmd.c:5957-5964).
+    let mut words = line.split_whitespace();
+    let interp = words.next()?;
+    let arg = words.next();
+    // An `env` launcher resolves through the FOLLOWING word — the program
+    // env would exec — and that target decides the shell/foreign split,
+    // the same mailbox exec_format_refusal uses.
+    if Path::new(interp)
+        .file_name()
+        .is_some_and(|base| base == "env")
+    {
+        return match arg {
+            Some(target) if is_shell_interpreter_name(target) => None,
+            Some(target) => {
+                if let Some(env_program) = find_user_command(interp, env_vars) {
+                    let leading = dispatch_prefixed(&env_program, interp, vec![target.to_string()]);
+                    Some((env_program, leading))
+                } else {
+                    // No env binary on this host (native Windows without
+                    // an MSYS layer): env's only job here is the PATH
+                    // lookup of the target, so spawn the resolved target
+                    // directly instead of failing the script.
+                    let target_program = find_user_command(target, env_vars)?;
+                    let leading = dispatch_prefixed(&target_program, target, vec![]);
+                    Some((target_program, leading))
+                }
+            }
+            // A bare `#!/usr/bin/env` hands env the script as its operand.
+            None => {
+                let env_program = find_user_command(interp, env_vars)?;
+                let leading = dispatch_prefixed(&env_program, interp, vec![]);
+                Some((env_program, leading))
+            }
+        };
+    }
+    if is_shell_interpreter_name(interp) {
+        return None;
+    }
+    let resolved = find_user_command(interp, env_vars)?;
+    let leading: Vec<String> = arg.into_iter().map(|word| word.to_string()).collect();
+    let leading = dispatch_prefixed(&resolved, interp, leading);
+    Some((resolved, leading))
+}
+
+/// rubash#3415: build the spawn of a foreign `#!` interpreter for
+/// `program`: `[interpreter] [leading args] [script-as-invoked] [args...]`,
+/// the argv execute_shell_script (execute_cmd.c:6001-6043) composes —
+/// interpreter, one optional argument, then the script name. The second
+/// tuple member is false: this is a native child spawn, not a shell
+/// wrap, so the caller's spawn machinery must not treat the script as a
+/// shell child. None when no foreign interpreter applies; the caller
+/// then keeps today's shell path. The signal reset is the caller's, as
+/// with shell_wrapped_command.
+pub(crate) fn shebang_interpreter_command(
+    program: &Path,
+    zero_word: &str,
+    args: &[String],
+    env_vars: &HashMap<String, String>,
+) -> Option<(Command, bool)> {
+    let (interpreter, leading) = foreign_shebang_interpreter(program, env_vars)?;
+    let mut command = Command::new(interpreter);
+    command.args(&leading);
+    command.arg(zero_word);
+    push_external_args(&mut command, args);
+    Some((command, false))
 }
 
 fn is_winuxcmd_dispatcher(path: &Path) -> bool {
