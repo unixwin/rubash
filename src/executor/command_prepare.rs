@@ -430,6 +430,40 @@ impl Executor {
         Ok(())
     }
 
+    /// rubash#3383: GNU arrayfunc.c:507-517 assign_array_from_string runs
+    /// find_or_make_array_variable BEFORE assign_array_var_from_string
+    /// expands the elements, so a brand-new compound target is bound as
+    /// an empty indexed array even when an element's expansion fails and
+    /// the command is abandoned. The nonfatal arm in
+    /// execute_empty_words_command already kept this contract; the fatal
+    /// arm returned without binding, so `a=($((1/0)) 2)` left `a` unbound
+    /// where GNU leaves `declare -a a=()`. A pre-existing target — or a
+    /// declared-but-unset one — keeps its prior state (niubash #121).
+    fn bind_empty_array_for_failed_compound_assignment(&mut self, name: &str, value: &str) {
+        if !value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
+            return;
+        }
+        let stripped = name.strip_suffix('+').unwrap_or(name);
+        let base = stripped.split_once('[').map_or(stripped, |(base, _)| base);
+        if self.shell_state.env_vars.contains_key(base)
+            || is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base)
+        {
+            return;
+        }
+        self.shell_state.env_vars.insert(
+            base.to_string(),
+            format_indexed_array_storage(BTreeMap::new()),
+        );
+        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
+        // Keep the structured cell in lockstep (empty array).
+        crate::executor::arrays::sync_typed_indexed_array(
+            &mut self.shell_state.variables,
+            base,
+            &std::collections::BTreeMap::new(),
+        );
+        self.shell_state.env_vars.clear_array_cells_dirty();
+    }
+
     pub(in crate::executor) fn execute_empty_words_command(
         &mut self,
         cmd: &CommandNode,
@@ -694,6 +728,11 @@ impl Executor {
                 // prints "after"), matching the plain-parameter nounset path;
                 // other fatal categories abandon only the command list
                 // (probe a6: `x=$((1/0)); echo after` prints "after").
+                // rubash#3383: a compound target is created BEFORE its
+                // elements expand (arrayfunc.c:507-517), so bind the empty
+                // array here too — before every return below — exactly as
+                // the nonfatal arm does.
+                self.bind_empty_array_for_failed_compound_assignment(name, value);
                 if self.shell_state.arithmetic_nounset_error.replace(false) {
                     // expr.c:1208-1216: interactive_shell DISCARDs — the
                     // assignment is abandoned with status 1, the session
@@ -742,26 +781,7 @@ impl Executor {
                 // elements — same contract as fail_compound_array_assignment
                 // (failglob, niubash #121).
                 self.exit_code = 1;
-                if value.starts_with(COMPOUND_ASSIGNMENT_MARKER) {
-                    let stripped = name.strip_suffix('+').unwrap_or(name);
-                    let base = stripped.split_once('[').map_or(stripped, |(base, _)| base);
-                    if !self.shell_state.env_vars.contains_key(base)
-                        && !is_marked_var(&self.shell_state.env_vars, DECLARED_UNSET_VARS, base)
-                    {
-                        self.shell_state.env_vars.insert(
-                            base.to_string(),
-                            format_indexed_array_storage(BTreeMap::new()),
-                        );
-                        mark_env_name(&mut self.shell_state.env_vars, ARRAY_VARS, base);
-                        // Keep the structured cell in lockstep (empty array).
-                        crate::executor::arrays::sync_typed_indexed_array(
-                            &mut self.shell_state.variables,
-                            base,
-                            &std::collections::BTreeMap::new(),
-                        );
-                        self.shell_state.env_vars.clear_array_cells_dirty();
-                    }
-                }
+                self.bind_empty_array_for_failed_compound_assignment(name, value);
                 // rubash#1518: same evalerror class as the word funnel
                 // (`v=${#a[1/0]}` discards and continues under `set -e`).
                 self.evalerror_arith_pending.set(true);
