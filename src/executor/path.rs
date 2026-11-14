@@ -1575,8 +1575,49 @@ pub fn should_run_with_shell(path: &Path) -> bool {
     false
 }
 
+/// Mach-O native-image magics (darwin), for the two pre-emptive
+/// native-binary classifiers below. This is pure format recognition —
+/// whether the image is NATIVE is decided at the call sites by target:
+/// only the Darwin kernel execs Mach-O, so on Linux a Mach-O file
+/// stays an ENOEXEC candidate and GNU refuses it post-execve as
+/// "cannot execute binary file" / 126 (verified against the GNU 5.3
+/// oracle on Linux), while on macOS the same file spawns directly
+/// (rubash#3510 rework: macOS /bin/sleep is MH_MAGIC_64, and the
+/// pre-emptive refusal turned every native macOS spawn into
+/// "cannot execute binary file" / 126).
+///
+/// Thin images, both byte orders: MH_MAGIC_64 (CF FA ED FE /
+/// FE ED FA CF) and MH_MAGIC (CE FA ED FE / FE ED FA CE).
+///
+/// The fat/universal wrapper shares its magic with Java class files
+/// (CAFEBABE); the arch count in bytes 4..8 disambiguates — a real fat
+/// binary carries a handful of slices, a class file carries a major
+/// version (>= 45) there. The count reads big-endian under FAT_MAGIC
+/// and little-endian under FAT_CIGAM.
+pub(crate) fn is_macho_binary_magic(head: &[u8]) -> bool {
+    if head.len() < 4 {
+        return false;
+    }
+    match &head[..4] {
+        [0xCF, 0xFA, 0xED, 0xFE]
+        | [0xFE, 0xED, 0xFA, 0xCF]
+        | [0xCE, 0xFA, 0xED, 0xFE]
+        | [0xFE, 0xED, 0xFA, 0xCE] => true,
+        [0xCA, 0xFE, 0xBA, 0xBE] => {
+            head.len() >= 8
+                && (1..=16).contains(&u32::from_be_bytes([head[4], head[5], head[6], head[7]]))
+        }
+        [0xBE, 0xBA, 0xFE, 0xCA] => {
+            head.len() >= 8
+                && (1..=16).contains(&u32::from_le_bytes([head[4], head[5], head[6], head[7]]))
+        }
+        _ => false,
+    }
+}
+
 /// Whether `path` is directly exec-able by the kernel (rubash#1035): a file
-/// carrying a `#!` interpreter line or an ELF image. GNU shell_execve
+/// carrying a `#!` interpreter line, an ELF image, or — on macOS only,
+/// where the Darwin kernel execs it — a Mach-O image. GNU shell_execve
 /// (execute_cmd.c:6126-6233) only reaches the in-process shell-script
 /// fallback when execve refuses (ENOEXEC) — a script WITHOUT a hashbang.
 /// A direct spawn of such a file does not fail cleanly everywhere: libc's
@@ -1593,13 +1634,22 @@ pub fn program_execs_directly(path: &Path) -> bool {
     let Ok(mut file) = std::fs::File::open(path) else {
         return true;
     };
-    let mut prefix = [0u8; 4];
-    let Ok(()) = file.read_exact(&mut prefix) else {
-        return true;
-    };
+    let mut prefix = [0u8; 8];
+    // Read, not read_exact: a 4-7 byte file must still be judged on its
+    // real prefix (the pre-rework read_exact(4) did so; read_exact(8)
+    // returns true for every sub-8-byte file, so a 7-byte `echo hi`
+    // script would have been misread as directly exec-able). A file
+    // shorter than 4 bytes matches no magic and falls through to the
+    // script path, as GNU does (rubash#3510 rework).
+    let n = file.read(&mut prefix).unwrap_or(0);
+    let prefix = &prefix[..n];
     prefix.starts_with(b"#!")
         || prefix.starts_with(&[0x7F, b'E', b'L', b'F'])
         || prefix.starts_with(b"MZ")
+        // Mach-O is native only where the Darwin kernel execs it; on
+        // Linux the kernel refuses it with ENOEXEC, so it is not
+        // directly exec-able there (rubash#3510 rework).
+        || (cfg!(target_os = "macos") && is_macho_binary_magic(prefix))
 }
 
 #[allow(dead_code)]
@@ -4750,6 +4800,131 @@ mod tests {
     #[test]
     fn process_path_to_shell_passes_unix_form_through() {
         assert_eq!(process_path_to_shell("/usr/bin:/bin"), "/usr/bin:/bin");
+    }
+
+    /// rubash#3510 rework: Mach-O native-image magics — thin 32/64-bit in
+    /// both byte orders, plus the fat/universal wrapper disambiguated from
+    /// Java class files (same CAFEBABE magic) by the arch count.
+    #[test]
+    fn macho_binary_magic_recognizes_thin_and_fat_images() {
+        // Thin 64-bit, little- and big-endian.
+        assert!(is_macho_binary_magic(&[0xCF, 0xFA, 0xED, 0xFE]));
+        assert!(is_macho_binary_magic(&[0xFE, 0xED, 0xFA, 0xCF]));
+        // Thin 32-bit, little- and big-endian.
+        assert!(is_macho_binary_magic(&[0xCE, 0xFA, 0xED, 0xFE]));
+        assert!(is_macho_binary_magic(&[0xFE, 0xED, 0xFA, 0xCE]));
+        // Fat, 2 slices — the universal-binary shape.
+        assert!(is_macho_binary_magic(&[
+            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x02
+        ]));
+        assert!(is_macho_binary_magic(&[
+            0xBE, 0xBA, 0xFE, 0xCA, 0x02, 0x00, 0x00, 0x00
+        ]));
+        // A Java class file shares FAT_MAGIC but carries a major version
+        // (>= 45) where the arch count sits — not a Mach-O image.
+        assert!(!is_macho_binary_magic(&[
+            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34
+        ]));
+        assert!(!is_macho_binary_magic(&[
+            0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x00
+        ]));
+        // A 4-byte fat prefix cannot carry the count — not recognized.
+        assert!(!is_macho_binary_magic(&[0xCA, 0xFE, 0xBA, 0xBE]));
+        // Everything else is not Mach-O.
+        assert!(!is_macho_binary_magic(&[0x7F, b'E', b'L', b'F']));
+        assert!(!is_macho_binary_magic(b"#!/bin/sh"));
+        assert!(!is_macho_binary_magic(b"MZ\x90\x00"));
+        assert!(!is_macho_binary_magic(b"hello"));
+        assert!(!is_macho_binary_magic(&[]));
+        assert!(!is_macho_binary_magic(&[0xCF, 0xFA, 0xED]));
+    }
+
+    /// rubash#3510 rework: the two pre-emptive native-binary classifiers
+    /// treat Mach-O images by platform — admitted on macOS, where the
+    /// Darwin kernel execs them (the macOS face where /bin/sleep,
+    /// MH_MAGIC_64, was refused as "cannot execute binary file" / 126
+    /// before any execve was attempted), and still refused elsewhere,
+    /// where the kernel answers ENOEXEC and GNU's post-ENOEXEC binary
+    /// refusal (126) applies. A Java class file (FAT_MAGIC, major
+    /// version in the count slot) stays a non-native file on both.
+    #[cfg(unix)]
+    #[test]
+    fn native_binary_classifiers_admit_macho_images() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join("rubash-macho-classifiers");
+        std::fs::create_dir_all(&base).unwrap();
+        let write_exec = |name: &str, bytes: &[u8]| {
+            let path = base.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        };
+        // Thin Mach-O 64-bit (the /bin/sleep shape: magic + arm64 cputype).
+        let thin = write_exec(
+            "thin-macho",
+            &[
+                0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        // Fat universal binary, 2 slices.
+        let fat = write_exec(
+            "fat-macho",
+            &[
+                0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        // Java class file: same FAT_MAGIC, major version 52 in the count slot.
+        let class = write_exec(
+            "java-class",
+            &[
+                0xCA, 0xFE, 0xBA, 0xBE, 0x00, 0x00, 0x00, 0x34, 0x00, 0x00, 0x00, 0x00,
+            ],
+        );
+        // Shebangless text: the genuine ENOEXEC-candidate shape.
+        let text = write_exec("plain-text", b"echo hi\n");
+        // Sub-8-byte shebangless scripts: judged on their real prefix, not
+        // on a short-read failure (read_exact(8) misread these as directly
+        // exec-able). `echo hi` without a trailing newline is 7 bytes.
+        let short_text = write_exec("short-text", b"echo hi");
+        let tiny_text = write_exec("tiny-text", b"abc");
+        if cfg!(target_os = "macos") {
+            for path in [&thin, &fat] {
+                assert!(program_execs_directly(path), "{}", path.display());
+                assert!(
+                    !crate::executor::external_inner::is_enoexec_candidate(path),
+                    "{}",
+                    path.display()
+                );
+            }
+        } else {
+            // Off macOS the kernel refuses Mach-O with ENOEXEC, so both
+            // classifiers keep it on the refusal path (GNU: 126).
+            for path in [&thin, &fat] {
+                assert!(!program_execs_directly(path), "{}", path.display());
+                assert!(
+                    crate::executor::external_inner::is_enoexec_candidate(path),
+                    "{}",
+                    path.display()
+                );
+            }
+        }
+        assert!(!program_execs_directly(&class));
+        assert!(crate::executor::external_inner::is_enoexec_candidate(
+            &class
+        ));
+        assert!(!program_execs_directly(&text));
+        assert!(crate::executor::external_inner::is_enoexec_candidate(&text));
+        for path in [&short_text, &tiny_text] {
+            assert!(!program_execs_directly(path), "{}", path.display());
+            assert!(
+                crate::executor::external_inner::is_enoexec_candidate(path),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [&thin, &fat, &class, &text, &short_text, &tiny_text] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     #[cfg(unix)]
