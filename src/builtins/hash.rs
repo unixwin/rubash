@@ -477,7 +477,7 @@ pub(crate) fn phash_search(env_vars: &HashMap<String, String>, name: &str) -> Op
 /// and `type`). Any other stored path is returned as stored. "Current
 /// directory" is the session cwd (G-02), so both probes anchor there.
 /// HASH_CHKDOT (a `.` PATH element ahead of the hit) is not recorded by
-/// this table and is not modelled here.
+/// this table and is not modelled here (rubash#3551).
 pub(crate) fn phash_search_spelling(
     path: &str,
     env_vars: &HashMap<String, String>,
