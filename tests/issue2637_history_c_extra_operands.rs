@@ -57,9 +57,8 @@ fn rubash_c(script: &str) -> (String, String, Option<i32>) {
 #[test]
 fn history_c_extra_operand_clears_silently() {
     // The issue's regression seed, verbatim.
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c extra 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c extra 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -67,9 +66,8 @@ fn history_c_extra_operand_clears_silently() {
 
 #[test]
 fn history_c_two_surplus_operands_clears_silently() {
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c one two 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c one two 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -86,9 +84,8 @@ fn history_c_numeric_operand_clears_silently() {
 
 #[test]
 fn history_c_dashdash_extra_clears_silently() {
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c -- extra 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c -- extra 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -98,9 +95,8 @@ fn history_c_dashdash_extra_clears_silently() {
 fn history_c_delete_consumed_operand_never_runs() {
     // getopt consumes `-d 1`, so no words remain: GNU returns success
     // right after the clear and the delete never runs.
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c -d 1 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c -d 1 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -108,9 +104,8 @@ fn history_c_delete_consumed_operand_never_runs() {
 
 #[test]
 fn history_c_delete_bad_offset_never_validated() {
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c -d bad 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c -d bad 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -120,9 +115,8 @@ fn history_c_delete_bad_offset_never_validated() {
 fn history_c_save_after_clear_adds_again() {
     // CFLAG clears, then the -s arm still runs: the list ends with
     // just the pushed entry.
-    let (stdout, stderr, code) = rubash_c(
-        "history -s one; history -c -s two 2>&1; echo \"rc=$?\"; history",
-    );
+    let (stdout, stderr, code) =
+        rubash_c("history -s one; history -c -s two 2>&1; echo \"rc=$?\"; history");
     assert_eq!(stdout, "rc=0\n    1  two\n");
     assert_eq!(stderr, "");
     assert_eq!(code, Some(0));
@@ -131,11 +125,17 @@ fn history_c_save_after_clear_adds_again() {
 #[test]
 fn history_c_delete_with_remaining_operand_eranges() {
     // Words remain, so the -d arm runs against the cleared (empty)
-    // list: `1` is out of range, rc 1.
-    let (stdout, _stderr, code) = rubash_file(
-        "history -s one\nhistory -c -d 1 extra 2>&1\necho \"rc=$?\"\nhistory\n",
+    // list: `1` is out of range, rc 1. GNU renders the diagnostic with
+    // the standard `$0: line N:` non-interactive prefix (error.c
+    // builtin_error -> file_error/line number), which carries the
+    // script path spelling — the pin asserts the GNU scheme's tail
+    // rather than the platform-dependent path text.
+    let (stdout, _stderr, code) =
+        rubash_file("history -s one\nhistory -c -d 1 extra 2>&1\necho \"rc=$?\"\nhistory\n");
+    assert!(
+        stdout.ends_with(": line 2: history: 1: history position out of range\nrc=1\n"),
+        "stdout: {stdout:?}"
     );
-    assert_eq!(stdout, "history: 1: history position out of range\nrc=1\n");
     assert_eq!(code, Some(0));
 }
 
@@ -143,8 +143,7 @@ fn history_c_delete_with_remaining_operand_eranges() {
 fn history_plain_listing_surplus_still_too_many() {
     // Positive control (rubash#1660): without -c, a surplus operand
     // after the count is still `too many arguments` with DISCARD.
-    let (stdout, _stderr, code) =
-        rubash_file("history -s one\nhistory 1 extra\necho \"ran=$?\"\n");
+    let (stdout, _stderr, code) = rubash_file("history -s one\nhistory 1 extra\necho \"ran=$?\"\n");
     assert_eq!(stdout, "ran=2\n");
     assert_eq!(code, Some(0));
 }
