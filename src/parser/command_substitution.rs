@@ -253,6 +253,31 @@ fn dollar_command_substitution(
                 continue;
             }
         }
+        // rubash#3623: inside a `case` body `(`/`)` do not nest `depth`, so
+        // an inner `$(...)` would be scanned inline — its contents land as
+        // the case subject word and its `)` hits the case-close arm,
+        // truncating the substitution (`case $(ls) in` cut at `$(ls`.
+        // GNU parse.y:4451 parse_comsub parses every `$(` as a fresh
+        // parse, opaque to the outer case machine — skip the nested
+        // `$(...)` as a unit (same shape as the double-quote nested-$( skip
+        // above) and leave a non-empty word so the case subject still
+        // completes at the next boundary.
+        if case_depth > 0
+            && !single
+            && !double
+            && ch == '$'
+            && chars.get(index + 1) == Some(&'(')
+            && chars.get(index + 2) != Some(&'(')
+        {
+            if let Some((_, next_index)) = dollar_command_substitution(chars, index) {
+                index = next_index;
+                if word.is_empty() {
+                    word.push('$');
+                }
+                token_boundary = false;
+                continue;
+            }
+        }
         // Heredoc bodies are opaque to command-substitution delimiter matching.
         if ch == '<' && !single && !double && chars.get(index + 1) == Some(&'<') {
             if let Some((next_index, header_close)) =
