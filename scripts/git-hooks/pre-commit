@@ -1,13 +1,35 @@
 #!/bin/sh
 # Enforce rustfmt on every commit (owner directive 2026-09-26: fmt must be a
 # commit hook). Fails the commit when any Rust source is not formatted.
-if ! command -v cargo >/dev/null 2>&1; then
-    echo "pre-commit: cargo not found; skipping rustfmt check" >&2
-    exit 0
+#
+# `cargo fmt --check` is equivalent but overflows the Windows
+# CreateProcess command-line limit on this workspace (~1.5k target roots,
+# os error 206), so the gate runs scripts/check-rustfmt.py instead: same
+# workspace-member coverage via cargo metadata, batched rustfmt --check.
+# The gate fails closed: missing git/python/cargo/rustfmt or any diff
+# blocks the commit; there is no bypass.
+repo_root=$(git rev-parse --show-toplevel) || {
+    echo "pre-commit: cannot resolve repository root" >&2
+    exit 1
+}
+# Prefer python3, then python. A candidate must actually run Python 3:
+# on Windows a python3.exe Store-alias stub can sit on PATH and exit
+# nonzero on every invocation, which must not be mistaken for a working
+# interpreter (and must not silently skip the gate).
+py=""
+for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 \
+        && "$cand" -c 'import sys; sys.exit(0 if sys.version_info[0] >= 3 else 1)' >/dev/null 2>&1; then
+        py=$cand
+        break
+    fi
+done
+if [ -z "$py" ]; then
+    echo "pre-commit: no working python3/python found; rustfmt check cannot run" >&2
+    exit 1
 fi
-if ! cargo fmt --check >/dev/null 2>&1; then
-    echo "pre-commit: rustfmt check failed. Run 'cargo fmt' and re-stage." >&2
-    cargo fmt --check 2>&1 | head -20 >&2
+if ! "$py" "$repo_root/scripts/check-rustfmt.py" --repo-root "$repo_root"; then
+    echo "pre-commit: rustfmt check failed; fix formatting and re-stage." >&2
     exit 1
 fi
 exit 0
