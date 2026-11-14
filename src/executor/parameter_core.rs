@@ -272,6 +272,20 @@ impl Executor {
                 } else {
                     raw_value.to_string()
                 };
+                // GNU subst.c:10278 (parameter_brace_expand's `bad
+                // substitution` default) names the WHOLE word
+                // expand_word_internal was expanding. This arm split the
+                // word at `=` and re-roots the RHS walk at the RHS alone,
+                // so record the whole word for the RHS expansion: the
+                // walker's `${` arm keeps an already-recorded enclosing
+                // word (PendingDiagnosticWordGuard is install-if-absent),
+                // and the fragment gates take it (rubash#3441: `echo
+                // a=${-x}` reported `${-x}` instead of `a=${-x}`).
+                // Compound values are excluded: GNU names the ELEMENT word
+                // there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
+                // element-boundary tracking of its own.
+                let _diag_word =
+                    crate::executor::expand_word::PendingDiagnosticWordGuard::new(word);
                 crate::executor::assignment_expansion::restore_sq_content_markers(
                     self.expand_embedded_parameters_mut(&hoisted)
                         .replace(DQ_DATA, "\"")

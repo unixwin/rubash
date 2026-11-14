@@ -618,13 +618,68 @@ pub(in crate::executor) fn has_indirect_parameter_word_operator(name: &str) -> b
     let Some(indirect) = name.strip_prefix('!') else {
         return false;
     };
-    [":-", ":=", ":?", ":+", "-", "=", "?", "+"]
-        .iter()
-        .any(|operator| {
-            indirect
-                .split_once(operator)
-                .is_some_and(|(left, _)| !left.is_empty())
-        })
+    // The operator must apply to the indirect NAME itself, at the top
+    // level: an operator character nested inside a `${...}` (or a quote)
+    // belongs to the nested word, not to this expansion — `${!x#*a=${-y}}`
+    // is an indirect REMOVAL whose pattern merely contains `=` inside
+    // the nested `${-y}` (rubash#3501). Likewise, once a pattern operator
+    // (`#`/`%`/`/`/`^`/`,`/`~`) opens the pattern half, everything after
+    // it is pattern text, never an operator word. Same top-level walk as
+    // split_top_level_pattern_operator / split_once_outside_subscript_impl
+    // (nested `${...}` + quotes); brackets are NOT tracked, matching the
+    // previous scan's treatment of `${!a[i-1]}`.
+    let bytes = indirect.as_bytes();
+    let mut index = 0usize;
+    let mut nested = 0usize;
+    let mut quote: Option<u8> = None;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'\\' {
+            index += 2;
+            continue;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            quote = Some(byte);
+            index += 1;
+            continue;
+        }
+        if byte == b'$' && bytes.get(index + 1) == Some(&b'{') {
+            nested += 1;
+            index += 2;
+            continue;
+        }
+        if byte == b'}' && nested > 0 {
+            nested -= 1;
+            index += 1;
+            continue;
+        }
+        if nested == 0 {
+            // A `:`-led pair (`:-`, `:=`, `:?`, `:+`) or a bare
+            // `-`/`=`/`?`/`+` at the top level, after a non-empty name.
+            if index > 0
+                && (matches!(
+                    (byte, bytes.get(index + 1).copied()),
+                    (b':', Some(b'-' | b'=' | b'?' | b'+'))
+                ) || matches!(byte, b'-' | b'=' | b'?' | b'+'))
+            {
+                return true;
+            }
+            // A pattern operator opens the pattern half: nothing after
+            // it can be an operator word on the indirect name.
+            if matches!(byte, b'#' | b'%' | b'/' | b'^' | b',' | b'~') {
+                return false;
+            }
+        }
+        index += 1;
+    }
+    false
 }
 
 pub(in crate::executor) fn parameter_substring(

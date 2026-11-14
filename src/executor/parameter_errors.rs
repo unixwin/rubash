@@ -45,6 +45,33 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     Some((base, subscript))
 }
 
+/// The subscript text of the leading `name[...]` reference of a
+/// `${...}` parameter body, if it has one; text after the closing
+/// `]` (an operator suffix) is ignored because GNU
+/// parameter_brace_expand evaluates the subscript before the
+/// operator. Unlike `split_leading_array_ref`, a subscript that
+/// itself contains `[` (a nested subscript) is kept — the closing
+/// `]` is skipsubscript's, which nests brackets and treats
+/// `${...}` units as indivisible. An optional `!` (indirect) or
+/// `#` (length) prefix is skipped: both forms still expand the
+/// subscript during the fetch.
+fn leading_reference_subscript(inner: &str) -> Option<&str> {
+    let body = inner.strip_prefix(['!', '#']).unwrap_or(inner);
+    let open = body.find('[')?;
+    let head = &body[..open];
+    // GNU arrayfunc.c:1297-1313 `tokenize_array_reference` requires
+    // the base before `[` to pass `valid_identifier` — a digit base
+    // (`${1[...]}`) or a special-parameter base (`${@[0]}`) is a bad
+    // substitution, not a reference whose subscript is expanded, so
+    // only an identifier base descends (the malformed arm owns the
+    // rest and the real expansion reports it).
+    if !is_shell_name(head) {
+        return None;
+    }
+    let close = skipsubscript_close(body.as_bytes(), open)?;
+    Some(&body[open + 1..close])
+}
+
 /// A subscript that is a clean decimal integer literal (`-3`, `0`, `42`,
 /// `+7`): evaluating it through evalexp reads no variable, draws no RNG
 /// and writes nothing, so its value is decidable without evaluation.
@@ -1791,6 +1818,125 @@ impl Executor {
         None
     }
 
+    /// Adjudicate a nested `${...}` inside the leading reference's
+    /// subscript (rubash#2596). GNU `parameter_brace_expand`
+    /// (subst.c:9777) fetches the parameter before any operator,
+    /// transform, length or indirect adjudication, and the fetch
+    /// expands the subscript (expand_array_subscript → expand_string,
+    /// subst.c:11063 `expand_subscript_string`), which recurses into
+    /// a nested `${...}` under its own name — a `:?` there is fatal
+    /// for the inner parameter (`${a[${b:?e}]}` reports `b: e`).
+    /// The pre-scan never descended into subscripts: it consumed the
+    /// outer span whole, so the nested error was swallowed (and the
+    /// real expansion's subscript walk yields empty for it). Scan the
+    /// subscript text before the operator arms, so the subscript
+    /// error pre-empts them exactly like the fetch does.
+    fn nested_subscript_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+        let subscript = leading_reference_subscript(inner)?;
+        if !subscript.contains("${") {
+            return None;
+        }
+        self.scan_subscript_text_for_errors(subscript)
+    }
+
+    /// Walk subscript text for nested `${...}` errors (rubash#2596).
+    /// Quote-transparent — GNU expands a nested expansion inside a
+    /// subscript even in single quotes (`${a['${b:?e}']}` reports
+    /// `b: e`; the quotes survive into the arithmetic evaluation,
+    /// subst.c:11063 expand_subscript_string → expand_string) — but
+    /// `$(...)`/backtick spans are opaque: a `:?` inside one belongs
+    /// to the inner command, which reports it itself while the outer
+    /// command continues. `$((...))` arithmetic units stay opaque
+    /// like the top-level scan's P_ARITH rule (rubash#533).
+    fn scan_subscript_text_for_errors(&self, text: &str) -> Option<(String, String, i32)> {
+        let bytes = text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => {
+                    index += 2;
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'\'') => {
+                    // ANSI-C string: backslash escapes carry through.
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'\'' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                    // $(...) / $((...)) body: a separate expansion
+                    // source with its own scan; skip it whole.
+                    index += 2;
+                    let mut depth = 1usize;
+                    let mut single = false;
+                    let mut double = false;
+                    while index < bytes.len() {
+                        let current = bytes[index];
+                        if current == b'\\' && !single {
+                            index += 2;
+                            continue;
+                        }
+                        match current {
+                            b'\'' if !double => single = !single,
+                            b'"' if !single => double = !double,
+                            b'(' if !single && !double => depth += 1,
+                            b')' if !single && !double => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    index += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                }
+                b'`' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'`' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                    let after = &text[index + 2..];
+                    let Some(end) = matching_parameter_brace(after) else {
+                        return Some((
+                            "${".to_string() + after + "}",
+                            "unexpected EOF while looking for matching `}'`".to_string(),
+                            2,
+                        ));
+                    };
+                    let span = &text[index..index + 2 + end + 1];
+                    if let Some(error) = self.parameter_expansion_error_in_word(span) {
+                        return Some(error);
+                    }
+                    index += 2 + end + 1;
+                }
+                _ => {
+                    index += 1;
+                }
+            }
+        }
+        None
+    }
+
     /// rubash#2527: the set/null verdict the error pre-scan needs for an
     /// operator's left-hand side, derived WITHOUT evaluating a subscript.
     /// GNU `parameter_brace_expand` (subst.c:9777) fetches the parameter
@@ -2249,6 +2395,15 @@ impl Executor {
                     "bad substitution".to_string(),
                     1,
                 ));
+            }
+            // rubash#2596: the subscript is expanded while the
+            // parameter is fetched, before any operator, transform,
+            // length or indirect adjudication (subst.c:9777
+            // parameter_brace_expand; expand_subscript_string,
+            // subst.c:11063) — a nested error inside it pre-empts
+            // every arm below.
+            if let Some(nested) = self.nested_subscript_word_error(inner) {
+                return Some(nested);
             }
             // GNU subst.c:8944-8951 parameter_brace_transform +
             // valid_parameter_transform (subst.c:8898): a `@xform` suffix on

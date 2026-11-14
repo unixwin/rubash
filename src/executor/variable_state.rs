@@ -351,7 +351,64 @@ impl Executor {
                 entries.insert(0, element);
                 super::arrays::format_indexed_array_storage(entries)
             };
-            self.shell_state.local_var_scopes[scope_index].insert(fallback.clone(), Some(updated));
+            self.shell_state.local_var_scopes[scope_index]
+                .insert(fallback.clone(), Some(updated.clone()));
+
+            // rubash#2655: the mirror snapshot above is the global
+            // namesake's saved value — the typed snapshot saved beside it
+            // must move with it, or the frame restore hands the boundary
+            // verifier a mirror the typed cell never saw (nameref15.sub:
+            // `a=X` through circular `a -> a` moved the mirror to "X"
+            // while the cell kept "0"). Rebuild the saved cell from the
+            // same render, preserving the saved variable's flags.
+            let typed_value = if attrs.assoc {
+                crate::shell::ShellValue::AssociativeArray(
+                    crate::executor::assignment_helpers::assoc_entries(&updated)
+                        .into_iter()
+                        .collect(),
+                )
+            } else {
+                crate::shell::ShellValue::IndexedArray(
+                    super::arrays::indexed_array_entries(&updated)
+                        .into_iter()
+                        .map(|(index, value)| (i64::try_from(index).unwrap_or(i64::MAX), value))
+                        .collect(),
+                )
+            };
+            let mut typed_var = self
+                .shell_state
+                .local_typed_scopes
+                .get(scope_index)
+                .and_then(|scope| scope.get(&fallback))
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| crate::shell::Variable::scalar(String::new()));
+            typed_var.value = typed_value;
+            // The typed scopes parallel the var scopes frame for frame;
+            // fall back to the first scope holding the name, like the
+            // scalar path below does.
+            let mut wrote_typed = false;
+            if let Some(typed_scope) = self.shell_state.local_typed_scopes.get_mut(scope_index) {
+                if typed_scope.contains_key(&fallback) {
+                    typed_scope.insert(fallback.clone(), Some(typed_var.clone()));
+                    wrote_typed = true;
+                }
+            }
+            if !wrote_typed {
+                for typed_scope in &mut self.shell_state.local_typed_scopes {
+                    if typed_scope.contains_key(&fallback) {
+                        typed_scope.insert(fallback.clone(), Some(typed_var.clone()));
+                        wrote_typed = true;
+                        break;
+                    }
+                }
+            }
+            if !wrote_typed {
+                if let Some(typed_scope) = self.shell_state.local_typed_scopes.get_mut(scope_index)
+                {
+                    typed_scope.insert(fallback.clone(), Some(typed_var));
+                }
+            }
             return;
         }
         let mut variable = match self.circular_fallback_value(name) {

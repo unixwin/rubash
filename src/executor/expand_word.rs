@@ -1215,6 +1215,23 @@ impl Executor {
         // expand_word_mut_with_context); expanding the name portion here
         // applied side effects for words that are not assignments at all.
         let (name, value) = split_assignment_word(word)?;
+        // rubash#3441 (F1): mirror the mut path's split arm
+        // (parameter_core.rs): this arm splits the word at `=` and expands
+        // the RHS as its own word, so record the whole word for the RHS
+        // expansion — GNU subst.c:10278 names the whole word
+        // expand_word_internal was expanding, and the walker's `${` arm
+        // keeps an already-recorded enclosing word (install-if-absent).
+        // Compound values are excluded, as there: GNU names the ELEMENT
+        // word there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
+        // element-boundary tracking of its own. Quoted values are excluded
+        // too, as there: the word carries the QUOTED_ASSIGNMENT_VALUE
+        // transport byte after `=`, which must never reach a diagnostic.
+        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+            || value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE)
+        {
+            return Some(self.expand_plain_assignment_word(name, value));
+        }
+        let _diag_word = PendingDiagnosticWordGuard::new(word);
         Some(self.expand_plain_assignment_word(name, value))
     }
 
@@ -1499,14 +1516,22 @@ thread_local! {
 
 /// Run `f` with `word` recorded as the enclosing word for a walked `${}`
 /// fragment's bad-substitution diagnostic. The record is one-shot (see
-/// [`take_pending_diagnostic_word`]) and always cleared on return so it can
-/// never leak past the fragment.
+/// [`take_pending_diagnostic_word`]); on return the previous record (if
+/// any) is restored, so the frame's record can never leak past the
+/// fragment.
+///
+/// The record is install-if-absent, like [`PendingDiagnosticWordGuard`]:
+/// an outer record belongs to a word the caller is already expanding
+/// (rubash#3441: the assignment split in `expand_word` expands the RHS
+/// as a fresh word, so without this the `${` arm would re-root the
+/// diagnostic at the RHS — GNU subst.c:10278 names the whole word
+/// `expand_word_internal` was expanding). A nested fragment still keeps
+/// its own word: the outer fragment's gate evaluation consumes the record
+/// (take) before any nested operator word expands, so the slot is empty
+/// again by then.
 pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
-    let previous =
-        PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
-    let result = f();
-    PENDING_DIAGNOSTIC_WORD.with(|slot| slot.set(previous));
-    result
+    let _guard = PendingDiagnosticWordGuard::new(word);
+    f()
 }
 
 /// Consume the pending enclosing word, if any. Evaluating a fragment that is
@@ -1533,14 +1558,27 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
 
 /// RAII scope arm: records `word` as the enclosing word for the duration of
 /// one `${}` fragment in a walker, restoring the previous record on drop.
+/// The record is install-if-absent: an outer record belongs to a word the
+/// caller is already expanding (rubash#3441: the assignment split in
+/// `expand_word_mut_with_context` expands the RHS as a fresh word, so
+/// without this the RHS walker's `${` arm would re-root the diagnostic at
+/// the RHS — GNU subst.c:10278 names the whole word `expand_word_internal`
+/// was expanding). A nested fragment still keeps its own word: the outer
+/// fragment's gate evaluation consumes the record (take) before any nested
+/// operator word expands, so the slot is empty again by then.
 pub(in crate::executor) struct PendingDiagnosticWordGuard {
     previous: Option<(*const u8, usize)>,
 }
 
 impl PendingDiagnosticWordGuard {
     pub(in crate::executor) fn new(word: &str) -> Self {
-        let previous =
-            PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
+        let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
+            let previous = slot.get();
+            if previous.is_none() {
+                slot.set(Some((word.as_ptr(), word.len())));
+            }
+            previous
+        });
         Self { previous }
     }
 }
