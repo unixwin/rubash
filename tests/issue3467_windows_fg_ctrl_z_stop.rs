@@ -295,4 +295,42 @@ mod windows_faces {
         assert_eq!(worker.read("trap.out"), "", "the shell's trap stays quiet");
         worker.run("kill %1");
     }
+
+    /// The #877 acceptance vehicle: a foreground `sleep`. On Windows
+    /// `sleep` is an in-process emulation OF the PATH-resolved sleep
+    /// (an unresolvable one is "command not found", the emulation never
+    /// runs), and a virtual sleep has no process to suspend — so with
+    /// the stop channel live the emulation stands down to the real
+    /// child it stands in for, exactly the unix rubash#2398 rule
+    /// (GNU's sleep is always a forked child: jobs.c:4077 sees its
+    /// stop). The pin needs a resolvable `sleep` on PATH (winuxcmd's,
+    /// as on every niubash install); without one there is no `sleep`
+    /// command to stop and the pin reports that instead of passing
+    /// vacuously.
+    #[test]
+    fn issue3467_ctrl_z_stops_foreground_sleep_and_fg_resumes_it() {
+        let _guard = serial();
+        let worker = Worker::start("sleep");
+        worker.run("set -m; type -P sleep > sleep.path");
+        if worker.read("sleep.path").trim().is_empty() {
+            eprintln!(
+                "issue3467: no external sleep resolves on PATH; the sleep face is not exercised"
+            );
+            return;
+        }
+        let (accepted, _, elapsed) =
+            worker.run_and_ctrl_z("sleep 8; echo \"rc=$?\" > rc1; jobs > jobs1");
+        assert!(accepted, "the sleep runs as a stoppable foreground child");
+        assert!(elapsed < Duration::from_secs(6), "{elapsed:?}");
+        assert_eq!(worker.read("rc1"), "rc=148\n");
+        assert_eq!(
+            worker.read("jobs1"),
+            "[1]+  Stopped                    sleep 8\n"
+        );
+        let (_, elapsed) = worker.run("fg > fg.out; echo \"rc=$?\" > rc2; jobs > jobs2");
+        assert!(elapsed < Duration::from_secs(20), "{elapsed:?}");
+        assert_eq!(worker.read("fg.out"), "sleep 8\n");
+        assert_eq!(worker.read("rc2"), "rc=0\n");
+        assert_eq!(worker.read("jobs2"), "");
+    }
 }
