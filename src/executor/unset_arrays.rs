@@ -253,8 +253,12 @@ impl Executor {
                     // nameref chain, so `unset n[0]' with n -> v resolves the
                     // element against the REFERENCED array (nameref15.sub:
                     // v[0] is unbound and n survives) — resolve before the
-                    // element path consumes the operand.
-                    if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
+                    // element path consumes the operand. The W_ARRAYREF
+                    // flag travels with it (rubash#3521): the operand's
+                    // VA_ONEWORD|VA_NOEXPAND vflags reach the resolved
+                    // element unbind, so quote/backslash/backtick keys
+                    // split verbatim through the nameref too.
+                    if let Some(status) = self.unset_through_nameref(&name, true, &mut diag) {
                         element_status = element_status.max(i32::from(status));
                         continue;
                     }
@@ -287,7 +291,7 @@ impl Executor {
             // array's element (unset n[0] with n->v removes v[0]); a plain
             // nameref whose cell is an array reference unbinds that element
             // while keeping the nameref itself.
-            if let Some(status) = self.unset_through_nameref(&name, &mut diag) {
+            if let Some(status) = self.unset_through_nameref(&name, false, &mut diag) {
                 element_status = element_status.max(i32::from(status));
                 continue;
             }
@@ -530,9 +534,20 @@ impl Executor {
     /// nameref resolves the subscript against the referenced array
     /// (nameref3/nameref15.sub). Returns Some(status) when this call handled
     /// the operand and the ordinary variable path must be skipped.
+    /// `oneword` carries the operand's W_ARRAYREF flag (builtins/
+    /// common.c:1050-1051 VA_ONEWORD|VA_NOEXPAND): GNU threads the same
+    /// vflags through find_variable's nameref walk into
+    /// unbind_array_element (builtins/set.def:887), so the subscripted
+    /// arm below must split verbatim and re-call with the same
+    /// (arrayref, oneword) pair as the direct W_ARRAYREF call site
+    /// (rubash#3521). The plain-cell arm keeps (false, false): GNU
+    /// applies valid_array_reference(cell, 0) there (set.def:990-1010),
+    /// and a quote/backtick-key cell cannot even be created
+    /// (`declare -n` rejects it), so no verbatim split is reachable.
     pub(in crate::executor) fn unset_through_nameref(
         &mut self,
         name: &str,
+        oneword: bool,
         diag: &mut crate::executor::builtin_diag::Diag,
     ) -> Option<u8> {
         if is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, name) {
@@ -594,23 +609,68 @@ impl Executor {
             }
             return None;
         }
-        let Some((base, subscript)) = parse_array_subscript(name) else {
+        // rubash#3521: a W_ARRAYREF operand (oneword) binds its subscript
+        // verbatim — GNU tokenize_array_reference with VA_ONEWORD takes
+        // everything up to the LAST `]` (arrayfunc.c:1312-1313), so the
+        // quote-aware parse_array_subscript scan misreads quote/backslash/
+        // backtick keys here exactly as it did on the direct path (#3493).
+        // Split verbatim when oneword, falling back to the quote-aware
+        // scan exactly as unset_array_element's oneword arm does.
+        let Some((base, subscript)) = (if oneword {
+            split_oneword_array_subscript(name).or_else(|| parse_array_subscript(name))
+        } else {
+            parse_array_subscript(name)
+        }) else {
             return None;
         };
         if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, base) {
             return None;
         }
+        // GNU builtins/set.def:887 + variables.c find_variable: the
+        // nameref CHAIN is followed to the referenced array before the
+        // element unbinds (the plain-cell arm above already walks it the
+        // same way). A single hop leaves `n1[x]` with n1->n2->dict
+        // rebuilding `n2[x]` — a name no array arm owns.
+        let mut referent = base.to_string();
+        let mut seen = HashSet::from([referent.clone()]);
+        for _ in 0..8 {
+            let Some(cell) = self.shell_state.env_vars.get(&referent).cloned() else {
+                break;
+            };
+            if !is_marked_var(&self.shell_state.env_vars, NAMEREF_VARS, &cell)
+                || !seen.insert(cell.clone())
+            {
+                break;
+            }
+            referent = cell;
+        }
         let Some(cell) = self
             .shell_state
             .env_vars
-            .get(base)
+            .get(&referent)
             .filter(|cell| is_shell_name(cell))
         else {
             return None;
         };
         let cell = cell.clone();
-        self.unset_array_element(&format!("{cell}[{subscript}]"), false, false, diag)
-            .or(Some(0))
+        // GNU builtins/set.def:887 + builtins/common.c:1050-1051: the
+        // W_ARRAYREF word's vflags (VA_ONEWORD|VA_NOEXPAND) travel with
+        // the operand through find_variable's nameref walk into
+        // unbind_array_element — the two halves of that one vflags word
+        // are this call's (arrayref, oneword) pair, so a W_ARRAYREF
+        // operand re-calls with (true, true), the same pair the direct
+        // W_ARRAYREF call site uses; a non-W_ARRAYREF operand keeps
+        // (false, false). With oneword a None must fall through rather
+        // than .or(Some(0)): for an indexed/scalar referent the
+        // quote-aware re-parse fails, and the caller's validity gate
+        // then reports GNU's `not a valid identifier` (probes A8/A9).
+        let status =
+            self.unset_array_element(&format!("{cell}[{subscript}]"), oneword, oneword, diag);
+        if oneword {
+            status
+        } else {
+            status.or(Some(0))
+        }
     }
 
     pub(in crate::executor) fn unset_outer_local_variable(&mut self, name: &str) -> bool {
