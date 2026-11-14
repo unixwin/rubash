@@ -3164,8 +3164,17 @@ impl Executor {
                     index += 1;
                     if chars.get(index).copied() == Some('(') {
                         // `$(( ... ))` arithmetic is evaluated in the PARENT
-                        // (no fork): keep scanning the text for `$name'
-                        // references (GNU expr.c expr_streval).
+                        // (no fork), at this walk position: its expansion
+                        // phase's `$` reads, then its evalexp reads
+                        // (rubash#3498, see nounset_arith_expansion_verdict).
+                        if let Some((body, end)) = arith_expansion_body_at(&chars, index - 1) {
+                            let (unbound, bodies) = self.nounset_arith_expansion_verdict(&body);
+                            comsubs.extend(bodies);
+                            if unbound.is_some() {
+                                return (unbound, comsubs);
+                            }
+                            index = end;
+                        }
                         continue;
                     }
                     // `$( ... )` command substitution: collect the balanced
@@ -3205,6 +3214,30 @@ impl Executor {
             }
         }
         (None, comsubs)
+    }
+
+    /// rubash#3498: the nounset verdict of one `$((body))` the word
+    /// pre-scan reaches. GNU expands the arithmetic text first
+    /// (subst.c:3981 expand_arith_string — its `$` reads trap at
+    /// param_expand's `unbound_variable:` label, with indexed subscripts
+    /// expanded in an unquoted context, subst.c:11147) and then
+    /// evaluates it (expr.c:1190-1216 expr_streval traps a bare unset
+    /// name), both before the walk moves on to the next word. Returns
+    /// the trapped name (if any) plus the comsub bodies met on the way.
+    fn nounset_arith_expansion_verdict(&self, body: &str) -> (Option<String>, Vec<String>) {
+        let reads = crate::executor::arithmetic::arith_body_expansion_reads(body);
+        let (unbound, bodies) = self.nounset_unbound_parameter_with_comsubs(&reads);
+        if unbound.is_some() {
+            return (unbound, bodies);
+        }
+        let overlaid =
+            crate::executor::expand_braced_indices::env_vars_with_pending_subscript_writes(
+                &self.shell_state.env_vars,
+            );
+        (
+            crate::executor::arithmetic::arith_body_nounset_trap(body, &overlaid),
+            bodies,
+        )
     }
 
     pub(in crate::executor) fn nounset_unbound_parameter(&self, word: &str) -> Option<String> {
@@ -3305,8 +3338,19 @@ impl Executor {
                         // the PARENT (no fork): an unbound name inside is a
                         // parent-side fatal error (GNU expr.c expr_streval;
                         // probe p3: `x=$(($U))' under set -u exits the
-                        // script with 1), so keep scanning the arithmetic
-                        // text for `$name' references.
+                        // script with 1), judged at this walk position
+                        // (rubash#3498, see nounset_arith_expansion_verdict).
+                        let mut span = vec!['('];
+                        span.extend(chars.clone());
+                        if let Some((body, end)) = arith_expansion_body_at(&span, 0) {
+                            let (unbound, _bodies) = self.nounset_arith_expansion_verdict(&body);
+                            if unbound.is_some() {
+                                return unbound;
+                            }
+                            for _ in 1..end {
+                                chars.next();
+                            }
+                        }
                         continue;
                     }
                     // `$( ... )` command substitution: GNU forks
@@ -4177,4 +4221,36 @@ impl Executor {
             }
         }
     }
+}
+
+/// The body of the `$((...))` whose first `(` sits at `chars[open]`
+/// (`chars[open + 1]` is the second), and the index just past its
+/// closing `))`. Parentheses balance across the whole span (nested
+/// groups and `$(...)` bodies included, `\x` escapes skipped); a span
+/// that does not close with `))` (or never closes) yields None and the
+/// caller keeps its plain text walk.
+fn arith_expansion_body_at(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                index += 2;
+                continue;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    if index < open + 3 || chars[index - 1] != ')' {
+                        return None;
+                    }
+                    return Some((chars[open + 2..index - 1].iter().collect(), index + 1));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
