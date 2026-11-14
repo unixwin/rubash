@@ -2173,7 +2173,22 @@ impl Executor {
         if crate::executor::expand_braced_indices::scan_pure_mode() {
             return QuestionOutcome::ProvisionalPending;
         }
+        // rubash#3541: GNU's evalerror (arrayfunc.c:1356 array_expand_index
+        // -> evalexp -> expr.c error jump) abandons parameter_brace_expand
+        // BEFORE subst.c:8216 parameter_brace_expand_error can run, so an
+        // arithmetic failure inside the tested subscript is the whole
+        // verdict — the `:?` report must not follow it. The fetch below
+        // raises the fatal-expansion flags on that path; honor them and
+        // defer instead of layering the `:?` report on top.
+        let pre_fetch_arith_error = self.shell_state.arithmetic_expansion_error.get()
+            || self.shell_state.arithmetic_fatal_error.get();
         let fetched = self.parameter_error_value(name);
+        if !pre_fetch_arith_error
+            && (self.shell_state.arithmetic_expansion_error.get()
+                || self.shell_state.arithmetic_fatal_error.get())
+        {
+            return QuestionOutcome::NoError;
+        }
         // The fetch resolved the subscript (carry map): re-check the
         // simulation by the RESOLVED name — an earlier `:=` may have
         // bound exactly this element, and the fetched (pre-command)
@@ -3121,6 +3136,63 @@ impl Executor {
                         index += 1;
                         if name_ch == '}' {
                             break;
+                        }
+                        // rubash#3540: a comsub inside the braced text (an
+                        // array subscript, an operator word) is still
+                        // forked by expand_word_internal's walk before the
+                        // nounset fatal reports — collect its body in
+                        // order so the caller runs it for side effects.
+                        if name_ch == '`' {
+                            name.push(name_ch);
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '`' {
+                                    break;
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
+                        }
+                        if name_ch == '$' && chars.get(index).copied() == Some('(') {
+                            name.push(name_ch);
+                            name.push('(');
+                            index += 1;
+                            let mut depth = 1usize;
+                            let mut body = String::new();
+                            while index < chars.len() {
+                                let body_ch = chars[index];
+                                index += 1;
+                                name.push(body_ch);
+                                if body_ch == '\\' {
+                                    if index < chars.len() {
+                                        name.push(chars[index]);
+                                        index += 1;
+                                    }
+                                    continue;
+                                }
+                                if body_ch == '(' {
+                                    depth += 1;
+                                } else if body_ch == ')' {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        break;
+                                    }
+                                }
+                                body.push(body_ch);
+                            }
+                            comsubs.push(body);
+                            continue;
                         }
                         name.push(name_ch);
                     }
@@ -4085,6 +4157,41 @@ impl Executor {
         }
         let mut chars = subscript.chars().peekable();
         while let Some(ch) = chars.next() {
+            if ch == '`' {
+                // A command substitution inside the subscript is evaluated
+                // by expand_arith_string (subst.c:3981) in a forked child
+                // (subst.c:7143) — its variables are the child's business
+                // and never leak to this scan (rubash#3540).
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '`' {
+                        break;
+                    }
+                }
+                continue;
+            }
+            if ch == '$' && chars.peek().copied() == Some('(') {
+                chars.next();
+                let mut depth = 1usize;
+                while let Some(body_ch) = chars.next() {
+                    if body_ch == '\\' {
+                        chars.next();
+                        continue;
+                    }
+                    if body_ch == '(' {
+                        depth += 1;
+                    } else if body_ch == ')' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
             if !is_shell_name_start(ch) {
                 continue;
             }
