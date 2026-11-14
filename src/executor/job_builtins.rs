@@ -2385,6 +2385,26 @@ impl Executor {
         retain_for_explicit_wait: bool,
         force: bool,
     ) -> Result<WaitPidOutcome, ExecuteError> {
+        self.wait_for_background_pid_inner(pid, retain_for_explicit_wait, force, false)
+    }
+
+    /// The body of [`wait_for_background_pid`]. `stoppable` is the
+    /// Windows `fg` wait (rubash#3467): only fg's wait_for runs with the
+    /// job holding the terminal (jobs.c:3826 start_job(foreground=1)),
+    /// so only it is armed to consume a console ^Z — the `wait`
+    /// builtin's job is in the background, where the terminal's ^Z
+    /// reaches the shell itself and GNU's SIG_IGN drops it
+    /// (jobs.c:4949-4955 initialize_job_signals). Unix ignores the flag:
+    /// its fg wait is wait_for_fg_job_control's WUNTRACED one.
+    fn wait_for_background_pid_inner(
+        &mut self,
+        pid: u32,
+        retain_for_explicit_wait: bool,
+        force: bool,
+        stoppable: bool,
+    ) -> Result<WaitPidOutcome, ExecuteError> {
+        #[cfg(unix)]
+        let _ = stoppable;
         // GNU trap.c:604-611: a trapped signal arriving while the wait
         // builtin blocks longjmps out of the wait FROM THE SIGNAL HANDLER --
         // the signal wins over the child's exit even when both are pending
@@ -2460,6 +2480,8 @@ impl Executor {
             return Ok(WaitPidOutcome::NotFound);
         };
         self.procsub_stream_children.remove(&pid);
+        #[cfg(not(unix))]
+        let stop_window = stoppable.then(crate::builtins::kill::ForegroundStopWindow::arm);
         // GNU jobs.c:3064 wait_for + wait.def:178-191 wait_intr_flag: the
         // blocking waitpid is interruptible — a trapped signal longjmps out
         // and wait returns 128+sig while the job stays live. The mailbox
@@ -2504,6 +2526,24 @@ impl Executor {
                 }
                 break crate::executor::wait_status::process_exit_status(&done);
             }
+            // rubash#3467: a console ^Z while fg holds the job — the
+            // re-stop waitchld reports under WUNTRACED (jobs.c:4077).
+            // The engine suspends the job's live members through the
+            // kill builtin's Windows stop path (the inverse of the
+            // resume fg just delivered), marks them Stopped, and hands
+            // the handle back so the job stays resumable; the caller
+            // prints the stop notice and settles fg at 128+SIGTSTP
+            // (jobs.c:3220-3221), as on the unix fg wait.
+            #[cfg(not(unix))]
+            if stop_window.is_some()
+                && crate::builtins::kill::take_foreground_stop_request()
+                && crate::builtins::kill::send_signal(pid, crate::builtins::kill::SIGTSTP_NUMBER)
+                    .is_ok()
+            {
+                drop(stop_window);
+                self.background_children.insert(pid, child);
+                return Ok(self.settle_fg_job_console_stop(pid));
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
         self.join_coproc_stderr_forwarder(pid)?;
@@ -2522,6 +2562,48 @@ impl Executor {
         self.shell_state.job_table.mark_job_notified_by_pid(pid);
         self.forget_background_runtime(pid);
         Ok(WaitPidOutcome::Status(status))
+    }
+
+    /// rubash#3467: the stop bookkeeping for a Windows `fg` job the
+    /// console ^Z just stopped (`pid`, the waited member, is already
+    /// suspended and parked). Every other still-live member of the job
+    /// is suspended too — GNU's terminal stops the job's whole process
+    /// group — and each suspended member goes Stopped; the job flips
+    /// back to a background-listed entry, exactly the unix fg re-stop
+    /// arm (wait_for_fg_job_control).
+    #[cfg(not(unix))]
+    fn settle_fg_job_console_stop(&mut self, pid: u32) -> WaitPidOutcome {
+        let stop_signal = crate::builtins::kill::SIGTSTP_NUMBER;
+        let job_id = self.shell_state.job_table.job_id_for_pid(pid);
+        let members: Vec<u32> = job_id
+            .and_then(|job_id| self.shell_state.job_table.jobs.get(&job_id))
+            .map(|entry| entry.pids.clone())
+            .unwrap_or_default();
+        for member in members {
+            if member == pid {
+                continue;
+            }
+            if self.background_children.contains_key(&member)
+                && crate::builtins::kill::send_signal(member, stop_signal).is_ok()
+            {
+                self.shell_state
+                    .job_table
+                    .mark_stopped(member, Some(stop_signal));
+            }
+        }
+        self.shell_state
+            .job_table
+            .mark_stopped(pid, Some(stop_signal));
+        if let Some(job_id) = job_id {
+            if let Some(entry) = self.shell_state.job_table.jobs.get_mut(&job_id) {
+                entry.foreground = false;
+                entry.background = true;
+            }
+        }
+        WaitPidOutcome::Stopped {
+            job_id: job_id.unwrap_or(0),
+            stop_signal,
+        }
     }
 
     /// rubash#2398: fg's wait while the job-control channel is live —
@@ -3756,8 +3838,14 @@ impl Executor {
         } else {
             self.wait_for_background_pid(pid, false, false)
         };
+        // rubash#3467: on Windows the fg wait is the stoppable one while
+        // the foreground-stop channel is live — a console ^Z re-stops
+        // the job (WaitPidOutcome::Stopped below).
         #[cfg(not(unix))]
-        let wait_result = self.wait_for_background_pid(pid, false, false);
+        let wait_result = {
+            let stoppable = self.foreground_stop_channel_active();
+            self.wait_for_background_pid_inner(pid, false, false, stoppable)
+        };
         // jobs.c:3253: the shell takes its terminal back on every way
         // out of the wait.
         #[cfg(unix)]

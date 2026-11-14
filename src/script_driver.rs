@@ -3543,6 +3543,26 @@ pub fn inject_console_ctrl_c() {
     crate::builtins::kill::note_console_ctrl_c();
 }
 
+/// rubash#3467: note a console Ctrl+Z the host observed while a
+/// foreground command runs — the Windows stand-in for the terminal
+/// driver's VSUSP -> SIGTSTP delivery to the foreground process group.
+/// The request is consumed by the engine's stoppable foreground waits
+/// (an external child, the `fg` wait): they suspend the job's
+/// processes, mark the job Stopped (`jobs` lists it, `fg`/`bg` resume
+/// it) and settle the wait at 128+SIGTSTP, as GNU's waitchld does for
+/// a WUNTRACED stop (jobs.c:4077, jobs.c:4290
+/// set_job_status_and_cleanup). It never enters the shell's own signal
+/// mailbox: an interactive GNU shell ignores SIGTSTP for itself
+/// (jobs.c:4949-4955 initialize_job_signals). Returns whether a
+/// stoppable wait was armed to receive the request; at any other
+/// moment the keystroke is dropped, like GNU's SIG_IGN shell.
+///
+/// Unix: no-op returning false — the kernel delivers the terminal's
+/// SIGTSTP to the foreground process group itself.
+pub fn inject_console_ctrl_z() -> bool {
+    crate::builtins::kill::note_console_ctrl_z()
+}
+
 /// Tier B host hook (PLAN row 11, M-3): consume the background
 /// wrapper handshake from a host launcher's argv before the
 /// host's own option parsing sees it — the driver-layer face of
