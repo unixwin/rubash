@@ -212,9 +212,11 @@ impl Executor {
             }
             // Same compound-claim gate as above (rubash#3034).
             if compound_assignment {
-                if let Some(expanded) =
-                    self.expand_compound_positional_at_assignment(raw_value, false)
-                {
+                if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                    raw_value,
+                    false,
+                    self.compound_assignment_is_assoc(name),
+                ) {
                     let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                     return format!("{name}={marker}{expanded}");
                 }
