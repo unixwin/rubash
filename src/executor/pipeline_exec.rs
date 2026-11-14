@@ -660,8 +660,16 @@ struct TimedPipelineInput {
 /// brace-group wrappers already inline (rubash#117 whitelist
 /// discipline: the condition is a necessary condition of the mutation
 /// arms themselves, so a false negative is impossible).
+/// rubash#3491: the gate also fires on a LIST-ONLY output procsub —
+/// every fd >= 3 entry, and any fd-1/2 entry that lost the mirror
+/// race to a later same-fd redirect, lives solely in the ordered
+/// `redirects` list (nodes.rs `is_list_only_redirect`), and the
+/// materializer now rewrites those too. The list predicate is the
+/// same `>(` prefix the mirror predicate uses (the materializer's
+/// recorded-span filter only narrows it further), so the gate stays
+/// a necessary condition of the mutation arms.
 pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &CommandNode) -> bool {
-    [
+    let mirror = [
         command.redirect_out.as_deref(),
         command.append.as_deref(),
         command.redirect_err.as_deref(),
@@ -669,7 +677,18 @@ pub(in crate::executor) fn compound_redirect_needs_procsub_rewrite(command: &Com
     ]
     .into_iter()
     .flatten()
-    .any(|redirect| redirect.target.starts_with(">("))
+    .any(|redirect| redirect.target.starts_with(">("));
+    mirror
+        || command.redirects.iter().any(|redirect| {
+            redirect.fd_var.is_none()
+                && matches!(
+                    redirect.kind,
+                    crate::parser::RedirectKind::Output
+                        | crate::parser::RedirectKind::Append
+                        | crate::parser::RedirectKind::ClobberOutput
+                )
+                && redirect.target.starts_with(">(")
+        })
 }
 
 /// rubash#2255 (§8 face): a list-only redirect that merely DUPS a
@@ -697,6 +716,89 @@ fn redirect_is_stdio_dup(redirect: &crate::parser::Redirect) -> bool {
                 | crate::parser::RedirectKind::DuplicateOutput
         )
         && super::execution_misc::dup_spelling_source_fd(&redirect.target).is_some_and(|fd| fd <= 2)
+}
+
+/// rubash#3491: one materialized compound output process substitution:
+/// the carrier the owning command's writes land in, the consumer body,
+/// and the redirect-prefix fd plan the consumer runs under (see
+/// `with_procsub_spawn_plan`) — the same plan the simple path computes
+/// for its spawned children.
+pub(in crate::executor) struct CompoundOutputProcsub {
+    path: std::path::PathBuf,
+    source: String,
+    spawn_plan: super::external_setup::ProcsubSpawnPlan,
+}
+
+/// rubash#3491: the list entry a stdio-mirror field is the twin of.
+/// The parser pushes every redirect to the ordered `redirects` list
+/// AND clones fd-1/2 entries into the mirror fields (see
+/// assign_output_redirect_raw), overwriting the mirror on each
+/// assignment — so the mirror always holds the LAST list entry with
+/// its fd, kind, and target text. The compound materializer consumes
+/// that entry so the list arm never materializes the same
+/// substitution twice.
+fn compound_procsub_mirror_twin(
+    redirects: &[crate::parser::Redirect],
+    fd: u32,
+    kind: crate::parser::RedirectKind,
+    target: &str,
+) -> Option<usize> {
+    redirects.iter().rposition(|redirect| {
+        redirect.fd.unwrap_or(1) == fd && redirect.kind == kind && redirect.target == target
+    })
+}
+
+/// rubash#3491: writer-before-reader order for one finish batch of
+/// compound consumers: a consumer whose prefix fds name another
+/// consumer's carrier must run AFTER that writer has appended,
+/// because the reader's input is snapshotted from the carrier at
+/// its own turn (the sequential in-process equivalent of the simple
+/// path's live pipes, which keep both ends concurrent). The order is
+/// stable — materialization order among unconstrained consumers —
+/// and a dependency cycle falls back to materialization order for
+/// its members (GNU runs them concurrently, so no sequential order
+/// is faithful there; the fallback keeps the pre-fix order).
+fn compound_output_execution_order(outputs: &[CompoundOutputProcsub]) -> Vec<usize> {
+    let mut remaining: Vec<usize> = (0..outputs.len()).collect();
+    let mut order = Vec::new();
+    while !remaining.is_empty() {
+        let mut progressed = false;
+        let mut index = 0;
+        while index < remaining.len() {
+            let candidate = remaining[index];
+            // Blocked while some still-unrun consumer writes
+            // into this candidate's carrier: the reader must wait
+            // for its writers (a writer itself is never blocked by
+            // its own target — it runs first).
+            let blocked = remaining.iter().any(|other| {
+                *other != candidate
+                    && outputs[*other]
+                        .spawn_plan
+                        .fds()
+                        .iter()
+                        .any(|(_, disposition)| {
+                            matches!(
+                                disposition,
+                                super::external_setup::ProcsubSpawnFd::CarrierWrite(carrier)
+                                if *carrier == outputs[candidate].path
+                            )
+                        })
+            });
+            if !blocked {
+                order.push(candidate);
+                remaining.remove(index);
+                progressed = true;
+            } else {
+                index += 1;
+            }
+        }
+        if !progressed {
+            // Cycle: keep the rest in materialization order.
+            order.extend(remaining.iter().copied());
+            break;
+        }
+    }
+    order
 }
 
 impl Executor {
@@ -1026,8 +1128,16 @@ impl Executor {
     pub(in crate::executor) fn materialize_compound_output_process_substitutions(
         &mut self,
         command: &mut CommandNode,
-    ) -> Result<Vec<(PathBuf, String)>, ExecuteError> {
-        let mut outputs = Vec::new();
+    ) -> Result<Vec<CompoundOutputProcsub>, ExecuteError> {
+        // (carrier path, consumer body, position of the entry in
+        // command.redirects — the prefix walk's position for the
+        // spawn plan, see procsub_spawn_plan).
+        let mut outputs: Vec<(PathBuf, String, usize)> = Vec::new();
+        // List indices already materialized through a mirror field
+        // (see compound_procsub_mirror_twin): the mirror is a clone
+        // of one list entry, so the list arm must not materialize
+        // that entry a second time.
+        let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         if let Some(source) = shared_combined_output_process_substitution(
             command.redirect_out.as_deref(),
             command.redirect_err_append.as_deref(),
@@ -1037,6 +1147,16 @@ impl Executor {
                 .as_deref()
                 .map(|redirect| redirect.target.clone())
                 .unwrap_or_default();
+            // The twin is resolved BEFORE the rewrite below (the
+            // list still holds the original text at this point).
+            let twin = command.redirect_out.as_deref().and_then(|redirect| {
+                compound_procsub_mirror_twin(
+                    &command.redirects,
+                    redirect.fd.unwrap_or(1),
+                    redirect.kind.clone(),
+                    &original,
+                )
+            });
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut command.redirect_out {
@@ -1046,7 +1166,15 @@ impl Executor {
                 redirect.target = display_path.clone();
             }
             self.note_procsub_carrier(&original, &display_path);
-            outputs.push((path, source));
+            if let Some(twin) = twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                // No list twin (defensive; the parser pushes every
+                // redirect to the list): the consumer runs with an
+                // empty prefix plan.
+                outputs.push((path, source, 0));
+            }
         }
         if let Some(source) = shared_combined_output_process_substitution(
             command.append.as_deref(),
@@ -1057,6 +1185,14 @@ impl Executor {
                 .as_deref()
                 .map(|redirect| redirect.target.clone())
                 .unwrap_or_default();
+            let twin = command.append.as_deref().and_then(|redirect| {
+                compound_procsub_mirror_twin(
+                    &command.redirects,
+                    redirect.fd.unwrap_or(1),
+                    redirect.kind.clone(),
+                    &original,
+                )
+            });
             let path = self.empty_process_substitution_temp()?;
             let display_path = shell_display_path(&path.to_string_lossy());
             if let Some(redirect) = &mut command.append {
@@ -1066,28 +1202,176 @@ impl Executor {
                 redirect.target = display_path.clone();
             }
             self.note_procsub_carrier(&original, &display_path);
-            outputs.push((path, source));
+            if let Some(twin) = twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                outputs.push((path, source, 0));
+            }
         }
 
-        if let Some(output) =
+        // The mirror arms below run on the same fields the combined
+        // arms may already have rewritten; a rewritten target no
+        // longer starts with `>(`, so a combined substitution is
+        // never materialized twice. Each arm's twin is resolved
+        // BEFORE the arm rewrites the mirror's target.
+        let redirect_out_twin = command.redirect_out.as_deref().and_then(|redirect| {
+            compound_procsub_mirror_twin(
+                &command.redirects,
+                redirect.fd.unwrap_or(1),
+                redirect.kind.clone(),
+                &redirect.target,
+            )
+        });
+        if let Some((path, source)) =
             self.materialize_compound_output_redirect(&mut command.redirect_out)?
         {
-            outputs.push(output);
+            if let Some(twin) = redirect_out_twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                outputs.push((path, source, 0));
+            }
         }
-        if let Some(output) = self.materialize_compound_output_redirect(&mut command.append)? {
-            outputs.push(output);
+        let append_twin = command.append.as_deref().and_then(|redirect| {
+            compound_procsub_mirror_twin(
+                &command.redirects,
+                redirect.fd.unwrap_or(1),
+                redirect.kind.clone(),
+                &redirect.target,
+            )
+        });
+        if let Some((path, source)) =
+            self.materialize_compound_output_redirect(&mut command.append)?
+        {
+            if let Some(twin) = append_twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                outputs.push((path, source, 0));
+            }
         }
-        if let Some(output) =
+        let redirect_err_twin = command.redirect_err.as_deref().and_then(|redirect| {
+            compound_procsub_mirror_twin(
+                &command.redirects,
+                redirect.fd.unwrap_or(1),
+                redirect.kind.clone(),
+                &redirect.target,
+            )
+        });
+        if let Some((path, source)) =
             self.materialize_compound_output_redirect(&mut command.redirect_err)?
         {
-            outputs.push(output);
+            if let Some(twin) = redirect_err_twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                outputs.push((path, source, 0));
+            }
         }
-        if let Some(output) =
+        let redirect_err_append_twin =
+            command.redirect_err_append.as_deref().and_then(|redirect| {
+                compound_procsub_mirror_twin(
+                    &command.redirects,
+                    redirect.fd.unwrap_or(1),
+                    redirect.kind.clone(),
+                    &redirect.target,
+                )
+            });
+        if let Some((path, source)) =
             self.materialize_compound_output_redirect(&mut command.redirect_err_append)?
         {
-            outputs.push(output);
+            if let Some(twin) = redirect_err_append_twin {
+                consumed.insert(twin);
+                outputs.push((path, source, twin));
+            } else {
+                outputs.push((path, source, 0));
+            }
         }
-        Ok(outputs)
+
+        // rubash#3491: the list arm — every output procsub the
+        // mirrors never see. A numbered fd (>= 3) is list-only by
+        // construction, and so is any fd-1/2 entry that lost the
+        // mirror race to a later same-fd redirect (the mirror holds
+        // only the last one). Without this arm the entry's `>(...)`
+        // text reached the compound fd walk verbatim, which opened
+        // a literal file of that name and never ran the consumer.
+        // Combined entries are mirror-covered by construction
+        // (assign_output_redirect_raw / assign_append_redirect_raw
+        // always mirror `&>` / `&>>`), so they are skipped here.
+        // The recorded-span filter is the same admission the mirror
+        // arm runs (rubash#1931): a quoted `">(...)"` stays a
+        // literal filename.
+        for index in 0..command.redirects.len() {
+            if consumed.contains(&index) {
+                continue;
+            }
+            let redirect = &command.redirects[index];
+            if redirect.fd_var.is_some() {
+                continue;
+            }
+            if !matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::Output
+                    | crate::parser::RedirectKind::Append
+                    | crate::parser::RedirectKind::ClobberOutput
+            ) {
+                continue;
+            }
+            let Some(source) = redirect
+                .target
+                .strip_prefix(">(")
+                .and_then(|target| target.strip_suffix(')'))
+                .filter(|_| super::external_setup::redirect_target_span_is_recorded(redirect))
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            let path = self.empty_process_substitution_temp()?;
+            let display_path = shell_display_path(&path.to_string_lossy());
+            let original = redirect.target.clone();
+            command.redirects[index].target = display_path.clone();
+            self.note_procsub_carrier(&original, &display_path);
+            outputs.push((path, source, index));
+        }
+
+        // Every output's redirect-prefix fd plan (see
+        // procsub_spawn_plan): the carrier map is keyed by list
+        // position, and the walk runs over the clone's list — an
+        // entry the arms rewrote still resolves through the map, so
+        // its rewritten display-path target never reaches the walk.
+        // Input procsubs have no carrier map on this pass (the
+        // compound's input side is bound elsewhere, after
+        // materialization), so a prefix input entry leaves its fd
+        // Inherit — the pre-fix behavior for that shape, and the
+        // plan walk declines its `<(...)` target rather than opening
+        // it as a file.
+        let carrier_by_position: std::collections::HashMap<usize, PathBuf> = outputs
+            .iter()
+            .map(|(path, _, position)| (*position, path.clone()))
+            .collect();
+        let no_input_carriers: std::collections::HashMap<usize, PathBuf> =
+            std::collections::HashMap::new();
+        let no_input_streams: std::collections::HashMap<
+            usize,
+            std::rc::Rc<crate::executor::fd_table::FileFd>,
+        > = std::collections::HashMap::new();
+        let mut compound_outputs = Vec::new();
+        for (path, source, position) in outputs {
+            let spawn_plan = self.procsub_spawn_plan(
+                &command.redirects,
+                position,
+                &carrier_by_position,
+                &no_input_carriers,
+                &no_input_streams,
+            );
+            compound_outputs.push(CompoundOutputProcsub {
+                path,
+                source,
+                spawn_plan,
+            });
+        }
+        Ok(compound_outputs)
     }
 
     /// rubash#394: record `>(...)`-text -> carrier-path for the duration of
@@ -1137,23 +1421,39 @@ impl Executor {
 
     pub(in crate::executor) fn finish_compound_output_process_substitutions(
         &mut self,
-        outputs: Vec<(PathBuf, String)>,
+        outputs: Vec<CompoundOutputProcsub>,
     ) -> Result<(), ExecuteError> {
+        // rubash#3491: writers run before their readers (see
+        // compound_output_execution_order), and each consumer runs
+        // under its redirect-prefix fd bindings (see
+        // with_procsub_spawn_plan) — GNU forks every consumer
+        // mid-do_redirections (redir.c:237, subst.c:6362) with the
+        // prefix entries already applied, so a body `>&3` reaches
+        // the earlier substitution's pipe instead of failing EBADF
+        // against the compound's already-restored fd table. The
+        // bindings are restored after each consumer, even on error.
+        let order = compound_output_execution_order(&outputs);
         let mut error = None;
-        for (path, source) in outputs {
-            let carrier = shell_display_path(&path.to_string_lossy());
+        for index in order {
+            let output = &outputs[index];
+            let carrier = shell_display_path(&output.path.to_string_lossy());
             self.procsub_carrier_memo
                 .borrow_mut()
                 .retain(|_, value| *value != carrier);
             if error.is_none() {
-                let input = fs::read_to_string(&path).unwrap_or_default();
-                if let Err(output_error) =
-                    self.execute_persistent_output_process_substitution(&source, input, None)
-                {
+                // The input is snapshotted at this consumer's own
+                // turn, so writers ordered before it have already
+                // appended their bytes to this carrier.
+                let input = fs::read_to_string(&output.path).unwrap_or_default();
+                let source = output.source.clone();
+                let plan = output.spawn_plan.clone();
+                if let Err(output_error) = self.with_procsub_spawn_plan(&plan, |executor| {
+                    executor.execute_persistent_output_process_substitution(&source, input, None)
+                }) {
                     error = Some(output_error);
                 }
             }
-            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(&output.path);
         }
         if let Some(error) = error {
             return Err(error);
@@ -6251,6 +6551,13 @@ impl Executor {
         streaming_stdin: bool,
         live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#3324: an inline arm records its ordered output
+        // chunks here for the driver's merge (see the field doc); a
+        // stage that records none must not inherit the previous
+        // stage's log, so clear it up front. This is the single
+        // dispatch point for the slot arms (the outer wrapper and
+        // the redirect-carrier path both come through here).
+        self.pipeline_stage_ordered_chunks.borrow_mut().take();
         // rubash#1540: entry snapshot for the post-scan adjudication
         // below — the no-fields scan expands every word with the full
         // walker, and the arithmetic verdict flags / brace latch it
@@ -6914,14 +7221,32 @@ impl Executor {
             Some(PipelineSlot::Printf) => {
                 let args: Vec<String> = self.expand_pipeline_stage_arg_words(command, 1);
                 let mut env_vars = self.shell_state.env_vars.clone();
-                let mut output = Vec::new();
-                let mut stderr = Vec::new();
+                // rubash#3324: same ordered-log treatment as the Trap
+                // arm below — printf interleaves its values with its
+                // diagnostics (e.g. `printf '%d\n' 5 bad 7` prints 5,
+                // the `bad: invalid number` diagnostic, then 0, 7), and
+                // the two-Vec split loses that order.
+                let log = super::trap_stack_builtins::OrderedOutputLog::new();
                 let status = crate::builtins::printf::execute_with_io(
                     args.iter().map(String::as_str),
                     &mut env_vars,
-                    &mut output,
-                    &mut stderr,
+                    &mut log.stdout_writer(),
+                    &mut log.stderr_writer(),
                 )?;
+                let mut output = Vec::new();
+                let mut stderr = Vec::new();
+                let mut chunks = Vec::new();
+                for (fd, bytes) in log.chunks().iter() {
+                    match fd {
+                        1 => output.extend_from_slice(bytes),
+                        _ => stderr.extend_from_slice(bytes),
+                    }
+                    chunks.push((
+                        *fd,
+                        crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                    ));
+                }
+                *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
                 Ok(Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output),
                     crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),
@@ -6970,19 +7295,40 @@ impl Executor {
                     }
                 }
                 let mut env_vars = self.shell_state.env_vars.clone();
-                let mut output = Vec::new();
-                let mut stderr = Vec::new();
+                // rubash#3324: run the handler against the ordered log
+                // (#2699) instead of two separate Vecs — the log keeps
+                // the listing/diagnostic production order (GNU's
+                // display_traps writes both to the element's own
+                // descriptors, builtins/trap.def:333) so the driver's
+                // merge can interleave the streams when the stage
+                // merges them (`2>&1`). The split pair below stays the
+                // stage's result for the unmerged legs.
+                let log = super::trap_stack_builtins::OrderedOutputLog::new();
                 let status = crate::builtins::trap::execute_with_io(
                     &args,
                     &mut env_vars,
-                    &mut output,
-                    &mut stderr,
+                    &mut log.stdout_writer(),
+                    &mut log.stderr_writer(),
                 )?;
                 // The POSIX reset-by-name usage failure returns GNU's raw
                 // internal EX_USAGE (258) for the execute_trap wrapper's
                 // special_builtin_failed gate; a pipeline stage surfaces the
                 // user-visible conversion instead (execute_cmd.c:4886-4888).
                 let status = if status > 256 { 2 } else { status };
+                let mut output = Vec::new();
+                let mut stderr = Vec::new();
+                let mut chunks = Vec::new();
+                for (fd, bytes) in log.chunks().iter() {
+                    match fd {
+                        1 => output.extend_from_slice(bytes),
+                        _ => stderr.extend_from_slice(bytes),
+                    }
+                    chunks.push((
+                        *fd,
+                        crate::executor::substitution_metadata::bytes_to_shell_text(bytes),
+                    ));
+                }
+                *self.pipeline_stage_ordered_chunks.borrow_mut() = Some(chunks);
                 Ok(Some((
                     crate::executor::substitution_metadata::bytes_to_shell_text(&output),
                     crate::executor::substitution_metadata::bytes_to_shell_text(&stderr),

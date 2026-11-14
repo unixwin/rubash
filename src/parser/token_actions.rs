@@ -1759,6 +1759,11 @@ fn reject_compound_assignment_position(
 
 /// Name-side validator for atomic compound assignments: optional
 /// `name[subscript]` head, then identifier rules (GNU arrayfunc.c).
+/// GNU general.c:288 valid_identifier: the FIRST character must be a
+/// legal starter (ASCII letter or `_`) — a digit-leading head such as
+/// `9bad` is not a compound-assignment LHS (rubash#3186), so the word
+/// stays plain and the builtin reports InvalidId on the flat word
+/// instead of the compound arm leaking markers into the diagnostic.
 fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     // GNU general.c:519 assignment(): `name+=` is an assignment word (`+` is
     // valid only immediately before `=`), so `name+=(list)` opens a compound
@@ -1779,6 +1784,7 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     };
     let bytes = head.as_bytes();
     !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')
@@ -2070,12 +2076,41 @@ fn skip_dollar_paren(bytes: &[u8], mut i: usize) -> usize {
     i
 }
 
+/// Index just past the closing backquote of the backquote command
+/// substitution whose opening backquote sits at `tick` in `bytes` —
+/// or None when the span never closes. Byte twin of the lexer's
+/// `skip_backtick_corrected` (lexer/skip.rs), same rules: a
+/// backslash carries the next byte, the first other backquote
+/// closes. Used by skip_procsub_paren so a backquote group is
+/// skipped whole (rubash#3354).
+fn skip_backtick_bytes(bytes: &[u8], mut i: usize) -> Option<usize> {
+    i += 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'`' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Skip from just after the `(` of a `<(`/`>(` process substitution to the
 /// index just past the matching `)`. Quote/escape/nesting rules mirror
 /// GNU parse_matched_pair (parse.y:3877) as invoked by the read_token_word
 /// shellexp arm (parse.y:5490-5524). Returns `None` when the group never
 /// closes (the caller then treats the `<`/`>` as an operator, matching the
 /// yyerror a truncated word produces).
+///
+/// A backquote group is skipped whole (skip_backtick_bytes, the byte
+/// twin of the lexer's skip_backtick_corrected): its interior — an
+/// unmatched `(` or a quote that would corrupt this walker's quote
+/// state — belongs to the inner command text, never to this span's
+/// paren depth (rubash#3354; the char twin is embedded_procsub_close
+/// in parser/process_substitution.rs).
 fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
     let mut depth = 1i32;
     let mut in_single = false;
@@ -2092,6 +2127,16 @@ fn skip_procsub_paren(bytes: &[u8], mut i: usize) -> Option<usize> {
             b'\\' if !in_single => escaped = true,
             b'\'' if !in_double => in_single = !in_single,
             b'"' if !in_single => in_double = !in_double,
+            // A backquote group is a unit at this span's level (see the
+            // fn doc): skip it whole so its interior parens/quotes
+            // never touch this walker's depth or quote state. The
+            // gate is `!in_single` only — a backquote group stays
+            // active inside double quotes. An unclosed group falls
+            // through to the plain walk below.
+            b'`' if !in_single && let Some(end) = skip_backtick_bytes(bytes, i) => {
+                i = end;
+                continue;
+            }
             b'$' if !in_single
                 && !in_double
                 && i + 1 < bytes.len()
