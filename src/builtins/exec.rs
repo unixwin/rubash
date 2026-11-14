@@ -439,14 +439,16 @@ where
                         // exec.def:166-168 full_pathname: the failing path is
                         // reported resolved against the current directory
                         // (the session cwd, G-02).
+                        // rubash#3316: the same full_pathname rebinding
+                        // as every other exec report (one leading `./`
+                        // removed, nothing else canonicalized).
                         let full = if command.starts_with('/')
                             || command.starts_with('\\')
                             || command.as_bytes().get(1) == Some(&b':')
                         {
                             command.to_string()
                         } else {
-                            format!("{}/{}", cwd.to_string_lossy().replace('\\', "/"), command)
-                                .replace("/./", "/")
+                            full_pathname(command, cwd)
                         };
                         // A regular file as a path component fails the
                         // probe ENOTDIR; GNU's file_error classification
@@ -663,52 +665,84 @@ where
     Ok(Some(index))
 }
 
+/// The exec target word before absolutization: exec.def:151 hands
+/// full_pathname `command`, which is the typed word itself for a
+/// slash-bearing name (absolute_program; findcmd.c:385-387 never
+/// searches it) and the search's as-written `<elem>/<name>` join
+/// otherwise (findcmd.c find_in_path_element's sh_makepath) — the
+/// shared spawn funnel's name (`path::spawn_exec_name`). A resolution
+/// the walk did not itself produce (a hash-table hit, or any non-unix
+/// lookup, whose recorded form is the resolved path) keeps the
+/// resolved program's rendering. Folded like every other probe and
+/// diagnostic in this file (rubash#3076): the word names the raw file.
+fn exec_target_word(
+    command_name: &str,
+    program: &std::path::Path,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> String {
+    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(command_name);
+    crate::executor::path::spawn_exec_name(&folded, program, env_vars)
+        .or_else(|| crate::executor::path::has_path_separator(&folded).then(|| folded.clone()))
+        .unwrap_or_else(|| program.to_string_lossy().into_owned())
+}
+
+/// GNU general.c:931-943 full_pathname, the exec builtin's rebinding
+/// of its target (exec.def:172 `com2 = full_pathname (command)`): an
+/// absolute word is returned verbatim (general.c:937-938); anything
+/// else is `sh_makepath (NULL, file, MP_DOCWD|MP_RMDOT)`
+/// (lib/sh/makepath.c) — the current working directory, one `/`
+/// unless the directory already ends in one, then the word with ONE
+/// leading `./` removed (MP_RMDOT strips exactly `dir[0] == '.' &&
+/// dir[1] == '/'`). Nothing else is canonicalized: `././s`, `a/./s`,
+/// `a/../s` and `.//s` keep their remaining components (rubash#3316;
+/// GNU 5.3.20 probe: `exec ././s.sh` -> $0 `$PWD/./s.sh`,
+/// `exec sub/../s.sh` -> `$PWD/sub/../s.sh`). The result is both the
+/// execve filename — so the kernel hands it to a `#!` interpreter as
+/// the script name — and the name shell_execve's failure reports
+/// carry (file_error / sys_error on `command`).
+fn full_pathname(word: &str, cwd: &std::path::Path) -> String {
+    // The `\` fold and the `X:/` drive test are Win32-host path syntax,
+    // not GNU semantics: general.h's ABSPATH arm is `x[0]=='/'` only
+    // (the `!defined(__CYGWIN__)` side carries no drive notion either),
+    // and on Unix `\` is an ordinary filename byte while `D:/x` is a
+    // relative path. Gate both to Windows so a Unix execve sees the
+    // word's original bytes.
+    let word = if cfg!(windows) {
+        word.replace('\\', "/")
+    } else {
+        word.to_owned()
+    };
+    let bytes = word.as_bytes();
+    let absolute = word.starts_with('/')
+        || (cfg!(windows) && bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
+    if absolute {
+        return word;
+    }
+    // G-02: general.c's "current working directory" is the session cwd.
+    let cwd = if cfg!(windows) {
+        cwd.to_string_lossy().replace('\\', "/")
+    } else {
+        cwd.to_string_lossy().into_owned()
+    };
+    let rest = word.strip_prefix("./").unwrap_or(&word);
+    if cwd.ends_with('/') {
+        format!("{cwd}{rest}")
+    } else {
+        format!("{cwd}/{rest}")
+    }
+}
+
 /// The reported name for a failed spawn on the exec face: GNU
-/// builtins/exec.def:172 hands shell_execve `full_pathname (command)`
-/// (general.c:931-943) — the typed word for a slash-bearing name
-/// (findcmd.c:385-387 savestring), the PATH walk's as-written join
-/// otherwise — made absolute against the cwd with dot components
-/// removed (sh_makepath, MP_DOCWD|MP_RMDOT). The resolved `program`
-/// cannot be re-rendered into this form: the session-cwd anchor that
-/// produced it keeps the join's `/./` residue (rubash#3148).
+/// builtins/exec.def:172 hands shell_execve `full_pathname (command)`,
+/// and shell_execve reports every refusal against that string
+/// (rubash#3148, rubash#3316).
 fn exec_report_name(
     command_name: &str,
     program: &std::path::Path,
     env_vars: &crate::shell::var_table::VarTable,
     cwd: &std::path::Path,
 ) -> String {
-    // Folded like every other probe and diagnostic in this file
-    // (rubash#3076): the recorded join names the raw file.
-    let folded = crate::executor::substitution_metadata::fold_literal_char_escapes(command_name);
-    let construction = if crate::executor::path::has_path_separator(&folded) {
-        folded
-    } else {
-        crate::executor::path::find_user_command_as_written(&folded, env_vars)
-            .unwrap_or_else(|| program.display().to_string())
-    };
-    let construction = construction.replace('\\', "/");
-    // full_pathname: an absolute construction is returned verbatim
-    // (general.c:937-938).
-    if construction.starts_with('/') || construction.as_bytes().get(1) == Some(&b':') {
-        return construction;
-    }
-    let cwd = cwd.to_string_lossy().replace('\\', "/");
-    let joined = format!("{cwd}/{construction}");
-    // sh_makepath MP_RMDOT canonicalizes the joined form textually:
-    // "." components drop, ".." consumes the preceding component,
-    // empty components collapse.
-    let root_prefix = if joined.starts_with('/') { "/" } else { "" };
-    let mut parts: Vec<&str> = Vec::new();
-    for part in joined.split('/') {
-        match part {
-            "" | "." => {}
-            ".." => {
-                parts.pop();
-            }
-            _ => parts.push(part),
-        }
-    }
-    format!("{root_prefix}{}", parts.join("/"))
+    full_pathname(&exec_target_word(command_name, program, env_vars), cwd)
 }
 
 /// GNU shell_execve (execute_cmd.c:6126-6198) reporting for a failed
@@ -879,26 +913,23 @@ fn external_exec_process(
     // a script run through `exec` reports the absolute path as its $0 (the
     // ENOEXEC re-entry at execute_cmd.c:6252 passes `command` as the new
     // script name). Non-script targets keep the dispatcher word form.
-    let mut process = if let Some((command, _)) = crate::executor::path::shell_wrapped_command(
-        program,
-        &full_pathname_word(program, cwd),
-        operands,
-        env_vars,
-    ) {
+    let exec_filename = full_pathname(&exec_target_word(command_name, program, env_vars), cwd);
+    let mut process = if let Some((command, _)) =
+        crate::executor::path::shell_wrapped_command(program, &exec_filename, operands, env_vars)
+    {
         command
     } else {
         // Non-script targets get the command word as typed for argv[0]
         // (shell_execve via external_command_for_named_program), NOT the
         // resolved program's file stem: `exec /usr/bin/bash -c 'echo $0'`
         // reports /usr/bin/bash in GNU (rubash#1227).
-        // rubash#2442 audit: this route deliberately stays OFF the
-        // spawn_exec_name funnel — GNU's exec builtin absolutizes the
-        // resolved target before shell_execve (exec.def:172
-        // full_pathname, exec.def:231), so the execve filename here
-        // is the anchored program, and a script run through `exec`
-        // reports the absolute path as its $0 where every other
-        // spawn shape reports the as-written join.
-        let (command, _) = crate::executor::path::external_command_for_named_program(
+        // rubash#2442/#3316: the execve filename is the funnel's
+        // word (exec_target_word) rebound by full_pathname
+        // (exec.def:172, handed to shell_execve at exec.def:231) — not
+        // the session-anchored program, whose cwd join keeps a `./`
+        // the GNU rebinding strips — so a `#!` script run through
+        // `exec` sees the full_pathname string as its $0.
+        let (command, _) = crate::executor::path::external_command_for_named_program_with_exec_name(
             program,
             Some(command_name),
             operands,
@@ -906,6 +937,7 @@ fn external_exec_process(
             env_vars
                 .get("BASH_ARGV0")
                 .is_some_and(|value| !value.is_empty()),
+            Some(&exec_filename),
         );
         command
     };
@@ -927,31 +959,6 @@ fn external_exec_process(
     }
     crate::executor::path::suppress_orphan_console(&mut process);
     process
-}
-
-/// GNU general.c:909-922 full_pathname: a word that is already absolute is
-/// returned as-is; anything else gets the current working directory
-/// prepended and `.` path components removed (sh_makepath MP_DOCWD|MP_RMDOT
-/// — no symlink resolution). Applied to the slash form so the child shell
-/// sees a forward-slash absolute script name.
-fn full_pathname_word(program: &std::path::Path, cwd: &std::path::Path) -> String {
-    let display = program.to_string_lossy().replace('\\', "/");
-    let bytes = display.as_bytes();
-    let absolute =
-        display.starts_with('/') || (bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
-    if absolute {
-        return display;
-    }
-    // G-02: general.c's "current working directory" is the session cwd.
-    let cwd = cwd.to_string_lossy().replace('\\', "/");
-    let joined = format!("{cwd}/{display}");
-    let mut parts: Vec<&str> = Vec::new();
-    for part in joined.split('/') {
-        if !part.is_empty() && part != "." {
-            parts.push(part);
-        }
-    }
-    parts.join("/")
 }
 
 fn apply_exported_environment(process: &mut Command, env_vars: &crate::shell::var_table::VarTable) {
