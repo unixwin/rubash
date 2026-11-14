@@ -167,11 +167,23 @@ pub(in crate::executor) fn is_initial_export_candidate(name: &str) -> bool {
     !(name.starts_with("__RUBASH_") || is_bash_managed_shell_var(name))
 }
 
+/// Names the shell re-derives at birth and that an inherited environment
+/// value does not mark exported.
+///
+/// SHELLOPTS and BASHOPTS are deliberately NOT here (rubash#3517): GNU
+/// variables.c:506-517 initialize_shell_variables binds an imported
+/// SHELLOPTS/BASHOPTS like every other valid-name entry, with
+/// `att_exported | att_imported` (the `ro` branch only adds ASS_FORCE and
+/// re-asserts att_readonly), and the rebuilds that follow
+/// (builtins/set.def set_shellopts, builtins/shopt.def set_bashopts) go
+/// through bind_variable, which keeps the attributes. The imported value
+/// is consumed by the option replay in initialize_fresh_shell_env_vars and
+/// then rebuilt in place, so the export mark survives and `set -o` /
+/// `shopt -s` changes reach child shells through it.
 pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
     matches!(
         name,
         "BASH"
-            | "BASHOPTS"
             | "BASH_ALIASES"
             | "BASH_ARGC"
             | "BASH_ARGV"
@@ -196,7 +208,6 @@ pub(in crate::executor) fn is_bash_managed_shell_var(name: &str) -> bool {
             | "PPID"
             | "RANDOM"
             | "SECONDS"
-            | "SHELLOPTS"
             | "SRANDOM"
             | "UID"
             | "_"
