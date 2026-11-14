@@ -538,9 +538,20 @@ impl Executor {
         // applying it synchronously inside the kill.
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor") {
             if signal == 18 {
-                self.shell_state
-                    .job_table
-                    .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
+                // GNU jobs.c:4013-4018 kill_pid: `kill -s CONT` on a
+                // job the table already records as stopped emulates
+                // `bg` — set_job_running publishes the Running
+                // transition at DELIVERY time (with J_NOTIFIED), not
+                // at the next notification point. Only the deferred
+                // path covers a CONT aimed at a job still running or
+                // one whose stop has not been recorded yet.
+                if self.shell_state.job_table.job_recorded_stopped(pid) {
+                    self.shell_state.job_table.mark_running(pid);
+                } else {
+                    self.shell_state
+                        .job_table
+                        .defer_state_mark(pid, crate::jobs::table::DeferredJobState::Running);
+                }
             } else if matches!(signal, 19 | 20) {
                 self.shell_state.job_table.defer_state_mark(
                     pid,
