@@ -207,6 +207,70 @@ impl Executor {
         false
     }
 
+    /// GNU read.def:482 `input_is_pipe = fd_ispipe (fd)`: whether the
+    /// descriptor the read will consume is a FIFO/pipe — the
+    /// classification that opens GNU's reap window. A `read` on a
+    /// pipe blocks: during that window the SIGCHLD handler's waitchld
+    /// records a dead coproc's status (jobs.c:4173 coproc_pidchk ->
+    /// execute_cmd.c:2323 coproc_setstatus sets COPROC_DEAD) and the
+    /// cleanup that follows disposes it (jobs.c:1342
+    /// cleanup_dead_jobs -> execute_cmd.c:2225 coproc_reap), so
+    /// `coproc xcase ...; read <&${COPROC[0]}` leaves `${COPROC[@]}`
+    /// empty at the next command (coproc.tests, rubash#3633). A read
+    /// of a regular file has no such window: `read -t 1 </dev/null`
+    /// leaves the array bound (GNU 5.3.20 probes).
+    fn read_source_is_pipe(&self, cmd: &CommandNode, read_fd: Option<u32>) -> bool {
+        let fd = read_fd.unwrap_or(0);
+        if fd == 0 {
+            if let Some(redirect) = &cmd.redirect_in {
+                let target = self.expand_redirect_target(redirect);
+                // `<&N` dup: fd_ispipe answers for the SOURCE
+                // descriptor's open file description.
+                if let Some((source, _)) = redirect_target_fd_and_move(&target) {
+                    return self.fd_read_endpoint_is_pipe(source);
+                }
+                // `<(cmd)` binds a process-substitution pipe.
+                if target.starts_with("<(") {
+                    return true;
+                }
+                // A plain `< path` may not be bound in the table at
+                // this point — a FIFO path classifies as a pipe the
+                // same way the fd probe below would.
+                if !target.starts_with('&') && !is_closed_redirect_target(&target) {
+                    let path = self.session_path(crate::executor::path::windows_operand_file_path(
+                        shell_path_to_windows(&target, &self.shell_state.env_vars),
+                        &self.shell_state.env_vars,
+                    ));
+                    return std::fs::metadata(&path)
+                        .map(|m| {
+                            #[cfg(unix)]
+                            {
+                                std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type())
+                            }
+                            #[cfg(not(unix))]
+                            {
+                                m.is_file()
+                            }
+                        })
+                        .unwrap_or(false);
+                }
+            }
+        }
+        self.fd_read_endpoint_is_pipe(fd)
+    }
+
+    fn fd_read_endpoint_is_pipe(&self, fd: u32) -> bool {
+        match self.fd_table.read_endpoint(fd) {
+            Some(FdReadEndpoint::CoprocStdout { .. })
+            | Some(FdReadEndpoint::ProcessSubstitution(_)) => true,
+            Some(FdReadEndpoint::File(file)) => crate::fd::is_pipe_handle(file.handle),
+            Some(FdReadEndpoint::InheritedProcessStdin) => {
+                crate::fd::is_pipe_handle(crate::fd::process_std_handle(0))
+            }
+            _ => false,
+        }
+    }
+
     pub(in crate::executor) fn read_input_for_command(
         &mut self,
         cmd: &CommandNode,
@@ -218,6 +282,16 @@ impl Executor {
         escape_aware: bool,
         raw: bool,
     ) -> Option<String> {
+        // GNU read.def:482 input_is_pipe: a read whose descriptor is a
+        // pipe is where a blocking builtin hands the SIGCHLD handler a
+        // synchronous window — the dead coproc's reap (record) lands in
+        // that window and the cleanup after the command disposes it.
+        // The foreground-wait mark makes the next command-boundary
+        // refresh run the same retire-observed-coprocs step
+        // (flush_pending_coproc_retirements).
+        if self.read_source_is_pipe(cmd, read_fd) {
+            self.note_foreground_wait();
+        }
         // GNU builtins/read.def: NUL bytes in the input are skipped as
         // the record is read — they never reach the assigned value,
         // the IFS field splitting, or a -a array (rubash#1419:
