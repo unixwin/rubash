@@ -7632,14 +7632,24 @@ pub(in crate::executor) fn test_rubash_binary_from_current_exe() -> Option<std::
     if deps.file_name().and_then(|name| name.to_str()) != Some("deps") {
         return None;
     }
-    let debug_dir = deps.parent()?;
+    let profile_dir = deps.parent()?;
     let binary_name = if cfg!(windows) {
         "rubash.exe"
     } else {
         "rubash"
     };
-    let candidate = debug_dir.join(binary_name);
-    candidate.is_file().then_some(candidate)
+    let candidate = profile_dir.join(binary_name);
+    if candidate.is_file() {
+        return Some(candidate);
+    }
+    // Non-dev test profiles place the test binary in target/<profile>/deps
+    // while `cargo build` writes the bin to target/debug — e.g. CI runs
+    // `cargo nextest run --profile ci` (deps = target/ci/deps) after
+    // `cargo build --locked` (bin = target/debug/rubash). Fall back to the
+    // sibling debug profile before giving up to current_exe (rubash#2875
+    // under nextest spawned the lib-test binary itself).
+    let debug_candidate = profile_dir.parent()?.join("debug").join(binary_name);
+    debug_candidate.is_file().then_some(debug_candidate)
 }
 
 fn case_pattern_has_extglob(pattern: &str) -> bool {
