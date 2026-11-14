@@ -1650,9 +1650,35 @@ impl Executor {
         // imported PWD keeps its stale value and an absent one stays
         // unbound; no logical value is adopted either — the readers
         // gate on the empty field itself.
+        // rubash#3347: a validated internal respawn (keep_shlvl) is
+        // GNU's forked child — its tcwd is the spawner's logical cwd,
+        // carried in the fork-context stamp (LOGICAL_CWD_TRANSPORT),
+        // not re-derived from the exported $PWD. Adopt the transported
+        // value verbatim once it still names this session's cwd (the
+        // same_file judgment variables.c:907 set_pwd applies, in the
+        // runtime form logical_value_names_cwd); any other value —
+        // stale, foreign, or naming another directory — falls through
+        // to the $PWD adoption below. A fresh shell (keep_shlvl false:
+        // explicit `-c`, script file, top-level) is a fresh exec in
+        // GNU too and keeps adopting from $PWD. The key itself is
+        // stripped by the FORK_TRANSPORT_KEYS sweep in Executor::new,
+        // so it never surfaces as a shell variable.
+        let transported_logical_cwd = if keep_shlvl {
+            env_vars
+                .get(crate::executor::compound_exec::LOGICAL_CWD_TRANSPORT)
+                .cloned()
+                .filter(|value| {
+                    !value.is_empty()
+                        && crate::builtins::pwd::logical_value_names_cwd(value, cwd, env_vars)
+                })
+        } else {
+            None
+        };
         let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
         let startup_logical_cwd = if cwd.as_os_str().is_empty() {
             String::new()
+        } else if let Some(logical) = transported_logical_cwd {
+            logical
         } else {
             match crate::builtins::pwd::adopted_logical_pwd(env_vars, cwd) {
                 Some(logical) => logical,

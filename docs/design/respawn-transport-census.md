@@ -25,3 +25,4 @@ mechanism at the four spawn sites, not per-site patches.
 | RANDOM sequence | DELIBERATELY-OMIT | GNU reseeds in a subshell environment (variables.c get_random_number); the contract is parent-untouched + child-fresh, which a fresh process already satisfies. Carrying the seed would break it |
 | SRANDOM | DELIBERATELY-OMIT | entropy draws; GNU gives no stable inheritance contract |
 | SECONDS, BASH_SUBSHELL, non-exported vars, locals (values), cwd, umask, $0 | TRANSPORT (done) | existing stamps / env merge, verified against the oracle |
+| Logical cwd (tcwd) | TRANSPORT (done, #3347) | `__RUBASH_LOGICAL_CWD` in fork_context_transport_entries; the respawn child adopts it under the provenance gate when it still names the session cwd, instead of re-deriving from the exported $PWD |

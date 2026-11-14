@@ -144,6 +144,18 @@ pub(in crate::executor) const FORK_FN_SPANS_TRANSPORT: &str = "__RUBASH_FORK_FN_
 /// collect_command_line_spans order. See
 /// docs/design/respawn-root-line-spans.md.
 pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_ROOT_SPANS";
+/// rubash#3347: the spawner's logical cwd (GNU
+/// the_current_working_directory, builtins/common.c:589), stamped by
+/// fork_context_transport_entries and consumed by the child's startup
+/// funnel under the provenance gate (init.rs). A GNU fork child
+/// inherits tcwd verbatim (execute_cmd.c:1576 execute_in_subshell,
+/// subst.c:6362 process_substitute); a respawned `rubash -c` child
+/// re-imports only its environment, so without this stamp its startup
+/// re-derives the logical cwd from the exported $PWD — and a forged
+/// $PWD moves it (variables.c:907 set_pwd adopts any same-directory
+/// spelling). Like the FORK_* keys, the child's init strips it
+/// unconditionally via FORK_TRANSPORT_KEYS.
+pub(in crate::executor) const LOGICAL_CWD_TRANSPORT: &str = "__RUBASH_LOGICAL_CWD";
 /// rubash#2456: the spawner's effective login state, stamped ONLY by
 /// the two process-substitution spawn sites. GNU's procsub fork
 /// (subst.c:6412-6445 process_substitute) is the one fork-shaped child
@@ -163,7 +175,7 @@ pub(in crate::executor) const FORK_ROOT_SPANS_TRANSPORT: &str = "__RUBASH_FORK_R
 pub(in crate::executor) const FORK_LOGIN_SHELL_TRANSPORT: &str = "__RUBASH_FORK_LOGIN_SHELL";
 
 /// Every FORK_* transport key, for the child's unconditional strip.
-pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 12] = [
+pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 13] = [
     FORK_FUNCNAME_TRANSPORT,
     FORK_SOURCE_TRANSPORT,
     FORK_LINENO_TRANSPORT,
@@ -176,6 +188,7 @@ pub(in crate::executor) const FORK_TRANSPORT_KEYS: [&str; 12] = [
     FORK_FN_SPANS_TRANSPORT,
     FORK_ROOT_SPANS_TRANSPORT,
     FORK_LOGIN_SHELL_TRANSPORT,
+    LOGICAL_CWD_TRANSPORT,
 ];
 
 impl Executor {
@@ -275,6 +288,20 @@ impl Executor {
                 FORK_FN_SPANS_TRANSPORT.to_string(),
                 format_indexed_array_values(span_entries),
             ));
+        }
+        // rubash#3347: the session's logical cwd rides the same stamp.
+        // The value is already the canonical form cd/startup
+        // established (or the verbatim uncanonicalized `cd .`
+        // make_absolute form GNU stores); the child's init adopts it
+        // verbatim once it still names the session cwd, and falls
+        // back to the $PWD adoption when it does not. An empty value
+        // is the unknown-birth state — there is no logical value to
+        // carry, and stamping it would let a stale empty ride past
+        // the child's validation.
+        if let Some(logical) = self.shell_state.logical_cwd.clone() {
+            if !logical.is_empty() {
+                entries.push((LOGICAL_CWD_TRANSPORT.to_string(), logical));
+            }
         }
         entries
     }

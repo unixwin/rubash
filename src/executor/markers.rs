@@ -658,6 +658,7 @@ pub(crate) const HASH_ENV_FIELD_SEP: char = SUBSCRIPT_CARRIER;
 // EXACT __RUBASH_LAST_COMMAND - state key (last command) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_LINE_OFFSET - state key (line offset) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_LOCAL_EXPORT_ENV - state key (local export env) - serialized across the respawn/subshell boundary; see the owning subsystem
+// EXACT __RUBASH_LOGICAL_CWD - state key (logical cwd) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_LOGIN_SHELL - state key (login shell) - serialized across the respawn/subshell boundary; see the owning subsystem
 // EXACT __RUBASH_LOWERCASE_VARS - serialized variable-name set (lowercase) for child/subshell state transfer
 // EXACT __RUBASH_NAMEREF_VARS - serialized variable-name set (nameref) for child/subshell state transfer
