@@ -297,3 +297,62 @@ fn issue2764_case_pattern_procsub_counted_once_two_arms() {
         "N\nc1=1 c2=1\n",
     );
 }
+
+/// rubash#2764 F3 — Q5 (dossier §13, GNU probe gnu5.sh): quotes
+/// INSIDE the `<(...)` body belong to the child, not to the pattern.
+/// `v=hello` so the body prints `hello`, but the pattern is the fd
+/// path `/dev/fd/63` — GNU MATCHes. The F2 rework judged the branch
+/// on the raw text's body-internal quotes, materialized only the raw
+/// string, and the downstream gate then took the unquoted arm over
+/// the un-materialized text: permanent NOMATCH.
+#[test]
+fn issue2764_case_pattern_procsub_body_single_quotes_match() {
+    let dir = scratch("q5");
+    assert_script(
+        &dir.0,
+        "v=hello; case /dev/fd/63 in <(printf '%s' \"$v\")) echo MATCH;; *) echo NOMATCH;; esac\n",
+        "MATCH\n",
+    );
+}
+
+/// rubash#2764 F3 — Q5b (dossier §13, GNU probe gnu5.sh): the same
+/// face with double quotes inside the body.
+#[test]
+fn issue2764_case_pattern_procsub_body_double_quotes_match() {
+    let dir = scratch("q5b");
+    assert_script(
+        &dir.0,
+        "case /dev/fd/63 in <(printf \"hello\")) echo MATCH;; *) echo NOMATCH;; esac\n",
+        "MATCH\n",
+    );
+}
+
+/// rubash#2764 F3 — Q5m (dossier §13): body ran AND matched, both
+/// in one assertion. The marker is touched FIRST in the body: a
+/// `printf` to the procsub pipe followed by `touch` is racy on GNU
+/// (the parent may close the read end before the child is scheduled,
+/// SIGPIPE-killing it before `touch`), while touch-first is
+/// deterministic on both shells.
+#[test]
+fn issue2764_case_pattern_procsub_body_quotes_match_and_marker() {
+    let dir = scratch("q5m");
+    assert_script(
+        &dir.0,
+        "v=hello; case /dev/fd/63 in <(touch m5; printf '%s' \"$v\")) echo MATCH;; *) echo NOMATCH;; esac\nsleep 1\ntest -e m5 && echo MARKER_CREATED || echo MARKER_MISSING\n",
+        "MATCH\nMARKER_CREATED\n",
+    );
+}
+
+/// rubash#2764 F3 — Q5o: the same invariant on the output arm.
+/// `>(...)` with double quotes inside the body matches `/dev/fd/63`
+/// on GNU; the body writes `hello` to a file so the assertion is not
+/// ordered against the async child's stdout.
+#[test]
+fn issue2764_case_pattern_output_procsub_body_quotes_match() {
+    let dir = scratch("q5o");
+    assert_script(
+        &dir.0,
+        "case /dev/fd/63 in >(touch m5; printf \"hello\\n\" > m5out)) echo MATCH;; *) echo NOMATCH;; esac\nsleep 1\ntest -e m5 && echo MARKER_CREATED || echo MARKER_MISSING\ncat m5out\n",
+        "MATCH\nMARKER_CREATED\nhello\n",
+    );
+}
