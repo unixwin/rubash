@@ -110,7 +110,7 @@ impl Executor {
             let display: &str = if name.contains('/') { name } else { &path };
             match mode {
                 TypeDescribeMode::Verbose => {
-                    if crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+                    if crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
                         .is_some()
                     {
                         writeln!(stdout, "{name} is hashed ({path})")?;
