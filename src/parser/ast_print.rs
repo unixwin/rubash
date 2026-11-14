@@ -1135,141 +1135,10 @@ impl Printer {
         redirects
     }
 
-    /// print_redirection: byte-exact operator rendering per instruction.
+    /// print_redirection: byte-exact operator rendering per instruction
+    /// (the shared [`print_redirection_text`] owner).
     fn print_redirection(&mut self, redirect: &Redirect) {
-        let fd_prefix = |redirect: &Redirect, default_fd: u32| -> String {
-            if let Some(var) = &redirect.fd_var {
-                format!("{{{var}}}")
-            } else if let Some(fd) = redirect.fd {
-                if fd != default_fd {
-                    format!("{fd}")
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        };
-        let target = if redirect.target_metadata.raw.is_empty() {
-            redirect.target.as_str()
-        } else {
-            redirect.target_metadata.raw.as_str()
-        };
-        match redirect.kind {
-            RedirectKind::Input => {
-                let prefix = fd_prefix(redirect, 0);
-                self.cprintf(&format!("{prefix}< {target}"));
-            }
-            RedirectKind::Output => {
-                let prefix = fd_prefix(redirect, 1);
-                self.cprintf(&format!("{prefix}> {target}"));
-            }
-            RedirectKind::ClobberOutput => {
-                let prefix = fd_prefix(redirect, 1);
-                self.cprintf(&format!("{prefix}>| {target}"));
-            }
-            RedirectKind::Append => {
-                let prefix = fd_prefix(redirect, 1);
-                self.cprintf(&format!("{prefix}>> {target}"));
-            }
-            RedirectKind::ReadWrite => {
-                let prefix = fd_prefix(redirect, 0);
-                self.cprintf(&format!("{prefix}<> {target}"));
-            }
-            RedirectKind::HereString => {
-                let prefix = fd_prefix(redirect, 0);
-                self.cprintf(&format!("{prefix}<<< {target}"));
-            }
-            RedirectKind::DuplicateInput => {
-                if let Some(var) = &redirect.fd_var {
-                    let fd = redirect
-                        .fd
-                        .map(|fd| fd.to_string())
-                        .unwrap_or_else(|| target.trim_start_matches('&').to_string());
-                    self.cprintf(&format!("{{{var}}}<&{fd}"));
-                } else {
-                    let redirectee = target.trim_start_matches('&');
-                    let (moved, bare) = redirectee
-                        .strip_suffix('-')
-                        .map(|b| (true, b))
-                        .unwrap_or((false, redirectee));
-                    if bare.chars().all(|ch| ch.is_ascii_digit()) {
-                        // print_cmd.c r_duplicating_input/r_move_input print
-                        // both fds unconditionally: `<&3` -> `0<&3`,
-                        // `<&5-` -> `0<&5-`.
-                        let fd = redirect.fd.unwrap_or(0);
-                        let dash = if moved { "-" } else { "" };
-                        self.cprintf(&format!("{fd}<&{bare}{dash}"));
-                    } else if redirect.fd == Some(0) || redirect.fd.is_none() {
-                        // r_duplicating_input_word omits a zero redirector.
-                        self.cprintf(&format!("<&{redirectee}"));
-                    } else {
-                        let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                        self.cprintf(&format!("{fd}<&{redirectee}"));
-                    }
-                }
-            }
-            RedirectKind::DuplicateOutput => {
-                if let Some(var) = &redirect.fd_var {
-                    let fd = redirect
-                        .fd
-                        .map(|fd| fd.to_string())
-                        .unwrap_or_else(|| target.trim_start_matches('&').to_string());
-                    self.cprintf(&format!("{{{var}}}>&{fd}"));
-                } else {
-                    let redirectee = target.trim_start_matches('&');
-                    let (moved, bare) = redirectee
-                        .strip_suffix('-')
-                        .map(|b| (true, b))
-                        .unwrap_or((false, redirectee));
-                    if bare.chars().all(|ch| ch.is_ascii_digit()) {
-                        // print_cmd.c r_duplicating_output/r_move_output
-                        // print both fds unconditionally.
-                        let fd = redirect.fd.unwrap_or(1);
-                        let dash = if moved { "-" } else { "" };
-                        self.cprintf(&format!("{fd}>&{bare}{dash}"));
-                    } else if redirect.fd == Some(1) || redirect.fd.is_none() {
-                        // r_duplicating_output_word omits a unit redirector.
-                        self.cprintf(&format!(">&{redirectee}"));
-                    } else {
-                        let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                        self.cprintf(&format!("{fd}>&{redirectee}"));
-                    }
-                }
-            }
-            RedirectKind::CloseInput => {
-                if let Some(var) = &redirect.fd_var {
-                    // print_cmd.c r_close_this + REDIR_VARASSIGN always prints
-                    // `{var}>&-`, even when the source operator was `<&-`.
-                    self.cprintf(&format!("{{{var}}}>&-"));
-                } else {
-                    let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                    self.cprintf(&format!("{fd}<&-"));
-                }
-            }
-            RedirectKind::CloseOutput => {
-                if let Some(var) = &redirect.fd_var {
-                    self.cprintf(&format!("{{{var}}}>&-"));
-                } else {
-                    let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                    self.cprintf(&format!("{fd}>&-"));
-                }
-            }
-            RedirectKind::CombinedOutput => {
-                self.cprintf(&format!("&> {target}"));
-            }
-            RedirectKind::CombinedAppend => {
-                self.cprintf(&format!("&>> {target}"));
-            }
-            RedirectKind::Unknown => {
-                // Keep the operator verbatim rather than losing it.
-                let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
-                self.cprintf(&format!("{fd}{} {target}", redirect.operator));
-            }
-            RedirectKind::HereDoc => {
-                // Handled by the caller (headers) and deferred bodies.
-            }
-        }
+        self.cprintf(&print_redirection_text(redirect));
     }
 
     fn print_heredoc_bodies(&mut self) {
@@ -1297,6 +1166,106 @@ impl Printer {
             }
         }
         self.deferred_heredocs.clear();
+    }
+}
+
+/// print_cmd.c:1150 print_redirection — the ONE text owner for a single
+/// redirection, shared by the `declare -f` printer above and the
+/// print_comsub canonical serializer (executor/print_comsub.rs, the text
+/// parse.y:4632 parse_comsub stores in the word). Here-documents print
+/// their header through [`heredoc_header`] instead (print_cmd.c:1118).
+///
+/// Per instruction (print_cmd.c:1162-1306):
+/// - `<`/`<>`/`<<<` omit a 0 redirector, `>`/`>|`/`>>` omit a 1;
+/// - r_duplicating_input/output and r_move_input/output (numeric
+///   redirectee) print BOTH fds unconditionally: `>&2` -> `1>&2`,
+///   `<&0` -> `0<&0`, `3>&2-` -> `3>&2-`;
+/// - r_duplicating_*_word omits the default redirector (`>&$x`, `<&$x`);
+///   r_move_*_word (`>&$x-`) prints it unconditionally: `1>&$x-`;
+/// - r_close_this prints `%d>&-` for BOTH `<&-` and `>&-` (the parser
+///   builds one instruction, parse.y:754-789, source 0 for `<&-` and 1
+///   for `>&-`): `<&-` -> `0>&-`, `2<&-` -> `2>&-`, `{v}<&-` -> `{v}>&-`;
+/// - `&>`/`&>>` print `&> word`/`&>> word`.
+pub(crate) fn print_redirection_text(redirect: &Redirect) -> String {
+    let fd_prefix = |redirect: &Redirect, default_fd: u32| -> String {
+        if let Some(var) = &redirect.fd_var {
+            format!("{{{var}}}")
+        } else if let Some(fd) = redirect.fd {
+            if fd != default_fd {
+                format!("{fd}")
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    };
+    let target = if redirect.target_metadata.raw.is_empty() {
+        redirect.target.as_str()
+    } else {
+        redirect.target_metadata.raw.as_str()
+    };
+    match redirect.kind {
+        RedirectKind::Input => format!("{}< {target}", fd_prefix(redirect, 0)),
+        RedirectKind::Output => format!("{}> {target}", fd_prefix(redirect, 1)),
+        RedirectKind::ClobberOutput => format!("{}>| {target}", fd_prefix(redirect, 1)),
+        RedirectKind::Append => format!("{}>> {target}", fd_prefix(redirect, 1)),
+        RedirectKind::ReadWrite => format!("{}<> {target}", fd_prefix(redirect, 0)),
+        RedirectKind::HereString => format!("{}<<< {target}", fd_prefix(redirect, 0)),
+        RedirectKind::DuplicateInput => duplication_text(redirect, target, '<', 0),
+        RedirectKind::DuplicateOutput => duplication_text(redirect, target, '>', 1),
+        RedirectKind::CloseInput | RedirectKind::CloseOutput => {
+            if let Some(var) = &redirect.fd_var {
+                format!("{{{var}}}>&-")
+            } else {
+                let default_fd = if redirect.kind == RedirectKind::CloseInput {
+                    0
+                } else {
+                    1
+                };
+                format!("{}>&-", redirect.fd.unwrap_or(default_fd))
+            }
+        }
+        RedirectKind::CombinedOutput => format!("&> {target}"),
+        RedirectKind::CombinedAppend => format!("&>> {target}"),
+        RedirectKind::Unknown => {
+            // Keep the operator verbatim rather than losing it.
+            let fd = redirect.fd.map(|fd| fd.to_string()).unwrap_or_default();
+            format!("{fd}{} {target}", redirect.operator)
+        }
+        // Handled by the caller (headers) and deferred bodies.
+        RedirectKind::HereDoc => String::new(),
+    }
+}
+
+/// The `<&`/`>&` duplication arms of print_redirection (print_cmd.c:1236-
+/// 1293): `direction` is `<` or `>`, `default_fd` the redirector the
+/// `_word` forms omit.
+fn duplication_text(redirect: &Redirect, target: &str, direction: char, default_fd: u32) -> String {
+    if let Some(var) = &redirect.fd_var {
+        let fd = redirect
+            .fd
+            .map(|fd| fd.to_string())
+            .unwrap_or_else(|| target.trim_start_matches('&').to_string());
+        return format!("{{{var}}}{direction}&{fd}");
+    }
+    let redirectee = target.trim_start_matches('&');
+    let redirector = redirect.fd.unwrap_or(default_fd);
+    if let Some(bare) = redirectee.strip_suffix('-') {
+        // make_cmd.c:704-717: a trailing `-` makes r_move_input/output
+        // (numeric) or r_move_*_word; both print the redirector
+        // unconditionally (print_cmd.c:1267-1293).
+        return format!("{redirector}{direction}&{bare}-");
+    }
+    if redirectee.chars().all(|ch| ch.is_ascii_digit()) {
+        // r_duplicating_input/output print both fds unconditionally:
+        // `<&3` -> `0<&3`, `>&2` -> `1>&2`.
+        format!("{redirector}{direction}&{redirectee}")
+    } else if redirector == default_fd {
+        // r_duplicating_*_word omits the default redirector.
+        format!("{direction}&{redirectee}")
+    } else {
+        format!("{redirector}{direction}&{redirectee}")
     }
 }
 
