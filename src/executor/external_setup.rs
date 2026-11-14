@@ -1350,7 +1350,7 @@ impl Executor {
         // rubash#3210: the body's diagnostic seed is the enclosing
         // command's first-element end line (execute_cmd.c:936), not
         // its start line — see procsub_body_seed_line.
-        let cmd_line = super::command_text::procsub_body_seed_line(cmd);
+        let cmd_line = super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get());
         let mut redirect_target_rewrites = Vec::new();
         // GNU subst.c: an unquoted `name=<( )` word is an assignment whose
         // value is the process substitution (make_dev_fd_filename,

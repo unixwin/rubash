@@ -878,7 +878,7 @@ impl Executor {
                 if let Some(fd) = self.allocate_dynamic_fd() {
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         source,
-                        super::command_text::procsub_body_seed_line(cmd),
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
                         self.fd_table
                             .open_input(fd, FdReadEndpoint::File(file_fd), true);

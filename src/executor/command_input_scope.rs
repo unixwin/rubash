@@ -952,7 +952,7 @@ impl Executor {
                     // schedule served #1141 before a live pipe could).
                     if let Some(file_fd) = self.spawn_input_process_substitution_child(
                         &source,
-                        super::command_text::procsub_body_seed_line(cmd),
+                        super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                     ) {
                         let saved_fd0_entry = self.fd_table.entries.get(&0).cloned();
                         let saved_function_stdin =
@@ -1479,7 +1479,7 @@ impl Executor {
                 // spawn-failure fallback.
                 if let Some(file_fd) = self.spawn_input_process_substitution_child(
                     source,
-                    super::command_text::procsub_body_seed_line(cmd),
+                    super::command_text::procsub_body_seed_line(cmd, self.ambient_line.get()),
                 ) {
                     self.set_fd_input_file(fd, file_fd, true);
                     if redirect.kind == crate::parser::RedirectKind::ReadWrite {
