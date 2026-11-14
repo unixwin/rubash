@@ -867,14 +867,139 @@ impl FdTable {
         Some(candidate as u32)
     }
 
+    /// rubash#3213: GNU's floor for varredir/save descriptors
+    /// (redir.c:86 SHELL_FD_BASE). Slots at or above it are
+    /// materialized as real process descriptors (see
+    /// materialize_read_endpoint); 0/1/2 are the shell's virtualized
+    /// stdio and low fixed fds (3-9) keep current behavior.
+    const SHELL_FD_BASE: u32 = 10;
+
+    /// rubash#3213: dup a handle-backed endpoint's descriptor onto
+    /// its logical number in this process (GNU redir.c:963-968:
+    /// open, then fcntl(fd, F_DUPFD, SHELL_FD_BASE), then
+    /// redir_varassign binds the number; the low original is
+    /// closed), so /proc/$$/fd shows the number and readlink
+    /// resolves the target. The table used to keep only a virtual
+    /// entry (the FileFd's raw handle sat at some other low number),
+    /// visible to children only through the spawn pin pass.
+    /// Returns the materialized descriptor, or None when the
+    /// endpoint must stay virtual: the number is already occupied
+    /// in this process (another entry's raw handle, an inherited
+    /// descriptor, a transient spawn pipe) or the dup fails — never
+    /// clobber a live descriptor.
+    #[cfg(unix)]
+    fn materialized_handle(fd: u32, raw: crate::fd::HANDLE) -> Option<crate::fd::HANDLE> {
+        let target = fd as crate::fd::HANDLE;
+        if raw == target {
+            return Some(raw);
+        }
+        if unsafe { libc::fcntl(target, libc::F_GETFD) } >= 0 {
+            return None;
+        }
+        if unsafe { libc::dup2(raw, target) } < 0 {
+            return None;
+        }
+        Some(target)
+    }
+
+    /// rubash#3213: materialize a read endpoint at its logical
+    /// number (see materialized_handle). The replacement FileFd owns
+    /// the materialized descriptor, so every existing close path —
+    /// which drops the endpoint — closes it; no new bookkeeping.
+    /// Off Unix this is the identity: there is no /proc view to
+    /// serve and the virtual table is the whole model.
+    fn materialize_read_endpoint(fd: u32, endpoint: FdReadEndpoint) -> FdReadEndpoint {
+        #[cfg(unix)]
+        {
+            if fd < Self::SHELL_FD_BASE {
+                return endpoint;
+            }
+            return match endpoint {
+                FdReadEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
+                    Some(handle) => FdReadEndpoint::File(Rc::new(FileFd {
+                        handle,
+                        path: file.path.clone(),
+                    })),
+                    None => FdReadEndpoint::File(file),
+                },
+                FdReadEndpoint::CoprocStdout { pid, fd: file } => {
+                    match Self::materialized_handle(fd, file.handle) {
+                        Some(handle) => FdReadEndpoint::CoprocStdout {
+                            pid,
+                            fd: Rc::new(FileFd {
+                                handle,
+                                path: file.path.clone(),
+                            }),
+                        },
+                        None => FdReadEndpoint::CoprocStdout { pid, fd: file },
+                    }
+                }
+                other => other,
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            endpoint
+        }
+    }
+
+    /// rubash#3213: the write-side twin of
+    /// materialize_read_endpoint.
+    fn materialize_write_endpoint(fd: u32, endpoint: FdWriteEndpoint) -> FdWriteEndpoint {
+        #[cfg(unix)]
+        {
+            if fd < Self::SHELL_FD_BASE {
+                return endpoint;
+            }
+            return match endpoint {
+                FdWriteEndpoint::File(file) => match Self::materialized_handle(fd, file.handle) {
+                    Some(handle) => FdWriteEndpoint::File(Rc::new(FileFd {
+                        handle,
+                        path: file.path.clone(),
+                    })),
+                    None => FdWriteEndpoint::File(file),
+                },
+                FdWriteEndpoint::CoprocStdin { pid, fd: file } => {
+                    match Self::materialized_handle(fd, file.handle) {
+                        Some(handle) => FdWriteEndpoint::CoprocStdin {
+                            pid,
+                            fd: Rc::new(FileFd {
+                                handle,
+                                path: file.path.clone(),
+                            }),
+                        },
+                        None => FdWriteEndpoint::CoprocStdin { pid, fd: file },
+                    }
+                }
+                other => other,
+            };
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = fd;
+            endpoint
+        }
+    }
+
     pub(crate) fn open_input(&mut self, fd: u32, endpoint: FdReadEndpoint, dynamic: bool) {
         let entry = self.entry_mut(fd, dynamic);
+        // rubash#3213: drop the previous read endpoint BEFORE
+        // materializing the new one — dup2 onto fd closes whatever
+        // descriptor held that number, and dropping the old FileFd
+        // afterwards would close the new descriptor a second time.
+        drop(std::mem::replace(&mut entry.read, None));
+        let endpoint = Self::materialize_read_endpoint(fd, endpoint);
         entry.read = Some(endpoint);
         entry.closed = false;
     }
 
     pub(crate) fn open_output(&mut self, fd: u32, endpoint: FdWriteEndpoint, dynamic: bool) {
         let entry = self.entry_mut(fd, dynamic);
+        // rubash#3213: drop the previous write endpoint BEFORE
+        // materializing the new one (see open_input).
+        drop(std::mem::replace(&mut entry.write, None));
+        let endpoint = Self::materialize_write_endpoint(fd, endpoint);
         entry.write = Some(endpoint);
         entry.closed = false;
         self.stdout_alias_generation.remove(&fd);
@@ -924,8 +1049,15 @@ impl FdTable {
         }
         let dynamic = self.is_dynamic(target);
         let entry = self.entry_mut(target, dynamic);
-        entry.read = read;
-        entry.write = write;
+        // rubash#3213: drop the target's previous endpoints BEFORE
+        // materializing the copies (see open_input): dup2 onto the
+        // target closes whatever descriptor held that number, and
+        // dropping the old FileFd afterwards would close the new
+        // descriptor a second time.
+        drop(std::mem::replace(&mut entry.read, None));
+        drop(std::mem::replace(&mut entry.write, None));
+        entry.read = read.map(|endpoint| Self::materialize_read_endpoint(target, endpoint));
+        entry.write = write.map(|endpoint| Self::materialize_write_endpoint(target, endpoint));
         entry.closed = false;
         Ok(())
     }
