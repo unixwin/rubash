@@ -1658,7 +1658,7 @@ impl Executor {
                     status = 1;
                     let _ = writeln!(
                         stderr,
-                        "cp: cannot create '{}': {}",
+                        "cp: cannot create regular file '{}': {}",
                         target_node.display_path().display(),
                         crate::posix_errors::message(&error)
                     );
@@ -1774,7 +1774,7 @@ impl Executor {
                                 Err(error) => {
                                     let _ = writeln!(
                                         stderr,
-                                        "cp: cannot create '{}': {}",
+                                        "cp: cannot create regular file '{}': {}",
                                         target.display_path().display(),
                                         crate::posix_errors::message(&error)
                                     );
@@ -1890,9 +1890,18 @@ impl Executor {
                         }
                     }
                     Err(error) => {
+                        // GNU coreutils copy.c copy_internal names the
+                        // kind it failed to create: `cannot create
+                        // regular file` for plain targets, `cannot
+                        // create directory` for the tree branch.
+                        let kind = if source.is_dir() {
+                            "directory"
+                        } else {
+                            "regular file"
+                        };
                         let _ = writeln!(
                             stderr,
-                            "cp: cannot create '{}': {}",
+                            "cp: cannot create {kind} '{}': {}",
                             target.display_path().display(),
                             crate::posix_errors::message(&error)
                         );
