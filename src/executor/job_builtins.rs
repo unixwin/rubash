@@ -857,9 +857,18 @@ impl Executor {
         }
 
         if !bg_operands.is_empty()
-            && bg_operands
-                .iter()
-                .any(|operand| self.resolve_background_job(operand).is_some())
+            && bg_operands.iter().any(|operand| {
+                // rubash#2777: a retired `%N` (job already notified
+                // and cleaned up, status saved in `completed_statuses`)
+                // counts as resolvable for the operand-wait route —
+                // the live-table check alone would drop it to the
+                // single-word fallback below, which can only answer
+                // 127. The retired link is consulted only here and
+                // inside `wait_for_background_operands`, never by
+                // kill/fg/bg.
+                self.resolve_background_job(operand).is_some()
+                    || self.retired_job_pid_for_wait_operand(operand).is_some()
+            })
         {
             // GNU wait.def:338-339: -p binds the pid of the LAST operand
             // waited for (pstat.pid; NO_PID when the last operand
@@ -1186,15 +1195,28 @@ impl Executor {
                     continue;
                 }
                 JobOperandResolution::NoMatch => {
-                    status = write_wait_operand_error(
-                        &operand,
-                        false,
-                        &self.diagnostic_prefix(),
-                        &self.error_prefix(),
-                        &mut stderr,
-                    )?;
-                    last_pid = None;
-                    continue;
+                    // rubash#2777: a numeric `%N` whose job already
+                    // left the live table at notification cleanup
+                    // falls back to the retained link — see
+                    // `retired_job_pid_for_wait_operand`. A pid
+                    // recovered this way still flows through
+                    // `wait_for_background_pid`, so a wiped saved
+                    // status lands in its NotFound arm (127) exactly
+                    // where GNU has no record.
+                    match self.retired_job_pid_for_wait_operand(&operand) {
+                        Some(pid) => pid,
+                        None => {
+                            status = write_wait_operand_error(
+                                &operand,
+                                false,
+                                &self.diagnostic_prefix(),
+                                &self.error_prefix(),
+                                &mut stderr,
+                            )?;
+                            last_pid = None;
+                            continue;
+                        }
+                    }
                 }
             };
             match self.wait_for_background_pid(pid, true, force)? {
@@ -3467,6 +3489,33 @@ impl Executor {
         } else {
             JobOperandResolution::NoMatch
         }
+    }
+
+    /// rubash#2777: the last pid of a job retired by
+    /// `cleanup_dead_jobs` (notification cleanup), for an explicit
+    /// operand `wait %N` only. GNU `wait_for_job` (jobs.c:3401) reads
+    /// the job's slot, which survives until the wait consumes it; a
+    /// rubash job whose death notice already printed lost its slot,
+    /// so a numeric `%N` with no live match falls back to the
+    /// retained link and `wait_for_background_pid` answers from
+    /// `completed_statuses` (the bgpids equivalent) — 137 for the
+    /// killed job — instead of 127. A spec that is not a plain
+    /// `%<digits>` has no retained link (GNU's current/previous
+    /// markers reset on deletion, jobs.c:1535-1543), and a link whose
+    /// saved status was wiped (bare-`wait` bgp_clear, jobs.c:2866)
+    /// still lands in `wait_for_background_pid`'s NotFound arm, so
+    /// 127 survives exactly where GNU has no record.
+    fn retired_job_pid_for_wait_operand(&self, operand: &str) -> Option<u32> {
+        let body = operand.strip_prefix('%')?;
+        if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let job_id: u32 = body.parse().ok()?;
+        self.shell_state
+            .job_table
+            .completed_job_pids
+            .get(&job_id)
+            .copied()
     }
 
     pub(in crate::executor) fn resolve_background_job(&self, job: &str) -> Option<u32> {

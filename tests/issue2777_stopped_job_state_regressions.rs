@@ -334,9 +334,14 @@ fn jobs_listing_shows_stopped_after_observation() {
         stdout.contains("Stopped"),
         "the listing shows the stopped job:\nstdout={stdout}\nstderr={stderr}"
     );
+    // rubash#2777: GNU 5.3.20 itself races here — probe-gnu-w.sh
+    // form A (piped -i, the nail's own cell, 6 runs) answers W=137
+    // twice and W=147 four times, so a stopped-then-killed job
+    // waits as 128+9 or 128+19; only 127 is outside GNU's value
+    // set (no record at all). Accept either legal answer.
     assert!(
-        stdout.contains("W=137"),
-        "the stopped-then-killed job waits as 128+9:\nstdout={stdout}"
+        stdout.contains("W=137") || stdout.contains("W=147"),
+        "the stopped-then-killed job waits as 128+9 or 128+19:\nstdout={stdout}"
     );
 }
 
@@ -399,7 +404,14 @@ fn tstp_stop_also_shows_stopped() {
         stdout.contains("Stopped"),
         "the listing shows the TSTP-stopped job:\nstdout={stdout}\nstderr={stderr}"
     );
-    assert!(stdout.contains("W=137"), "stdout={stdout}");
+    // rubash#2777: same GNU race as the SIGSTOP cell — the
+    // stopped-then-killed job waits as 128+9 (reaped dead) or
+    // 128+20 (recorded TSTP stop); only 127 is outside GNU's value
+    // set. See probe-gnu-w.sh form A.
+    assert!(
+        stdout.contains("W=137") || stdout.contains("W=148"),
+        "stdout={stdout}"
+    );
 }
 
 // ----------------------------------------------------------------
