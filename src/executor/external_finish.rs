@@ -1197,6 +1197,15 @@ impl Executor {
             // half — a `ulimit` inside the child script re-limited
             // this process and must die at this boundary too.
             let fork_saved_process_rlimits = saved_shell_state.fork_saved_process_rlimits.clone();
+            // rubash#3387: the same bypass applies to the rusage
+            // half — this direct-assignment restore skips
+            // restore_flat_subshell, so pop the CloneBoundary
+            // baseline the entry clone_for_child_save pushed (same
+            // kind-and-depth condition) explicitly here.
+            crate::executor::read_helpers::pop_times_baseline_if(
+                crate::executor::read_helpers::TimesBaselineKind::CloneBoundary,
+                saved_shell_state.subshell_depth.get(),
+            );
             self.shell_state = saved_shell_state;
             if let Some(mask) = fork_saved_process_umask {
                 crate::builtins::umask::apply_process_umask(mask);

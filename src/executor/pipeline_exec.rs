@@ -6081,6 +6081,17 @@ impl Executor {
         stdin_inherit: bool,
         live_stdin: bool,
     ) -> Result<Option<(String, String, i32)>, ExecuteError> {
+        // rubash#3387: a pipeline element is a forked child (GNU
+        // execute_cmd.c:2620 execute_pipeline), so its `times` reads
+        // from this stage's entry baseline, not the host's
+        // accumulated rusage. The guard pops on every exit path. The
+        // lastpipe last element never comes through here
+        // (execute_lastpipe_stage), so its `times` keeps the
+        // accumulated reading (execute_cmd.c:2758).
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::PipelineStage,
+            self.shell_state.subshell_depth.get(),
+        );
         // rubash#1333/niubash#345: SIGPIPE is SIG_DFL for the shell
         // process (GNU parity), but a pipeline member executed in
         // process shares that disposition — GNU forks members, so a

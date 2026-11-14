@@ -1791,6 +1791,14 @@ impl Executor {
         // pipeline stage when this substitution runs inside one, leaking
         // the substitution's output into the stage's pipe. Give the body
         // its own thread-local capture and merge both buffers.
+        // rubash#3387: the body runs in a forked child (GNU subst.c:7143
+        // command_substitute) — its `times` reads from this body's entry
+        // baseline. The guard lives for the body execution below and
+        // pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (captured, status) = crate::executor::shell_options::capture_stdout(|| {
             if dbg_trap_enabled() {
                 eprintln!(
@@ -2377,6 +2385,14 @@ impl Executor {
                 subshell.execute_ast(&ast)
             }
         };
+        // rubash#3387: the funsub body runs in a forked child (GNU
+        // subst.c:7101 "nofork comsub") — its `times` reads from this
+        // body's entry baseline. The guard lives for the body
+        // execution below and pops when it ends.
+        let _times_baseline = crate::executor::read_helpers::TimesBaselineGuard::enter(
+            crate::executor::read_helpers::TimesBaselineKind::ComsubBody,
+            subshell.shell_state.subshell_depth.get(),
+        );
         let (result, captured) = if valsub {
             (run_body(&mut subshell), None)
         } else {
