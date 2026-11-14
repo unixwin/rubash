@@ -841,6 +841,44 @@ impl Executor {
                 status = 1;
             }
         }
+        // rubash#2761: a wordless command's heredoc / here-string
+        // bodies expand at GNU do_redirections time
+        // (execute_cmd.c:4203-4278 execute_null_command, reached from
+        // execute_cmd.c:4626-4640 when the expanded words are empty;
+        // redir.c:237 do_redirections walks the list in order;
+        // redir.c:1065-1072 hands each heredoc / here-string to
+        // here_document_to_fd, redir.c:423-434, which expands it
+        // first via heredoc_expand, redir.c:348). The empty-words
+        // dispatch used to bypass the pre-expansion funnel entirely,
+        // so a body substitution never executed and `:=` never bound.
+        // Route the bodies through the same funnel every other
+        // command class uses — after the assignment loop above (GNU
+        // expand_words binds the assignments first, so a body sees
+        // them) and before the redirect gate below (so its probes
+        // see post-expansion values, the #2718 ordering). The
+        // funnel's fork classifier already implements
+        // execute_null_command's force-fork rule (fd-0 / {fd}
+        // varassign -> the bodies expand in a throwaway child
+        // context and their effects die with it; numbered-fd bodies
+        // expand in the shell, so `:=` persists). The pre-expanded
+        // carriers are consumed by nobody — a null command has no
+        // stdin reader — the observable effect is the expansion
+        // itself, so the clone below only carries the expansion
+        // through; the abort check reads the failure latches the
+        // funnel preserves across the fork boundary, exactly as the
+        // word-bearing path does. All three empty-words arms share
+        // this function (raw-empty, vanished-words, post-alias), so
+        // one insertion covers them.
+        let preexpanded;
+        if cmd.heredoc.is_some() || !cmd.heredoc_redirects.is_empty() || cmd.here_string.is_some() {
+            let mut clone = cmd.clone();
+            self.preexpand_command_stdin(&mut clone);
+            preexpanded = Some(clone);
+        } else {
+            preexpanded = None;
+        }
+        let cmd = preexpanded.as_ref().unwrap_or(cmd);
+        self.abort_on_expansion_errors()?;
         // GNU applies a null command's redirections too (execute_cmd.c
         // execute_null_command -> do_redirections), so `> $nope` under set
         // -u reports the unbound redirect word and ends the script — the
