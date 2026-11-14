@@ -1088,19 +1088,33 @@ where
             }
         }
         if !valid_declare_name(name) {
-            // GNU declare.def:389-406: with -p the operand is a NAME to
-            // print, `=` included — `declare -p dv=6` reports `dv=6: not
-            // found` and assigns nothing, so the `=` carve-out here is
-            // dropped (Stage-2 ④ Phase 4, E1).
             if print {
-                // GNU declare.def: -p is display-only; the identifier check
-                // gates attribute changes, not display, so an invalid name
-                // reaches find_variable and reports "not found" — never the
-                // full listing fallback (niubash issue #102 probe: bash 5.3.0
-                // prints `declare: X(BR): not found` for `declare -p X(BR)`,
-                // `not a valid identifier` only without -p).
-                diag.free(format_args!("{name}: not found"));
-                attr_status = EXECUTION_FAILURE;
+                // GNU builtins/declare.def:389-406: with -p the builtin is
+                // display-only — the pflag branch walks the operands in
+                // order and reports each missing name exactly once
+                // (show_name_attributes + sh_notfound, in place). The
+                // identifier check gates attribute changes, never
+                // display, so an invalid-identifier operand
+                // (option-shaped names, `--`, `--help`, `X(BR)`,
+                // `a[]`, `a[bad`) must reach the print loop below,
+                // which is the single reporter. (A valued operand
+                // like `dv=6` is not invalid here — its base `dv`
+                // is a valid identifier — so it already flows
+                // through and the print loop reports `dv=6: not
+                // found`; there is no `=` carve-out, Stage-2 ④
+                // Phase 4, E1.) Reporting it here as
+                // well double-reported it and put the duplicate before
+                // every other diagnostic (rubash#3345: `declare -p x
+                // --help` reported `--help` twice; `declare -p
+                // nope1 -x nope2` reported `-x` first and again in
+                // place). Dropping it here is not an option either:
+                // with every operand invalid the names list would
+                // empty out and the early return below would skip the
+                // print loop entirely. Flow it through to
+                // assign_names instead — the print loop adjudicates
+                // it (find_variable) and reports it once, in operand
+                // order, with EXECUTION_FAILURE.
+                assign_names.push(*name);
                 continue;
             }
             diag.error(DiagKind::InvalidId(name.to_string()));
