@@ -512,20 +512,23 @@ where
                 .unwrap_or_else(|| shell_pwd_display_path(&new_pwd_display));
             writeln!(stdout, "{verbatim}")?
         }
-        // GNU builtins/cd.def: the CDPATH announcement prints the path
-        // that was FOUND (the CDPATH-joined pathname), even under -P —
-        // only $PWD becomes the physical directory. new_pwd_display is
-        // the resolved physical path in Mode::Physical, which leaked
-        // into the announcement (rubash#1329); the logical destination
-        // built from the target display is the found path in both modes.
-        PrintPath::CdPath => writeln!(
-            stdout,
-            "{}",
-            shell_pwd_display_path(&logical_destination_display(
-                &old_logical,
-                target.display.as_deref().unwrap_or(&target.path)
-            ))
-        )?,
+        // GNU builtins/cd.def:370 `path = no_symlinks ? temp :
+        // the_current_working_directory`: under -P the announcement is
+        // `temp` itself — the sh_makepath join of the CDPATH unit and the
+        // operand, verbatim (a relative unit stays relative, `./` and
+        // `..` components stay; rubash#3395) — never the resolved
+        // physical directory (rubash#1329). Under -L it is the new
+        // logical cwd, the canonical absolute destination.
+        PrintPath::CdPath => {
+            let found = target.display.as_deref().unwrap_or(&target.path);
+            let announced = match mode {
+                Mode::Physical => found.to_string_lossy().into_owned(),
+                Mode::Logical => {
+                    shell_pwd_display_path(&logical_destination_display(&old_logical, found))
+                }
+            };
+            writeln!(stdout, "{announced}")?
+        }
         _ => {}
     }
 
@@ -775,7 +778,23 @@ fn resolve_cdpath(
     for unit in cdpath.split(':') {
         let base = if unit.is_empty() { "." } else { unit };
         let candidate = filesystem_path_for_display(base, env_vars).join(&target.path);
-        let display = Path::new(base).join(&target.path);
+        // GNU builtins/cd.def:360 `temp = sh_makepath (path, dirname,
+        // MP_DOTILDE)` — lib/sh/makepath.c:66 sh_makepath glues the unit
+        // and the operand AS SPELLED with one `/` (none when the unit
+        // already ends in one). That string is both the chdir target and,
+        // under -P, the announcement (cd.def:370), so it is built
+        // textually here rather than through Path::join, whose separator
+        // is the host's (rubash#3395).
+        let operand = target
+            .display
+            .as_deref()
+            .unwrap_or(&target.path)
+            .to_string_lossy();
+        let display = if base.ends_with('/') {
+            PathBuf::from(format!("{base}{operand}"))
+        } else {
+            PathBuf::from(format!("{base}/{operand}"))
+        };
 
         // G-02: CDPATH units are relative to the SESSION cwd, not the
         // process cwd; the returned candidate keeps its as-spelled form
