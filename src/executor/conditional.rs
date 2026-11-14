@@ -1073,6 +1073,22 @@ impl Executor {
         let left_exp = self.expand_conditional_word(left);
         let right_exp = self.expand_conditional_word(right);
         self.xtrace_conditional_term(op, &left_exp, Some(&right_exp));
+        // rubash#3432: the binary file operators (-ef/-nt/-ot) resolve
+        // an fd-alias operand through the fd table (sh_stataccess
+        // stats the current binding, eaccess.c:116), so the marks
+        // must be fresh for THIS evaluation — the same contract as
+        // the unary arm above and the [ ] path's fused scan. The
+        // binary arm never synced at all: without this, [[ ]] binary
+        // ops read the marks stale from a previous evaluation (or
+        // none) and fall to the literal path, whose OS fd namespace
+        // is shifted one fd down from the user's.
+        if crate::special_paths::fd_alias_target(&left_exp).is_some()
+            || crate::special_paths::fd_alias_target(&right_exp).is_some()
+        {
+            self.sync_fd_pipe_marks();
+            let redirects = self.current_conditional_redirects.clone();
+            self.sync_fd_alias_facts_scoped(None, redirects.as_deref());
+        }
         let args = vec![left_exp, op.to_string(), right_exp];
         crate::builtins::test::execute(&args, false, &self.shell_state.env_vars).unwrap_or(1) == 0
     }

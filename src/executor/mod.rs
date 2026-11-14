@@ -1655,6 +1655,17 @@ pub struct Executor {
     /// takes the stash and places each payload at the target the
     /// ordered walk resolved for that fd at its own position.
     stage_dup_channel_payloads: std::cell::RefCell<Vec<(u32, String)>>,
+    /// rubash#3324: ordered (fd, text) chunks a sequential pipeline
+    /// stage's inline arm produced (trap/printf via OrderedOutputLog).
+    /// The stage result is a (stdout_text, stderr_text) split, which
+    /// cannot represent the production order across the two streams,
+    /// so an arm that writes both streams records its chunks here and
+    /// route_pipeline_stage_streams takes the log and interleaves
+    /// them when both streams resolve to the same target (`2>&1`,
+    /// `1>&2`, `>f 2>&1`). The dispatcher clears it at the start of
+    /// every stage so a stale log can never leak into the next
+    /// stage's routing; the route takes it exactly once.
+    pipeline_stage_ordered_chunks: std::cell::RefCell<Option<Vec<(u8, String)>>>,
     /// rubash#1454: set by the sequential pipeline driver around the LAST
     /// stage's dispatch only. The stage spawner may then hand an external
     /// final member the shell's own stdout (Stdio::inherit) instead of a
