@@ -117,12 +117,23 @@ fn dot_is_command_position(bytes: &[u8], i: usize) -> bool {
 fn set_args_may_set_onecmd(args: &str) -> bool {
     for token in args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|')) {
         if token.len() >= 2 && token.starts_with('-') && !token.starts_with("--") {
-            // A flag bundle: `t` counts only before any `o`, which
-            // would swallow the rest of the bundle as its option
-            // name operand (`set -ot` names an option, sets none).
-            let bundle = &token[1..];
-            let head = bundle.split('o').next().unwrap_or("");
-            if head.contains('t') {
+            // A flag bundle carrying `t` in any position counts:
+            // GNU's apply loop walks the bundle letter by letter
+            // (builtins/set.def:726-766), and an `o` takes its
+            // option name from the NEXT WORD, never from the bundle
+            // remainder (set.def:737-762) — after listing options
+            // (no next word) or setting the named option it
+            // CONTINUES with the next letter, so `set -ot` sets
+            // onecmd AND lists the option table (verified against
+            // GNU bash 5.3.20: `FLAGS=htBc`, table printed), the
+            // same letter-by-letter rule the verbose scanner
+            // already uses for `set -ov`. The old `split('o')`
+            // truncation assumed the rest was swallowed as the
+            // option name; it is not. A false positive (an `o`
+            // whose next word is an invalid option name aborts
+            // before the `t`, or a bundle the validation pass
+            // rejects) only costs the incremental driver.
+            if token[1..].contains('t') {
                 return true;
             }
         }
