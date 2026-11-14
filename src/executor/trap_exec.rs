@@ -5070,7 +5070,9 @@ impl Executor {
             use std::os::unix::process::CommandExt;
             let pins = ambient_pins;
             unsafe {
-                child.pre_exec(move || super::external_inner::pin_ambient_fds_in_child(&pins));
+                child.pre_exec(move || {
+                    super::external_inner::pin_ambient_fds_in_child(&pins).map(|_| ())
+                });
             }
         }
         match child.spawn() {
@@ -5329,7 +5331,9 @@ impl Executor {
                     crate::parser::RedirectKind::Input
                     | crate::parser::RedirectKind::ReadWrite
                     | crate::parser::RedirectKind::DuplicateInput
-                    | crate::parser::RedirectKind::CloseInput => 0,
+                    | crate::parser::RedirectKind::CloseInput
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString => 0,
                     _ => 1,
                 });
                 let gate_name = match redirect.kind {
@@ -5348,7 +5352,16 @@ impl Executor {
                     | crate::parser::RedirectKind::CombinedOutput
                     | crate::parser::RedirectKind::CombinedAppend
                     | crate::parser::RedirectKind::Input
-                    | crate::parser::RedirectKind::ReadWrite => {
+                    | crate::parser::RedirectKind::ReadWrite
+                    // rubash#3195: a heredoc / here-string entry is
+                    // materialized first (here_document_to_fd,
+                    // redir.c:1072) and the dup2 onto its redirector
+                    // fails the same way (redir.c:1120) — the gate
+                    // names the redirector itself. There is no
+                    // filesystem pre-open for the gate_fires probe
+                    // below: the body materialization is the open.
+                    | crate::parser::RedirectKind::HereDoc
+                    | crate::parser::RedirectKind::HereString => {
                         self.redirect_fd_over_limit(gate_fd).then_some(gate_fd)
                     }
                     _ => None,

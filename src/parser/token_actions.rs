@@ -1759,6 +1759,11 @@ fn reject_compound_assignment_position(
 
 /// Name-side validator for atomic compound assignments: optional
 /// `name[subscript]` head, then identifier rules (GNU arrayfunc.c).
+/// GNU general.c:288 valid_identifier: the FIRST character must be a
+/// legal starter (ASCII letter or `_`) — a digit-leading head such as
+/// `9bad` is not a compound-assignment LHS (rubash#3186), so the word
+/// stays plain and the builtin reports InvalidId on the flat word
+/// instead of the compound arm leaking markers into the diagnostic.
 fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     // GNU general.c:519 assignment(): `name+=` is an assignment word (`+` is
     // valid only immediately before `=`), so `name+=(list)` opens a compound
@@ -1779,6 +1784,7 @@ fn valid_compound_assignment_lhs(lhs: &str) -> bool {
     };
     let bytes = head.as_bytes();
     !bytes.is_empty()
+        && (bytes[0].is_ascii_alphabetic() || bytes[0] == b'_')
         && bytes
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || *b == b'_')

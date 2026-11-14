@@ -183,6 +183,21 @@ impl Executor {
                     // shell's own process image. Windows has no process
                     // replacement and keeps the fast path.
                     && !(cfg!(unix) && self.exec_replace_dispatch_stamp.get() != 0)
+                    // rubash#3488 (user ruling 2026-11-14, decision
+                    // (a)): the sleep row's resolvable policy is now
+                    // Yield, so on unix this face stands down for
+                    // every parseable form and sleep runs as a real
+                    // spawned child. The in-process simulation has
+                    // no process identity (rubash#2995): a
+                    // process-tree supervisor — the bats timeout
+                    // killer, which enumerates the test shell's
+                    // descendant tree and TERMs every pid in it —
+                    // finds no child to kill, and the run lasts the
+                    // whole sleep. The #2398/#2836 and #1497
+                    // stand-downs above are subsumed on unix and
+                    // stay for the record; the non-unix face keeps
+                    // the fast path below.
+                    && !(cfg!(unix) && self.registered_stand_down("sleep"))
                 {
                     // rubash#2736: GNU records the PATH resolution at
                     // locate time (findcmd.c:416); the in-process
