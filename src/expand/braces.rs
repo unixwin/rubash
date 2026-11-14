@@ -477,23 +477,31 @@ fn skip_backtick_body(bytes: &[u8], start: usize) -> usize {
 /// Index just past the matching close paren of the $( at `start` (which
 /// points at the $). Tracks parenthesis nesting while staying inside
 /// single- and double-quoted spans, mirroring parse.y parse_comsub's
-/// matching-paren search.
+/// matching-paren search. A backquote group is its own quote state
+/// (parse.y:3877 parse_matched_pair's grouping branch does not parse
+/// constructs inside a backquote body, so a quote inside it is ordinary
+/// text): track it like `skip_compound_subscript_span` does, so an
+/// unbalanced `"` inside `` `...` `` cannot leak into the paren count
+/// (rubash#3435: `{$(echo `echo "q`),x}` must still brace-expand).
 fn skip_dollar_paren_body(bytes: &[u8], start: usize) -> usize {
     let mut i = start + 2;
     let mut depth = 1usize;
     let mut single = false;
     let mut double = false;
+    let mut in_backtick = false;
     while i < bytes.len() {
         let ch = bytes[i];
         if ch == b'\\' && !single {
             i += 2;
             continue;
         }
-        if ch == b'\'' && !double {
+        if ch == b'\'' && !double && !in_backtick {
             single = !single;
-        } else if ch == b'"' && !single {
+        } else if ch == b'"' && !single && !in_backtick {
             double = !double;
-        } else if !single && !double {
+        } else if ch == b'`' && !single {
+            in_backtick = !in_backtick;
+        } else if !single && !double && !in_backtick {
             if ch == b'(' {
                 depth += 1;
             } else if ch == b')' {
