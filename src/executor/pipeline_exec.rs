@@ -922,6 +922,20 @@ impl Executor {
                     return Ok(true);
                 }
             }
+            // rubash#3429 (rework): the group's own redirects run in
+            // the main shell (GNU execute_cmd.c:854 compound prologue),
+            // so an unbound target under `set -u` is fatal here — the
+            // prologue arms expand the word with no nounset gate. The
+            // gate runs before any prepare/bind side effect (no target
+            // file is created, the body never runs) and unwinds as
+            // ExitCode(1): the list loop's handle_exit_code folds it
+            // into a subshell's status at a `( )` boundary and aborts
+            // the script at top level — the same unwind the arithmetic
+            // command's reject-gate fatal takes (command_execute.rs,
+            // finish_heredoc_expansion_error).
+            if self.brace_group_redirect_nounset_fatal(command)? {
+                return Err(ExecuteError::ExitCode(1));
+            }
             // GNU execute_cmd.c:826-828: cm_group is a shell control
             // structure, so `{ } <f` sets the sticky stdin_redir flag the
             // same way `while ... done <f` does — the check lives in

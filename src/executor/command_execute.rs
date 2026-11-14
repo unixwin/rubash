@@ -1857,6 +1857,31 @@ impl Executor {
     /// a builtin or function (main-shell redirects, execute_cmd.c:5606)
     /// rather than a forked external child (execute_cmd.c:5884+).
     fn heredoc_error_command_runs_in_main_shell(&mut self, cmd: &CommandNode) -> bool {
+        // rubash#3429: a compound command's redirections run in the main
+        // shell (GNU execute_cmd.c:854 compound prologue,
+        // RX_ACTIVE|RX_UNDOABLE — cm_arith/cm_cond/cm_case/cm_while/
+        // cm_until/cm_if/cm_for/cm_group share it, :479-495) — but the
+        // node's synthetic words name no builtin (`((` for an arithmetic
+        // command; no words at all for a brace group), so the word-based
+        // classification below reads them as a forked-child (external)
+        // target and contains the fatal jump: the walker has already
+        // reported the diagnostic and set status 1, yet the script keeps
+        // running (`set -u; (( x = 1 )) > $nope` prints the line and
+        // continues). A backgrounded (`&`) or pipelined stage still
+        // forks first (execute_cmd.c:2837 / the pipeline children), so
+        // those keep the child containment; `!` does not exempt it
+        // (GNU aborts). A command inside a subshell keeps the main-shell
+        // reading: the Err unwinds to the subshell boundary, which folds
+        // it into the subshell's status (compound_exec.rs, the
+        // body_result match) — the parent continues, as GNU does.
+        if (cmd.arithmetic_command.is_some() || cmd.brace_group.is_some())
+            && !cmd.background
+            && cmd.background_command.is_none()
+            && cmd.pipe.is_none()
+            && cmd.pipeline_command.is_none()
+        {
+            return true;
+        }
         // A NULL command (`> $nope`, no words) applies its redirections in
         // the main shell (execute_cmd.c execute_null_command runs
         // do_redirections directly) — the fatal jump is not contained
