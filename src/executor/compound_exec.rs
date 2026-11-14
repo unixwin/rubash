@@ -395,44 +395,67 @@ pub(in crate::executor) fn decode_root_line_spans(
 }
 
 /// The parent-source line of the first command that will execute from
-/// `cmd`'s transported text: descend through subshell / brace-group /
-/// pipeline / list / wrapper nodes to the first leaf. The respawn
-/// line seed must name where the child's body text starts — GNU's
-/// forked child reports each body command's own line, and the
-/// serialized body collapses onto the seed line, so the seed is the
-/// first leaf's line (compound nodes' own `line` is their closing
-/// line, which mis-seeded async subshells by the body's height).
+/// `cmd`'s transported text: the first leaf's line (compound nodes'
+/// own `line` is their closing line, which mis-seeded async subshells
+/// by the body's height). The coproc respawn seed instead uses the
+/// first leaf's GNU stamp (`first_leaf_command_stamp`, rubash#3301).
 pub(in crate::executor) fn first_leaf_command_line(cmd: &CommandNode) -> Option<usize> {
+    first_leaf_command(cmd).line
+}
+
+/// The first leaf command node under `cmd`: descend through subshell /
+/// brace-group / pipeline / list / wrapper nodes to the first leaf.
+fn first_leaf_command(cmd: &CommandNode) -> &CommandNode {
     if let Some(subshell) = &cmd.subshell_command {
         if let Some(first) = subshell.body.first() {
-            return first_leaf_command_line(first);
+            return first_leaf_command(first);
         }
     }
     if let Some(group) = &cmd.brace_group {
         if let Some(first) = group.body.first() {
-            return first_leaf_command_line(first);
+            return first_leaf_command(first);
         }
     }
     if let Some(pipeline) = &cmd.pipeline_command {
         if let Some(first) = pipeline.stages.first() {
-            return first_leaf_command_line(first);
+            return first_leaf_command(first);
         }
     }
     if let Some(list) = &cmd.and_or_list {
         if let Some(first) = list.commands.first() {
-            return first_leaf_command_line(first);
+            return first_leaf_command(first);
         }
     }
     if let Some(background) = &cmd.background_command {
-        return first_leaf_command_line(&background.command);
+        return first_leaf_command(&background.command);
     }
     if let Some(time) = &cmd.time_command {
-        return first_leaf_command_line(&time.command);
+        return first_leaf_command(&time.command);
     }
     if let Some(inverted) = &cmd.inverted_command {
-        return first_leaf_command_line(&inverted.command);
+        return first_leaf_command(&inverted.command);
     }
-    cmd.line
+    cmd
+}
+
+/// rubash#3301: the coproc respawn seed is the first leaf's GNU stamp
+/// — the line its first element finished on
+/// (`simple_command_first_word_end_line`: GNU parse.y:5849-5851 for a
+/// word first element, parse.y:810-811 for a redirect first element),
+/// not its start line. The child re-parses rendered body text whose
+/// continuations already collapsed, so the seed IS the diagnostic
+/// line: a split first word (`foooo\<NL>bar`) reported line 1 where
+/// GNU's forked child reports line 2. The #3209 function-definition
+/// plant rides the stamp, not around it: the #3209 restamp
+/// (`restamp_function_body_first_command`) sets a redirect-first
+/// first body command's `line` AND `first_word_end_line` to the
+/// definition line, so a `coproc >x\<NL>y foooo` inside a function
+/// body still seeds the definition line. Falls back to the leaf's
+/// start line when the stamp is absent (redirect-only / synthetic
+/// nodes).
+pub(in crate::executor) fn first_leaf_command_stamp(cmd: &CommandNode) -> Option<usize> {
+    let leaf = first_leaf_command(cmd);
+    crate::executor::command_text::simple_command_first_word_end_line(leaf).or(leaf.line)
 }
 
 /// GNU jobs.c:2455/2460 pipeline_pgrp at fork time, recorded as j->pgrp
@@ -5435,14 +5458,15 @@ impl Executor {
             if let Some(script) = self.shell_state.env_vars.get("__RUBASH_SCRIPT_NAME") {
                 env_entries.push(("__RUBASH_SCRIPT_NAME".to_string(), script.clone()));
                 // rubash#2058: seed where the transported body text
-                // starts (first leaf command's line), not the coproc
-                // node's own line. Simple-command coprocs keep the
-                // node's line — the command IS the body.
+                // starts (first leaf command's GNU stamp, rubash#3301),
+                // not the coproc node's own line. Simple-command
+                // coprocs keep the node's line — the command IS the
+                // body.
                 let line = coproc_cmd
                     .body
                     .as_ref()
                     .and_then(|body| body.first())
-                    .and_then(first_leaf_command_line)
+                    .and_then(first_leaf_command_stamp)
                     .or_else(|| cmd.line)
                     .map(|line| line.to_string())
                     .or_else(|| {
