@@ -1412,11 +1412,12 @@ pub(crate) fn recorded_resolution_spelling(
 /// to the resolved program ([`exec_name_for_program`]). Every route
 /// below resolves `program` from `name` under `env_vars` and births
 /// the child in the session cwd, which is what a relative join
-/// resolves against. The exec builtin is the one deliberate
-/// exception: exec.def:151 resolves through search_for_command but
-/// exec.def:172 then rebinds the target with `full_pathname` before
-/// shell_execve (exec.def:231), so its filename is the anchored
-/// absolute path and builtins/exec.rs stays off this funnel.
+/// resolves against. The exec builtin takes this funnel's name one
+/// step further: exec.def:151 resolves through search_for_command, and
+/// exec.def:172 then rebinds that word with `full_pathname` before
+/// shell_execve (exec.def:231), so its filename is the funnel's word
+/// made absolute against the cwd with one leading `./` removed
+/// (builtins/exec.rs full_pathname, rubash#3316).
 #[cfg(unix)]
 pub(crate) fn spawn_exec_name(
     name: &str,
@@ -1822,8 +1823,8 @@ pub fn external_command_for_named_program(
 /// funnel, [`spawn_exec_name`] (rubash#2442): every spawn route that
 /// resolves its program from a typed word passes one — plain
 /// foreground, pipeline stages, command substitution, the `env`
-/// wrapper. The exec builtin is the documented exception (see
-/// [`spawn_exec_name`]).
+/// wrapper. The exec builtin passes the funnel's name rebound by
+/// full_pathname (see [`spawn_exec_name`]).
 pub fn external_command_for_named_program_with_exec_name(
     program: &Path,
     command_name: Option<&str>,
