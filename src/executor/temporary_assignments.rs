@@ -1826,6 +1826,18 @@ impl Executor {
         // takes the generic store below and the caller's
         // note_pipestatus_assignment derives the shape from the
         // stored form (rubash#1364, rubash#2369).
+        // rubash#3211: the dynamic associative pair routes whole-variable
+        // binds through the owner-table door, mirroring the DIRSTACK arm
+        // above — GNU's assign_aliasvar / assign_hashcmd hooks fire for
+        // every bind form (compound list, scalar, append; variables.c:1785
+        // / 1715). Without the door the generic machinery wrote the mirror
+        // + typed cell only and the command-boundary reconciliation
+        // rebuilt both from the untouched owner table, discarding the
+        // assignment. Unset names and plain-cell shadows (local/tempenv)
+        // stand the door down exactly as for DIRSTACK.
+        if matches!(base_name, "BASH_ALIASES" | "BASH_CMDS") && !dynamic_unbound && !dynamic_plain {
+            return self.apply_dynamic_assoc_assignment(base_name, &value, append);
+        }
         if is_noassign_bash_array(base_name) && !append {
             return true;
         }
