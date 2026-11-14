@@ -2773,7 +2773,25 @@ impl Executor {
     /// spellings reach the mapped append open. Errors are raw:
     /// callers apply posix_errors::path_error.
     pub(in crate::executor) fn open_append_target(&self, target: &str) -> io::Result<File> {
+        self.open_append_target_for(None, target)
+    }
+
+    /// [`Self::open_append_target`] with the redirect node: the
+    /// filesystem spelling resolves through the node's own recorded
+    /// transport spelling, never a string-keyed record another redirect
+    /// folded to the same string may own — the create funnel's rule
+    /// (`create_redirect_output_for`, rubash#3218) on the append face
+    /// (rubash#3372).
+    pub(in crate::executor) fn open_append_target_for(
+        &self,
+        redirect: Option<&crate::parser::Redirect>,
+        target: &str,
+    ) -> io::Result<File> {
         use crate::special_paths::SpecialPathClass;
+        let fs_path = |target: &str| match redirect {
+            Some(redirect) => self.redirect_target_filesystem_path_for(redirect, target),
+            None => self.redirect_target_filesystem_path(target),
+        };
         match crate::special_paths::classify_special_path(target) {
             SpecialPathClass::NetRedirect => self.open_net_redirect_raw(target),
             SpecialPathClass::NullDevice => {
@@ -2830,7 +2848,7 @@ impl Executor {
                     Ok(file) => Ok(file),
                     Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                         crate::executor::execution_misc::open_redirect_append(
-                            &self.session_path(self.redirect_target_filesystem_path(target)),
+                            &self.session_path(fs_path(target)),
                         )
                     }
                     Err(error) => Err(error),
@@ -2844,7 +2862,7 @@ impl Executor {
                     )),
                     Some(true) => Self::synthetic_proc_write_sink(true),
                     None => crate::executor::execution_misc::open_redirect_append(
-                        &self.session_path(self.redirect_target_filesystem_path(target)),
+                        &self.session_path(fs_path(target)),
                     ),
                 }
             }
@@ -2873,7 +2891,7 @@ impl Executor {
                 // FIFO classification carve-out as the create face.
                 #[cfg(unix)]
                 {
-                    let fs_operand = self.redirect_target_filesystem_path(target);
+                    let fs_operand = fs_path(target);
                     if fs_operand.is_relative() {
                         let is_fifo = matches!(
                             self.fstatat_via_cwd_anchor(&fs_operand),
@@ -2893,7 +2911,7 @@ impl Executor {
                     }
                 }
                 crate::executor::execution_misc::open_redirect_append(
-                    &self.session_path(self.redirect_target_filesystem_path(target)),
+                    &self.session_path(fs_path(target)),
                 )
             }
         }
@@ -5062,8 +5080,13 @@ pub(in crate::executor) fn probe_output_redirect(
 /// fail for exactly the shapes the bind's open does — a net target
 /// connects, a synthetic /proc entry answers by write class, a
 /// closed fd alias fails ENOENT.
+///
+/// `redirect` is the node being probed: with it, both opens (the FIFO
+/// stat and the append open) resolve the node's own recorded transport
+/// spelling instead of the plain string funnel (rubash#3372).
 pub(in crate::executor) fn probe_output_redirect_append(
     executor: &Executor,
+    redirect: Option<&crate::parser::Redirect>,
     target: &str,
 ) -> std::io::Result<()> {
     // rubash#1967: net arm of the same carve-out as probe_output_redirect.
@@ -5074,10 +5097,10 @@ pub(in crate::executor) fn probe_output_redirect_append(
     }
     #[cfg(any(unix, windows))]
     {
-        let path = executor.session_path(shell_path_to_windows(
-            target,
-            &executor.shell_state.env_vars,
-        ));
+        let path = executor.session_path(match redirect {
+            Some(redirect) => executor.redirect_target_filesystem_path_for(redirect, target),
+            None => shell_path_to_windows(target, &executor.shell_state.env_vars),
+        });
         if redirect_path_is_fifo(&path) {
             if let Some(error) = redirect_fifo_access_error(&path, true) {
                 return Err(crate::posix_errors::path_error(target, error));
@@ -5086,7 +5109,7 @@ pub(in crate::executor) fn probe_output_redirect_append(
         }
     }
     executor
-        .open_append_target(target)
+        .open_append_target_for(redirect, target)
         .map(|_| ())
         .map_err(|e| crate::posix_errors::path_error(target, e))
 }
