@@ -5410,7 +5410,10 @@ pub(in crate::executor) fn fg_forward_drain(sigint_guard: &ForegroundWaitSigintG
 /// form below: it forwards the recorded terminal SIGINT to the child
 /// instead of aborting the wait outright.
 #[cfg(unix)]
-pub(in crate::executor) fn wait_fg_child_draining(
+/// rubash#3401: widened from `pub(in crate::executor)` — the `exec`
+/// builtin's simulated wait (builtins::exec) is the same draining-wait
+/// shape and now calls this directly instead of a bare `child.wait()`.
+pub(crate) fn wait_fg_child_draining(
     executor: &mut Executor,
     child: &mut std::process::Child,
 ) -> Result<std::process::ExitStatus, ExecuteError> {
@@ -5427,6 +5430,23 @@ pub(in crate::executor) fn wait_fg_child_draining(
         }
         std::thread::sleep(SLICE);
     }
+}
+
+/// rubash#3401: non-unix twin of the draining wait. There is no
+/// termsig/mailbox model off unix (no `observe_signals_while_blocked`,
+/// no SIGTERM deferral), so the wait is the plain blocking wait — the
+/// same shape the fast path's `#[cfg(not(unix))]` arm and the non-unix
+/// branches of `wait_external_child` use. It exists so the
+/// `builtins::exec` call sites (which are not cfg-gated) resolve on
+/// every platform; without it the ungated re-export in `executor/mod.rs`
+/// is E0432 on Windows (CI run 43278490674, both windows-latest legs).
+#[cfg(not(unix))]
+pub(crate) fn wait_fg_child_draining(
+    executor: &mut Executor,
+    child: &mut std::process::Child,
+) -> Result<std::process::ExitStatus, ExecuteError> {
+    let _ = executor;
+    child.wait().map_err(ExecuteError::IoError)
 }
 
 /// rubash#1990: sliced form of the armed foreground wait. GNU never
