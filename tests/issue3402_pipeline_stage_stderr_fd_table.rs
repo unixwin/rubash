@@ -262,3 +262,29 @@ fn control_unredirected_sandwich_reaches_stderr() {
     assert_eq!(stdout, "done\n");
     assert!(stderr.contains(LS_MISSING), "diagnostic lost: {stderr:?}");
 }
+
+// --- rubash#3566: the stderr relay must not swallow the prefix stdout --
+
+#[test]
+fn prefix_stdout_survives_last_prefix_member_stderr() {
+    // Two external prefix members, the last of which writes BOTH a
+    // diagnostic and a payload line; two shell-side stages follow.
+    let script = format!(
+        "{FN_G}: > here.txt\nls . | ls here.txt /nonexistent_xyz_probe | g | g\necho done\n"
+    );
+    let (stdout, stderr, code, _) = run("px-payload", &script);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "g:g:here.txt\ndone\n", "stderr: {stderr}");
+    assert!(stderr.contains(LS_MISSING), "diagnostic lost: {stderr:?}");
+}
+
+#[test]
+fn prefix_stdout_survives_silenced_prefix_stderr() {
+    let script = format!(
+        "{FN_G}: > here.txt\n{{ ls . | ls here.txt /nonexistent_xyz_probe | g | g; }} 2>/dev/null\necho done\n"
+    );
+    let (stdout, stderr, code, _) = run("px-payload-devnull", &script);
+    assert_eq!(code, Some(0), "stderr: {stderr}");
+    assert_eq!(stdout, "g:g:here.txt\ndone\n", "stderr: {stderr}");
+    assert_eq!(stderr, "");
+}

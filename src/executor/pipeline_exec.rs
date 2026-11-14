@@ -1899,7 +1899,6 @@ impl Executor {
                 // the remaining stages read (rubash#1552 — same fd model
                 // as the stage-loop merge below).
                 if self.fd_table.write_endpoint(2) == Some(FdWriteEndpoint::Stdout) {
-                    input = prefix_output;
                     ambient_stderr.push_str(&prefix_stderr);
                 } else if !prefix_stderr.is_empty() {
                     // rubash#3308: prefix members' stderr is the shell's
@@ -1911,9 +1910,13 @@ impl Executor {
                             &prefix_stderr,
                         ),
                     );
-                } else {
-                    input = prefix_output;
                 }
+                // rubash#3566: the prefix's stdout is the next stage's
+                // input whatever its last member wrote on fd 2 — the
+                // stderr relay above must not swallow the payload (GNU
+                // execute_cmd.c:2620: a member's fd 1 pipe and its fd 2
+                // are independent objects).
+                input = prefix_output;
                 statuses = prefix_statuses;
                 first_stage = prefix_len;
             }
