@@ -983,7 +983,7 @@ impl Executor {
                 // subscript plus a well-formed comma expression, and
                 // the subscript's own evalexp error is silently
                 // swallowed (rubash#2654).
-                let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+                let with_indexed_keys = self.expand_arith_command_subscripts(&with_assoc_keys);
                 self.expand_arithmetic_expression_mut(&with_indexed_keys)
             } else {
                 self.expand_arith_eval_subscripts(&with_assoc_keys)
@@ -1018,11 +1018,16 @@ impl Executor {
         {
             // rubash#3199: a `$name` trapped inside a subscript during
             // the pre-expansion precedes every evalexp-time read (GNU
-            // expands before evaluating), so the S2 trace is consulted
-            // before the scan can report the array name.
-            if let Some(name) = take_arith_subscript_unbound()
-                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
-            {
+            // expands before evaluating), so the S2 trace aborts here.
+            // Every evalexp-time read — bare names, array cells, element
+            // values — traps inside the evaluator at GNU's own read
+            // point (expr.c:1190-1216 expr_streval, value.rs
+            // variable_value / lvalue_value), which honors `noeval`
+            // short-circuits and never reads `$` data or assignment
+            // targets as names (rubash#3496: a text scan here used to
+            // report `let '$undef'` as an unbound read and `0 && i` as
+            // a trap).
+            if let Some(name) = take_arith_subscript_unbound() {
                 *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1404,10 +1409,9 @@ impl Executor {
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
             // rubash#3199: same S2 consultation as the command entry —
             // a trace recorded by an outer evaluation's subscript
-            // pre-expansion precedes this entry's own reads.
-            if let Some(name) = take_arith_subscript_unbound()
-                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
-            {
+            // pre-expansion precedes this entry's own reads, which the
+            // evaluator traps at their read points (rubash#3496).
+            if let Some(name) = take_arith_subscript_unbound() {
                 *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
@@ -1664,7 +1668,7 @@ impl Executor {
             // (subst.c:11107 via subst.c:11395-11405): indexed
             // subscripts are expanded and protected as units before the
             // whole-string pass splices anything (rubash#2654).
-            let with_indexed_keys = self.expand_arith_indexed_subscripts(&with_assoc_keys);
+            let with_indexed_keys = self.expand_arith_command_subscripts(&with_assoc_keys);
             self.expand_arithmetic_expression_mut(&with_indexed_keys)
         } else {
             arith_string_quote_removal(&with_assoc_keys).into_owned()
@@ -1672,10 +1676,9 @@ impl Executor {
         let expression = normalize_arithmetic_quotes(&expanded);
         *self.arithmetic_last_eval_input.borrow_mut() = expression.to_string();
         if crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "nounset") {
-            // rubash#3199: same S2 consultation as the command entry.
-            if let Some(name) = take_arith_subscript_unbound()
-                .or_else(|| arithmetic_unbound_variable(&expression, &self.shell_state.env_vars))
-            {
+            // rubash#3199: same S2 consultation as the command entry;
+            // evalexp-time reads trap in the evaluator (rubash#3496).
+            if let Some(name) = take_arith_subscript_unbound() {
                 self.shell_state.arithmetic_nounset_error.set(true);
                 if !self.shell_state.arithmetic_expansion_error.replace(true) {
                     eprintln!("{}{}: unbound variable", self.error_prefix(), name);
@@ -1972,6 +1975,33 @@ impl Executor {
         &mut self,
         expression: &str,
     ) -> String {
+        self.expand_arith_indexed_subscripts_in(expression, false)
+    }
+
+    /// The expand-entry (`(( ))`, `$(( ))`, arith-for) twin of
+    /// [`Self::expand_arith_indexed_subscripts`]. Here the subscript is
+    /// expanded by expand_word_internal's `[` arm (subst.c:11395-11405)
+    /// through expand_array_subscript, which calls
+    /// `expand_subscript_string (exp, quoted & ~(Q_ARITH|Q_DOUBLE_QUOTES))`
+    /// (subst.c:11147) — an UNQUOTED context, where a single-quoted span
+    /// is quote-removed and its body is literal data. The eval entries
+    /// (`let`, `[[`) only reach array_expand_index's
+    /// `expand_arith_string (exp, Q_DOUBLE_QUOTES|...)` (arrayfunc.c:1370),
+    /// where `'` is an ordinary character and `$` inside it still expands.
+    /// The `[` arm only runs on expand_arith_string's word-expansion
+    /// branch, taken when the string holds an ARITH_EXP_CHAR (`$`,
+    /// backquote, CTLESC — subst.c:3802, 3992-4001); a string without
+    /// one goes through string_quote_removal under Q_DOUBLE_QUOTES, which
+    /// keeps `'` as data (`(( b['1'] ))` is an operand error on `'1'`).
+    pub(in crate::executor) fn expand_arith_command_subscripts(
+        &mut self,
+        expression: &str,
+    ) -> String {
+        let unquoted = arith_expansion_char_present(expression);
+        self.expand_arith_indexed_subscripts_in(expression, unquoted)
+    }
+
+    fn expand_arith_indexed_subscripts_in(&mut self, expression: &str, unquoted: bool) -> String {
         let bytes = expression.as_bytes();
         let mut output = String::with_capacity(expression.len());
         let mut index = 0usize;
@@ -2012,6 +2042,13 @@ impl Executor {
                     // product — pass it through so a second pass stays
                     // idempotent (same rule as the assoc scanner above).
                     if !raw.is_empty() && !raw.starts_with(ARITH_ASSOC_KEY_MARKER) {
+                        let raw_owned;
+                        let raw = if unquoted && raw.contains('\'') {
+                            raw_owned = unquoted_subscript_single_quotes_as_data(raw);
+                            raw_owned.as_str()
+                        } else {
+                            raw
+                        };
                         // rubash#3199: GNU traps an unbound `$name`
                         // inside the subscript during THIS expansion
                         // (subst.c:11024-11037), before the array
@@ -2586,6 +2623,170 @@ pub(super) fn arithmetic_name_is_unbound(
             | "BASHOPTS"
             | "PIPESTATUS"
     ) && !is_marked_var(env_vars, UNSET_DYNAMIC_VARS, name))
+}
+
+/// rubash#3498: the bare-name nounset trap a `$((...))` body's evalexp
+/// would raise, judged from the word pre-scan's walk position. GNU
+/// evaluates each arithmetic expansion as expand_word_internal reaches
+/// it (subst.c:11229 -> param_expand's `$((` arm -> expand_arith_string
+/// then evalexp), so a bare unset name read by expr_streval
+/// (expr.c:1190-1216) aborts the command BEFORE any later word is
+/// expanded — `echo $(( i++ )) + b[$undef]` reports `i`, not `undef`.
+/// The verdict comes from the real evaluator on a scratch copy of the
+/// variables (short-circuit `noeval`, assignment targets and every
+/// other read rule included), with every arithmetic thread-local the
+/// evaluation touches saved and restored, so the verdict-only pass
+/// leaves no trace. A body still holding an expansion character
+/// (`$`, backquote, CTLESC) cannot be evaluated without performing
+/// that expansion first, so it yields no verdict here (the caller's
+/// text walk keeps judging its `$` reads, and the real expansion
+/// evaluates it later).
+pub(in crate::executor) fn arith_body_nounset_trap(
+    body: &str,
+    env_vars: &crate::shell::var_table::VarTable,
+) -> Option<String> {
+    if arith_expansion_char_present(body) || body.trim().is_empty() {
+        return None;
+    }
+    let saved_error = take_arith_eval_error();
+    let saved_events = take_arith_eval_events();
+    let saved_writes = ARITH_WRITES.with(|log| std::mem::take(&mut *log.borrow_mut()));
+    let saved_name = take_arith_unbound_name();
+    let mut scratch = env_vars.clone();
+    let (_, category) = eval_mutable_arith_result(body, &mut scratch, None, None, true, None);
+    let trapped = take_arith_unbound_name();
+    ARITH_EVAL_ERROR.with(|slot| *slot.borrow_mut() = saved_error);
+    ARITH_EVAL_EVENTS.with(|slot| *slot.borrow_mut() = saved_events);
+    ARITH_WRITES.with(|log| *log.borrow_mut() = saved_writes);
+    ARITH_UNBOUND_NAME.with(|slot| *slot.borrow_mut() = saved_name);
+    if category == Some(ArithmeticErrorCategory::UnboundVariable) {
+        trapped
+    } else {
+        None
+    }
+}
+
+/// The `$((...))` body text as its expansion phase reads it, for the
+/// word pre-scan's `$`-read walk: each `name[...]` subscript is expanded
+/// in an UNQUOTED context (subst.c:11147, see
+/// [`unquoted_subscript_single_quotes_as_data`]) when the body holds an
+/// expansion character, so a single-quoted `$` inside a subscript is
+/// data, not a parameter read. Elsewhere the body is double-quoted
+/// (Q_DOUBLE_QUOTES|Q_ARITH): a `'` is an ordinary character there and
+/// its `$` still expands.
+pub(in crate::executor) fn arith_body_expansion_reads(body: &str) -> std::borrow::Cow<'_, str> {
+    if !body.contains('\'') || !arith_expansion_char_present(body) {
+        return std::borrow::Cow::Borrowed(body);
+    }
+    let bytes = body.as_bytes();
+    let mut output = String::with_capacity(body.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'`' || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{'))) {
+            let end = assoc_skip_substitution(bytes, index).min(bytes.len());
+            output.push_str(&body[index..end]);
+            index = end;
+            continue;
+        }
+        if ch.is_ascii_alphabetic() || ch == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            output.push_str(&body[start..index]);
+            if bytes.get(index) == Some(&b'[') {
+                let end = assoc_subscript_end(bytes, index);
+                if end > index + 1 && bytes.get(end - 1) == Some(&b']') {
+                    output.push('[');
+                    output.push_str(&unquoted_subscript_single_quotes_as_data(
+                        &body[index + 1..end - 1],
+                    ));
+                    output.push(']');
+                    index = end;
+                }
+            }
+            continue;
+        }
+        let next = body[index..].chars().next().unwrap_or_default();
+        output.push(next);
+        index += next.len_utf8();
+    }
+    std::borrow::Cow::Owned(output)
+}
+
+/// Quote removal for the single-quoted spans of an indexed subscript
+/// expanded in an UNQUOTED context (subst.c:11147 expand_array_subscript
+/// -> expand_subscript_string): each `'...'` outside double quotes and
+/// outside a nested substitution loses its quotes and its body becomes
+/// literal data. The subscript expanders model the double-quoted
+/// context, so the body is re-spelled as that context's data: `$` as the
+/// DATA_DOLLAR carrier, `` ` `` / `"` backslash-escaped — `'$undef'` reaches
+/// evalexp as the text `$undef` (an operand error, never a parameter
+/// read), exactly what GNU's sh_backslash_quote'd subscript evaluates.
+/// `$'...'` ANSI-C spans and escaped quotes are left untouched.
+fn unquoted_subscript_single_quotes_as_data(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut output = String::with_capacity(raw.len() + 4);
+    let mut index = 0usize;
+    let mut in_double = false;
+    while index < bytes.len() {
+        let ch = bytes[index];
+        if ch == b'`' || (ch == b'$' && matches!(bytes.get(index + 1), Some(b'(') | Some(b'{'))) {
+            let end = assoc_skip_substitution(bytes, index).min(bytes.len());
+            output.push_str(&raw[index..end]);
+            index = end;
+            continue;
+        }
+        match ch {
+            b'\\' => {
+                let end = (index + 1 + raw[index + 1..].chars().next().map_or(0, char::len_utf8))
+                    .min(bytes.len());
+                output.push_str(&raw[index..end]);
+                index = end;
+            }
+            b'"' => {
+                in_double = !in_double;
+                output.push('"');
+                index += 1;
+            }
+            b'$' if !in_double && bytes.get(index + 1) == Some(&b'\'') => {
+                let end = skip_arith_quoted_span(bytes, index + 1, b'\'', true).min(bytes.len());
+                output.push_str(&raw[index..end]);
+                index = end;
+            }
+            b'\'' if !in_double => {
+                let close = raw[index + 1..].find('\'').map(|offset| index + 1 + offset);
+                let Some(close) = close else {
+                    // Unterminated: leave the text for the parser.
+                    output.push_str(&raw[index..]);
+                    break;
+                };
+                for body_ch in raw[index + 1..close].chars() {
+                    match body_ch {
+                        // The expander's literal-dollar carrier (decoded
+                        // back to `$` by expand_arithmetic_special_parameters),
+                        // so no backslash pairing can re-arm it.
+                        '$' => output.push(DATA_DOLLAR),
+                        '`' | '"' => {
+                            output.push('\\');
+                            output.push(body_ch);
+                        }
+                        _ => output.push(body_ch),
+                    }
+                }
+                index = close + 1;
+            }
+            _ => {
+                let next = raw[index..].chars().next().unwrap_or_default();
+                output.push(next);
+                index += next.len_utf8();
+            }
+        }
+    }
+    output
 }
 
 /// The first unbound `$name` / `${name}` read in RAW (pre-expansion)
