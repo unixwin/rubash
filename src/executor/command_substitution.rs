@@ -1250,22 +1250,48 @@ impl Executor {
         }
 
         if word_slot == Some(ComsubWordSlot::Pwd) {
-            if words.get(1).map(String::as_str) == Some("-P") {
-                // rubash#537: the raw session cwd is a Windows path; the
-                // builtin renders get_working_directory in the one
-                // canonical POSIX form — the fast path must agree with it
-                // (pwd.def routes -P through the same display). G-02: the
-                // physical directory is the session cwd field.
-                return crate::executor::path::shell_pwd_display_path(
-                    &self.shell_state.cwd.to_string_lossy().replace('\\', "/"),
-                );
+            // rubash#3348: the old arm echoed env_vars["PWD"] verbatim —
+            // the forgeable variable, not the shell's logical cwd — so
+            // a forged $PWD (or `unset PWD`, which yielded the empty
+            // string) leaked straight into the capture, and the arm had
+            // none of pwd's own faces (invalid-option usage + status 2,
+            // `set -P` physical mode). GNU's pwd_builtin prints
+            // the_current_working_directory (builtins/cd.def
+            // pwd_builtin; builtins/common.c:589), never the variable.
+            // Route through the builtin's own session entry, exactly
+            // like execute_pwd_with_io: the stored validated logical
+            // cwd, the canonical spelling of a validated $PWD, else
+            // the physical display. The shared --help gate lives in
+            // the simple-command funnel (rubash#2753 CHECK_HELPOPT),
+            // which this arm bypasses, so replay it here first: on a
+            // help word the long help is the capture and the status is
+            // EX_USAGE (2), exactly as the real dispatch would give.
+            if let Some(row) = super::builtin_table::builtin_table_row("pwd") {
+                if super::builtin_opt::help_opt_requested(row, &words[1..]) {
+                    let mut out = Vec::new();
+                    let _ = crate::builtins::help::print_builtin_help(row.name, &mut out);
+                    self.last_command_substitution_status.set(Some(2));
+                    return String::from_utf8_lossy(&out)
+                        .trim_capture_terminator()
+                        .to_string();
+                }
             }
-            return self
-                .shell_state
-                .env_vars
-                .get("PWD")
-                .cloned()
-                .unwrap_or_default();
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            let status = crate::builtins::pwd::execute_with_env_and_io(
+                words[1..].iter().map(String::as_str),
+                &self.shell_state.env_vars,
+                &self.shell_state.cwd,
+                self.shell_state.logical_cwd.as_deref(),
+                &mut out,
+                &mut err,
+            )
+            .unwrap_or(1); // Vec<u8> writes are infallible
+            let _ = std::io::stderr().write_all(&err);
+            self.last_command_substitution_status.set(Some(status));
+            return String::from_utf8_lossy(&out)
+                .trim_capture_terminator()
+                .to_string();
         }
 
         if word_slot == Some(ComsubWordSlot::Type)
@@ -1520,7 +1546,13 @@ impl Executor {
         // pair; the physical probe above still gates existence and
         // directory-ness, so a logical name for a missing directory is
         // never produced.
+        // rubash#3348: the chain starts at the STORED logical cwd
+        // (the cloned tcwd state), not at a re-derivation from the
+        // $PWD variable — a forged $PWD that names no directory made
+        // the old base fall back to the physical cwd and lose the
+        // symlink spelling (`$(cd sub && pwd)` printed real/sub).
         let logical_display = crate::builtins::cd::logical_destination_display_from(
+            self.shell_state.logical_cwd.as_deref(),
             &self.shell_state.env_vars,
             &self.shell_state.cwd,
             std::path::Path::new(&target_display),

@@ -6931,10 +6931,99 @@ impl Executor {
         if case_arm_pattern_is_static_literal(&pattern.text, &pattern.raw_text) {
             return std::borrow::Cow::Borrowed(pattern.text.as_str());
         }
+        // rubash#2764: a case pattern word carrying an UNQUOTED
+        // `<(...)` / `>(...)` executes it — GNU expands every pattern
+        // with the full word pipeline (execute_cmd.c:3712
+        // expand_word_leave_quoted, per pattern attempt) and the
+        // `<`/`>` arms of expand_word_internal (subst.c:11365-11385)
+        // extract the body verbatim (extract_process_subst,
+        // subst.c:1311) and run process_substitute (subst.c:6362),
+        // splicing the `/dev/fd/N` result into the expanding word.
+        // Rubash's word pipeline materializes process substitution
+        // from the parser's quote-aware scan of the RAW word, not
+        // from the cooked text (materialize_for_list_process_substitutions,
+        // rubash#2390: a quoted `"<(...)"` stays literal, a body keeps
+        // its backslashes, and `<(...)` text that only appears in an
+        // expansion result is data). Reuse that exact vehicle here,
+        // BEFORE either expansion branch runs: splicing the fd path
+        // in up front keeps the body out of the pattern expander (a
+        // `$v` / `$(...)` inside the body belongs to the child, not
+        // to the pattern) and keeps body quotes from mis-splitting
+        // the quote-aware walker's segments. Quoted spans are never
+        // in the derived list, so they stay literal; the splice is
+        // per match attempt (this fn runs once per attempt), so a
+        // side-effecting body re-runs per arm like GNU's
+        // re-expansion. The static-literal gate above already
+        // excludes `<`/`>` from the fast path, so this only fires
+        // for patterns that can carry a substitution.
+        let pattern_substitutions = if pattern.raw_text.contains("<(")
+            || pattern.raw_text.contains(">(")
+        {
+            crate::parser::WordMetadata::new(0, pattern.raw_text.clone(), pattern.raw_text.clone())
+                .process_substitutions
+        } else {
+            Vec::new()
+        };
+        // rubash#2764 (F2 rework, F3 fix): materialize ONCE per
+        // attempt, on the branch that consumes it. The two expansion
+        // branches below consume disjoint strings (the quote-free
+        // branch expands `pattern.text`, the quoted branch expands
+        // `pattern.raw_text`). Materializing both strings eagerly
+        // spawned/registered every body twice (input bodies ran
+        // twice — no per-source dedup in
+        // spawn_input_process_substitution_child; output bodies
+        // registered two different fd-words and both finished);
+        // GNU runs each body once per attempt (subst.c:6362
+        // process_substitute, per pattern attempt). The branch
+        // decision is therefore made ONCE, and on quotes OUTSIDE
+        // `<(...)` / `>(...)` bodies: a quote inside a body belongs
+        // to the child, not to the pattern, and disappears with the
+        // `<(...)`→`/dev/fd/N` splice — deciding on the raw text's
+        // body-internal quotes (F3) sent such a pattern down the
+        // quoted arm's materialization while the downstream gate
+        // re-judged the spliced string and took the unquoted arm,
+        // which then consumed the UN-materialized text. Quotes
+        // outside bodies survive the splice, so one outside-quote
+        // decision serves both the materialization choice and the
+        // branch gate below.
+        let quoted = if pattern_substitutions.is_empty() {
+            case_pattern_raw_has_quotes(&pattern.raw_text)
+        } else {
+            case_pattern_raw_has_outside_quotes(&pattern.raw_text)
+        };
+        let materialized_text;
+        let materialized_raw;
+        let pattern_text: &str;
+        let pattern_raw: &str;
+        if pattern_substitutions.is_empty() {
+            pattern_text = &pattern.text;
+            pattern_raw = &pattern.raw_text;
+        } else if quoted {
+            materialized_raw = self
+                .materialize_for_list_process_substitutions(
+                    &pattern.raw_text,
+                    &pattern_substitutions,
+                )
+                .unwrap_or_else(|_| pattern.raw_text.clone());
+            pattern_text = &pattern.text;
+            pattern_raw = &materialized_raw;
+        } else {
+            materialized_text = self
+                .materialize_for_list_process_substitutions(&pattern.text, &pattern_substitutions)
+                .unwrap_or_else(|_| pattern.text.clone());
+            pattern_text = &materialized_text;
+            pattern_raw = &pattern.raw_text;
+        };
         const PROTECTED_CASE_PATTERN_BACKSLASH: char =
             crate::executor::markers::CASE_PATTERN_BACKSLASH_GUARD;
 
-        if !case_pattern_raw_has_quotes(&pattern.raw_text) {
+        // rubash#2764 (F3): the gate reuses the single `quoted`
+        // decision above — it must agree with the materialization
+        // choice, because each branch consumes the string its arm
+        // materialized. Re-judging here on the (sometimes spliced)
+        // `pattern_raw` is what sent body-quoted patterns down the
+        // unquoted arm with the un-materialized text.
+        if !quoted {
             // Backslashes in a case pattern are escape characters, not
             // quote-removal subjects: GNU performs no quote removal on the
             // pattern (execute_cmd.c:3733-3736) because read_token_word
@@ -6970,7 +7059,7 @@ impl Executor {
             // its assignment side effects (bash execute_cmd.c evaluates
             // patterns with the current variable state; case.tests `;&`
             // fall-through).
-            let chars: Vec<char> = pattern.text.chars().collect();
+            let chars: Vec<char> = pattern_text.chars().collect();
             let mut output = String::new();
             let mut run_start = 0usize;
             let mut index = 0usize;
@@ -7063,9 +7152,9 @@ impl Executor {
             return std::borrow::Cow::Owned(restored);
         }
 
-        let array_at = self.case_pattern_array_at_map(&pattern.raw_text);
+        let array_at = self.case_pattern_array_at_map(pattern_raw);
         std::borrow::Cow::Owned(quote_aware_case_pattern(
-            &pattern.raw_text,
+            pattern_raw,
             |word| self.expand_word_mut(word),
             &array_at,
         ))
@@ -7144,9 +7233,19 @@ impl Executor {
         }
         if !has_redirects {
             let case_line = cmd.line;
-            return self.with_ambient_line(case_line, |executor| {
+            let result = self.with_ambient_line(case_line, |executor| {
                 executor.execute_case_command(case_command)
             });
+            // rubash#2764 (rubash#1523 same rule): a case command owns
+            // the `>(...)` bodies its word / patterns materialized —
+            // finish them at the case's own completion (GNU forks them
+            // at materialization, subst.c process_substitute), so a
+            // case that is the last command still runs its output
+            // bodies instead of leaving them for the next simple
+            // command's drain — or never. Input fds already die here
+            // via the per-command wrapper (command_execute.rs).
+            let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
+            return result;
         }
 
         // rubash#2246: same borrow conversion as the if wrapper — the
@@ -7191,6 +7290,7 @@ impl Executor {
         });
         let status = self.exit_code;
         let finish_result = self.finish_compound_output_process_substitutions(group_outputs);
+        let _ = self.finish_assignment_output_process_substitutions_for_command(cmd);
         self.exit_code = status;
         result?;
         finish_result?;
@@ -7684,6 +7784,49 @@ fn case_pattern_raw_has_quotes(raw: &str) -> bool {
     let chars = raw.chars().collect::<Vec<_>>();
     let mut index = 0usize;
     while index < chars.len() {
+        match chars[index] {
+            '\'' | '"' => return true,
+            '$' if matches!(chars.get(index + 1), Some('\'' | '"')) => return true,
+            '\\' => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Twin of `case_pattern_raw_has_quotes` that ignores quotes inside
+/// `<(...)` / `>(...)` bodies (rubash#2764 F3): a quote inside a
+/// process-substitution body belongs to the child command, not to
+/// the pattern — it disappears with the `<(...)`→`/dev/fd/N` splice,
+/// so it must not decide whether the pattern is quoted. Bodies are
+/// skipped with the lexer's parenthesized-unit walker (the same one
+/// the unquoted branch below uses for `$(...)` units); an
+/// unterminated body falls back to char-by-char judging, i.e. the
+/// old behavior for that span. Only the bodies the materializer
+/// splices are skipped — quotes anywhere else, including inside
+/// `$(...)`, are judged exactly as before, so every pattern without
+/// a body-internal quote keeps its old branch. A `<(`/`>(` directly
+/// preceded by the same operator char (`<<(`/`>>(`) is a heredoc /
+/// append redirect, not a substitution, and is not skipped.
+fn case_pattern_raw_has_outside_quotes(raw: &str) -> bool {
+    let chars = raw.chars().collect::<Vec<_>>();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if (chars[index] == '<' || chars[index] == '>')
+            && chars.get(index + 1) == Some(&'(')
+            && index
+                .checked_sub(1)
+                .map_or(true, |prev| chars[prev] != chars[index])
+        {
+            if let Some(close) = crate::lexer::skip_parenthesized_unit_corrected(&chars, index + 1)
+            {
+                index = close.min(chars.len());
+                continue;
+            }
+            // Unterminated body: fall through and judge char by char
+            // (the old behavior for this span).
+        }
         match chars[index] {
             '\'' | '"' => return true,
             '$' if matches!(chars.get(index + 1), Some('\'' | '"')) => return true,
