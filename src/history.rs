@@ -231,6 +231,14 @@ pub struct SessionHistory {
     pub last_line_pushed: bool,
     /// The HISTFILE load triggered by the first "set -o history" ran.
     pub histfile_loaded: bool,
+    /// lib/readline/histfile.c:126 `history_multiline_entries`: armed by
+    /// the first file read that both starts with a timestamp line and
+    /// runs while history_write_timestamps is set (histfile.c:384 `+=
+    /// has_timestamps && history_write_timestamps`), and never reset
+    /// afterwards — not by `history -c`, not by unsetting HISTTIMEFORMAT.
+    /// While armed, a read appends an unstamped line to the previous
+    /// entry and keeps blank lines (histfile.c:387, 436-437).
+    pub multiline_entries: bool,
     /// Entries already flushed by "history -a".
     pub entries_written: usize,
     /// Expansion state (search string, last substitution) that survives
@@ -404,8 +412,15 @@ impl SessionHistory {
             l.starts_with('#') && l[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
         });
         let timestamps_active = timestamps_armed || has_timestamps;
+        // histfile.c:384: `history_multiline_entries += has_timestamps &&
+        // history_write_timestamps` — regrouping needs the file's leading
+        // stamp AND HISTTIMEFORMAT existing at read time (every caller
+        // passes that variable-exists state as `timestamps_armed`,
+        // variables.c:6177 sv_histtimefmt). The counter is sticky: once a
+        // read armed it, later reads regroup too (rubash#3393).
+        self.multiline_entries |= has_timestamps && timestamps_armed;
         // histfile.c:387: default_skipblanks = 0 when multiline entries.
-        let has_multiline = has_timestamps;
+        let has_multiline = self.multiline_entries;
         let default_skipblanks = !has_multiline;
         let mut skipblanks = default_skipblanks;
         let mut last_ts: Option<String> = None;
