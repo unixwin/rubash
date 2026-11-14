@@ -2563,6 +2563,19 @@ impl Executor {
                             }
                         }
                     }
+                    // rubash#3382: the DISCARD has been absorbed — the
+                    // rest of this logical line was skipped and the
+                    // errexit exemption above already ran for THIS
+                    // command. Consume the arith-evalerror exemption
+                    // here so it cannot leak into the NEXT command's
+                    // errexit adjudication: GNU's evalerror jumps
+                    // DISCARD for the current command only (expr.c), so
+                    // `set -e; x=$(( 1/0 )); false; echo after` exits
+                    // at `false` instead of exempting it. Without this
+                    // the flag survived every DISCARD source (assignment
+                    // and argument forms included) and wrongly exempted
+                    // later failures under `set -e`.
+                    self.evalerror_arith_pending.set(false);
                 }
                 Err(ExecuteError::IoError(error)) => {
                     // rubash#440: a closed output (SIGPIPE analogue) is this

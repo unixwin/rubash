@@ -407,6 +407,19 @@ impl Executor {
                         if let Some(result) = self.take_conditional_nounset_fatal() {
                             return result;
                         }
+                        // rubash#3382: same fatal-arith consumption as
+                        // the primary `[[ ]]` wrapper in
+                        // command_prepare.rs — the operands' evalerror
+                        // belongs to THIS command. The nounset check
+                        // above runs first so a FORCE_EOF is never
+                        // downgraded to a DISCARD when both are latched.
+                        if self.take_conditional_arith_evalerror() {
+                            self.exit_code = 1;
+                            // rubash#439: an expansion error, not a
+                            // failed command.
+                            self.command_expansion_failed.set(true);
+                            return Err(ExecuteError::ExpansionFailure(1));
+                        }
                         Ok(())
                     }
                     None => self.execute_external(cmd),
