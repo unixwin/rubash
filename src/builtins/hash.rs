@@ -375,7 +375,22 @@ where
             crate::executor::path::remove_command_lookup_cache(name, env_vars);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
-                    let path_string = path.to_string_lossy().to_string();
+                    // rubash#3358: the table records the as-found
+                    // spelling — the as-written `<elem>/<name>` join
+                    // (recorded_resolution_spelling, rubash#2696) —
+                    // not the anchored resolution find_user_command
+                    // returns: with PATH=.:... GNU stores `./mycmd`
+                    // (builtins/hash.def:223-225 phash_insert of the
+                    // find_user_command result, findcmd.c sh_makepath
+                    // with the element verbatim), while the anchored
+                    // form leaks `<cwd>/./mycmd`. An absolute element
+                    // anchors to itself, so the two forms coincide
+                    // there. The internal lookup cache keeps the
+                    // anchored form find_user_command wrote (the
+                    // execution face is untouched by this fix; see
+                    // REPORT.md §4 for the mirror-sync residual).
+                    let path_string =
+                        crate::executor::path::recorded_resolution_spelling(name, &path, env_vars);
                     table.insert(
                         name.to_string(),
                         (path_string.clone(), 0, next_hash_seq(&table)),
