@@ -2752,6 +2752,35 @@ impl Executor {
             // the rendered value differs from what is already stored —
             // byte-identical inserts are idempotent, so skipping them
             // changes nothing observable.
+            // GNU line_number_for_err_trap (execute_cmd.c:291): a second
+            // tracker fed ONLY by the leaf kinds — simple :936, subshell
+            // :696, arith :3904, cond :4138 — and by the ambient pins at
+            // pipeline :2895 and the misc-compound frame :1141. The ERR
+            // trap action for a compound's OWN redirect failure reports
+            // this stale line rather than the compound's (execute_cmd.c:
+            // 854-883), so `{ :; } </bad` names the previous leaf and a
+            // failing compound inside a function names the call line
+            // (rubash#3553). SET_LINE_NUMBER skips the write while the
+            // ERR trap itself runs (the signal_in_progress guard).
+            if !self.error_trap_running {
+                if crate::executor::command_text::command_stamps_err_trap_line(cmd) {
+                    self.err_trap_line.set(Some(line));
+                } else if crate::executor::command_text::command_stamps_err_trap_line_ambient(cmd) {
+                    // The ambient pin reads `line_number` — the LAST
+                    // stamped line, which for/select/case advance by raw
+                    // assignment too (execute_cmd.c:3000/3513/3653).
+                    // `__RUBASH_CURRENT_LINE` still holds that stamp here;
+                    // this command's own lands just below.
+                    let last_stamped = self
+                        .shell_state
+                        .env_vars
+                        .get("__RUBASH_CURRENT_LINE")
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .or(self.ambient_line.get());
+                    self.err_trap_line
+                        .set(last_stamped.or(cmd.line).or(Some(line)));
+                }
+            }
             self.set_current_line_value(line);
             // GNU's line_number is a single process-global C int
             // (execute_cmd.c:295 SET_LINE_NUMBER writes the one global;

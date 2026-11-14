@@ -248,6 +248,12 @@ impl Executor {
                     self.report_io_error_routed(cmd, error)?;
                     self.exit_code = 1;
                     self.maybe_run_error_trap(cmd)?;
+                    // The comment two paragraphs up promises the
+                    // fired-at-dispatch record for exactly this fire —
+                    // without it the list loop's own adjudication look
+                    // fires the same command's trap a second time
+                    // (`[[ x = x ]] </bad` double-fired; rubash#3553).
+                    self.err_trap_fired_at_dispatch.set(true);
                     if self.errexit_enabled() && self.errexit_is_active() {
                         return Err(self.errexit_exit(1));
                     }
