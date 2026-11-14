@@ -1277,8 +1277,11 @@ impl Executor {
                 let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                 return format!("{name}={marker}{expanded}");
             }
-            if let Some(expanded) = self.expand_compound_positional_at_assignment(raw_value, quoted)
-            {
+            if let Some(expanded) = self.expand_compound_positional_at_assignment(
+                raw_value,
+                quoted,
+                self.compound_assignment_is_assoc(name),
+            ) {
                 let marker = COMPOUND_ASSIGNMENT_MARKER.to_string();
                 return format!("{name}={marker}{expanded}");
             }
@@ -1532,6 +1535,49 @@ thread_local! {
 pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
     let _guard = PendingDiagnosticWordGuard::new(word);
     f()
+}
+
+// Names the current command is declaring as associative arrays
+// (`declare -A` / `typeset -A` / `local -A` operands, rubash#3500): GNU
+// declare.def creates the variable — with its assoc attribute — BEFORE
+// expanding the operand value (arrayfunc.c:594-599 defers assoc elements
+// and expands key/value separately), but rubash expands command words
+// before the builtin runs, so a fresh `declare -A h=(...)` operand would
+// otherwise look indexed at expansion time. `expand_command_words`
+// installs the operand names for the duration of the command's word
+// expansion; the assoc computation consults this set alongside
+// ASSOC_VARS. Nest-safe: a nested expansion restores the outer set.
+thread_local! {
+    static DECLARE_ASSOC_HINT: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// RAII guard installing `names` as the declare-assoc hint for the
+/// duration of a command's word expansion; the previous set is restored on
+/// drop, so nested expansions cannot leak the hint.
+pub(in crate::executor) struct DeclareAssocHintGuard {
+    previous: Vec<String>,
+}
+
+impl DeclareAssocHintGuard {
+    pub(in crate::executor) fn new(names: Vec<String>) -> Self {
+        let previous =
+            DECLARE_ASSOC_HINT.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), names));
+        DeclareAssocHintGuard { previous }
+    }
+}
+
+impl Drop for DeclareAssocHintGuard {
+    fn drop(&mut self) {
+        DECLARE_ASSOC_HINT.with(|slot| {
+            *slot.borrow_mut() = std::mem::take(&mut self.previous);
+        });
+    }
+}
+
+/// Whether `name` is among the current command's declare-assoc hint names.
+pub(in crate::executor) fn declare_assoc_hint_contains(name: &str) -> bool {
+    DECLARE_ASSOC_HINT.with(|slot| slot.borrow().iter().any(|hint| hint == name))
 }
 
 /// Consume the pending enclosing word, if any. Evaluating a fragment that is

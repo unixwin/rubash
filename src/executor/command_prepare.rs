@@ -1730,6 +1730,12 @@ impl Executor {
         // as an ARRAYREF_FLAG prefix so it survives word splitting the way
         // GNU copies word->flags to each output word.
         let arrayref_marks = self.arrayref_operand_marks(cmd);
+        // rubash#3500: install the declare-assoc hint for this command's
+        // word expansion (see declare_assoc_operand_names); dropped right
+        // after the per-word expansion below.
+        let _declare_assoc_guard = crate::executor::expand_word::DeclareAssocHintGuard::new(
+            declare_assoc_operand_names(cmd),
+        );
         let expanded_words = cmd
             .words
             .iter()
@@ -1808,6 +1814,7 @@ impl Executor {
                     })
             })
             .collect::<Vec<_>>();
+        drop(_declare_assoc_guard);
         // GNU subst.c:9955-9956 + 4288-4296: a bad array subscript in a
         // length expansion (${#arr[bad]}) returns &expand_wdesc_error, which
         // exp_jump_to_top_level(DISCARD) uses to abandon the entire command
@@ -2278,9 +2285,10 @@ impl Executor {
                     .strip_prefix(COMPOUND_ASSIGNMENT_MARKER)
                     .unwrap_or(value);
                 if value.starts_with('(') && value.ends_with(')') {
-                    if let Some(flattened) =
-                        self.expand_compound_positional_at_assignment_bare(value)
-                    {
+                    if let Some(flattened) = self.expand_compound_positional_at_assignment_bare(
+                        value,
+                        self.compound_assignment_is_assoc(name),
+                    ) {
                         return vec![format!("{name}={flattened}")];
                     }
                 }
@@ -4293,6 +4301,77 @@ fn assignment_builtin_receives_assignment_word(
         cmd.words.first().map(String::as_str),
         Some("export" | "readonly" | "declare" | "typeset" | "local")
     )
+}
+
+/// Operand names this command is about to declare as associative arrays
+/// (rubash#3500): a `declare -A` / `typeset -A` / `local -A` operand's
+/// compound value expands during command word expansion — before the
+/// builtin runs and marks ASSOC_VARS — so the expansion-time assoc check
+/// would otherwise see a fresh name as indexed. `expand_command_words`
+/// installs the returned names as the declare-assoc hint for the
+/// command's word expansion. Only the ordered flag scan is modelled
+/// (flags before the first operand; `-A` after an operand is not picked
+/// up — GNU declare.def's getopt order — and `-f`/`-F`/`-p` end the scan
+/// since their operands are not assignments). `command`/`builtin`
+/// wrappers around a declaration builtin are recognised; anything else
+/// yields no names.
+fn declare_assoc_operand_names(cmd: &CommandNode) -> Vec<String> {
+    let words = &cmd.words;
+    let mut index = match words.first().map(String::as_str) {
+        Some("declare" | "typeset" | "local") => 1,
+        Some("command" | "builtin")
+            if matches!(
+                words.get(1).map(String::as_str),
+                Some("declare" | "typeset" | "local")
+            ) =>
+        {
+            2
+        }
+        _ => return Vec::new(),
+    };
+    let mut assoc = false;
+    let mut flags_done = false;
+    let mut names = Vec::new();
+    while index < words.len() {
+        let word = &words[index];
+        index += 1;
+        if !flags_done {
+            if word == "--" {
+                flags_done = true;
+                continue;
+            }
+            if word.len() > 1 && (word.starts_with('-') || word.starts_with('+')) {
+                let negated = word.starts_with('+');
+                let mut stop = false;
+                for flag in word[1..].chars() {
+                    match flag {
+                        'A' => assoc = !negated,
+                        'a' => assoc = false,
+                        'f' | 'F' | 'p' => {
+                            stop = true;
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                if stop {
+                    break;
+                }
+                continue;
+            }
+            flags_done = true;
+        }
+        if assoc {
+            if let Some((name, _)) = split_assignment_word(word) {
+                let base = name.strip_suffix('+').unwrap_or(name);
+                let base = base.split('[').next().unwrap_or(base);
+                if is_shell_name(base) {
+                    names.push(base.to_string());
+                }
+            }
+        }
+    }
+    names
 }
 
 /// Quote state carried across the literal fragments of
