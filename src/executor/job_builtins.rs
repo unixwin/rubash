@@ -623,8 +623,12 @@ impl Executor {
                 self.shell_state.env_vars.remove_unset_marks(&unbind_name);
                 // GNU: an unbound dynamic variable stays unbound for the
                 // shell's lifetime (the unset builtin's UNSET_DYNAMIC_VARS
-                // record).
-                if self.dynamic_parameter_is_set(&unbind_name) {
+                // record). The two dynamic assoc variables are not served
+                // by dynamic_parameter_is_set (owner-table-backed, not
+                // scalar-registry) but unbind the same way (rubash#3573).
+                if self.dynamic_parameter_is_set(&unbind_name)
+                    || matches!(unbind_name.as_ref(), "BASH_ALIASES" | "BASH_CMDS")
+                {
                     mark_env_name(
                         &mut self.shell_state.env_vars,
                         UNSET_DYNAMIC_VARS,

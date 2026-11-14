@@ -2023,6 +2023,14 @@ impl Executor {
     /// `sync_dirstack_cell` (rubash#2424): the cell materializes only
     /// on named access.
     fn publish_dynamic_assoc_var(&mut self, name: &str, storage: &str) {
+        // GNU variables.c:3839 unbind_variable: an unset dynamic variable
+        // stays unbound for the shell's lifetime — owner-table mutations
+        // (alias/hash/declare entry) must not resurrect the variable
+        // (rubash#3573). Mirrors the UNSET_DYNAMIC_VARS skip in
+        // sync_dynamic_assoc_cells.
+        if is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name) {
+            return;
+        }
         self.shell_state
             .env_vars
             .insert(name.to_string(), storage.to_string());

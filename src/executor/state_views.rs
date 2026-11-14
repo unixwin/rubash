@@ -653,6 +653,10 @@ impl Executor {
             // Same DIRSTACK unbind recording as the unset builtin's
             // leaf sequence (unset_arrays.rs, rubash#2434).
             || (name == "DIRSTACK" && !self.dirstack_shadowed())
+            // rubash#3573: same for the two dynamic assoc variables,
+            // which dynamic_parameter_is_set does not serve
+            // (owner-table-backed, not scalar-registry).
+            || matches!(name, "BASH_ALIASES" | "BASH_CMDS")
         {
             mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name);
         }

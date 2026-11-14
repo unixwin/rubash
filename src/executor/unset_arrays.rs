@@ -334,7 +334,15 @@ impl Executor {
                     // carrier after the unset (rubash#2434). A live
                     // local/tempenv shadow owns the name: unsetting it
                     // removes the shadow, not the global dynamic var.
-                    || (name == "DIRSTACK" && !self.dirstack_shadowed()))
+                    || (name == "DIRSTACK" && !self.dirstack_shadowed())
+                    // rubash#3573: the two dynamic assoc variables are
+                    // likewise not served by dynamic_parameter_is_set
+                    // (owner-table-backed, not scalar-registry), but
+                    // their unbind is the same variables.c:3839 act:
+                    // without the record the #3220 door never stands
+                    // down for an unset name and declare -p keeps
+                    // serving the owner view for a plain post-unset bind.
+                    || matches!(name, "BASH_ALIASES" | "BASH_CMDS"))
             {
                 mark_env_name(&mut self.shell_state.env_vars, UNSET_DYNAMIC_VARS, &name);
             }
@@ -746,6 +754,14 @@ impl Executor {
         }) else {
             return None;
         };
+        // rubash#3573: GNU variables.c:3839 — an unbound dynamic
+        // variable's element unset is a silent no-op; the owner table
+        // is a separate object and survives.
+        if matches!(array_name, "BASH_ALIASES" | "BASH_CMDS")
+            && is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, array_name)
+        {
+            return Some(0);
+        }
         if array_name == "BASH_ALIASES" {
             let key = subscript.trim_matches('\'').trim_matches('"');
             self.shell_state.aliases.remove(key);

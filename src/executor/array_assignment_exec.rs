@@ -257,7 +257,13 @@ impl Executor {
         } else {
             pre_attrs
         };
-        if name == "BASH_ALIASES" {
+        // rubash#3573: an unbound dynamic variable stays unbound
+        // (variables.c:3839) — the element bind lands on the plain
+        // variable GNU's generic path builds (indexed, arithmetic
+        // subscript), never in the alias table.
+        if name == "BASH_ALIASES"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
@@ -458,7 +464,12 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "BASH_CMDS" {
+        // rubash#3573: same unbind stand-down as the BASH_ALIASES arm
+        // above — the element bind lands on the plain variable
+        // (variables.c:3839), never in the hashed-command table.
+        if name == "BASH_CMDS"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             let command_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
