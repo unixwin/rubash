@@ -18,6 +18,23 @@ enum Mode {
     Physical,
 }
 
+/// Outcome of a `pwd` execution: the status, plus whether the
+/// physical face failed to resolve the cwd. The session executor
+/// needs the second fact: in GNU, a failed physical resolution
+/// (`sh_physpath (tcwd, 0)` returning 0) takes the
+/// `tcwd && directory == 0` arm of builtins/cd.def pwd_builtin,
+/// which calls resetpwd (cd.def:183-191) — freeing
+/// the_current_working_directory and leaving it NULL. The logical
+/// cache is poisoned, not merely stale, and the next logical face
+/// must re-derive instead of printing the stale value (rubash#3349).
+/// The standalone entry has no session cache to poison, so it only
+/// reads `status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PwdOutcome {
+    pub status: i32,
+    pub physical_resolution_failed: bool,
+}
+
 /// Execute `pwd` with arguments after the command name.
 pub fn execute(args: &[String]) -> io::Result<i32> {
     let mut stdout = io::stdout().lock();
@@ -44,7 +61,7 @@ where
     // process cwd itself when the inherited value does not name it.
     let cwd = env::current_dir().unwrap_or_default();
     let logical = adopted_logical_pwd(&env_vars, &cwd).unwrap_or_else(|| shell_display_path(&cwd));
-    execute_with_env_and_io(args, &env_vars, &cwd, Some(&logical), stdout, stderr)
+    Ok(execute_with_env_and_io(args, &env_vars, &cwd, Some(&logical), stdout, stderr)?.status)
 }
 
 pub(crate) fn execute_with_env_and_io<'a, I, W, E>(
@@ -54,7 +71,7 @@ pub(crate) fn execute_with_env_and_io<'a, I, W, E>(
     logical_cwd: Option<&str>,
     stdout: &mut W,
     stderr: &mut E,
-) -> io::Result<i32>
+) -> io::Result<PwdOutcome>
 where
     I: IntoIterator<Item = &'a str>,
     W: Write,
@@ -97,7 +114,10 @@ where
                     });
                     writeln!(stderr, "{prefix}pwd: -{other}: invalid option")?;
                     writeln!(stderr, "pwd: usage: pwd [-LP]")?;
-                    return Ok(EX_USAGE);
+                    return Ok(PwdOutcome {
+                        status: EX_USAGE,
+                        physical_resolution_failed: false,
+                    });
                 }
             }
         }
@@ -119,30 +139,46 @@ where
             "pwd: error retrieving current directory: \
              getcwd: cannot access parent directories: No such file or directory"
         )?;
-        return Ok(EXECUTION_FAILURE);
+        return Ok(PwdOutcome {
+            status: EXECUTION_FAILURE,
+            physical_resolution_failed: false,
+        });
     }
 
-    let Some(directory) = current_directory(mode, env_vars, cwd, logical_cwd, stderr)? else {
-        return Ok(EXECUTION_FAILURE);
+    let (directory, physical_resolution_failed) =
+        current_directory(mode, env_vars, cwd, logical_cwd, stderr)?;
+    let Some(directory) = directory else {
+        return Ok(PwdOutcome {
+            status: EXECUTION_FAILURE,
+            physical_resolution_failed,
+        });
     };
 
     writeln!(stdout, "{directory}")?;
-    Ok(EXECUTION_SUCCESS)
+    Ok(PwdOutcome {
+        status: EXECUTION_SUCCESS,
+        physical_resolution_failed,
+    })
 }
 
+/// Resolve the directory `pwd` prints. The second return component
+/// reports whether the physical face failed to resolve the cwd (the
+/// `sh_physpath` failure of builtins/cd.def pwd_builtin): the caller
+/// (the session executor) must then poison the logical cache, per
+/// resetpwd (cd.def:183-191) — see rubash#3349.
 fn current_directory<E>(
     mode: Mode,
     env_vars: &HashMap<String, String>,
     cwd: &Path,
     logical_cwd: Option<&str>,
     stderr: &mut E,
-) -> io::Result<Option<String>>
+) -> io::Result<(Option<String>, bool)>
 where
     E: Write,
 {
     if mode == Mode::Physical {
         if let Some(physical) = env_vars.get("__RUBASH_PHYSICAL_PWD") {
-            return Ok(Some(physical.clone()));
+            return Ok((Some(physical.clone()), false));
         }
         // GNU builtins/cd.def pwd_builtin: physical mode runs
         // sh_physpath on the_current_working_directory; when that
@@ -152,7 +188,12 @@ where
         // "pwd" — pwd then returns EXECUTION_FAILURE and prints
         // nothing (rubash#2798). The session cwd field is this port's
         // getcwd truth (G-02), so its resolvability is the gate: a
-        // deleted cwd no longer canonicalizes.
+        // deleted cwd no longer canonicalizes. The failure ALSO takes
+        // the `tcwd && directory == 0` arm (cd.def:495), which calls
+        // resetpwd (cd.def:183-191): the cached logical value is freed
+        // and left NULL — report it (the `true` below) so the session
+        // poisons its logical cache instead of printing the stale
+        // value on the next logical face (rubash#3349).
         if let Err(error) = cwd.canonicalize() {
             writeln!(
                 stderr,
@@ -160,7 +201,7 @@ where
                  cannot access parent directories: {}",
                 crate::posix_errors::message(&error)
             )?;
-            return Ok(None);
+            return Ok((None, true));
         }
     }
     // G-02: the physical truth is the session cwd field, not the
@@ -173,7 +214,7 @@ where
     // the same shape of lie as the "/" fabrication this state
     // replaced.
     if physical.as_os_str().is_empty() {
-        return Ok(None);
+        return Ok((None, false));
     }
 
     if mode == Mode::Logical {
@@ -187,7 +228,7 @@ where
         // too.
         if let Some(tcwd) = logical_cwd {
             if logical_value_names_cwd(tcwd, &physical, env_vars) {
-                return Ok(Some(tcwd.replace('\\', "/")));
+                return Ok((Some(tcwd.replace('\\', "/")), false));
             }
         }
         // Windows bridge state: cd's logical bridge branch (and
@@ -207,7 +248,7 @@ where
         if cfg!(windows) && env_vars.contains_key("__RUBASH_PHYSICAL_PWD") {
             if let Some(pwd) = env_vars.get("PWD") {
                 if pwd.starts_with('/') {
-                    return Ok(Some(pwd.replace('\\', "/")));
+                    return Ok((Some(pwd.replace('\\', "/")), false));
                 }
             }
         }
@@ -218,7 +259,31 @@ where
         // valid-but-non-canonical $PWD spelling (`/.`, trailing `/`,
         // `/../` components) never reaches the output (rubash#2797).
         if let Some(logical) = logical_pwd_if_current(&physical, env_vars) {
-            return Ok(Some(canonical_logical_spelling(&logical)));
+            return Ok((Some(canonical_logical_spelling(&logical)), false));
+        }
+        // rubash#3349: the poisoned state — logical_cwd is None
+        // because a failed physical resolution went through resetpwd
+        // (builtins/cd.def:183-191), which freed
+        // the_current_working_directory and left it NULL. There is no
+        // cached value to print, so this face re-derives through the
+        // getcwd gate, exactly like get_working_directory("pwd")
+        // (builtins/common.c:592): a deleted cwd cannot be re-derived,
+        // so the same diagnostic prints and pwd fails instead of
+        // printing the stale session cwd field string below. The gate
+        // fires only in the poisoned state: with a stored logical
+        // value the arm above already printed it (the #2798 control),
+        // and with a resolvable cwd the fall-through below prints the
+        // re-derived physical display.
+        if logical_cwd.is_none() {
+            if let Err(error) = cwd.canonicalize() {
+                writeln!(
+                    stderr,
+                    "pwd: error retrieving current directory: getcwd: \
+                     cannot access parent directories: {}",
+                    crate::posix_errors::message(&error)
+                )?;
+                return Ok((None, false));
+            }
         }
     }
 
@@ -238,11 +303,11 @@ where
                 && display.starts_with('/')
                 && !display.starts_with("//")
             {
-                return Ok(Some(format!("/{display}")));
+                return Ok((Some(format!("/{display}")), false));
             }
         }
     }
-    Ok(Some(display))
+    Ok((Some(display), false))
 }
 
 pub(crate) fn logical_pwd_if_current(

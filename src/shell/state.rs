@@ -199,8 +199,13 @@ pub struct ShellState {
     /// cd family and the startup funnel maintain this field; other
     /// movers (pushd/popd) do not, so readers must confirm it still
     /// names `cwd` before trusting it and fall back to the derived
-    /// value when it does not. `None` until a session funnel seeds it.
-    /// Like `cwd`, it rides the Clone fork boundary.
+    /// value when it does not. `None` until a session funnel seeds it,
+    /// and `None` again after a failed physical resolution poisons it
+    /// (rubash#3349: GNU builtins/cd.def:183-191 resetpwd frees
+    /// the_current_working_directory, leaving it NULL, so the next
+    /// logical face re-derives through the getcwd gate instead of
+    /// printing the stale value). Like `cwd`, it rides the Clone fork
+    /// boundary.
     pub(crate) logical_cwd: Option<String>,
     /// rubash#618/#616: element writes append one storage segment in O(1)
     /// instead of re-rendering every key, so the storage string accumulates
