@@ -1765,6 +1765,7 @@ impl Executor {
                     self.fire_dynamic_operand_lookups(&args);
                 }
                 let dynamic_set_views = self.dynamic_set_views();
+                let function_set_views = self.function_set_views();
                 // The Diag's sink is this command's own stderr buffer,
                 // so a readonly diagnostic lands in the command's
                 // redirection, not the shell's (A3-R1, rubash#2707).
@@ -1783,6 +1784,7 @@ impl Executor {
                     &frame_locals,
                     &dynamic_views,
                     &dynamic_set_views,
+                    &function_set_views,
                     &underlay,
                     &mut oob_word,
                     &mut written_hints,
@@ -2106,6 +2108,7 @@ impl Executor {
             let mut diag = crate::executor::builtin_diag::Diag::new(row, &mut stderr);
             let prolog = self.diagnostic_prolog_parts();
             let dynamic_set_views = self.dynamic_set_views();
+            let function_set_views = self.function_set_views();
             let underlay = crate::shell::var_table::TempenvListingUnderlay::new();
             let mut oob_word = None;
             let mut written_hints = crate::builtins::declare::WrittenOperandHints::default();
@@ -2120,6 +2123,7 @@ impl Executor {
                 &[],
                 &[],
                 &dynamic_set_views,
+                &function_set_views,
                 &underlay,
                 &mut oob_word,
                 &mut written_hints,
@@ -2453,6 +2457,7 @@ impl Executor {
                 // rubash#1569: same listing underlay as declare.
                 let underlay = self.tempenv_listing_underlay();
                 let dynamic_set_views = self.dynamic_set_views();
+                let function_set_views = self.function_set_views();
                 // Same A3-R1 sink binding as the declare route above.
                 let row =
                     crate::executor::builtin_table::builtin_table_row("local").expect("local row");
@@ -2469,6 +2474,7 @@ impl Executor {
                     &frame_locals,
                     &dynamic_views,
                     &dynamic_set_views,
+                    &function_set_views,
                     &underlay,
                     &mut oob_word,
                     &mut written_hints,

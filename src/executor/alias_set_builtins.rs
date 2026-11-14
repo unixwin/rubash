@@ -135,6 +135,7 @@ impl Executor {
             crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "history");
         let mut o_writes: Vec<(String, bool)> = Vec::new();
         let dynamic_set_views = self.dynamic_set_views();
+        let function_set_views = self.function_set_views();
         let status = {
             let row =
                 super::builtin_table::builtin_table_row("set").expect("set row in BUILTIN_TABLE");
@@ -147,6 +148,7 @@ impl Executor {
                 &mut stdout,
                 &underlay,
                 &dynamic_set_views,
+                &function_set_views,
                 &mut o_writes,
             );
             diag.flush_with(|| self.diagnostic_prolog());
@@ -191,22 +193,11 @@ impl Executor {
                 self.shell_state.forced_interactive = *enabled;
             }
         }
-        if cmd.words.len() == 1 && !self.posix_mode_enabled() {
-            // GNU set.def set_builtin with no arguments calls
-            // print_var_list over ALL variables — shell functions are
-            // variables in GNU's table and print after the scalars, in
-            // name order, through print_function_def (rubash#1056).
-            // POSIX mode suppresses the function half: bare `set` writes
-            // only the shell variables (rubash#1260).
-            let mut names: Vec<&String> = self.shell_state.functions.keys().collect();
-            names.sort();
-            for name in names {
-                if let Some(body) = self.shell_state.functions.get(name) {
-                    let commands = body.commands.clone();
-                    self.write_function_definition(name, &commands, false, &mut stdout)?;
-                }
-            }
-        }
+        // The no-argument listing's function half (print_func_list,
+        // rubash#1056/#1260) prints inside print_shell_variables from
+        // the function_set_views supplied above, so every route to the
+        // enumerator — bare `set` here and bare `declare` alike —
+        // carries it (rubash#3487).
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         self.load_history_file_if_needed();
         // GNU set.def returns EX_USAGE (258 > EX_SHERRBASE) for invalid

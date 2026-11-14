@@ -577,6 +577,7 @@ where
         &[],
         &[],
         &[],
+        &[],
         &crate::shell::var_table::TempenvListingUnderlay::new(),
         oob_word,
         &mut WrittenOperandHints::default(),
@@ -601,6 +602,7 @@ pub(crate) fn execute_with_io_named_in_context<'a, W>(
     frame_locals: &[String],
     dynamic_views: &[DynamicDeclarationView],
     dynamic_set_views: &[crate::builtins::set::DynamicSetView],
+    function_set_views: &[crate::builtins::set::FunctionSetView],
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     oob_word: &mut Option<String>,
     written_hints: &mut WrittenOperandHints,
@@ -1479,11 +1481,13 @@ where
 
     // GNU declare.def:373-380: with no operands, no -p, and no minus-form
     // attribute options (flags_on == 0; `+x`-style options only populate
-    // flags_off), `declare` lists variables exactly like `set` with no
-    // arguments — set_builtin(NULL) -> print_var_list (variables.c):
-    // assignment form with print_var_value quoting (`NAME=value`,
-    // `IFS=$' \t\n'`), NOT the `declare -p` declaration form
-    // (`declare -- NAME="value"`). rubash#406.
+    // flags_off), `declare` lists exactly like `set` with no arguments —
+    // set_builtin(NULL) -> print_all_shell_variables (builtins/set.def:
+    // 506-527): print_var_list in assignment form with print_var_value
+    // quoting (`NAME=value`, `IFS=$' \t\n'`), NOT the `declare -p`
+    // declaration form (`declare -- NAME="value"`), followed by
+    // print_func_list's function definitions when not in POSIX mode
+    // (rubash#406, rubash#3487).
     let flags_on = export
         || array
         || assoc
@@ -1500,6 +1504,7 @@ where
             variables,
             underlay,
             dynamic_set_views,
+            function_set_views,
             stdout,
         )?;
         return Ok(attr_status);
