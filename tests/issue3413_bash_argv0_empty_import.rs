@@ -63,6 +63,7 @@ impl Scratch {
 
     /// Invoke with `BASH_ARGV0=<value>` present in the environment
     /// (the empty string included — that is the face under test).
+    #[cfg(unix)]
     fn run_with_import(&self, value: &str, args: &[&str]) -> (String, String, i32) {
         let out = self
             .base_cmd()
