@@ -97,6 +97,20 @@ impl Executor {
                 self.invocation_login() && !self.shell_state.subshell_login_cleared.get();
             self.set_shopt_option("login_shell", effective);
         }
+        // rubash#2634: GNU builtins/shopt.def:618-626
+        // (shopt_set_debug_mode) calls init_bash_argv() when extdebug
+        // is enabled — the BASH_ARGV/BASH_ARGC bottom frame latches
+        // from the positional parameters current at enable time and
+        // survives a later `shopt -u extdebug`, so a function called
+        // after on->off still observes it (variables.c:5640-5650; the
+        // disable path never unbinds the arrays). The hook sits here,
+        // after the builtin applied the change, rather than in the
+        // pure `set_option` (which has no executor state): by the time
+        // a script runs `shopt`, the positional window is settled,
+        // which is what makes the latched frame correct.
+        if crate::builtins::shopt::option_enabled(&self.shell_state.env_vars, "extdebug") {
+            self.init_bash_argv();
+        }
         self.sync_shopt_rebound_var();
         self.write_buffered_builtin_output(cmd, &stdout, &stderr)?;
         Ok(status)
