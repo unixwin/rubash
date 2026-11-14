@@ -161,15 +161,17 @@ where
         for name in names {
             // GNU phash_search -> hash_search bumps times_found on a hit
             // (hashlib.c:254).
-            if let Some((path, hits, seq)) = table.get_mut(name) {
+            if let Some((path, hits, seq, chkdot)) = table.get_mut(name) {
                 *hits += 1;
-                let path = path.clone();
+                let (path, chkdot) = (path.clone(), *chkdot);
                 let _ = (hits, seq);
-                // GNU hashcmd.c phash_search: a stored relative path prints
-                // `./`-prefixed when that form is executable, and reports
-                // not-found when it resolves to `.` itself unexecutably
-                // (rubash#1361).
-                match phash_search_target(&path) {
+                // GNU hashcmd.c phash_search: the CHKDOT arm serves
+                // `./NAME` when that form is executable (a `.` element
+                // preceded the recorded hit, rubash#3551), and a stored
+                // relative path prints `./`-prefixed the same way — or
+                // reports not-found when it resolves to `.` itself
+                // unexecutably (rubash#1361).
+                match phash_search_target(name, &path, chkdot, env_vars) {
                     Some(target) => {
                         if reusable {
                             writeln!(stdout, "builtin hash -p {target} {name}")?;
@@ -251,7 +253,15 @@ where
             }
             table.insert(
                 (*name).to_string(),
-                (pathname.to_string(), 0, next_hash_seq(&table)),
+                (
+                    pathname.to_string(),
+                    0,
+                    next_hash_seq(&table),
+                    // GNU hash.def:195 `hash -p` passes a literal 0 for
+                    // check_dot — user-pinned paths never carry the
+                    // walk's dot-element verdict (rubash#3551).
+                    false,
+                ),
             );
             let cached_path = crate::executor::path::shell_path_to_windows(pathname, env_vars);
             crate::executor::path::set_command_lookup_cache(name, Some(cached_path), env_vars);
@@ -310,7 +320,7 @@ where
                         .cmp(&gnu_hash_bucket(&right.0))
                         .then(right.1 .2.cmp(&left.1 .2))
                 });
-                for (name, (path, hits, _)) in entries {
+                for (name, (path, hits, _, _)) in entries {
                     writeln!(stdout, "{hits:4}\t{path}")?;
                 }
                 return Ok(EXECUTION_SUCCESS);
@@ -326,7 +336,7 @@ where
                     .cmp(&gnu_hash_bucket(&right.0))
                     .then(right.1 .2.cmp(&left.1 .2))
             });
-            for (name, (path, _, _)) in entries {
+            for (name, (path, _, _, _)) in entries {
                 writeln!(stdout, "builtin hash -p {path} {name}")?;
             }
             return Ok(EXECUTION_SUCCESS);
@@ -375,10 +385,28 @@ where
             crate::executor::path::remove_command_lookup_cache(name, env_vars);
             match crate::executor::path::find_user_command(name, env_vars) {
                 Some(path) => {
-                    let path_string = path.to_string_lossy().to_string();
+                    // GNU phash_insert stores the recorded spelling —
+                    // the `<elem>/<name>` join search_for_command reports
+                    // (findcmd.c:385) — not the anchored candidate
+                    // find_user_command hands the executor. A `.`
+                    // element records `./NAME`, and RELPATH-ness is a
+                    // stored property phash_search later reads
+                    // (rubash#3551).
+                    let path_string =
+                        crate::executor::path::find_user_command_as_written(name, env_vars)
+                            .unwrap_or_else(|| path.to_string_lossy().to_string());
                     table.insert(
                         name.to_string(),
-                        (path_string.clone(), 0, next_hash_seq(&table)),
+                        (
+                            path_string.clone(),
+                            0,
+                            next_hash_seq(&table),
+                            // The PATH walk find_user_command just ran
+                            // left its dot-element verdict in the
+                            // dot_found_in_search side channel
+                            // (findcmd.c:416-426 phash_insert).
+                            crate::executor::path::dot_found_in_search(env_vars),
+                        ),
                     );
                     // find_user_command already inserted the result into the
                     // internal cache, so no extra set_command_lookup_cache is
@@ -407,7 +435,15 @@ pub(crate) fn set_hashed_path(env_vars: &mut VarTable, name: &str, path: &str) {
     let mut table = hash_table(env_vars);
     table.insert(
         name.to_string(),
-        (path.to_string(), 0, next_hash_seq(&table)),
+        (
+            path.to_string(),
+            0,
+            next_hash_seq(&table),
+            // `hash -p`-equivalent insert: BASH_CMDS[key]=value goes
+            // through phash_insert(..., 0, 0) at variables.c:1739 —
+            // check_dot is always 0 (rubash#3551).
+            false,
+        ),
     );
     store_hash_table(env_vars, &table);
     // BASH_CMDS[name]=value mirrors `hash -p value name`; keep the internal
@@ -426,17 +462,22 @@ pub(crate) fn remove_hashed_path(env_vars: &mut VarTable, name: &str) {
     crate::executor::path::remove_command_lookup_cache(&name, env_vars);
 }
 
+/// GNU hashcmd.c:123-191 phash_search: the lookup every consumer of the
+/// table performs — `type`, `command -v`, `hash -t`, and command
+/// resolution alike. The stored path is served through the CHKDOT/RELPATH
+/// arm: `./NAME` (or `./<stored path>`) wins whenever that dotted form is
+/// executable (rubash#3551), and a stored `.`-leading path that resolves
+/// to `.` itself unexecutably counts as not found (rubash#1361).
 pub(crate) fn hashed_path(env_vars: &HashMap<String, String>, name: &str) -> Option<String> {
     let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
-    hash_table(env_vars)
-        .remove(name.as_str())
-        .map(|(path, _, _)| path)
+    let (path, _, _, chkdot) = hash_table(env_vars).remove(name.as_str())?;
+    phash_search_serve(name.as_str(), &path, chkdot, env_vars)
 }
 
 pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String, String)> {
     let mut entries: Vec<_> = hash_table(env_vars)
         .into_iter()
-        .map(|(name, (path, _, _))| (name, path))
+        .map(|(name, (path, _, _, _))| (name, path))
         .collect();
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     entries
@@ -444,18 +485,44 @@ pub(crate) fn hashed_entries(env_vars: &HashMap<String, String>) -> Vec<(String,
 
 /// GNU hashcmd.c:123-191 phash_search, as used by `hash -t`
 /// (list_hashed_filename_targets): resolve the stored path to its display
-/// target. A stored relative path (RELPATH, general.h:267) prints
-/// `./`-prefixed when that dotted form is executable; when it is not
-/// executable and its directory is the current directory, the entry counts
-/// as not found (None). Absolute paths print as stored. (rubash#1361)
-fn phash_search_target(path: &str) -> Option<String> {
-    if !path.starts_with('/') {
-        let dotted: std::borrow::Cow<str> = if path.starts_with("./") {
-            std::borrow::Cow::Borrowed(path)
+/// target — the same arm [`phash_search_serve`] applies, evaluated
+/// against the session cwd.
+fn phash_search_target(
+    name: &str,
+    path: &str,
+    chkdot: bool,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    phash_search_serve(name, path, chkdot, env_vars)
+}
+
+/// hashcmd.c:146-191 — the CHKDOT/RELPATH arm of phash_search, shared by
+/// [`hashed_path`] (exec/type resolution) and [`phash_search_target`]
+/// (`hash -t`). `tail` is the stored path when it is relative (RELPATH,
+/// general.h:267 — an insert-time property of the immutable spelling),
+/// else the command name; `./tail` is served whenever it is executable.
+/// Otherwise a `.`-leading stored path resolving to `.` unexecutably is
+/// not found; anything else keeps the stored path verbatim.
+fn phash_search_serve(
+    name: &str,
+    path: &str,
+    chkdot: bool,
+    env_vars: &HashMap<String, String>,
+) -> Option<String> {
+    if chkdot || !path.starts_with('/') {
+        let tail = if !path.starts_with('/') { path } else { name };
+        let dotted: std::borrow::Cow<str> = if tail.starts_with("./") {
+            std::borrow::Cow::Borrowed(tail)
         } else {
-            std::borrow::Cow::Owned(format!("./{path}"))
+            std::borrow::Cow::Owned(format!("./{tail}"))
         };
-        if crate::executor::path::is_executable_file(std::path::Path::new(dotted.as_ref())) {
+        // executable_file probes at the session cwd — the same anchoring
+        // the PATH walk's own probes use.
+        let dotted_path = crate::executor::path::anchor_at_session_cwd(
+            std::path::PathBuf::from(dotted.as_ref()),
+            env_vars,
+        );
+        if crate::executor::path::is_executable_file(&dotted_path) {
             return Some(dotted.into_owned());
         }
         // hashcmd.c:183-196: only when the dotted form is not executable
@@ -504,11 +571,11 @@ fn gnu_hash_bucket(name: &str) -> u32 {
 /// The next bucket-chain position: hash_search inserts at the bucket head
 /// (hashlib.c:267-269), so a later insert prints before earlier entries in
 /// the same bucket — seq tracks insertion order for that LIFO sort.
-fn next_hash_seq(table: &HashMap<String, (String, u32, u64)>) -> u64 {
-    table.values().map(|(_, _, seq)| *seq).max().unwrap_or(0) + 1
+fn next_hash_seq(table: &HashMap<String, (String, u32, u64, bool)>) -> u64 {
+    table.values().map(|(_, _, seq, _)| *seq).max().unwrap_or(0) + 1
 }
 
-fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u32, u64)> {
+fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u32, u64, bool)> {
     env_vars
         .get(HASH_TABLE)
         .map(|value| {
@@ -519,7 +586,10 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
                     let (path, tail) = rest
                         .split_once(crate::executor::markers::HASH_ENV_FIELD_SEP)
                         .unwrap_or((rest, "0"));
-                    let (hits, seq) = tail
+                    let (hits, tail) = tail
+                        .split_once(crate::executor::markers::HASH_ENV_FIELD_SEP)
+                        .unwrap_or((tail, "0"));
+                    let (seq, chkdot) = tail
                         .split_once(crate::executor::markers::HASH_ENV_FIELD_SEP)
                         .unwrap_or((tail, "0"));
                     Some((
@@ -528,6 +598,7 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
                             path.to_string(),
                             hits.parse().unwrap_or(0),
                             seq.parse().unwrap_or(0),
+                            chkdot == "1",
                         ),
                     ))
                 })
@@ -536,15 +607,16 @@ fn hash_table(env_vars: &HashMap<String, String>) -> HashMap<String, (String, u3
         .unwrap_or_default()
 }
 
-fn store_hash_table(env_vars: &mut VarTable, table: &HashMap<String, (String, u32, u64)>) {
+fn store_hash_table(env_vars: &mut VarTable, table: &HashMap<String, (String, u32, u64, bool)>) {
     env_vars.insert(
         HASH_TABLE.to_string(),
         table
             .iter()
-            .map(|(name, (path, hits, seq))| {
+            .map(|(name, (path, hits, seq, chkdot))| {
                 format!(
-                    "{name}={path}{s}{hits}{s}{seq}",
-                    s = crate::executor::markers::HASH_ENV_FIELD_SEP
+                    "{name}={path}{s}{hits}{s}{seq}{s}{chk}",
+                    s = crate::executor::markers::HASH_ENV_FIELD_SEP,
+                    chk = u8::from(*chkdot)
                 )
             })
             .collect::<Vec<_>>()
@@ -579,7 +651,7 @@ pub(crate) fn flush_command_hash_table(env_vars: &mut VarTable) {
 pub(crate) fn bump_hashed_path_hit(env_vars: &mut VarTable, name: &str) {
     let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    if let Some((_, hits, _)) = table.get_mut(name.as_str()) {
+    if let Some((_, hits, _, _)) = table.get_mut(name.as_str()) {
         *hits += 1;
         store_hash_table(env_vars, &table);
     }
@@ -602,7 +674,16 @@ pub(crate) fn record_standard_path_resolution(
     let mut table = hash_table(env_vars);
     table.insert(
         name.to_string(),
-        (shell_path.to_string(), 1, next_hash_seq(&table)),
+        (
+            shell_path.to_string(),
+            1,
+            next_hash_seq(&table),
+            // The standard PATH (/usr/bin:/bin) never contains a `.`
+            // element, so its find_user_command_in_path call leaves
+            // dot_found_in_search at 0 for the phash_insert at
+            // findcmd.c:416-426 (rubash#3551).
+            false,
+        ),
     );
     store_hash_table(env_vars, &table);
     let cached_path = crate::executor::path::shell_path_to_windows(shell_path, env_vars);
@@ -617,13 +698,48 @@ pub(crate) fn record_standard_path_resolution(
 pub(crate) fn record_command_resolution(env_vars: &mut VarTable, name: &str, shell_path: &str) {
     let name = crate::executor::substitution_metadata::fold_literal_char_escapes(name);
     let mut table = hash_table(env_vars);
-    let recorded = if let Some((stored, hits, _)) = table.get_mut(name.as_str()) {
-        *hits += 1;
-        stored.clone()
+    let fresh_seq = next_hash_seq(&table);
+    let recorded = if let Some((stored, hits, seq, chkdot)) = table.get_mut(name.as_str()) {
+        // GNU splits this: a phash_search hit bumps times_found and
+        // keeps the entry's spelling (hashlib.c:254 via hashcmd.c:146),
+        // while a PATH-walk resolution phash_insert REPLACES the entry
+        // (findcmd.c:416-426). The resolution that just ran was a hash
+        // hit only when the stored entry's own serve arm still produces
+        // the path being recorded — a dead stored entry (e.g.
+        // `hash -p ./gone NAME`, whose RELPATH serve reports not-found
+        // after `.`-dir identity, rubash#3551) means the resolution fell
+        // through to a walk and the walk's spelling replaces it.
+        let serve_hit =
+            phash_search_serve(name.as_str(), stored, *chkdot, env_vars).is_some_and(|served| {
+                crate::executor::path::anchor_at_session_cwd(
+                    std::path::PathBuf::from(&served),
+                    env_vars,
+                ) == crate::executor::path::anchor_at_session_cwd(
+                    std::path::PathBuf::from(shell_path),
+                    env_vars,
+                )
+            });
+        if serve_hit {
+            *hits += 1;
+            stored.clone()
+        } else {
+            *stored = shell_path.to_string();
+            *hits = 1;
+            *seq = fresh_seq;
+            *chkdot = crate::executor::path::dot_found_in_search(env_vars);
+            shell_path.to_string()
+        }
     } else {
         table.insert(
             name.to_string(),
-            (shell_path.to_string(), 1, next_hash_seq(&table)),
+            (
+                shell_path.to_string(),
+                1,
+                fresh_seq,
+                // phash_insert(found=1) carries the walk's
+                // dot_found_in_search verdict (findcmd.c:416-426).
+                crate::executor::path::dot_found_in_search(env_vars),
+            ),
         );
         shell_path.to_string()
     };
