@@ -691,9 +691,9 @@ impl Executor {
                 // >file 2>&1) - open WORD for output instead of treating
                 // it as an unusable dup source.
                 let path = target.strip_prefix('&').unwrap_or(&target);
-                self.create_redirect_output(path, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), path, redirect.clobber)?;
             } else {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -732,7 +732,7 @@ impl Executor {
                 && !is_null_device(&target)
                 && redirect_target_fd(&target).is_none()
             {
-                self.create_redirect_output(&target, redirect.clobber)?;
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             }
         }
 
@@ -788,7 +788,7 @@ impl Executor {
                     } else if let Some(source_fd) = dup_spelling_source_fd(&target) {
                         self.validate_builtin_dup_source(cmd, index, source_fd)?;
                     } else if !target.starts_with("<(") && !target.starts_with(">(") {
-                        self.create_redirect_output(&target, redirect.clobber)?;
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
                     }
                 }
                 crate::parser::RedirectKind::Append => {

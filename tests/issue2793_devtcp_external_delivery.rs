@@ -18,6 +18,18 @@
 //! the regression pins for the Windows delivery face; the in-process
 //! and plain-file cells are the controls from the issue's own
 //! isolation table.
+//!
+//! W-2793 facecheck extension (2026-11-10, master beab07dc): two
+//! more GNU-measured cells — a genuinely foreign child (python3)
+//! reading its inherited fd 3 directly (no stdin dup), and the
+//! /dev/udp fd form (`exec 3<>/dev/udp/...` + `printf >&3` +
+//! `read -u 3` of the reply). GNU bash 5.3.20 oracle, script-file
+//! probes: the foreign child prints the full response from fd 3,
+//! and the UDP server receives `ping-udp-fd` on the fd form just
+//! as on the direct form. The Windows face of the issue remains
+//! open (see the lane REPORT): on Windows a numbered fd >= 3 has
+//! no live delivery channel to a foreign child in the spawn
+//! model, so these cells are the pins that face must satisfy.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, UdpSocket};
@@ -151,4 +163,97 @@ fn issue2793_udp_redirect_delivers_datagram() {
         .recv_from(&mut buf)
         .expect("no datagram arrived for the /dev/udp write");
     assert_eq!(&buf[..n], b"ping\n");
+}
+
+/// Extension cell (W-2793): a genuinely foreign child — python3,
+/// not any shell-side emulation — inherits fd 3 itself and reads
+/// the socket stream from that number. GNU's fork hands the child
+/// the descriptor at its number (execute_cmd.c fork inheritance);
+/// the delivery channel must do the same for a socket fd, not only
+/// for the stdin dup of the `cat <&3` cell. Skips when python3 is
+/// absent (the cell's foreign reader is then unavailable).
+#[test]
+fn issue2793_foreign_child_reads_inherited_devtcp_fd3() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+    let dir: PathBuf = std::env::temp_dir().join(format!("rubash2793-fd3-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create tempdir");
+    let helper = dir.join("read_fd3.py");
+    std::fs::write(
+        &helper,
+        "import os, sys\n\
+         data = b''\n\
+         while True:\n\
+         \x20   chunk = os.read(3, 4096)\n\
+         \x20   if not chunk: break\n\
+         \x20   data += chunk\n\
+         sys.stdout.write('FD3-GOT:[' + data.decode(errors='replace') + ']\\n')\n",
+    )
+    .expect("write helper");
+    let port = start_tcp_server();
+    let (stdout, stderr, code) = run_c(&format!(
+        "exec 3<>/dev/tcp/127.0.0.1/{port}\n\
+         printf 'GET /hello.txt HTTP/1.0\\r\\n\\r\\n' >&3\n\
+         python3 {}\n\
+         exec 3<&- 3>&-\n",
+        helper.display()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert!(
+        stdout.starts_with("FD3-GOT:[HTTP/1.0 200 OK"),
+        "stdout: {stdout:?}"
+    );
+    assert!(stdout.contains("hello-body"), "stdout: {stdout:?}");
+}
+
+/// Extension cell (W-2793): the /dev/udp fd form — `exec 3<>`
+/// binds the connected datagram socket, `printf >&3` sends one
+/// datagram, and the peer's reply is readable on the same fd
+/// (GNU netopen: one descriptor, both directions). The direct
+/// `echo > /dev/udp` cell above covers the one-shot form; this
+/// covers the persistent-fd form the issue's second defect also
+/// implicates.
+///
+/// The reply readback is locked to GNU's byte-wise read, not to
+/// a whole-datagram read: the plain line path of `read` consumes
+/// input one byte per read(2) (builtins/read.def:736,
+/// `zread (fd, &c, 1)`), so on a datagram socket the first byte's
+/// recv consumes the entire packet and the kernel discards the
+/// rest; the read then waits for a further datagram until `-t`
+/// expires, returning 142 (128 + SIGALRM) with `line` holding
+/// just `p`. GNU bash 5.3.20 measured exactly this shape
+/// (rc 142, `line:[p]`) at -t 5 and at the -t 1 used here;
+/// rubash matches byte-for-byte. The earlier whole-line
+/// expectation was never GNU-measured (delimitation record in
+/// the lane report). A stream face reads the full line back;
+/// that is a different shape, not this cell.
+#[test]
+fn issue2793_udp_fd_sends_datagram_and_reads_reply() {
+    let socket = UdpSocket::bind("127.0.0.1:0").expect("bind udp listener");
+    let port = socket.local_addr().expect("local addr").port();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("set timeout");
+    let server = std::thread::spawn(move || {
+        let mut buf = [0u8; 64];
+        let (n, peer) = socket.recv_from(&mut buf).expect("no datagram arrived");
+        let got = buf[..n].to_vec();
+        let _ = socket.send_to(b"pong-udp\n", peer);
+        got
+    });
+    let (stdout, stderr, code) = run_c(&format!(
+        "exec 3<>/dev/udp/127.0.0.1/{port}\n\
+         printf 'ping-udp-fd\\n' >&3\n\
+         read -t 1 -u 3 line\n\
+         echo \"rc:$?\"\n\
+         echo \"line:[$line]\"\n\
+         exec 3<&- 3>&-\n"
+    ));
+    assert_eq!(code, Some(0), "stderr:\n{stderr}");
+    assert_eq!(stdout, "rc:142\nline:[p]\n", "stderr:\n{stderr}");
+    let received = server.join().expect("udp server thread");
+    assert_eq!(received, b"ping-udp-fd\n".to_vec());
 }

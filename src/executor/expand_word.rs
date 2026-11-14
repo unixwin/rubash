@@ -574,7 +574,9 @@ impl Executor {
     /// The memo key shared by `redirect_target_memo` and
     /// `redirect_target_single_glob_match`: one entry per redirect node
     /// per command execution span.
-    fn redirect_target_memo_key(redirect: &crate::parser::Redirect) -> String {
+    pub(in crate::executor) fn redirect_target_memo_key(
+        redirect: &crate::parser::Redirect,
+    ) -> String {
         format!(
             "{:?}\x1f{}\x1f{:?}\x1f{}",
             redirect.kind, redirect.operator, redirect.fd, redirect.target
@@ -642,20 +644,41 @@ impl Executor {
             .contains_key(&Self::redirect_target_field_memo_key(redirect, false))
     }
 
-    /// Record that a redirect target's literal expansion carried
-    /// raw-byte transport (see `redirect_target_had_transport`): the
-    /// folded target string alone cannot tell a byte char (e.g. U+009C
-    /// for byte 0x9C) from a genuine char of the same code point, so
-    /// the output open funnels consult this set to decide whether the
-    /// target's byte chars emit raw bytes. Keyed by the folded literal
-    /// string; recorded only when the pre-literal expansion carried
-    /// decodable transport. (rubash#3104 p23)
-    fn note_redirect_target_transport(&self, literal: &str, expanded: &str) {
-        if crate::executor::markers::contains_decodable_transport(expanded) {
-            self.redirect_target_had_transport
-                .borrow_mut()
-                .insert(literal.to_string());
+    /// Record the byte spelling of a redirect target's literal
+    /// outcome (see `redirect_target_transport_spellings`): the
+    /// spelling is computed HERE, from the pre-literal expansion,
+    /// because the folded target string alone cannot tell a byte char
+    /// (e.g. U+009C for byte 0x9C) from a genuine char of the same
+    /// code point (rubash#3218). The word-position decode below
+    /// mirrors redirect_operand_literal's own pre-fold steps, so the
+    /// spelling describes exactly the literal it is keyed by. The
+    /// record is stored under BOTH the folded literal (for consumers
+    /// that only have the string) and the redirect node (for the
+    /// redirect walks): two redirects in one command can fold to the
+    /// same string with different transport verdicts, and both
+    /// expansions are recorded before either open runs, so only the
+    /// node key can give each open its own redirect's spelling
+    /// (rubash#3218 face 2). (rubash#3104 p23, rubash#3218)
+    fn note_redirect_target_transport(
+        &self,
+        redirect: &crate::parser::Redirect,
+        literal: &str,
+        expanded: &str,
+    ) {
+        if !crate::executor::markers::contains_decodable_transport(expanded) {
+            return;
         }
+        let decoded = crate::executor::markers::decode_word_position_carriers(
+            &expanded.replace(crate::executor::markers::CTLESC, ""),
+        );
+        let spelling =
+            crate::executor::substitution_metadata::transport_name_spelling_bytes(&decoded);
+        self.redirect_target_transport_spellings
+            .borrow_mut()
+            .insert(literal.to_string(), spelling.clone());
+        self.redirect_target_node_spellings
+            .borrow_mut()
+            .insert(Self::redirect_target_memo_key(redirect), spelling);
     }
 
     /// GNU redir.c:298 redirection_expand → subst.c:12590
@@ -774,7 +797,7 @@ impl Executor {
             // word that does not glob is still DEQUOTED before it becomes
             // the literal filename.
             let literal = redirect_operand_literal(&expanded);
-            self.note_redirect_target_transport(&literal, &expanded);
+            self.note_redirect_target_transport(redirect, &literal, &expanded);
             return (literal, false, field_verdict);
         }
         match glob::pathname_expand_word(
@@ -812,7 +835,7 @@ impl Executor {
             // failed ERROR_INVALID_NAME on the carrier byte).
             glob::PathnameExpansion::NoMatch => {
                 let literal = redirect_operand_literal(&expanded);
-                self.note_redirect_target_transport(&literal, &expanded);
+                self.note_redirect_target_transport(redirect, &literal, &expanded);
                 (literal, false, field_verdict)
             }
             // GNU subst.c:12663-12668 (fail_glob_expansion): report_error
@@ -1192,6 +1215,23 @@ impl Executor {
         // expand_word_mut_with_context); expanding the name portion here
         // applied side effects for words that are not assignments at all.
         let (name, value) = split_assignment_word(word)?;
+        // rubash#3441 (F1): mirror the mut path's split arm
+        // (parameter_core.rs): this arm splits the word at `=` and expands
+        // the RHS as its own word, so record the whole word for the RHS
+        // expansion — GNU subst.c:10278 names the whole word
+        // expand_word_internal was expanding, and the walker's `${` arm
+        // keeps an already-recorded enclosing word (install-if-absent).
+        // Compound values are excluded, as there: GNU names the ELEMENT
+        // word there (`[0]=${-x}` for `a=([0]=${-x})`), which needs
+        // element-boundary tracking of its own. Quoted values are excluded
+        // too, as there: the word carries the QUOTED_ASSIGNMENT_VALUE
+        // transport byte after `=`, which must never reach a diagnostic.
+        if value.starts_with(COMPOUND_ASSIGNMENT_MARKER)
+            || value.starts_with(tilde_expand::QUOTED_ASSIGNMENT_VALUE)
+        {
+            return Some(self.expand_plain_assignment_word(name, value));
+        }
+        let _diag_word = PendingDiagnosticWordGuard::new(word);
         Some(self.expand_plain_assignment_word(name, value))
     }
 
@@ -1476,14 +1516,22 @@ thread_local! {
 
 /// Run `f` with `word` recorded as the enclosing word for a walked `${}`
 /// fragment's bad-substitution diagnostic. The record is one-shot (see
-/// [`take_pending_diagnostic_word`]) and always cleared on return so it can
-/// never leak past the fragment.
+/// [`take_pending_diagnostic_word`]); on return the previous record (if
+/// any) is restored, so the frame's record can never leak past the
+/// fragment.
+///
+/// The record is install-if-absent, like [`PendingDiagnosticWordGuard`]:
+/// an outer record belongs to a word the caller is already expanding
+/// (rubash#3441: the assignment split in `expand_word` expands the RHS
+/// as a fresh word, so without this the `${` arm would re-root the
+/// diagnostic at the RHS — GNU subst.c:10278 names the whole word
+/// `expand_word_internal` was expanding). A nested fragment still keeps
+/// its own word: the outer fragment's gate evaluation consumes the record
+/// (take) before any nested operator word expands, so the slot is empty
+/// again by then.
 pub(in crate::executor) fn with_pending_diagnostic_word<T>(word: &str, f: impl FnOnce() -> T) -> T {
-    let previous =
-        PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
-    let result = f();
-    PENDING_DIAGNOSTIC_WORD.with(|slot| slot.set(previous));
-    result
+    let _guard = PendingDiagnosticWordGuard::new(word);
+    f()
 }
 
 /// Consume the pending enclosing word, if any. Evaluating a fragment that is
@@ -1510,14 +1558,27 @@ pub(in crate::executor) fn take_pending_diagnostic_word() -> Option<String> {
 
 /// RAII scope arm: records `word` as the enclosing word for the duration of
 /// one `${}` fragment in a walker, restoring the previous record on drop.
+/// The record is install-if-absent: an outer record belongs to a word the
+/// caller is already expanding (rubash#3441: the assignment split in
+/// `expand_word_mut_with_context` expands the RHS as a fresh word, so
+/// without this the RHS walker's `${` arm would re-root the diagnostic at
+/// the RHS — GNU subst.c:10278 names the whole word `expand_word_internal`
+/// was expanding). A nested fragment still keeps its own word: the outer
+/// fragment's gate evaluation consumes the record (take) before any nested
+/// operator word expands, so the slot is empty again by then.
 pub(in crate::executor) struct PendingDiagnosticWordGuard {
     previous: Option<(*const u8, usize)>,
 }
 
 impl PendingDiagnosticWordGuard {
     pub(in crate::executor) fn new(word: &str) -> Self {
-        let previous =
-            PENDING_DIAGNOSTIC_WORD.with(|slot| slot.replace(Some((word.as_ptr(), word.len()))));
+        let previous = PENDING_DIAGNOSTIC_WORD.with(|slot| {
+            let previous = slot.get();
+            if previous.is_none() {
+                slot.set(Some((word.as_ptr(), word.len())));
+            }
+            previous
+        });
         Self { previous }
     }
 }
