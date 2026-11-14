@@ -116,6 +116,7 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
         &mut diag,
         &mut stdout,
         &crate::shell::var_table::TempenvListingUnderlay::new(),
+        &[],
     );
     diag.flush_with(|| prolog_for_env(env_vars));
     status
@@ -188,11 +189,22 @@ pub(crate) fn set_with_io<'a, W>(
     diag: &mut Diag<'a>,
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
+    functions: &[FunctionSetView],
 ) -> io::Result<i32>
 where
     W: Write,
 {
-    set_with_io_tracked(row, args, env_vars, diag, stdout, underlay, &[], None)
+    set_with_io_tracked(
+        row,
+        args,
+        env_vars,
+        diag,
+        stdout,
+        underlay,
+        &[],
+        functions,
+        None,
+    )
 }
 
 /// [`set_with_io`] plus a sink for the `-o` option WRITES (name,
@@ -213,6 +225,7 @@ pub(crate) fn set_with_io_and_o_writes<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     o_writes: &mut Vec<(String, bool)>,
 ) -> io::Result<i32>
 where
@@ -226,6 +239,7 @@ where
         stdout,
         underlay,
         dynamic,
+        functions,
         Some(o_writes),
     )
 }
@@ -238,13 +252,14 @@ fn set_with_io_tracked<'a, W>(
     stdout: &mut W,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     mut o_writes: Option<&mut Vec<(String, bool)>>,
 ) -> io::Result<i32>
 where
     W: Write,
 {
     if args.is_empty() {
-        print_shell_variables(env_vars, underlay, dynamic, stdout)?;
+        print_shell_variables(env_vars, underlay, dynamic, functions, stdout)?;
         return Ok(EXECUTION_SUCCESS);
     }
 
@@ -432,14 +447,35 @@ pub(crate) struct DynamicSetView {
     pub storage: String,
 }
 
-/// GNU `set` with no arguments: print_var_list (variables.c) — assignment
-/// form with print_var_value quoting. `declare` with no operands and no
-/// minus-form attribute options dispatches here too (declare.def:373-380
+/// One shell function's entry in the assignment-form listing: the
+/// function's name and its definition rendered in the multiline form.
+/// GNU's listing is a single enumerator, print_all_shell_variables
+/// (builtins/set.def:506-527): print_var_list over the variables, then
+/// print_func_list (variables.c:1079-1090) over all_shell_functions —
+/// but only when posixly_correct == 0. Each function prints as
+/// `name ` + named_function_string (FUNC_MULTILINE|FUNC_EXTERNAL,
+/// variables.c:1152-1162) + newline, in name order, after ALL
+/// variables. The function table and the definition metadata live on
+/// ShellState, which the builtins never see, so the executor renders
+/// each entry with the same ast_print port `declare -f` / `type` use
+/// and supplies the views here (rubash#3487; the variable half's
+/// DynamicSetView above is the same supply pattern).
+pub(crate) struct FunctionSetView {
+    pub name: String,
+    pub text: String,
+}
+
+/// GNU `set` with no arguments: print_all_shell_variables
+/// (builtins/set.def:506-527) — print_var_list (assignment form with
+/// print_var_value quoting) followed, when not in POSIX mode, by
+/// print_func_list. `declare` with no operands and no minus-form
+/// attribute options dispatches here too (declare.def:373-380
 /// `set_builtin ((WORD_LIST *)NULL)`), so the two listings stay identical.
 pub(crate) fn print_shell_variables<W>(
     env_vars: &crate::shell::var_table::VarTable,
     underlay: &crate::shell::var_table::TempenvListingUnderlay,
     dynamic: &[DynamicSetView],
+    functions: &[FunctionSetView],
     stdout: &mut W,
 ) -> io::Result<()>
 where
@@ -589,6 +625,22 @@ where
         writeln!(stdout, "{}={}", name, shell_quote(value, posix_mode))?;
     }
 
+    // GNU builtins/set.def:518-527: POSIX.2 does not allow function
+    // definitions in the no-argument listing (PASC Interp #202), so
+    // print_func_list runs only when posixly_correct == 0 — the same
+    // live `posix` option read the ansic quoting branch above uses
+    // (the executor's __RUBASH_POSIX_MODE cell is kept in sync by
+    // set_shell_option). print_func_list (variables.c:1079-1090)
+    // walks all_shell_functions in name order, after every variable,
+    // one multiline definition per function (rubash#3487).
+    if !posix_mode {
+        let mut funcs: Vec<&FunctionSetView> = functions.iter().collect();
+        funcs.sort_by(|left, right| left.name.cmp(&right.name));
+        for function in funcs {
+            writeln!(stdout, "{}", function.text)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -692,6 +744,7 @@ mod tests {
             &mut diag,
             stdout,
             &crate::shell::var_table::TempenvListingUnderlay::new(),
+            &[],
         )
         .unwrap();
         diag.flush_with(|| Prolog {
