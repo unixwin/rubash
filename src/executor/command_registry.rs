@@ -60,9 +60,13 @@
 //! what happens when it does not resolve — the standard predicate
 //! (`emulated_external_stands_down`) fails closed to a real spawn and
 //! its 127. The policy value `Yield` (real body wins when resolvable)
-//! is used by **no** row; since S4 it is used by exactly one face —
-//! the pipeline cat face, whose net policy is set by the concurrent
-//! direct-spawn planner ahead of the arm (see the cat row).
+//! is used by exactly one row — `sleep`, since the user ruling of
+//! 2026-11-14 (rubash#3488, decision (a)): on unix its
+//! simple-command face stands down, so a parseable sleep runs as a
+//! real spawned child instead of an in-process simulation. Since S4
+//! it is also used by exactly one face — the pipeline cat face,
+//! whose net policy is set by the concurrent direct-spawn planner
+//! ahead of the arm (see the cat row).
 //! `ScriptYield` (real body wins when the resolution is a script)
 //! is used by exactly two rows — the identity tools `uname`/`arch`,
 //! adjudicated by rubash#2104 and consumed through
@@ -215,11 +219,13 @@ pub(crate) enum Admission {
 pub(crate) enum ResolvablePolicy {
     /// The emulation answers, replacing the resolved body.
     Replace,
-    /// The real body wins. **No row uses this** — since S4 exactly
-    /// one face does: the pipeline cat face carries it as a per-face
-    /// record (the concurrent planner, not the arm, yields). The
-    /// consistency tests pin the row-level absence and the exact
-    /// per-face set so either can only change deliberately.
+    /// The real body wins. Exactly one row uses this — `sleep`,
+    /// since the user ruling of 2026-11-14 (rubash#3488, decision
+    /// (a)); since S4 exactly one face also carries it as a per-face
+    /// record: the pipeline cat face (the concurrent planner, not
+    /// the arm, yields). The consistency tests pin the exact row
+    /// set and the exact per-face set so either can only change
+    /// deliberately.
     Yield,
     /// The real body wins when the resolution is a script (a `#!`
     /// file); a native-image resolution is still replaced. Ruled for
@@ -683,13 +689,30 @@ pub(crate) const COMMAND_REGISTRY: &[CommandRow] = &[
     CommandRow {
         name: "sleep",
         class: ClaimClass::Fastpath,
-        impls: &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> builtins/sleep.rs (interruptible virtual-child wait)"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step (stand-down checked)"), ImplRef::new(Entry::TimedConsumer, "pipeline_exec::timed_read_consumer_output. Per-face stand_down (KD-4, S3 §3.2-c, S4 sink): the consumer model NEVER consults the stand-down predicate — its sleep is a modeled delay inside the read -t consumer body, not a resolution claim — so it answers for an unresolvable sleep exactly as for a resolvable one (Unchecked). The producer face (TimedProducer) checks the predicate and declines (row policy). This producer-checks/consumer-doesn't split is a model-only divergence, KEPT deliberately: the timed entries are semantic models, not dispatch (audit R6), and making the consumer consult resolution would mistranslate 'unresolvable' into a timing verdict").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked)), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream")],
+        impls: &[ImplRef::new(Entry::SimpPrimary, "command_dispatch_primary -> builtins/sleep.rs (interruptible virtual-child wait)"), ImplRef::new(Entry::TimedProducer, "pipeline_exec::timed_pipeline_step (stand-down checked)").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed)), ImplRef::new(Entry::TimedConsumer, "pipeline_exec::timed_read_consumer_output. Per-face stand_down (KD-4, S3 §3.2-c, S4 sink): the consumer model NEVER consults the stand-down predicate — its sleep is a modeled delay inside the read -t consumer body, not a resolution claim — so it answers for an unresolvable sleep exactly as for a resolvable one (Unchecked). The producer face (TimedProducer) checks the predicate and declines (per-face record (Replace, FailClosed) on its ImplRef, registered by rubash#3488 when the row flipped to Yield). This producer-checks/consumer-doesn't split is a model-only divergence, KEPT deliberately: the timed entries are semantic models, not dispatch (audit R6), and making the consumer consult resolution would mistranslate 'unresolvable' into a timing verdict").with_stand_down(StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked)), ImplRef::new(Entry::TimedFollowup, "pipeline_exec::timed_followup_keeps_stream")],
         admission: Admission::SleepDuration,
-        // Row policy = the simple-command face; the timed-consumer model
-        // diverges (it never consults the predicate, audit §1.5) and
-        // carries its own per-face record on its ImplRef above
-        // (KD-4, adjudicated in S4: model-only divergence, kept).
-        stand_down: StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
+        // Row policy = the simple-command face. FLIPPED from
+        // Replace to Yield by user ruling 2026-11-14 (rubash#3488,
+        // decision (a)): on unix the face stands down for every
+        // parseable form, so sleep runs as a real spawned child —
+        // the in-process simulation has no process identity
+        // (rubash#2995), so a process-tree supervisor (the bats
+        // timeout killer is the field case) finds no child to kill
+        // and the run lasts the whole sleep. This overturns the
+        // #2036 fastpath axis for sleep. The Yield value is
+        // consumed by the simple-command face only under cfg!(unix);
+        // the non-unix face keeps the in-process body, and the
+        // unresolvable axis is unchanged (FailClosed). The timed
+        // faces are semantic models, not dispatch (audit R6), and
+        // keep their measured rules: the consumer model diverges
+        // (it never consults the predicate, audit §1.5) and the
+        // producer model consults only the fail-closed predicate —
+        // both carry their own per-face records on their ImplRefs
+        // above (KD-4 for the consumer, adjudicated in S4:
+        // model-only divergence, kept; #3488 for the producer,
+        // registered so the ledger stays truthful now that the row
+        // policy no longer describes it).
+        stand_down: StandDown::new(ResolvablePolicy::Yield, UnresolvablePolicy::FailClosed),
         function_shadow: FunctionShadow::Allow,
         enable_n: EnableN::NotApplicable,
         introspection: Introspection::Emulated,
@@ -2045,16 +2068,24 @@ mod registry_consistency {
         for name in &conflict34 {
             assert!(names.contains(name), "{name} missing from registry");
         }
-        // The audit's headline in executable form, at ROW level: no
-        // row yields to a resolved real body. The one per-face Yield
-        // (the pipeline cat face, whose planner yields) is a face
-        // record, pinned exactly in
-        // per_face_stand_down_records_are_exact below.
-        assert!(
-            COMMAND_REGISTRY
-                .iter()
-                .all(|r| r.stand_down.resolvable != ResolvablePolicy::Yield),
-            "a row started yielding — update this pin with the adjudication reference"
+        // Row-level Yield is exactly `sleep`, adjudicated by the
+        // user ruling of 2026-11-14 (rubash#3488, decision (a)): on
+        // unix its simple-command face stands down so a parseable
+        // sleep runs as a real spawned child (the in-process
+        // simulation has no process identity, rubash#2995). The one
+        // per-face Yield (the pipeline cat face, whose planner
+        // yields) is a face record, pinned exactly in
+        // per_face_stand_down_records_are_exact below. Any further
+        // row taking the value needs its own adjudication.
+        let yield_rows: Vec<&str> = COMMAND_REGISTRY
+            .iter()
+            .filter(|r| r.stand_down.resolvable == ResolvablePolicy::Yield)
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(
+            yield_rows,
+            vec!["sleep"],
+            "Yield rows are exactly the #3488 sleep adjudication"
         );
         // ScriptYield at row level is exactly the identity pair,
         // adjudicated by rubash#2104 (a script resolution runs; a
@@ -2084,13 +2115,15 @@ mod registry_consistency {
 
     #[test]
     fn per_face_stand_down_records_are_exact() {
-        // S4 per-face sink: exactly four faces carry their own
+        // S4 per-face sink: exactly five faces carry their own
         // StandDown record — the adjudicated cells whose measured
         // rule diverges from their row's (S3 REPORT §3.2-a/b/c and
-        // §3.1). Every other ImplRef in the table inherits its row
-        // policy (stand_down == None), so this set is the complete
-        // per-face divergence ledger; adding a fifth cell requires
-        // updating this pin with its adjudication reference.
+        // §3.1, plus the sleep producer cell registered by
+        // rubash#3488). Every other ImplRef in the table inherits
+        // its row policy (stand_down == None), so this set is the
+        // complete per-face divergence ledger; adding another cell
+        // requires updating this pin with its adjudication
+        // reference.
         let mut recorded: Vec<(&str, Entry, StandDown)> = COMMAND_REGISTRY
             .iter()
             .flat_map(|row| {
@@ -2128,6 +2161,17 @@ mod registry_consistency {
                 "sleep",
                 Entry::TimedConsumer,
                 StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::Unchecked),
+            ),
+            // rubash#3488: the producer model consults only
+            // emulated_external_stands_down — it models a resolvable
+            // sleep and declines an unresolvable one, the (Replace,
+            // FailClosed) cell. Registered when the row flipped to
+            // Yield so the ledger keeps stating the face's measured
+            // rule; the model code is unchanged (audit R6).
+            (
+                "sleep",
+                Entry::TimedProducer,
+                StandDown::new(ResolvablePolicy::Replace, UnresolvablePolicy::FailClosed),
             ),
         ];
         assert_eq!(recorded, expected);
