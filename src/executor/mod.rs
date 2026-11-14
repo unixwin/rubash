@@ -602,7 +602,8 @@ pub(crate) struct RunDiagnostic {
 pub(in crate::executor) struct SubshellProcessSave {
     pub(in crate::executor) depth: usize,
     pub(in crate::executor) background_children: HashMap<u32, crate::fd::SpawnedChild>,
-    pub(in crate::executor) pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    pub(in crate::executor) pending_job_completions:
+        Vec<(u32, i32, Option<i32>, std::time::Instant)>,
     pub(in crate::executor) pending_coproc_retirements: Vec<u32>,
     pub(in crate::executor) procsub_stream_children: HashMap<u32, bool>,
 }
@@ -780,11 +781,13 @@ pub struct Executor {
     /// Background-job completions the boundary reap has already
     /// observed (try_wait returned) but whose job-table visibility is
     /// deferred to the next GNU observation point — a foreground
-    /// process wait, a new reader line, a new execute_ast run, or an
-    /// explicit wait/fg (jobs.c waitchld lag; see
+    /// process wait, an explicit wait/fg, job control on a terminal,
+    /// or the SIGCHLD-delivery aging below (jobs.c waitchld lag; see
     /// refresh_background_jobs in job_builtins.rs). Entries are
-    /// (pid, flattened status, killing signal).
-    pending_job_completions: Vec<(u32, i32, Option<i32>)>,
+    /// (pid, flattened status, killing signal, first-seen instant):
+    /// the instant the sweep first reaped the child, which the aging
+    /// arm of apply_pending_job_completions measures (rubash#2769).
+    pending_job_completions: Vec<(u32, i32, Option<i32>, std::time::Instant)>,
     /// rubash#2053/#2057: coproc pids whose completion has been
     /// applied (status recorded in completed_statuses) but whose
     /// retirement — coproc_unsetvars + endpoint close, GNU's

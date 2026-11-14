@@ -127,8 +127,11 @@ impl Executor {
         // GNU's jobs listing disposes dead coprocs before printing
         // (jobs.c list_all_jobs/list_one_job call cleanup_dead_jobs,
         // which reaps coprocs) — the same disposal point as the wait
-        // family (rubash#2053).
-        let _ = self.apply_pending_job_completions(true, false);
+        // family (rubash#2053). Only coproc completions are applied
+        // here (rubash#2769): the listing records no new background
+        // death, so a non-coproc completion stays stashed until a
+        // GNU observation point applies it.
+        let _ = self.apply_pending_coproc_completions();
         self.flush_pending_coproc_retirements();
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1455,6 +1458,49 @@ impl Executor {
             .push((pid, signal, command, foreground));
     }
 
+    /// Print a foreground child's signal-death notice synchronously
+    /// at its wait (rubash#2769): GNU's wait_for calls
+    /// notify_and_cleanup for the dead foreground job before returning
+    /// (jobs.c:3385), so the notice is stamped with the line the reader
+    /// is on at the wait — the dying command's own line, or its
+    /// enclosing compound's end line (the ambient line) — and prints
+    /// before the next command's output. Queueing it for the reader
+    /// boundary instead stamped it with the next command's line and
+    /// printed it after that command ran. The notice goes through the
+    /// shared emit core (format + mark notified + cleanup + fd-2
+    /// write), so a later boundary flush never re-prints it.
+    pub(crate) fn print_fg_signal_notice_now(
+        &mut self,
+        pid: u32,
+        signal: i32,
+        command: String,
+    ) -> Result<(), ExecuteError> {
+        if signal <= 0 {
+            return Ok(());
+        }
+        let Some(line) = self.ambient_line.get() else {
+            return self.emit_signal_notices(vec![(pid, signal, command, true)]);
+        };
+        let previous = self
+            .shell_state
+            .env_vars
+            .get("__RUBASH_CURRENT_LINE")
+            .cloned();
+        self.set_current_line_value(line);
+        let result = self.emit_signal_notices(vec![(pid, signal, command, true)]);
+        match previous {
+            Some(value) => {
+                self.shell_state
+                    .env_vars
+                    .insert("__RUBASH_CURRENT_LINE".to_string(), value);
+            }
+            None => {
+                self.shell_state.env_vars.remove("__RUBASH_CURRENT_LINE");
+            }
+        }
+        result
+    }
+
     /// Command text for a foreground child's signal-death notice
     /// (rubash#229). GNU prints the job's `command` string — the pipeline
     /// text as typed (jobs.c make_job stores the_printed_command), not a
@@ -1764,9 +1810,15 @@ impl Executor {
             let padding = 27usize.saturating_sub(description.chars().count());
             if !trapped && signal != SIGTERM {
                 // Branch 1 (jobs.c:4625-4641): the "name: line N: PID desc
-                // cmd" shape. The line at notify time is the command that
-                // just finished (the boundary runs before the next command
-                // sets its own line), matching GNU's line_number.
+                // cmd" shape. The stamp is GNU's line_number at the
+                // moment the notice prints: the ambient line for a
+                // foreground death (wait_for's notify, jobs.c:3385 —
+                // the dying command's own line, or its enclosing
+                // compound's end line), the next command's line for a
+                // background death (the boundary pull, parse.y:2533).
+                // The two faces are stamped by their own callers
+                // (print_fg_signal_notice_now / the at_line reports);
+                // this formatter only renders the swapped-in line.
                 out.push_str(&self.diagnostic_prefix());
                 out.push_str(&format!("{pid:>5} {description}"));
                 out.push_str(&" ".repeat(padding));
@@ -1867,42 +1919,49 @@ impl Executor {
     ) -> Result<(), ExecuteError> {
         // part_036 (jobs.c waitchld lag): a reap becomes VISIBLE in the
         // job table only at a GNU observation point — the shell blocked
-        // in wait() for a foreground process, the reader advanced to a
-        // new line, or a fresh execute_ast run began. Between
-        // observation points (a stretch of builtins inside one read)
-        // `jobs` keeps showing the pre-death state: GNU 5.3.20 lists a
-        // jobspec-killed job as Running until the reap boundary even
-        // though the process is already dead, and the pre-fix eager
-        // application here printed `Terminated` for it.
+        // in wait() for a foreground process (wait_for's waitchld,
+        // jobs.c:3064), an explicit wait/fg, or job control live on a
+        // terminal. A bare reader advance is NOT one: GNU 5.3.20 lists
+        // a jobspec-killed job as Running after `kill` + `echo` + `jobs`
+        // with no foreground wait in between, and prints no death
+        // notice for it either (rubash#2769 oracle probes) — the death
+        // is recorded only when waitchld runs or the SIGCHLD handler
+        // happens to fire, which in a script is a race, not a boundary.
+        // Between observation points (a stretch of builtins inside one
+        // read) `jobs` keeps showing the pre-death state, and a death
+        // reaped there is stashed, not applied — it becomes visible at
+        // the next observation point, or once the SIGCHLD-delivery
+        // aging below has elapsed (see apply_pending_job_completions).
         let mark = (
             self.execute_generation.get(),
             self.reader_command_line.get(),
             self.foreground_wait_count.get(),
         );
         let prev_mark = self.reap_prev_mark.get();
-        let observation_happened = mark != prev_mark;
         // rubash#2529: the reader-boundary cleanup below keys on the
         // run/line components only — GNU's read_command boundary is
         // per freshly read list, never between one list's elements.
         let line_advanced = mark.0 != prev_mark.0 || mark.1 != prev_mark.1;
-        // rubash#1607/#1612: publication of the shell's own kill
-        // state marks uses a NARROWER event set than reap visibility.
-        // A mere reader-line advance must not publish (kill -STOP,
-        // one intervening builtin, then `jobs` still shows Running —
-        // #1607); the events that publish are an explicit wait/fg
-        // (force_observe), the shell having blocked on a foreground
-        // process since the last refresh (foreground_wait_count
-        // moved), or job control live on a terminal (under a pty
-        // GNU publishes on the very next command — #1612). One
-        // predicate, computed here at the notification point, feeds
-        // both the state marks and (via `observe`) the reap side.
+        // rubash#1607/#1612/#2769: publication of the shell's own kill
+        // state marks and visibility of reaped completions use ONE
+        // event set — a mere reader-line advance publishes neither
+        // (kill -STOP, one intervening builtin, then `jobs` still shows
+        // Running — #1607; kill -KILL, `echo`, then `jobs` still shows
+        // Running and prints no notice — #2769). The events that
+        // publish are an explicit wait/fg (force_observe), the shell
+        // having blocked on a foreground process since the last refresh
+        // (foreground_wait_count moved), or job control live on a
+        // terminal (under a pty GNU publishes on the very next command
+        // — #1612). One predicate, computed here at the notification
+        // point, feeds both the state marks and (via `observe`) the
+        // reap side.
         let foreground_blocked = mark.2 != self.reap_prev_mark.get().2;
         self.reap_prev_mark.set(mark);
-        let observe = force_observe || observation_happened;
         let state_observe = force_observe
             || foreground_blocked
             || (crate::builtins::set::shell_option_enabled(&self.shell_state.env_vars, "monitor")
                 && self.stdin_source_is_terminal());
+        let observe = state_observe;
         // rubash#1494: apply the ripe kill state marks at the same
         // per-command boundary that reaps finished children.
         self.shell_state
@@ -2018,7 +2077,15 @@ impl Executor {
             // it instead; a wait/fg observed refresh (force_observe)
             // still applies it inside the wait, where the notice
             // drains through the wait's own fd 2.
+            // rubash#2769: the same holds for a refresh that observed
+            // a foreground wait (foreground_blocked): wait_for's
+            // waitchld recorded the death during that wait, so the
+            // notice cannot escape past a later `wait` — and at stream
+            // end this refresh is the last chance to print it at all
+            // (a completion stashed here is never applied again, so
+            // the EOF notice was lost outright).
             let fresh_fatal = !force_observe
+                && !foreground_blocked
                 && term_signal.is_some()
                 && !self.shell_state.coproc_names.contains_key(&pid)
                 && self.shell_state.job_table.take_fresh_fatal(pid);
@@ -2033,8 +2100,15 @@ impl Executor {
             if !fresh_fatal && observe && !stopped_recorded {
                 self.apply_job_completion(pid, status, term_signal)?;
             } else {
-                self.pending_job_completions
-                    .push((pid, status, term_signal));
+                // rubash#2769: record when the sweep first reaped the
+                // child — the aging arm of apply_pending_job_completions
+                // measures from here.
+                self.pending_job_completions.push((
+                    pid,
+                    status,
+                    term_signal,
+                    std::time::Instant::now(),
+                ));
             }
         }
         // rubash#2053/#2057: a refresh that observed a foreground
@@ -2071,22 +2145,62 @@ impl Executor {
     /// stashed: wait_for (jobs.c:3064) answers that wait from the
     /// recorded stop state, not from a death waitchld has not
     /// recorded for it.
+    /// rubash#2769: a stashed completion also applies once the
+    /// SIGCHLD-delivery aging has elapsed — GNU's handler records a
+    /// death opportunistically during builtin stretches, so a death
+    /// first reaped several milliseconds ago is recorded by the time
+    /// the next boundary runs (oracle: a kill followed by a ~15 ms
+    /// builtin loop prints the notice 8/10, by ~50 ms 10/10, while a
+    /// microsecond gap prints it ~1/5). The threshold mirrors the
+    /// deferred-state-mark publication rule (apply_deferred_state_marks,
+    /// 5 ms): the same delivery latency, the same constant.
     fn apply_pending_job_completions(
         &mut self,
         observe: bool,
         wait_gate: bool,
     ) -> Result<(), ExecuteError> {
-        if !observe || self.pending_job_completions.is_empty() {
+        if self.pending_job_completions.is_empty() {
+            return Ok(());
+        }
+        const AGED: std::time::Duration = std::time::Duration::from_millis(5);
+        let pending = std::mem::take(&mut self.pending_job_completions);
+        for (pid, status, term_signal, stashed_at) in pending {
+            if wait_gate && self.shell_state.job_table.job_recorded_stopped(pid) {
+                self.pending_job_completions
+                    .push((pid, status, term_signal, stashed_at));
+                continue;
+            }
+            if observe || stashed_at.elapsed() >= AGED {
+                self.apply_job_completion(pid, status, term_signal)?;
+            } else {
+                self.pending_job_completions
+                    .push((pid, status, term_signal, stashed_at));
+            }
+        }
+        Ok(())
+    }
+
+    /// Apply only the stashed completions for coprocesses (rubash#2769):
+    /// GNU's `jobs` listing disposes dead coprocs (jobs.c
+    /// cleanup_dead_jobs -> coproc_reap) but records no new background
+    /// deaths — the listing shows the job table as waitchld/the handler
+    /// recorded it, and the `jobs` builtin itself calls only
+    /// notify_and_cleanup (builtins/jobs.def:172), never waitchld.
+    /// Force-applying every stashed completion here made `jobs` list a
+    /// job as Killed (and queue its notice) that GNU still shows
+    /// Running when no foreground wait has recorded the death.
+    fn apply_pending_coproc_completions(&mut self) -> Result<(), ExecuteError> {
+        if self.pending_job_completions.is_empty() {
             return Ok(());
         }
         let pending = std::mem::take(&mut self.pending_job_completions);
-        for (pid, status, term_signal) in pending {
-            if wait_gate && self.shell_state.job_table.job_recorded_stopped(pid) {
+        for (pid, status, term_signal, stashed_at) in pending {
+            if self.shell_state.coproc_names.contains_key(&pid) {
+                self.apply_job_completion(pid, status, term_signal)?;
+            } else {
                 self.pending_job_completions
-                    .push((pid, status, term_signal));
-                continue;
+                    .push((pid, status, term_signal, stashed_at));
             }
-            self.apply_job_completion(pid, status, term_signal)?;
         }
         Ok(())
     }
