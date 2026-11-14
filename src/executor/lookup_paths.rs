@@ -31,7 +31,8 @@ impl Executor {
         describe_spelling: bool,
     ) -> Option<String> {
         if !force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            if let Some(path) =
+                crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
                 return Some(path);
             }
@@ -258,7 +259,8 @@ impl Executor {
         // is the -a (`CDESC_ALL`) enumeration, so the hashed entry is reported
         // only under -P (force_path); a plain `type -a` must NOT prepend it.
         if force_path {
-            if let Some(path) = crate::builtins::hash::hashed_path(&self.shell_state.env_vars, name)
+            if let Some(path) =
+                crate::builtins::hash::phash_search(&self.shell_state.env_vars, name)
             {
                 paths.push(path);
             }
