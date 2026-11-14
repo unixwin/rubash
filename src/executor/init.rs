@@ -1650,7 +1650,15 @@ impl Executor {
         // imported PWD keeps its stale value and an absent one stays
         // unbound; no logical value is adopted either — the readers
         // gate on the empty field itself.
+        // rubash#3570: the `\`→`/` rewrite is a Windows path-form
+        // normalization — on Unix a backslash is an ordinary filename byte
+        // (general.h:264-270 ABSPATH), and GNU set_pwd (variables.c:907)
+        // binds the get_working_directory spelling verbatim, so a physical
+        // cwd named `dir\name` must NOT become the nonexistent `dir/name`.
+        #[cfg(windows)]
         let physical_pwd = shell_pwd_display(&cwd.to_string_lossy().replace('\\', "/"));
+        #[cfg(not(windows))]
+        let physical_pwd = shell_pwd_display(cwd.to_string_lossy().as_ref());
         let startup_logical_cwd = if cwd.as_os_str().is_empty() {
             String::new()
         } else {
