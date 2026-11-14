@@ -1333,6 +1333,27 @@ impl Executor {
             if redirect.fd_var.is_some() {
                 continue;
             }
+            // rubash#3195: a heredoc / here-string entry binds its
+            // redirector at this list position in GNU's walk — the
+            // body is materialized first (here_document_to_fd,
+            // redir.c:1072), then the dup2 onto a redirector at/above
+            // the RLIMIT_NOFILE soft limit fails EBADF (redir.c:1120)
+            // and the command never runs. The entries skip the kind
+            // filter below (their bodies are served textually, not
+            // bound into the table here), so without this gate an
+            // over-limit entry binds silently at any fd. `{var}`
+            // forms already continued above: their allocator stays
+            // below the limit by construction.
+            if matches!(
+                redirect.kind,
+                crate::parser::RedirectKind::HereDoc | crate::parser::RedirectKind::HereString
+            ) && self.redirect_fd_over_limit(fd)
+            {
+                return Err(ExecuteError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{fd}: Bad file descriptor"),
+                )));
+            }
             if !matches!(
                 redirect.kind,
                 crate::parser::RedirectKind::Input
