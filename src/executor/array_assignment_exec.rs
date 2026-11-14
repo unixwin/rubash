@@ -257,11 +257,16 @@ impl Executor {
         } else {
             pre_attrs
         };
-        if name == "BASH_ALIASES" {
+        if name == "BASH_ALIASES"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             // TODO(variables.c/alias.c): BASH_ALIASES is a dynamic
             // associative array backed by the alias table. Keep this narrow
             // bridge here so array assignment does not swallow alias.tests'
-            // invalid-name diagnostic.
+            // invalid-name diagnostic. A severed name (explicit `unset`,
+            // or a whole-name bind — variables.c:3839 makes it an ordinary
+            // variable for the rest of the shell's lifetime, rubash#3573)
+            // falls through to the normal element bind instead.
             let alias_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
@@ -458,7 +463,9 @@ impl Executor {
             self.exit_code = 0;
             return true;
         }
-        if name == "BASH_CMDS" {
+        if name == "BASH_CMDS"
+            && !is_marked_var(&self.shell_state.env_vars, UNSET_DYNAMIC_VARS, name)
+        {
             let command_name = index
                 .trim_end_matches(']')
                 .trim_matches('\'')
