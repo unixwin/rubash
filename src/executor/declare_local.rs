@@ -702,16 +702,42 @@ impl Executor {
                             return Err(());
                         }
                     } else if nested_readonly {
-                        // GNU declare.def make_local_variable path surfaces
-                        // through sh_readonly (builtin_error family): the
-                        // line segment never gates, so this keeps the
-                        // ungated prefix (verified: `local l=(...)` in a
-                        // function reports `line N:` under gnu_errfmt).
-                        eprintln!(
-                            "{}{lhs}: readonly variable",
-                            self.diagnostic_prefix()
-                        );
-                        if self.shell_state.function_depth == 0 {
+                        // rubash#2658: two prolog classes split by builtin.
+                        // declare/typeset/local bind the compound operand
+                        // through the nested declare's builtin_error, whose
+                        // this_command_name is the enclosing function name —
+                        // `f() { local r=(4); }` on readonly r prints
+                        // `f: r: readonly variable`, skips the bind, and the
+                        // outer builtin reports the operand a second time
+                        // with its own name. export/readonly (setattr.def
+                        // family) instead report via err_readonly, which
+                        // prints the bare variable name with no
+                        // this_command_name segment — and their operand's
+                        // expansion-time bind failure is a real DISCARD
+                        // (subst.c:13033 exp_jump_to_top_level): inside a
+                        // function the function body is abandoned after the
+                        // single line, before the special builtin runs
+                        // (probe: `f() { readonly r=(4); declare -p r; }`
+                        // prints `r: readonly variable` once, f's tail never
+                        // runs, the caller continues at top level).
+                        if declare_family {
+                            match self.shell_state.function_name_stack.first() {
+                                Some(func) => eprintln!(
+                                    "{}{func}: {lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                                None => eprintln!(
+                                    "{}{lhs}: readonly variable",
+                                    self.diagnostic_prefix()
+                                ),
+                            }
+                        } else {
+                            eprintln!(
+                                "{}{lhs}: readonly variable",
+                                self.diagnostic_prefix()
+                            );
+                        }
+                        if self.shell_state.function_depth == 0 || !declare_family {
                             // Same subst.c:13033 DISCARD for the nested
                             // readonly bind (GNU probe run401/nro.sh:
                             // `declare ro=() 2> E1; echo same-line` skips the
