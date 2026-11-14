@@ -701,15 +701,29 @@ fn exec_target_word(
 /// the script name — and the name shell_execve's failure reports
 /// carry (file_error / sys_error on `command`).
 fn full_pathname(word: &str, cwd: &std::path::Path) -> String {
-    let word = word.replace('\\', "/");
+    // The `\` fold and the `X:/` drive test are Win32-host path syntax,
+    // not GNU semantics: general.h's ABSPATH arm is `x[0]=='/'` only
+    // (the `!defined(__CYGWIN__)` side carries no drive notion either),
+    // and on Unix `\` is an ordinary filename byte while `D:/x` is a
+    // relative path. Gate both to Windows so a Unix execve sees the
+    // word's original bytes.
+    let word = if cfg!(windows) {
+        word.replace('\\', "/")
+    } else {
+        word.to_owned()
+    };
     let bytes = word.as_bytes();
-    let absolute =
-        word.starts_with('/') || (bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
+    let absolute = word.starts_with('/')
+        || (cfg!(windows) && bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/');
     if absolute {
         return word;
     }
     // G-02: general.c's "current working directory" is the session cwd.
-    let cwd = cwd.to_string_lossy().replace('\\', "/");
+    let cwd = if cfg!(windows) {
+        cwd.to_string_lossy().replace('\\', "/")
+    } else {
+        cwd.to_string_lossy().into_owned()
+    };
     let rest = word.strip_prefix("./").unwrap_or(&word);
     if cwd.ends_with('/') {
         format!("{cwd}{rest}")

@@ -31,12 +31,18 @@ fn scratch(tag: &str) -> PathBuf {
 
 fn run(root: &Path, body: &str) -> (String, String) {
     std::fs::write(root.join("case.sh"), body).expect("case script");
-    let out = Command::new(BIN)
+    let mut command = Command::new(BIN);
+    command
         .arg("case.sh")
         .current_dir(root)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("run rubash");
+        .stdin(std::process::Stdio::null());
+    // A real parent shell exports a PWD matching the cwd it chdir'd into;
+    // Command::current_dir only chdirs the child, so without this the
+    // child inherits a stale PWD and these pins would exercise the
+    // startup PWD-rebind path instead of the exec semantics under test.
+    #[cfg(unix)]
+    command.env("PWD", root);
+    let out = command.output().expect("run rubash");
     let _ = std::fs::remove_dir_all(root);
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -67,6 +73,8 @@ fn exec_relative_script_dollar0_strips_one_leading_dot_slash() {
 #[cfg(unix)]
 mod unix_faces {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     /// The `#!` face: the execve filename is what the kernel hands the
     /// interpreter as the script name.
@@ -111,5 +119,43 @@ mod unix_faces {
             "D/nope: No such file or directory\nD/sub/../nope: No such file or directory\nD/sub/./nope: No such file or directory\nD/./nope: No such file or directory\n",
             "stderr: {stderr}"
         );
+    }
+
+    /// Unix faces for the Windows-only path syntax: `\` is an ordinary
+    /// filename byte and `D:/x` is a relative path there, so neither the
+    /// backslash fold nor the `X:/` drive check may fire off Windows.
+    #[test]
+    fn exec_literal_backslash_filename_runs_verbatim_on_unix() {
+        let root = scratch("literal-backslash");
+        fs::copy("/bin/echo", root.join("back\\slash")).expect("copy /bin/echo");
+        let (stdout, stderr) = run(&root, "exec './back\\slash' literal-ok\n");
+        assert_eq!(stdout, "literal-ok\n", "stderr: {stderr}");
+        assert!(stderr.is_empty(), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn exec_cwd_with_backslash_byte_joins_verbatim_on_unix() {
+        let root = scratch("cwd\\backslash");
+        fs::copy("/bin/echo", root.join("echo")).expect("copy /bin/echo");
+        let (stdout, stderr) = run(&root, "exec ./echo cwd-ok\n");
+        assert_eq!(stdout, "cwd-ok\n", "stderr: {stderr}");
+        assert!(stderr.is_empty(), "stderr: {stderr}");
+    }
+
+    #[test]
+    fn exec_drive_colon_word_is_relative_and_binds_full_pathname_on_unix() {
+        let root = scratch("drive-relative");
+        let dir = root.join("D:");
+        fs::create_dir(&dir).expect("D: dir");
+        let target = dir.join("target.sh");
+        fs::write(&target, "#!/bin/sh\nprintf 'zero=%s\\n' \"$0\"\n").expect("target.sh");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).expect("chmod +x");
+        let (stdout, stderr) = run(&root, "exec 'D:/target.sh'\n");
+        assert_eq!(
+            stdout,
+            format!("zero={}/D:/target.sh\n", root.display()),
+            "stderr: {stderr}"
+        );
+        assert!(stderr.is_empty(), "stderr: {stderr}");
     }
 }
