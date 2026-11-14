@@ -5876,8 +5876,23 @@ impl Executor {
             return Ok(Some(0));
         }
 
-        if let Some((fd, input)) = self.exec_heredoc_fd_input(cmd) {
-            self.set_fd_input_text(fd, input, fd != 0);
+        // rubash#3578: bind EVERY heredoc/here-string entry in the
+        // list, in order — GNU's do_redirections (redir.c:237) walks
+        // the whole list and materializes each entry's own body
+        // (here_document_to_fd, redir.c:423) before dup2'ing it onto
+        // its redirector (redir.c:1120). The old single-entry lookup
+        // (`.rev().find()`) bound only the last entry, so
+        // `exec 14<<A 15<<B` lost fd 14's binding while fd 15 stood.
+        // Same-fd repeats keep GNU's last-wins order: binding in list
+        // order lets the later entry overwrite the earlier one.
+        // The gate in the plain loop above still runs first and aborts
+        // the whole walk on failure, so a failing later entry still
+        // leaves every earlier heredoc unbound (rubash#3195).
+        let heredoc_inputs = self.exec_heredoc_fd_inputs(cmd);
+        if !heredoc_inputs.is_empty() {
+            for (fd, input) in heredoc_inputs {
+                self.set_fd_input_text(fd, input, fd != 0);
+            }
             return Ok(Some(0));
         }
 
@@ -5890,19 +5905,35 @@ impl Executor {
         Ok(None)
     }
 
-    fn exec_heredoc_fd_input(&self, cmd: &CommandNode) -> Option<(u32, String)> {
-        let redirect = cmd
-            .heredoc_redirects
+    /// All heredoc/here-string bindings of a redirect-only `exec`,
+    /// in list order (rubash#3578). GNU's do_redirections
+    /// (redir.c:237) applies EVERY entry: each entry materializes
+    /// its own body (here_document_to_fd, redir.c:423) and dup2's it
+    /// onto its own redirector (redir.c:1120), so `exec 14<<A 15<<B`
+    /// binds both descriptors and `exec 14<<A 14<<B` leaves fd 14 on
+    /// the second body.
+    fn exec_heredoc_fd_inputs(&self, cmd: &CommandNode) -> Vec<(u32, String)> {
+        cmd.heredoc_redirects
             .iter()
-            .rev()
-            // `{var}` heredocs are bound by the fd_var loop above; every
-            // other heredoc/here-string with a body belongs to its explicit
-            // fd, or to fd 0 when the redirect names no fd. The old
-            // `fd.is_some()` gate silently dropped `exec <<EOF` and
-            // `exec <<<word`, whose persistence is the whole point of the
-            // no-operand exec form (GNU redir.c: a redirect-only exec makes
-            // the redirection permanent; rubash#1413).
-            .find(|redirect| redirect.fd_var.is_none() && redirect.body.is_some())?;
+            .filter_map(|redirect| self.exec_heredoc_fd_input_entry(redirect))
+            .collect()
+    }
+
+    /// Per-entry body expansion behind exec_heredoc_fd_inputs:
+    /// `{var}` heredocs are bound by the fd_var loop above; every
+    /// other heredoc/here-string with a body belongs to its explicit
+    /// fd, or to fd 0 when the redirect names no fd. The old
+    /// `fd.is_some()` gate silently dropped `exec <<EOF` and
+    /// `exec <<<word`, whose persistence is the whole point of the
+    /// no-operand exec form (GNU redir.c: a redirect-only exec makes
+    /// the redirection permanent; rubash#1413).
+    fn exec_heredoc_fd_input_entry(
+        &self,
+        redirect: &crate::parser::HereDocRedirect,
+    ) -> Option<(u32, String)> {
+        if redirect.fd_var.is_some() {
+            return None;
+        }
         let fd = redirect.fd.unwrap_or(0);
         let body = redirect.body.as_deref()?;
         let input = if let Some(carrier) = &redirect.body_carrier {
