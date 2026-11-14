@@ -152,6 +152,9 @@ impl Executor {
     /// outside command substitution. The stoppable foreground waits
     /// and the emulation stand-downs consult this one predicate. On
     /// unix it IS the job-control channel.
+    // The unix consumers keep calling job_control_channel_active
+    // directly; only the Windows waits read this face today.
+    #[cfg_attr(unix, allow(dead_code))]
     pub(in crate::executor) fn foreground_stop_channel_active(&self) -> bool {
         #[cfg(unix)]
         {
