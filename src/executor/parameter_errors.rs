@@ -45,6 +45,33 @@ fn split_leading_array_ref(name: &str) -> Option<(&str, &str)> {
     Some((base, subscript))
 }
 
+/// The subscript text of the leading `name[...]` reference of a
+/// `${...}` parameter body, if it has one; text after the closing
+/// `]` (an operator suffix) is ignored because GNU
+/// parameter_brace_expand evaluates the subscript before the
+/// operator. Unlike `split_leading_array_ref`, a subscript that
+/// itself contains `[` (a nested subscript) is kept — the closing
+/// `]` is skipsubscript's, which nests brackets and treats
+/// `${...}` units as indivisible. An optional `!` (indirect) or
+/// `#` (length) prefix is skipped: both forms still expand the
+/// subscript during the fetch.
+fn leading_reference_subscript(inner: &str) -> Option<&str> {
+    let body = inner.strip_prefix(['!', '#']).unwrap_or(inner);
+    let open = body.find('[')?;
+    let head = &body[..open];
+    // GNU arrayfunc.c:1297-1313 `tokenize_array_reference` requires
+    // the base before `[` to pass `valid_identifier` — a digit base
+    // (`${1[...]}`) or a special-parameter base (`${@[0]}`) is a bad
+    // substitution, not a reference whose subscript is expanded, so
+    // only an identifier base descends (the malformed arm owns the
+    // rest and the real expansion reports it).
+    if !is_shell_name(head) {
+        return None;
+    }
+    let close = skipsubscript_close(body.as_bytes(), open)?;
+    Some(&body[open + 1..close])
+}
+
 /// A subscript that is a clean decimal integer literal (`-3`, `0`, `42`,
 /// `+7`): evaluating it through evalexp reads no variable, draws no RNG
 /// and writes nothing, so its value is decidable without evaluation.
@@ -353,6 +380,33 @@ fn mask_nonlocal_expansion_spans(word: &str) -> String {
         }
     }
     out.into_iter().collect()
+}
+
+/// The error pre-scan's verdict for one parameter name (rubash#2595 /
+/// #2762): the simulated-binding table first, then the #2527 pure
+/// probe. `Undecidable` means the verdict needs an evaluating fetch —
+/// a subscript the pure probe cannot settle without executing it.
+enum ScanValue {
+    /// Unset (no value at all).
+    Unset,
+    /// Set to the given value (empty counts as null for `:?`).
+    Set(String),
+    /// Set, but the value is unknown (bound by a non-literal `:=` /
+    /// `=` word the scan must not evaluate). Decides set-ness only.
+    SetUnknown,
+    /// No verdict without evaluating.
+    Undecidable,
+}
+
+/// The outcome of adjudicating one `:?` / `?` span in the scan.
+enum QuestionOutcome {
+    /// The span does not error.
+    NoError,
+    /// The span errors (report it).
+    Error,
+    /// Pure (pipeline-admission) mode and the span is undecidable:
+    /// count it as pending without evaluating anything.
+    ProvisionalPending,
 }
 
 impl Executor {
@@ -1139,6 +1193,9 @@ impl Executor {
         &self,
         cmd: &CommandNode,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk — fresh
+        // simulated bindings and an empty subscript carry.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         // rubash#2558: this pre-scan is a verdict-only pass layered over
         // the real expansion (GNU's single fetch is subst.c:9777
         // parameter_brace_expand). Isolate the deferred subscript writes
@@ -1241,6 +1298,10 @@ impl Executor {
     /// a pipeline element's here-string skipped the nounset check on both
     /// the concurrent path and, for the heredoc family, the stage path).
     pub(in crate::executor) fn parameter_expansion_error_pending(&self, cmd: &CommandNode) -> bool {
+        // rubash#2595: the admission predicate is side-effect-free, so
+        // its scan runs in pure mode — an undecidable `:?` span counts
+        // as pending (decline the fast path) instead of being evaluated.
+        let _pure = crate::executor::expand_braced_indices::ScanPureGuard::new();
         if cmd.arithmetic_command.is_some() {
             return false;
         }
@@ -1328,6 +1389,8 @@ impl Executor {
         &self,
         body: &str,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         // rubash#2558: same deferred-write isolation as
         // `parameter_expansion_error` — a no-error heredoc pre-scan must
         // not leave its subscript evaluations queued for a second
@@ -1389,6 +1452,8 @@ impl Executor {
         &self,
         word: &str,
     ) -> Option<(String, String, i32)> {
+        // rubash#2595/#2762: one scan call, one simulated walk.
+        crate::executor::expand_braced_indices::scan_ctx_begin();
         let mark = Self::scan_pending_writes_mark();
         let verdict = self.parameter_expansion_error_in_word(word);
         if verdict.is_none() {
@@ -1733,8 +1798,10 @@ impl Executor {
             // and GNU fetches exactly once (subst.c:9777
             // parameter_brace_expand → one array_value_internal). A
             // subscript the probe cannot settle without evaluating is
-            // left to that single real fetch.
-            let Some(value) = self.pre_scan_operator_value(var_name) else {
+            // left to that single real fetch. rubash#2762: the probe is
+            // simulation-aware, so a `:=` fragment earlier in the same
+            // walk already counts for the word-selection test.
+            let Some(value) = self.scan_operator_value(var_name) else {
                 continue;
             };
             let word_evaluated = match op {
@@ -1747,6 +1814,125 @@ impl Executor {
                 return None;
             }
             return self.parameter_expansion_error_in_word(word);
+        }
+        None
+    }
+
+    /// Adjudicate a nested `${...}` inside the leading reference's
+    /// subscript (rubash#2596). GNU `parameter_brace_expand`
+    /// (subst.c:9777) fetches the parameter before any operator,
+    /// transform, length or indirect adjudication, and the fetch
+    /// expands the subscript (expand_array_subscript → expand_string,
+    /// subst.c:11063 `expand_subscript_string`), which recurses into
+    /// a nested `${...}` under its own name — a `:?` there is fatal
+    /// for the inner parameter (`${a[${b:?e}]}` reports `b: e`).
+    /// The pre-scan never descended into subscripts: it consumed the
+    /// outer span whole, so the nested error was swallowed (and the
+    /// real expansion's subscript walk yields empty for it). Scan the
+    /// subscript text before the operator arms, so the subscript
+    /// error pre-empts them exactly like the fetch does.
+    fn nested_subscript_word_error(&self, inner: &str) -> Option<(String, String, i32)> {
+        let subscript = leading_reference_subscript(inner)?;
+        if !subscript.contains("${") {
+            return None;
+        }
+        self.scan_subscript_text_for_errors(subscript)
+    }
+
+    /// Walk subscript text for nested `${...}` errors (rubash#2596).
+    /// Quote-transparent — GNU expands a nested expansion inside a
+    /// subscript even in single quotes (`${a['${b:?e}']}` reports
+    /// `b: e`; the quotes survive into the arithmetic evaluation,
+    /// subst.c:11063 expand_subscript_string → expand_string) — but
+    /// `$(...)`/backtick spans are opaque: a `:?` inside one belongs
+    /// to the inner command, which reports it itself while the outer
+    /// command continues. `$((...))` arithmetic units stay opaque
+    /// like the top-level scan's P_ARITH rule (rubash#533).
+    fn scan_subscript_text_for_errors(&self, text: &str) -> Option<(String, String, i32)> {
+        let bytes = text.as_bytes();
+        let mut index = 0usize;
+        while index < bytes.len() {
+            match bytes[index] {
+                b'\\' => {
+                    index += 2;
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'\'') => {
+                    // ANSI-C string: backslash escapes carry through.
+                    index += 2;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'\'' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'(') => {
+                    // $(...) / $((...)) body: a separate expansion
+                    // source with its own scan; skip it whole.
+                    index += 2;
+                    let mut depth = 1usize;
+                    let mut single = false;
+                    let mut double = false;
+                    while index < bytes.len() {
+                        let current = bytes[index];
+                        if current == b'\\' && !single {
+                            index += 2;
+                            continue;
+                        }
+                        match current {
+                            b'\'' if !double => single = !single,
+                            b'"' if !single => double = !double,
+                            b'(' if !single && !double => depth += 1,
+                            b')' if !single && !double => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    index += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        index += 1;
+                    }
+                }
+                b'`' => {
+                    index += 1;
+                    while index < bytes.len() {
+                        if bytes[index] == b'\\' {
+                            index += 2;
+                            continue;
+                        }
+                        if bytes[index] == b'`' {
+                            index += 1;
+                            break;
+                        }
+                        index += 1;
+                    }
+                }
+                b'$' if bytes.get(index + 1) == Some(&b'{') => {
+                    let after = &text[index + 2..];
+                    let Some(end) = matching_parameter_brace(after) else {
+                        return Some((
+                            "${".to_string() + after + "}",
+                            "unexpected EOF while looking for matching `}'`".to_string(),
+                            2,
+                        ));
+                    };
+                    let span = &text[index..index + 2 + end + 1];
+                    if let Some(error) = self.parameter_expansion_error_in_word(span) {
+                        return Some(error);
+                    }
+                    index += 2 + end + 1;
+                }
+                _ => {
+                    index += 1;
+                }
+            }
         }
         None
     }
@@ -1855,6 +2041,248 @@ impl Executor {
             resolve_indexed_array_subscript(&storage, index)
                 .and_then(|resolved| array_value_at(&storage, resolved)),
         )
+    }
+
+    /// The simulated-binding table's verdict for `name`, if it has one
+    /// (rubash#2762). Exact-name matches win; a bare name also reads
+    /// the simulated element 0 (GNU reads element 0 for a bare array
+    /// name, variables.c get_string_value); an element query reads a
+    /// simulated scalar base's element 0 — and only that, unless the
+    /// live base is an array, whose other elements the simulation did
+    /// not touch. `[@]` / `[*]` joins take no simulated verdict (the
+    /// pure probe answers them from the live elements).
+    fn scan_sim_value(&self, name: &str) -> Option<ScanValue> {
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        let to_value = |sim: ScanSimValue| match sim {
+            ScanSimValue::Exact(value) => ScanValue::Set(value),
+            ScanSimValue::SetUnknown => ScanValue::SetUnknown,
+        };
+        if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(name) {
+            return Some(to_value(sim));
+        }
+        if name.ends_with("[@]") || name.ends_with("[*]") {
+            return None;
+        }
+        if let Some((base, key)) = parse_array_subscript(name) {
+            if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(base) {
+                return match clean_integer_literal_subscript(key) {
+                    Some(0) => Some(to_value(sim)),
+                    Some(_) => {
+                        if self.parameter_is_array_variable(base)
+                            || is_marked_var(&self.shell_state.env_vars, ASSOC_VARS, base)
+                        {
+                            None
+                        } else {
+                            Some(ScanValue::Unset)
+                        }
+                    }
+                    None => None,
+                };
+            }
+            return None;
+        }
+        if is_shell_name(name) {
+            let element0 = format!("{name}[0]");
+            if let Some(sim) = crate::executor::expand_braced_indices::scan_sim_lookup(&element0) {
+                return Some(to_value(sim));
+            }
+        }
+        None
+    }
+
+    /// The scan's set/null verdict for `name`: simulated bindings
+    /// first (an earlier `:=` / `=` fragment of the same walk), then
+    /// the #2527 pure probe. Never evaluates a subscript.
+    fn scan_error_value(&self, name: &str) -> ScanValue {
+        if let Some(value) = self.scan_sim_value(name) {
+            return value;
+        }
+        match self.pre_scan_operator_value(name) {
+            Some(value) => match value {
+                Some(value) => ScanValue::Set(value),
+                None => ScanValue::Unset,
+            },
+            None => ScanValue::Undecidable,
+        }
+    }
+
+    /// The `Option<Option<String>>` shape the operator-word and
+    /// substring arms need: `None` means undecidable (skip the span,
+    /// as the pure probe does today).
+    fn scan_operator_value(&self, name: &str) -> Option<Option<String>> {
+        match self.scan_error_value(name) {
+            ScanValue::Unset => Some(None),
+            ScanValue::Set(value) => Some(Some(value)),
+            ScanValue::SetUnknown | ScanValue::Undecidable => None,
+        }
+    }
+
+    /// The simulation's verdict for `name` by its RESOLVED element
+    /// name, after an evaluating fetch populated the subscript carry.
+    /// `None` when the fetch resolved nothing the simulation knows.
+    fn scan_sim_value_for_resolved(&self, name: &str) -> Option<ScanValue> {
+        let (base, key) = parse_array_subscript(name)?;
+        let expanded = crate::executor::expand_braced_indices::scan_carry_peek(key)?;
+        let resolved = format!("{base}[{expanded}]");
+        self.scan_sim_value(&resolved)
+    }
+
+    /// Adjudicate one `:?` / `?` span (rubash#2595 / #2762). The
+    /// verdict comes from the simulated walk or the pure probe
+    /// wherever possible, so a command substitution inside the tested
+    /// subscript is not executed by the scan; only an undecidable span
+    /// falls through to the evaluating fetch — whose resolution the
+    /// real expansion reuses through the subscript carry, so the
+    /// substitution still executes exactly once (subst.c:9777 single
+    /// fetch). In pure (pipeline-admission) mode no span is ever
+    /// evaluated: an undecidable span is provisional.
+    fn scan_question_is_error(&self, name: &str, require_non_empty: bool) -> QuestionOutcome {
+        // A negative-literal subscript can carry the fetch's own `bad
+        // array subscript` diagnostic (GNU arrayfunc.c:1582-1583
+        // INDEX_ERROR), which the pure probe cannot reproduce — let the
+        // evaluating fetch adjudicate (it executes nothing: the
+        // subscript is a literal). Pure mode stays evaluation-free.
+        let negative_literal = parse_array_subscript(name).is_some_and(|(_, key)| {
+            clean_integer_literal_subscript(key).is_some_and(|index| index < 0)
+        });
+        if negative_literal && crate::executor::expand_braced_indices::scan_pure_mode() {
+            return QuestionOutcome::ProvisionalPending;
+        }
+        if !negative_literal {
+            match self.scan_error_value(name) {
+                ScanValue::Unset => return QuestionOutcome::Error,
+                ScanValue::Set(value) => {
+                    return if require_non_empty && value.is_empty() {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    };
+                }
+                ScanValue::SetUnknown => {
+                    // Set-ness is known; only the colon form needs the
+                    // value. A bare `?` is decided; `:?` falls through
+                    // to the fetch, whose pre-command value is the
+                    // fallback today's scan used.
+                    if !require_non_empty {
+                        return QuestionOutcome::NoError;
+                    }
+                }
+                ScanValue::Undecidable => {}
+            }
+        }
+        if crate::executor::expand_braced_indices::scan_pure_mode() {
+            return QuestionOutcome::ProvisionalPending;
+        }
+        let fetched = self.parameter_error_value(name);
+        // The fetch resolved the subscript (carry map): re-check the
+        // simulation by the RESOLVED name — an earlier `:=` may have
+        // bound exactly this element, and the fetched (pre-command)
+        // value would then be stale.
+        if let Some(sim) = self.scan_sim_value_for_resolved(name) {
+            return match sim {
+                ScanValue::Unset => QuestionOutcome::Error,
+                ScanValue::Set(value) => {
+                    if require_non_empty && value.is_empty() {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                ScanValue::SetUnknown => {
+                    if !require_non_empty {
+                        QuestionOutcome::NoError
+                    } else if fetched.as_deref().map(str::is_empty).unwrap_or(true) {
+                        QuestionOutcome::Error
+                    } else {
+                        QuestionOutcome::NoError
+                    }
+                }
+                // Unreachable: the simulation never reports Undecidable.
+                ScanValue::Undecidable => QuestionOutcome::NoError,
+            };
+        }
+        let is_error = if require_non_empty {
+            fetched.as_deref().map(str::is_empty).unwrap_or(true)
+        } else {
+            fetched.is_none()
+        };
+        if is_error {
+            QuestionOutcome::Error
+        } else {
+            QuestionOutcome::NoError
+        }
+    }
+
+    /// Record a `:=` / `=` bind the walk just passed (rubash#2762),
+    /// so later fragments are adjudicated against the evolved state
+    /// (subst.c:13219 left-to-right walk; subst.c:7966 binds as it
+    /// goes). The bind is recorded only when the trigger condition is
+    /// decidable without evaluating (pure probe / simulation) and the
+    /// target can bind (not positional, readonly, or noassign — the
+    /// same predicates as the assignment-error scan); a non-literal
+    /// operator word records set-ness only, never its unevaluated
+    /// text. Recorded AFTER the span's own arms, so a nested `:?`
+    /// inside the operator word still sees the pre-bind value — GNU
+    /// expands the right-hand side before binding it.
+    fn scan_record_assignment(&self, inner: &str) {
+        let Some((name, require_non_empty)) = parse_parameter_assignment_operator(inner) else {
+            return;
+        };
+        if name.parse::<usize>().is_ok_and(|index| index > 0) {
+            return;
+        }
+        // A negative-literal element target may fail to resolve at bind
+        // time (GNU arrayfunc.c:1582-1583 INDEX_ERROR on an empty array),
+        // so a simulated bind for it would be a promise the real bind
+        // may not keep — leave the later `:?` to the fetch, which
+        // reports the failure itself.
+        if parse_array_subscript(name).is_some_and(|(_, key)| {
+            clean_integer_literal_subscript(key).is_some_and(|index| index < 0)
+        }) {
+            return;
+        }
+        let target = parse_array_subscript(name)
+            .map(|(array_name, _)| array_name.to_string())
+            .unwrap_or_else(|| {
+                self.nameref_target_name(name)
+                    .unwrap_or_else(|| name.to_string())
+            });
+        if is_marked_var(&self.shell_state.env_vars, READONLY_VARS, &target)
+            || is_noassign_bash_array(&target)
+        {
+            return;
+        }
+        // The trigger condition, judged without evaluating: the bind
+        // happens when the parameter is unset (`=` and `:=`) or null
+        // (`:=` only). Undecidable means the condition needs the
+        // subscript evaluated — do not record; later fragments keep
+        // today's pre-command verdict for this name.
+        let triggered = match self.scan_error_value(name) {
+            ScanValue::Unset => true,
+            ScanValue::Set(value) => require_non_empty && value.is_empty(),
+            ScanValue::SetUnknown | ScanValue::Undecidable => return,
+        };
+        if !triggered {
+            return;
+        }
+        let word = inner
+            .split_once(":=")
+            .and_then(|(n, w)| (n == name).then_some(w))
+            .or_else(|| {
+                inner
+                    .split_once('=')
+                    .and_then(|(n, w)| (n == name).then_some(w))
+            });
+        let Some(word) = word else {
+            return;
+        };
+        use crate::executor::expand_braced_indices::ScanSimValue;
+        let value = if word.contains('$') || word.contains('`') {
+            ScanSimValue::SetUnknown
+        } else {
+            ScanSimValue::Exact(self.expand_parameter_word(word))
+        };
+        crate::executor::expand_braced_indices::scan_sim_record(name.to_string(), value);
     }
 
     fn parameter_expansion_error_in_word_context(
@@ -1968,6 +2396,15 @@ impl Executor {
                     1,
                 ));
             }
+            // rubash#2596: the subscript is expanded while the
+            // parameter is fetched, before any operator, transform,
+            // length or indirect adjudication (subst.c:9777
+            // parameter_brace_expand; expand_subscript_string,
+            // subst.c:11063) — a nested error inside it pre-empts
+            // every arm below.
+            if let Some(nested) = self.nested_subscript_word_error(inner) {
+                return Some(nested);
+            }
             // GNU subst.c:8944-8951 parameter_brace_transform +
             // valid_parameter_transform (subst.c:8898): a `@xform` suffix on
             // a parameter name must be exactly one valid transform
@@ -1978,8 +2415,23 @@ impl Executor {
                 // character, so `${unset@C}`/`${unset@}` expand empty
                 // without error; only a set variable reaches the fatal
                 // valid_parameter_transform check at subst.c:8944.
-                let is_set = self.parameter_error_value(base).is_some()
-                    || self.shell_state.env_vars.contains_key(base);
+                // rubash#2762: the set test is simulation-aware, so a
+                // `:=` fragment earlier in the same walk already counts.
+                let is_set = self.shell_state.env_vars.contains_key(base)
+                    || match self.scan_error_value(base) {
+                        ScanValue::Unset => false,
+                        ScanValue::Set(_) | ScanValue::SetUnknown => true,
+                        // Pure (pipeline-admission) mode never evaluates:
+                        // an undecidable base counts as unset here, so the
+                        // span is skipped and the stage scan adjudicates
+                        // it for real.
+                        ScanValue::Undecidable
+                            if crate::executor::expand_braced_indices::scan_pure_mode() =>
+                        {
+                            false
+                        }
+                        ScanValue::Undecidable => self.parameter_error_value(base).is_some(),
+                    };
                 if is_set {
                     return Some((
                         crate::executor::expand_word::bad_substitution_display(word),
@@ -2349,42 +2801,59 @@ impl Executor {
             if let Some((name, message, require_non_empty)) =
                 parse_parameter_error_operator(inner, self.posix_mode_enabled())
             {
-                let value = self.parameter_error_value(name);
-                let is_error = if require_non_empty {
-                    value.as_deref().map(str::is_empty).unwrap_or(true)
-                } else {
-                    value.is_none()
-                };
-                if is_error {
-                    // GNU subst.c:8216-8230 parameter_brace_expand_error
-                    // expands the message word (expand_string) before it
-                    // reports; a `:?` failure inside that word is itself
-                    // fatal, pre-empts the outer report, and names the
-                    // INNER variable (rubash#2343: `${a:?${b:?inner}}`
-                    // reports `b: inner`, never `a: inner`).
-                    if !message.is_empty() {
-                        if let Some(nested) = self.parameter_expansion_error_in_word(message) {
-                            return Some(nested);
-                        }
-                    }
-                    let message = if message.is_empty() {
-                        if require_non_empty {
+                // rubash#2595/#2762: the verdict comes from the scan's
+                // in-order simulated walk (or the pure probe), not from
+                // an evaluating fetch — a command substitution inside
+                // the tested subscript must execute exactly once, in
+                // the real expansion (subst.c:9777 single fetch).
+                match self.scan_question_is_error(name, require_non_empty) {
+                    QuestionOutcome::NoError => {}
+                    QuestionOutcome::ProvisionalPending => {
+                        // Pure (pipeline-admission) mode: count the
+                        // span as pending without evaluating anything
+                        // — not even its message word.
+                        let message = if require_non_empty {
                             "parameter null or not set".to_string()
                         } else {
                             "parameter not set".to_string()
+                        };
+                        return Some((
+                            name.to_string(),
+                            message,
+                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                        ));
+                    }
+                    QuestionOutcome::Error => {
+                        // GNU subst.c:8216-8230 parameter_brace_expand_error
+                        // expands the message word (expand_string) before it
+                        // reports; a `:?` failure inside that word is itself
+                        // fatal, pre-empts the outer report, and names the
+                        // INNER variable (rubash#2343: `${a:?${b:?inner}}`
+                        // reports `b: inner`, never `a: inner`).
+                        if !message.is_empty() {
+                            if let Some(nested) = self.parameter_expansion_error_in_word(message) {
+                                return Some(nested);
+                            }
                         }
-                    } else {
-                        self.expand_parameter_word(message)
-                    };
-                    // GNU subst.c:8221 parameter_brace_expand_error →
-                    // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
-                    // the whole noninteractive script; subshell, pipeline,
-                    // and command-substitution boundaries contain it.
-                    return Some((
-                        name.to_string(),
-                        message,
-                        Self::FATAL_PARAMETER_EXPANSION_STATUS,
-                    ));
+                        let message = if message.is_empty() {
+                            if require_non_empty {
+                                "parameter null or not set".to_string()
+                            } else {
+                                "parameter not set".to_string()
+                            }
+                        } else {
+                            self.expand_parameter_word(message)
+                        };
+                        // GNU subst.c:8221 parameter_brace_expand_error →
+                        // expand_wdesc_fatal (FORCE_EOF): `${x?}`/`${x:?}` abort
+                        // the whole noninteractive script; subshell, pipeline,
+                        // and command-substitution boundaries contain it.
+                        return Some((
+                            name.to_string(),
+                            message,
+                            Self::FATAL_PARAMETER_EXPANSION_STATUS,
+                        ));
+                    }
                 }
             }
             // GNU subst.c parameter_brace_expand: the word of a `-`/`+`/`=`
@@ -2445,8 +2914,9 @@ impl Executor {
                         // nested_operator_word_error — a subscripted
                         // element name is answered by the pure probe,
                         // never by an evaluating fetch the real
-                        // expansion would repeat.
-                        self.pre_scan_operator_value(name)
+                        // expansion would repeat. rubash#2762: the probe
+                        // is simulation-aware.
+                        self.scan_operator_value(name)
                             .and_then(|value| value)
                             .is_some_and(|value| {
                                 parameter_substring_has_negative_result(
@@ -2473,6 +2943,12 @@ impl Executor {
                     }
                 }
             }
+            // rubash#2762: record a `:=` / `=` bind this fragment
+            // applied, after its own arms (a nested `:?` inside the
+            // operator word still sees the pre-bind value) — later
+            // fragments of the same walk are adjudicated against the
+            // evolved state.
+            self.scan_record_assignment(inner);
             rest = &after_start[end + 1..];
         }
         None

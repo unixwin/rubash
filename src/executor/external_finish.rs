@@ -39,7 +39,8 @@ impl Executor {
                     && !target.starts_with("<(")
                     && !target.starts_with(">(")
                 {
-                    let _ = self.create_redirect_output(&target, redirect.clobber);
+                    let _ =
+                        self.create_redirect_output_for(Some(redirect), &target, redirect.clobber);
                 }
             } else {
                 seen_last = true;
@@ -78,7 +79,8 @@ impl Executor {
             {
                 return result;
             }
-            let file = self.create_redirect_output(&target, redirect.clobber)?;
+            let file =
+                self.create_redirect_output_for(Some(redirect), &target, redirect.clobber)?;
             crate::fd::write_file_all(&file, output)?;
         } else if let Some(redirect) = &cmd.append {
             let target = self.expand_redirect_target(redirect);

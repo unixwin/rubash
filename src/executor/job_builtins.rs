@@ -4723,7 +4723,15 @@ impl Executor {
                     // (fc.def:403-421); the executed text is remembered
                     // in its place (fc_execute_file with
                     // remember_on_history forced on, fc.def:530).
-                    let was_recorded = shell.record(&edited, &control, &ignore, histsize);
+                    // fc.def:770-780 fc_replhist returns early on an
+                    // empty command (`*command == '\0'`) — the empty
+                    // guard lives at the fc caller, not in the shared
+                    // record gate (rubash#3329).
+                    let was_recorded = if edited.is_empty() {
+                        false
+                    } else {
+                        shell.record(&edited, &control, &ignore, histsize)
+                    };
                     shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&edited);
@@ -4764,11 +4772,19 @@ impl Executor {
                     // entry is the current line's (hist_last_line_added),
                     // which covers both the interactive fc line and the
                     // entry an `fc -s`/`fc -e -` re-execution resolved.
-                    if shell.last_line_added && !shell.entries.is_empty() {
-                        shell.entries.pop();
-                        shell.timestamps.pop();
-                    }
-                    let was_recorded = shell.record(&command, &control, &ignore, histsize);
+                    // fc_replhist returns early on an empty command
+                    // (fc.def:770-780 `*command == '\0'`) BEFORE the
+                    // delete, so an empty command pops nothing and
+                    // records nothing (rubash#3329).
+                    let was_recorded = if command.is_empty() {
+                        false
+                    } else {
+                        if shell.last_line_added && !shell.entries.is_empty() {
+                            shell.entries.pop();
+                            shell.timestamps.pop();
+                        }
+                        shell.record(&command, &control, &ignore, histsize)
+                    };
                     shell.last_line_added = was_recorded;
                 }
                 let tokens = crate::lexer::tokenize(&command);

@@ -97,7 +97,7 @@ const EXPECTED_EXPORTSTR: &str = concat!(
     "}\n"
 );
 
-fn run_rubash(dir: &PathBuf, script: &str, args: &[&str]) -> (String, String, Option<i32>) {
+fn run_rubash(dir: &PathBuf, _script: &str, args: &[&str]) -> (String, String, Option<i32>) {
     let output = Command::new(env!("CARGO_BIN_EXE_rubash"))
         .current_dir(dir)
         .args(args)

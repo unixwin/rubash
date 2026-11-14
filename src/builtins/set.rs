@@ -125,14 +125,23 @@ pub fn set(args: &[String], env_vars: &mut crate::shell::var_table::VarTable) ->
 /// the same env cells `builtin_error_prefix` reads (the executor
 /// path builds its own via `Executor::diagnostic_prolog`).
 fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
+    // The name cells derive from the single argv[0] carrier chain
+    // (builtins::prefix, rubash#2791), as in shopt's twin of this
+    // composition: error_name follows the get_name_for_error chain
+    // via builtin_diag::error_report_name (rubash#3355: the
+    // presence-based $0 step — an empty $0 prints an empty name,
+    // not the hard-coded "rubash" brand), while shell_basename
+    // keeps the shared basename derivation (the old cells printed
+    // the shell-name carrier VERBATIM as the interactive name —
+    // a renamed shell invoked by path reported its full path —
+    // and a hard-coded "rubash" as the error name, rubash#3256).
+    let script_file = env_vars.get("__RUBASH_SCRIPT_NAME").cloned();
+    let get = |key: &str| env_vars.get(key).cloned();
     Prolog {
         interactive: env_vars.get("__RUBASH_INTERACTIVE").is_some(),
-        shell_basename: env_vars
-            .get("__RUBASH_SHELL_NAME")
-            .cloned()
-            .unwrap_or_else(|| "rubash".to_string()),
-        error_name: "rubash".to_string(),
-        script_file: env_vars.get("__RUBASH_SCRIPT_NAME").cloned(),
+        shell_basename: crate::builtins::prefix::shell_basename(&get),
+        error_name: crate::executor::builtin_diag::error_report_name(&script_file, env_vars),
+        script_file,
         line: env_vars.get("__RUBASH_CURRENT_LINE").cloned(),
     }
 }
@@ -144,34 +153,32 @@ fn prolog_for_env(env_vars: &crate::shell::var_table::VarTable) -> Prolog {
 /// Executor::diagnostic_prefix), matching GNU's script-relative prolog.
 /// Interactive mode (shell reading from a terminal) omits the line segment.
 pub fn builtin_error_prefix(env_vars: &HashMap<String, String>) -> String {
+    // The name in every arm derives from the single argv[0] carrier
+    // chain (builtins::prefix, rubash#2791): the interactive arm is
+    // base_pathname(shell_name), never the carrier verbatim, and the
+    // non-interactive arms are the chain's diagnostic_prefix — the
+    // hard-coded "rubash" this function used to print for the
+    // line-only and carrier-less arms named a renamed shell by the
+    // wrong name (rubash#3256). The one arm the chain has no
+    // counterpart for is the eval frame's `eval:` segment, kept
+    // here in its existing shape (script + line carriers present).
+    let get = |key: &str| env_vars.get(key).cloned();
     if env_vars.contains_key("__RUBASH_INTERACTIVE") {
         // Interactive mode: report only the shell name, no line segment.
         // GNU error.c:88-120 (get_name_for_error) for interactive shells
         // returns base_pathname(shell_name) with no line number.
-        if let Some(shell_name) = env_vars.get("__RUBASH_SHELL_NAME") {
-            return format!("{shell_name}: ");
-        }
-        return "rubash: ".to_string();
+        return format!("{}: ", crate::builtins::prefix::shell_basename(&get));
     }
 
     // Script/-c mode: line segment present
     let line = env_vars.get("__RUBASH_CURRENT_LINE");
     let script = env_vars.get("__RUBASH_SCRIPT_NAME");
-    match (script, line) {
-        (Some(script), Some(line)) => {
-            if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
-                format!("{script}: eval: line {line}: ")
-            } else {
-                // Script mode: "script: line N:"
-                format!("{script}: line {line}: ")
-            }
+    if let (Some(script), Some(line)) = (script, line) {
+        if env_vars.contains_key("__RUBASH_EVAL_CONTEXT") {
+            return format!("{script}: eval: line {line}: ");
         }
-        (None, Some(line)) => {
-            // -c mode: "rubash: line N:"
-            format!("rubash: line {line}: ")
-        }
-        _ => "rubash: ".to_string(),
     }
+    crate::builtins::prefix::diagnostic_prefix(&get)
 }
 
 pub(crate) fn set_with_io<'a, W>(

@@ -657,6 +657,22 @@ pub struct Executor {
     /// consumers (startup-file handling in main.rs, source driver);
     /// the driver layer reads this mark to decompose the unwind kind.
     errexit_unwind_armed: bool,
+    /// rubash#2652: the current unit's terminal status was produced
+    /// while errexit was suppressed — a CMD_IGNORE_RETURN position
+    /// (a non-last &&/|| operand, an if/while/until condition, a `!`
+    /// pipeline, or a function/eval body invoked in such a position;
+    /// GNU execute_cmd.c's CMD_IGNORE_RETURN propagation,
+    /// execute_cmd.c:2703/2829/3803, and the
+    /// execute_command_internal ignore_return checks). The
+    /// driver-level errexit verdict is a status re-derivation (Q6
+    /// arm B) and must not re-fire on such a status: GNU's -e
+    /// decision is made per command inside
+    /// execute_command_internal (execute_cmd.c:624) and the reader
+    /// never re-adjudicates it. Set by
+    /// `with_errexit_suppressed` when a suppressed execution
+    /// leaves a nonzero status; cleared by `run_source_impl` at
+    /// each outermost unit's entry so it never leaks across units.
+    errexit_suppressed_terminal: Cell<bool>,
     /// Q6 arm B: `run_source_impl` records that the unit ended in a
     /// signal discard, so the grouped driver loop can surface the
     /// fact per group (the pending itself is consumed inside
@@ -1639,6 +1655,17 @@ pub struct Executor {
     /// takes the stash and places each payload at the target the
     /// ordered walk resolved for that fd at its own position.
     stage_dup_channel_payloads: std::cell::RefCell<Vec<(u32, String)>>,
+    /// rubash#3324: ordered (fd, text) chunks a sequential pipeline
+    /// stage's inline arm produced (trap/printf via OrderedOutputLog).
+    /// The stage result is a (stdout_text, stderr_text) split, which
+    /// cannot represent the production order across the two streams,
+    /// so an arm that writes both streams records its chunks here and
+    /// route_pipeline_stage_streams takes the log and interleaves
+    /// them when both streams resolve to the same target (`2>&1`,
+    /// `1>&2`, `>f 2>&1`). The dispatcher clears it at the start of
+    /// every stage so a stale log can never leak into the next
+    /// stage's routing; the route takes it exactly once.
+    pipeline_stage_ordered_chunks: std::cell::RefCell<Option<Vec<(u8, String)>>>,
     /// rubash#1454: set by the sequential pipeline driver around the LAST
     /// stage's dispatch only. The stage spawner may then hand an external
     /// final member the shell's own stdout (Stdio::inherit) instead of a
@@ -1902,15 +1929,31 @@ pub struct Executor {
     /// The transport fact the folded target string cannot carry: keys
     /// are folded redirect-target strings whose literal expansion
     /// carried raw-byte transport (a stored E000 pair or E400 escape).
-    /// A folded byte char (e.g. U+009C for byte 0x9C) is
-    /// indistinguishable from a genuine char of the same code point,
-    /// so the output open funnels consult this set — cleared at each
-    /// execute_command entry like redirect_target_memo — to decide
-    /// whether the target's byte chars emit raw bytes or the name
-    /// takes the plain UTF-8 funnel. Only the literal arms of
-    /// expand_redirect_operand_fields set it; glob matches, procsub
-    /// carriers and heredoc delimiters never do. (rubash#3104 p23)
-    redirect_target_had_transport: RefCell<HashSet<String>>,
+    /// The byte spelling of a folded redirect target whose expansion
+    /// carried raw-byte transport, computed at expansion time from
+    /// the pre-fold text (transport_name_spelling_bytes): a folded
+    /// byte char (e.g. U+009C for byte 0x9C) is indistinguishable from
+    /// a genuine char of the same code point in the folded literal,
+    /// so the spelling cannot be re-derived at open time
+    /// (rubash#3218). Keyed by the folded literal; every later
+    /// literal outcome for the same string in the same command span
+    /// replaces the record — and a no-transport outcome clears it —
+    /// because the redirect walks expand and open in list order, so
+    /// an open must see its OWN redirect's verdict, never an earlier
+    /// same-spelling target's (rubash#3218 face 2). Cleared at each
+    /// execute_command entry like redirect_target_memo. Only the
+    /// literal arms of expand_redirect_operand_fields record it;
+    /// glob matches, procsub carriers and heredoc delimiters never
+    /// do. (rubash#3104 p23, rubash#3218)
+    redirect_target_transport_spellings: RefCell<HashMap<String, Vec<u8>>>,
+    /// The same spelling keyed by redirect NODE (the
+    /// redirect_target_memo key): the string-keyed record cannot
+    /// serve two redirects in one command whose expansions fold to
+    /// the SAME string with different transport verdicts — both
+    /// expansions are recorded before either open runs — so the
+    /// redirect walks, which hold the node, consult this map and get
+    /// their own redirect's spelling. (rubash#3218)
+    redirect_target_node_spellings: RefCell<HashMap<String, Vec<u8>>>,
     /// GNU subst.c:3565 do_assignment_internal expands an assignment RHS
     /// exactly once and subst.c:3576 hands the COMPUTED value to
     /// xtrace_print_assignment — the trace never re-runs the expansion.
